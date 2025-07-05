@@ -1,7 +1,17 @@
-.DS_Store
+@"
+# Python
+__pycache__/
 *.pyc
-*.egg-info
+
+# Frappe build artifacts
+assets/
+public/
+*.log
+
+# Node
+node_modules/
+
+# Editor
+.vscode/
 *.swp
-tags
-node_modules
-__pycache__
+"@ > .gitignore

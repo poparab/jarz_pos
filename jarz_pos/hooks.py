@@ -5,6 +5,10 @@ app_description = "Customized POS for JARZ company."
 app_email = "abdelrahmanmamdouh1996@gmail.com"
 app_license = "mit"
 
+patches = [
+  "my_custom_app.patches.v0_0_1.add_gps_location_field"
+]
+
 # Apps
 # ------------------
 
