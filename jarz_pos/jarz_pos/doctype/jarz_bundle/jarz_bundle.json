@@ -7,7 +7,8 @@
  "field_order": [
   "bundle_name",
   "bundle_price",
-  "items"
+  "items",
+  "erpnext_item"
  ],
  "fields": [
   {
@@ -31,12 +32,19 @@
    "label": "Items",
    "options": "Jarz Bundle Item Group",
    "reqd": 1
+  },
+  {
+   "fieldname": "erpnext_item",
+   "fieldtype": "Link",
+   "label": "ERPNext item.",
+   "options": "Item",
+   "reqd": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-07-05 06:02:46.405807",
+ "modified": "2025-07-06 16:55:30.403689",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Bundle",
