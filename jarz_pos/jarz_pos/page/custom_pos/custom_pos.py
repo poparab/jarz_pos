@@ -456,16 +456,15 @@ def add_delivery_charges(si, delivery_charges, company):
             "add_deduct_tax": "Add"
         })
 
-        # b) Invoice-level discount (positive number here means reduce grand total)
-        # Store *negative* value so it is clear this is a deduction
-        existing_discount = getattr(si, "discount_amount", 0) or 0
-        si.apply_discount_on = "Grand Total"
-        # We *subtract* the expense so the stored figure is negative
-        si.discount_amount = existing_discount - expense
+        # Previous versions stored delivery expense in the invoice-level
+        # `discount_amount` field (negative value). As per July-2025 requirement
+        # we must NOT touch `discount_amount`; only a negative tax row will
+        # reflect the expense.  This keeps the invoice "Discount" column clean
+        # and avoids confusion during accounting and printing.
 
-        # 🔍 DEBUG: Show the updated discount (should be negative)
-        print(f"      - apply_discount_on set to 'Grand Total'")
-        print(f"      - discount_amount updated (negative): {si.discount_amount}")
+        # NOTE: We intentionally do **not** set `si.discount_amount` or
+        # `apply_discount_on` anymore.
+        print("      - Skipping invoice-level discount_amount (requirement v2025-07)")
 
 
 def get_account_for_company(account_name, company):

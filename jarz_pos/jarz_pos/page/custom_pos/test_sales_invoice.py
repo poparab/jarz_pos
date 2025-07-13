@@ -266,9 +266,8 @@ class TestSalesInvoiceCreation(FrappeTestCase):
         self.assertIsNotNone(delivery_expense_tax)
         self.assertEqual(delivery_expense_tax["tax_amount"], -5.00)
         
-        # Verify discount amount for delivery expense
-        self.assertEqual(invoice["discount_amount"], 5.00)
-        self.assertEqual(invoice["apply_discount_on"], "Grand Total")
+        # Invoice-level discount_amount removed (delivery expense handled via negative tax row)
+        self.assertIsNone(invoice.get("discount_amount"))
     
     def test_mixed_cart_calculation(self):
         """Test mixed cart with regular items, bundles, and delivery"""
@@ -320,8 +319,8 @@ class TestSalesInvoiceCreation(FrappeTestCase):
         for item in bundle_items:
             self.assertEqual(item["discount_percentage"], 10.0)
         
-        # Verify delivery charges
-        self.assertEqual(invoice["discount_amount"], 3.00)
+        # Verify delivery charges (via negative tax row only, no invoice-level discount)
+        self.assertIsNone(invoice.get("discount_amount"))
         self.assertGreater(len(invoice["taxes"]), 0)
     
     def tearDown(self):
