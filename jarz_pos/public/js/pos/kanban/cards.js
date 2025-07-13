@@ -231,7 +231,7 @@ jarz_pos.kanban.cards.createInvoiceCard = function(invoice) {
 						<button class="btn btn-sm btn-outline-secondary view-invoice-btn" data-invoice="${invoice.name}">
 							<i class="fa fa-eye"></i> View
 						</button>
-						${ (['Received','Preparing'].includes(invoice.status) && ['Paid'].indexOf(erpStatusForDisplay)===-1 ) ?
+						${ (['Received','Preparing','Processing'].includes(invoice.status) && ['Paid'].indexOf(erpStatusForDisplay)===-1 ) ?
 							`<button class="btn btn-sm btn-success mark-paid-btn" data-invoice="${invoice.name}">
 								<i class="fa fa-check"></i> Mark Paid
 							</button>` : '' }
@@ -276,7 +276,7 @@ jarz_pos.kanban.cards.addKanbanCardEventHandlers = function() {
 					<div class="kanban-card-actions">
 						<button class="btn btn-sm btn-primary print-invoice-btn" data-invoice="${det.name}"><i class="fa fa-print"></i> Print</button>
 						<button class="btn btn-sm btn-outline-secondary view-invoice-btn" data-invoice="${det.name}"><i class="fa fa-eye"></i> View</button>
-						${ (['Received','Preparing'].includes(det.status) && det.erp_status !== 'Paid') ?
+						${ (['Received','Preparing','Processing'].includes(det.status) && det.erp_status !== 'Paid') ?
 							`<button class="btn btn-sm btn-success mark-paid-btn" data-invoice="${det.name}"><i class="fa fa-check"></i> Mark Paid</button>` : '' }
 					</div>`;
 
