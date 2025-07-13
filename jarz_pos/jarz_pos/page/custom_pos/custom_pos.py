@@ -19,7 +19,7 @@ def get_context(context):
 
 
 @frappe.whitelist()
-def create_sales_invoice(cart_json, customer_name, pos_profile_name, delivery_charges_json=None):
+def create_sales_invoice(cart_json, customer_name, pos_profile_name, delivery_charges_json=None, required_delivery_datetime=None):
     """
     Create Sales Invoice using the definitive, correct ERPNext workflow
     """
@@ -160,6 +160,18 @@ def create_sales_invoice(cart_json, customer_name, pos_profile_name, delivery_ch
             print(f"\n🚚 Adding delivery charges: {delivery_charges}")
             add_delivery_charges(si, delivery_charges, company)
 
+        # Store requested delivery datetime (convert from ISO string)
+        if required_delivery_datetime:
+            try:
+                from frappe.utils import get_datetime
+                _dt = get_datetime(required_delivery_datetime)
+                if getattr(_dt, 'tzinfo', None):
+                    _dt = _dt.replace(tzinfo=None)
+                si.required_delivery_datetime = _dt
+                print(f"   🕒 Parsed delivery datetime (naive) set: {si.required_delivery_datetime}")
+            except Exception as e:
+                print(f"   ⚠️  Unable to parse or set delivery datetime: {str(e)}")
+
         # Log all items before ERPNext processing
         print(f"\n📋 Items added to Sales Invoice BEFORE ERPNext processing:")
         for i, item in enumerate(si.items):
@@ -206,7 +218,7 @@ def create_sales_invoice(cart_json, customer_name, pos_profile_name, delivery_ch
         print(f"\n💾 Saving and submitting invoice...")
         si.save(ignore_permissions=True)
         print(f"   ✅ Invoice saved: {si.name}")
-        
+
         si.submit()
         print(f"   ✅ Invoice submitted: {si.name}")
 
@@ -345,13 +357,13 @@ def process_bundle_item(si, bundle, selling_price_list):
         final_rate = item_data["rate"] * (1 - child_discount_percentage)
         final_amount = final_rate * item_data["qty"]
         children_final_total += final_amount
-        
+
         print(f"      Child {i+1}: {item_data['item_code']}")
         print(f"         - qty: {item_data['qty']}")
         print(f"         - original_rate: {item_data['rate']}")
         print(f"         - final_rate: {final_rate}")
         print(f"         - final_amount: {final_amount}")
-        
+
         si.append("items", {
             "item_code": item_data["item_code"],
             "qty": item_data["qty"],
