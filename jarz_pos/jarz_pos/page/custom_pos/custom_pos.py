@@ -544,7 +544,7 @@ def get_item_price(item_code, price_list):
 
 
 @frappe.whitelist()
-def pay_invoice(invoice_name: str, payment_mode: str):
+def pay_invoice(invoice_name: str, payment_mode: str, pos_profile: str | None = None):
 	"""Mark a *submitted* Sales Invoice as fully paid using the selected online
 	payment mode. Creates and submits **one** Payment Entry that allocates the
 	full outstanding amount to the invoice.
@@ -563,8 +563,14 @@ def pay_invoice(invoice_name: str, payment_mode: str):
 	company = inv.company
 	outstanding = inv.outstanding_amount
 
+	pm_clean = payment_mode.strip().lower()
 	# Resolve ledger for the chosen payment mode
-	paid_to_account = _get_paid_to_account(payment_mode, company)
+	if pm_clean.startswith("cash"):
+	    if not pos_profile:
+	        frappe.throw("POS Profile name required for cash payments.")
+	    paid_to_account = _get_cash_account(pos_profile, company)
+	else:
+	    paid_to_account = _get_paid_to_account(payment_mode, company)
 
 	# Resolve receivable (paid_from) account
 	paid_from_account = frappe.get_value("Company", company, "default_receivable_account")
@@ -671,6 +677,31 @@ def _get_paid_to_account(payment_mode: str, company: str) -> str:
 	    f"No ledger found for payment mode '{payment_mode}' in company {company}.\n"
 	    "Please create the appropriate account under Bank Accounts."
 	)
+
+
+# ---------------------------------------------------------------------------
+# Helper: cash account for POS profile
+# ---------------------------------------------------------------------------
+
+
+def _get_cash_account(pos_profile: str, company: str) -> str:
+    """Return Cash In Hand ledger for the given POS profile."""
+    acc = frappe.db.get_value(
+        "Account",
+        {
+            "company": company,
+            "parent_account": ["like", "%Cash In Hand%"],
+            "account_name": ["like", f"%{pos_profile}%"],
+            "is_group": 0,
+        },
+        "name",
+    )
+    if acc:
+        return acc
+
+    frappe.throw(
+        f"No Cash In Hand account found for POS profile '{pos_profile}' in company {company}."
+    )
 
 
 def get_permission_query_conditions(user):
