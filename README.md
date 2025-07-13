@@ -84,6 +84,76 @@ A comprehensive, touch-optimized Point of Sale (POS) system built specifically f
    bench restart
    ```
 
+## 🚀 Production Deployment
+
+Below is a **copy-paste friendly checklist** for taking Jarz POS live on a fresh server. It assumes you already have SSH access and basic Linux administration rights.
+
+### Prerequisites
+• Ubuntu 20.04/22.04 (or Debian 12) with at least **2 vCPU / 4 GB RAM** (8 GB recommended)  
+• `bench` ≥ 5, Node 18, Yarn, Redis, MariaDB 10.6, wkhtmltopdf 0.12.6  
+• ERPNext / Frappe Framework **v15** codebase (same branch used in development)
+
+### 1 – Prepare the server (one-time)
+```bash
+# As root or a sudo user
+sudo apt update && sudo apt install git python3-pip -y
+pip3 install --upgrade frappe-bench
+
+# Create the bench directory and install Frappe
+bench init --frappe-branch version-15 ~/frappe-bench
+cd ~/frappe-bench
+```
+
+### 2 – Create site & install ERPNext
+```bash
+bench new-site your-site.com \
+    --mariadb-root-password <MYSQL_ROOT> \
+    --admin-password <ADMIN_PASS>
+
+# (Skip if ERPNext already installed)
+bench get-app erpnext --branch version-15
+bench --site your-site.com install-app erpnext
+```
+
+### 3 – Install **Jarz POS**
+```bash
+# Pull the app source
+bench get-app jarz_pos https://github.com/your-username/jarz_pos.git
+
+# Install on your production site
+bench --site your-site.com install-app jarz_pos
+
+# Run database migrations & automatic patches (custom fields etc.)
+bench --site your-site.com migrate
+```
+
+### 4 – Build assets & switch to production
+```bash
+# Compile JS/CSS for production (uses Node/Yarn)
+bench build --production
+
+# Generate Supervisor + Nginx configs and start services under supervisor
+sudo bench setup production frappe
+sudo bench restart
+```
+
+### 5 – Post-install checklist
+1. **POS Profile** – Create at `Setup › Point of Sale › POS Profile`, set warehouse, price list, and assign users.  
+2. **Delivery Cities** – Add records under `Jarz POS › City` with income & expense amounts.  
+3. **Verify Custom Fields** – `required_delivery_datetime` & `sales_invoice_state` should now appear on *Sales Invoice* (patch runs automatically).  
+4. **Test POS** – Browse to `https://your-site.com/app/custom-pos` and complete a test sale.  
+5. *(Optional)* Enable HTTPS with Let’s Encrypt: `sudo bench setup lets-encrypt your-site.com`.
+
+### 6 – Upgrading Jarz POS later
+```bash
+cd ~/frappe-bench/apps/jarz_pos
+git pull
+bench --site your-site.com migrate
+bench build --production && bench restart
+```
+
+That’s it—Jarz POS is now running in production. Happy selling! 🚀
+
 ## ⚙️ Configuration
 
 ### 1. Create POS Profile

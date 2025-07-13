@@ -3,6 +3,6 @@
 
 frappe.ui.form.on('City', {
 	// refresh: function(frm) {
-
+ 
 	// }
 }); 
