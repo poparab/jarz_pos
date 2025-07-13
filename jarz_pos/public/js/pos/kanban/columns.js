@@ -149,14 +149,30 @@ jarz_pos.kanban.columns.createKanbanColumns = function(config) {
 							var isPaid = $card.hasClass('status-paid');
 
 							if (!isPaid) {
-								frappe.prompt({
-									fieldname:'pay_choice',
-									label:'Select How This Invoice Will Be Collected',
-									fieldtype:'Select',
-									options:['Cash','Outstanding Courier'],
-									reqd:1
-								}, function(vals){
-									if(vals.pay_choice === 'Cash'){
+								// Build card-style selection dialog
+								var dlg = new frappe.ui.Dialog({
+									title: __('Select Collection Method'),
+									fields:[{fieldtype:'HTML', fieldname:'options_html'}],
+									size:'small'
+								});
+
+								var html = `
+									<div style="display:flex;gap:24px;justify-content:center;padding:12px;">
+										<div class="pay-card-option" data-choice="Cash" style="cursor:pointer;border:2px solid #28a745;border-radius:8px;padding:16px;width:140px;text-align:center;">
+											<i class="fa fa-money-bill" style="font-size:32px;color:#28a745;"></i><br/><strong>Cash</strong>
+										</div>
+										<div class="pay-card-option" data-choice="Outstanding Courier" style="cursor:pointer;border:2px solid #6c757d;border-radius:8px;padding:16px;width:140px;text-align:center;">
+											<i class="fa fa-truck" style="font-size:32px;color:#6c757d;"></i><br/><strong>Courier</strong>
+										</div>
+									</div>`;
+
+								dlg.fields_dict.options_html.$wrapper.html(html);
+
+								dlg.$wrapper.find('.pay-card-option').on('click', function(){
+									var choice = $(this).data('choice');
+									dlg.hide();
+
+									if(choice === 'Cash'){
 										frappe.call({
 											method:'jarz_pos.jarz_pos.page.custom_pos.custom_pos.pay_invoice',
 											args:{invoice_name:invoiceId, payment_mode:'Cash', pos_profile: (window.currentPOSProfile ? window.currentPOSProfile.name : '')},
@@ -172,13 +188,15 @@ jarz_pos.kanban.columns.createKanbanColumns = function(config) {
 												jarz_pos.kanban.data.loadOrdersData();
 											}
 										});
-									} else if(vals.pay_choice === 'Outstanding Courier'){
+									} else if(choice === 'Outstanding Courier'){
 										jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
 									} else {
 										// Cancel move
 										jarz_pos.kanban.data.loadOrdersData();
 									}
-								}, __('Payment Required'), __('Confirm'));
+								});
+
+								dlg.show();
 								return; // Wait for prompt
 							}
 						}
