@@ -536,6 +536,129 @@ def get_item_price(item_code, price_list):
     return standard_rate if standard_rate else 0
 
 
+# ────────────────────────────────────────────────────────────────────────────────
+# 💳  ONLINE PAYMENT ENDPOINT
+#     Handles single-shot payments (Instapay, Payment Gateway, Mobile Wallet)
+#     Triggered from Kanban "Mark Paid" button.
+# ────────────────────────────────────────────────────────────────────────────────
+
+
+@frappe.whitelist()
+def pay_invoice(invoice_name: str, payment_mode: str):
+	"""Mark a *submitted* Sales Invoice as fully paid using the selected online
+	payment mode. Creates and submits **one** Payment Entry that allocates the
+	full outstanding amount to the invoice.
+
+	Args:
+	    invoice_name: The Sales Invoice ID (e.g. ``ACC-SINV-2025-00078``)
+	    payment_mode: One of ``Instapay``, ``Payment Gateway``, ``Mobile Wallet``
+	"""
+	# Fetch and validate Invoice
+	inv = frappe.get_doc("Sales Invoice", invoice_name)
+	if inv.docstatus != 1:
+	    frappe.throw("Invoice must be submitted before payment can be recorded.")
+	if inv.outstanding_amount <= 0:
+	    frappe.throw("Invoice already paid.")
+
+	company = inv.company
+	outstanding = inv.outstanding_amount
+
+	# Resolve ledger for the chosen payment mode
+	paid_to_account = _get_paid_to_account(payment_mode, company)
+
+	# Resolve receivable (paid_from) account
+	paid_from_account = frappe.get_value("Company", company, "default_receivable_account")
+	if not paid_from_account:
+	    paid_from_account = frappe.get_value(
+	        "Account",
+	        {
+	            "account_type": "Receivable",
+	            "company": company,
+	            "is_group": 0,
+	        },
+	        "name",
+	    )
+	if not paid_from_account:
+	    frappe.throw("No receivable account found for company {0}".format(company))
+
+	# Build Payment Entry
+	pe = frappe.new_doc("Payment Entry")
+	pe.payment_type = "Receive"
+	pe.mode_of_payment = payment_mode
+	pe.company = company
+	pe.party_type = "Customer"
+	pe.party = inv.customer
+	pe.paid_from = paid_from_account
+	pe.paid_to = paid_to_account
+	pe.paid_amount = outstanding
+	pe.received_amount = outstanding
+
+	pe.append(
+	    "references",
+	    {
+	        "reference_doctype": "Sales Invoice",
+	        "reference_name": inv.name,
+	        "due_date": inv.get("due_date"),
+	        "total_amount": inv.grand_total,
+	        "outstanding_amount": outstanding,
+	        "allocated_amount": outstanding,
+	    },
+	)
+
+	# Stick to invoice currency
+	pe.source_exchange_rate = 1
+	pe.target_exchange_rate = 1
+
+	# Validation chain inside save() handles missing values automatically
+	pe.save(ignore_permissions=True)
+	pe.submit()
+
+	# Realtime update – let Kanban board refresh card colour/state
+	frappe.publish_realtime(
+	    "jarz_pos_invoice_paid",
+	    {"invoice": inv.name, "payment_entry": pe.name},
+	)
+
+	return {"payment_entry": pe.name}
+
+
+def _get_paid_to_account(payment_mode: str, company: str) -> str:
+	"""Return ledger to credit based on payment mode."""
+	payment_mode = payment_mode.strip().lower()
+
+	if payment_mode in {"instapay", "payment gateway"}:
+	    # Try to find a leaf account under Bank Accounts
+	    account = frappe.db.get_value(
+	        "Account",
+	        {
+	            "company": company,
+	            "parent_account": ["like", "%Bank Accounts%"],
+	            "is_group": 0,
+	        },
+	        "name",
+	    )
+	    if account:
+	        return account
+
+	if payment_mode == "mobile wallet":
+	    account = frappe.db.get_value(
+	        "Account",
+	        {
+	            "company": company,
+	            "account_name": ["like", "Mobile Wallet%"],
+	            "is_group": 0,
+	        },
+	        "name",
+	    )
+	    if account:
+	        return account
+
+	frappe.throw(
+	    f"No ledger found for payment mode '{payment_mode}' in company {company}.\n"
+	    "Please create the appropriate account under Bank Accounts."
+	)
+
+
 def get_permission_query_conditions(user):
     """Permission check for accessing the page"""
     return ""
