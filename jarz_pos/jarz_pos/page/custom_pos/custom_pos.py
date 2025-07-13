@@ -593,6 +593,20 @@ def pay_invoice(invoice_name: str, payment_mode: str):
 	pe.paid_amount = outstanding
 	pe.received_amount = outstanding
 
+	# ------------------------------------------------------------------
+	# Bank validation fields – Payment Entry requires Reference No & Date
+	# for bank-type transactions. If the user hasn't provided them,
+	# populate sensible placeholders so validation passes.
+	# ------------------------------------------------------------------
+
+	if not pe.get("reference_no"):
+	    # e.g. POS-INSTAPAY-20250713-183623
+	    timestamp = frappe.utils.now_datetime().strftime("%Y%m%d-%H%M%S")
+	    pe.reference_no = f"POS-{payment_mode.upper().replace(' ', '')}-{timestamp}"
+
+	if not pe.get("reference_date"):
+	    pe.reference_date = frappe.utils.nowdate()
+
 	pe.append(
 	    "references",
 	    {
@@ -609,7 +623,7 @@ def pay_invoice(invoice_name: str, payment_mode: str):
 	pe.source_exchange_rate = 1
 	pe.target_exchange_rate = 1
 
-	# Validation chain inside save() handles missing values automatically
+	# Validation chain inside save() handles remaining missing values automatically
 	pe.save(ignore_permissions=True)
 	pe.submit()
 
