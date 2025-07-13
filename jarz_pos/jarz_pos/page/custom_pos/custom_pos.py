@@ -566,8 +566,11 @@ def pay_invoice(invoice_name: str, payment_mode: str, pos_profile: str | None = 
 	pm_clean = payment_mode.strip().lower()
 	# Resolve ledger for the chosen payment mode
 	if pm_clean.startswith("cash"):
+	    # If front-end didn’t supply POS profile, derive from invoice itself
 	    if not pos_profile:
-	        frappe.throw("POS Profile name required for cash payments.")
+	        pos_profile = inv.get("pos_profile")
+	    if not pos_profile:
+	        frappe.throw("POS Profile name required for cash payments (could not infer from invoice).")
 	    paid_to_account = _get_cash_account(pos_profile, company)
 	else:
 	    paid_to_account = _get_paid_to_account(payment_mode, company)
@@ -686,16 +689,31 @@ def _get_paid_to_account(payment_mode: str, company: str) -> str:
 
 def _get_cash_account(pos_profile: str, company: str) -> str:
     """Return Cash In Hand ledger for the given POS profile."""
+    # Try exact child under Cash In Hand first: "{pos_profile} - <ABBR>"
     acc = frappe.db.get_value(
         "Account",
         {
             "company": company,
             "parent_account": ["like", "%Cash In Hand%"],
-            "account_name": ["like", f"%{pos_profile}%"],
+            "account_name": pos_profile,
             "is_group": 0,
         },
         "name",
     )
+
+    # Fallback: partial match
+    if not acc:
+        acc = frappe.db.get_value(
+            "Account",
+            {
+                "company": company,
+                "parent_account": ["like", "%Cash In Hand%"],
+                "account_name": ["like", f"%{pos_profile}%"],
+                "is_group": 0,
+            },
+            "name",
+        )
+
     if acc:
         return acc
 
