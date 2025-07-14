@@ -443,28 +443,16 @@ def add_delivery_charges(si, delivery_charges, company):
             "add_deduct_tax": "Add"
         })
 
-    # 2️⃣  Delivery expense appears twice:
-    #     a) Negative tax row in Sales Taxes and Charges
-    #     b) Invoice-level discount on Grand Total
-    if expense > 0 and freight_account:
-        # a) Negative tax row (will reduce net total)
-        si.append("taxes", {
-            "charge_type": "Actual",
-            "account_head": freight_account,
-            "description": f"Delivery Expense - {city}",
-            "tax_amount": -expense,  # negative amount reduces total
-            "add_deduct_tax": "Add"
-        })
-
-        # Previous versions stored delivery expense in the invoice-level
-        # `discount_amount` field (negative value). As per July-2025 requirement
-        # we must NOT touch `discount_amount`; only a negative tax row will
-        # reflect the expense.  This keeps the invoice "Discount" column clean
-        # and avoids confusion during accounting and printing.
-
-        # NOTE: We intentionally do **not** set `si.discount_amount` or
-        # `apply_discount_on` anymore.
-        print("      - Skipping invoice-level discount_amount (requirement v2025-07)")
+    # 2️⃣  Delivery expense
+    #
+    #    As per latest requirement (July 2025) we no longer reflect the
+    #    *expense* side of delivery charges on the Sales Invoice.  The
+    #    courier cost will be captured through separate purchase/expense
+    #    workflows instead.  Therefore **NO negative tax row or discount**
+    #    is added here anymore – only the customer-facing delivery income
+    #    (if any) is recorded above.
+    if expense > 0:
+        print("      ⚠️  Delivery expense provided but ignored on Sales Invoice per 2025-07 policy")
 
 
 def get_account_for_company(account_name, company):
@@ -720,6 +708,133 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
     frappe.throw(
         f"No Cash In Hand account found for POS profile '{pos_profile}' in company {company}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Helper: courier outstanding account
+# ---------------------------------------------------------------------------
+
+
+def _get_courier_outstanding_account(company: str) -> str:
+    """Return the 'Courier Outstanding' ledger for the given company."""
+    acc = frappe.db.get_value(
+        "Account",
+        {
+            "company": company,
+            "account_name": ["like", "Courier Outstanding%"],
+            "is_group": 0,
+        },
+        "name",
+    )
+
+    if acc:
+        return acc
+
+    frappe.throw(
+        f"No 'Courier Outstanding' account found for company {company}.\n"
+        "Please create a ledger named 'Courier Outstanding' (non-group) under Accounts Receivable."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 📦  COURIER OUTSTANDING ENDPOINT
+#     Records courier pick-up, creates Payment Entry against Courier Outstanding
+#     and logs a Courier Transaction document.
+# ---------------------------------------------------------------------------
+
+
+@frappe.whitelist()
+def mark_courier_outstanding(invoice_name: str, courier: str):
+    """Allocate the outstanding amount of a submitted Sales Invoice to the
+    company's *Courier Outstanding* account and create a *Courier Transaction*
+    log entry.
+
+    Args:
+        invoice_name: Sales Invoice ID that courier will collect payment for.
+        courier: Selected courier (link to *Courier* doctype).
+    """
+
+    # ------------------------------------------------------------------
+    # 1) Validate input & fetch documents
+    # ------------------------------------------------------------------
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted before marking as courier outstanding.")
+    if inv.outstanding_amount <= 0:
+        frappe.throw("Invoice already paid – no outstanding amount to allocate.")
+
+    company = inv.company
+    outstanding = inv.outstanding_amount
+
+    # ------------------------------------------------------------------
+    # 2) Resolve ledger accounts
+    # ------------------------------------------------------------------
+    paid_to_account = _get_courier_outstanding_account(company)
+
+    paid_from_account = frappe.get_value("Company", company, "default_receivable_account")
+    if not paid_from_account:
+        paid_from_account = frappe.get_value(
+            "Account",
+            {
+                "account_type": "Receivable",
+                "company": company,
+                "is_group": 0,
+            },
+            "name",
+        )
+    if not paid_from_account:
+        frappe.throw(f"No receivable account found for company {company}.")
+
+    # ------------------------------------------------------------------
+    # 3) Build & submit Journal Entry (move AR → Courier Outstanding)
+    # ------------------------------------------------------------------
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Journal Entry"
+    je.posting_date = frappe.utils.nowdate()
+    je.company = company
+    je.title = f"Courier Outstanding - {inv.name}"
+
+    amount = inv.grand_total
+
+    # Debit Debtors (Accounts Receivable) for the customer
+    je.append("accounts", {
+        "account": paid_from_account,
+        "debit_in_account_currency": amount,
+        "credit_in_account_currency": 0,
+        "party_type": "Customer",
+        "party": inv.customer,
+    })
+
+    # Credit Courier Outstanding
+    je.append("accounts", {
+        "account": paid_to_account,
+        "debit_in_account_currency": 0,
+        "credit_in_account_currency": amount,
+    })
+
+    je.save(ignore_permissions=True)
+    je.submit()
+
+    # ------------------------------------------------------------------
+    # 4) Create Courier Transaction log
+    # ------------------------------------------------------------------
+    ct = frappe.new_doc("Courier Transaction")
+    ct.courier = courier
+    ct.date = frappe.utils.now_datetime()
+    ct.type = "Pick-Up"
+    ct.reference_invoice = inv.name
+    ct.amount = outstanding
+    ct.insert(ignore_permissions=True)
+
+    # ------------------------------------------------------------------
+    # 5) Notify front-end & return (custom event)
+    # ------------------------------------------------------------------
+    frappe.publish_realtime(
+        "jarz_pos_courier_outstanding",
+        {"invoice": inv.name, "journal_entry": je.name, "courier_transaction": ct.name},
+    )
+
+    return {"journal_entry": je.name, "courier_transaction": ct.name}
 
 
 def get_permission_query_conditions(user):

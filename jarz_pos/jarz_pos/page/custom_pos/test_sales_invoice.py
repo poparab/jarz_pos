@@ -258,15 +258,14 @@ class TestSalesInvoiceCreation(FrappeTestCase):
         self.assertIsNotNone(delivery_income_tax)
         self.assertEqual(delivery_income_tax["tax_amount"], 15.00)
         
-        # Verify delivery expense tax
+        # Verify no delivery expense tax row (policy v2025-07)
         delivery_expense_tax = next(
-            (tax for tax in invoice["taxes"] if tax["description"] == "Delivery Expense - Test City"),
+            (tax for tax in invoice["taxes"] if tax["description"].startswith("Delivery Expense")),
             None
         )
-        self.assertIsNotNone(delivery_expense_tax)
-        self.assertEqual(delivery_expense_tax["tax_amount"], -5.00)
-        
-        # Invoice-level discount_amount removed (delivery expense handled via negative tax row)
+        self.assertIsNone(delivery_expense_tax)
+
+        # Invoice-level discount_amount remains unset
         self.assertIsNone(invoice.get("discount_amount"))
     
     def test_mixed_cart_calculation(self):

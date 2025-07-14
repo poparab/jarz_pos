@@ -10,6 +10,8 @@ frappe.provide('jarz_pos.kanban.cards');
 		.kanban-card.status-cancelled{border-left:4px solid #dc3545;opacity:0.6;}
 		.kanban-card.status-return{border-left:4px solid #6f42c1;}
 		.kanban-card.status-draft{border-left:4px solid #6c757d;}
+		.kanban-card.status-courier{border-left:4px solid #dc3545;}
+		.courier-tag{color:#dc3545;font-weight:600;margin-left:4px;}
 		`;
 		const style=document.createElement('style');
 		style.id='kanban-status-style';
@@ -158,7 +160,17 @@ jarz_pos.kanban.cards.loadInvoiceDetails = function(invoice) {
 							}
 							// Update status color
 							var $cardEl = $('#card-' + invoice.name);
-							jarz_pos.kanban.cards.applyStatusClass($cardEl, invoice.erp_status || invoice.status);
+							var isCourierOutstanding = ((invoice.status||'').toLowerCase()==='out for delivery' && (parseFloat(invoice.outstanding_amount||0)>0));
+							if(isCourierOutstanding){
+								$cardEl.removeClass('status-paid status-unpaid status-overdue status-cancelled status-return status-draft');
+								$cardEl.addClass('status-courier');
+								var $st=$cardEl.find('.kanban-card-status-text');
+								if($st.find('.courier-tag').length===0){
+									$st.append(' <span class="courier-tag">'+__('Outstanding Courier')+'</span>');
+								}
+							} else {
+								jarz_pos.kanban.cards.applyStatusClass($cardEl, invoice.erp_status || invoice.status);
+							}
 							resolve(invoice);
 						}).catch(function() {
 							invoice.address.city_name = cityId;
@@ -203,13 +215,20 @@ jarz_pos.kanban.cards.createInvoiceCard = function(invoice) {
 	var erpStatus = invoice.erp_status || invoice.status || '';
 	var statusCls = jarz_pos.kanban.cards.getStatusClass(erpStatus);
 
+	// Special case: *Outstanding Courier* (invoice unpaid & out for delivery)
+	var isCourierOutstanding = ( (invoice.status||'').toLowerCase()==='out for delivery' && (parseFloat(invoice.outstanding_amount||0) > 0) );
+	var courierTag = isCourierOutstanding ? '<span class="courier-tag">'+__('Outstanding Courier')+'</span>' : '';
+	if(isCourierOutstanding){
+	    statusCls = 'status-courier';
+	}
+
 	return `
 		<div class="kanban-card ${statusCls}" data-invoice-id="${invoice.name}" data-expanded="false" id="${cardId}">
 			<div class="kanban-card-header">
 				<div>
 					<div class="kanban-card-title">${invoice.customer_name}${isDemoData ? ' <small>(Demo)</small>' : ''}</div>
 					<div class="kanban-card-info kanban-card-city">${cityName}</div>
-					<div class="kanban-card-info kanban-card-status-text"><small>${displayStatus}</small></div>
+					<div class="kanban-card-info kanban-card-status-text"><small>${displayStatus} ${courierTag}</small></div>
 				</div>
 				<div class="kanban-card-amount">$${(invoice.grand_total || invoice.total || 0).toFixed(2)}</div>
 			</div>

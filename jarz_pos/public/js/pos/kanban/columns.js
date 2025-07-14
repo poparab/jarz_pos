@@ -1,5 +1,17 @@
 frappe.provide('jarz_pos.kanban.columns');
 
+// Ensure minimal drop zone area for Out for Delivery sub-lists
+(function(){
+    if(!document.getElementById('ofd-subbody-style')){
+        const style=document.createElement('style');
+        style.id='ofd-subbody-style';
+        style.innerHTML=`
+            .kanban-column-subbody{min-height:60px;padding-bottom:2px;}
+        `;
+        document.head.appendChild(style);
+    }
+})();
+
 jarz_pos.kanban.columns.ensureStandardColumns = function(config) {
 	// Default operational state columns (uses custom field `sales_invoice_state`)
 	var standardColumns = [
@@ -23,6 +35,122 @@ jarz_pos.kanban.columns.ensureStandardColumns = function(config) {
 
 	return config;
 }
+
+// ---------------------------------------------------------------------------
+// 📦 Helper: unified move handler for Out for Delivery unpaid cards
+// ---------------------------------------------------------------------------
+
+jarz_pos.kanban.columns.handleOutForDeliveryMove = function(invoiceId, cardElement, newColumnId, newStatus, oldColumnId){
+    var $card = $('#card-' + invoiceId);
+
+    var finalized = false; // becomes true once Cash or Courier flow completes
+
+    function revertCard(){
+        if(finalized) return;
+        var $origCol = $('#column-' + oldColumnId);
+        if($origCol.length){ $origCol.prepend($card); }
+    }
+
+    // Safety: if already paid, just update assignment
+    if($card.hasClass('status-paid')){
+        jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
+        return;
+    }
+
+    // Build selection dialog (Cash or Courier)
+    var dlg = new frappe.ui.Dialog({
+        title: __('Select Collection Method'),
+        fields:[{fieldtype:'HTML', fieldname:'options_html'}],
+        size:'small'
+    });
+
+    dlg.onhide = revertCard;
+
+    var html = `
+        <div style="display:flex;gap:24px;justify-content:center;padding:12px;">
+            <div class="pay-card-option" data-choice="Cash" style="cursor:pointer;border:2px solid #28a745;border-radius:8px;padding:16px;width:140px;text-align:center;">
+                <i class="fa fa-money-bill" style="font-size:32px;color:#28a745;"></i><br/><strong>Cash</strong>
+            </div>
+            <div class="pay-card-option" data-choice="Outstanding Courier" style="cursor:pointer;border:2px solid #6c757d;border-radius:8px;padding:16px;width:140px;text-align:center;">
+                <i class="fa fa-truck" style="font-size:32px;color:#6c757d;"></i><br/><strong>Courier</strong>
+            </div>
+        </div>`;
+
+    dlg.fields_dict.options_html.$wrapper.html(html);
+
+    dlg.$wrapper.find('.pay-card-option').on('click', function(){
+        var choice = $(this).data('choice');
+        dlg.hide();
+
+        if(choice === 'Cash'){
+            finalized = true;
+            frappe.call({
+                method:'jarz_pos.jarz_pos.page.custom_pos.custom_pos.pay_invoice',
+                args:{invoice_name:invoiceId, payment_mode:'Cash', pos_profile: (window.currentPOSProfile ? window.currentPOSProfile.name : '')},
+                freeze:true,
+                callback:function(){
+                    jarz_pos.kanban.cards.applyStatusClass($card,'Paid');
+                    $card.find('.kanban-card-status-text').text('Paid');
+                    $card.find('.mark-paid-btn').remove();
+                    $('#column-out_for_delivery').prepend($card);
+                    jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
+                },
+                error:function(){
+                    jarz_pos.kanban.data.loadOrdersData();
+                }
+            });
+        } else if(choice === 'Outstanding Courier'){
+            finalized = true; // hide first dialog, show courierDlg; will reset below
+            const courierDlg = new frappe.ui.Dialog({
+                title: __('Select Courier'),
+                fields: [
+                    {
+                        fieldname: 'courier',
+                        label: __('Courier'),
+                        fieldtype: 'Link',
+                        options: 'Courier',
+                        reqd: 1
+                    }
+                ],
+                primary_action_label: __('Assign'),
+                primary_action(values){
+                    if(!values || !values.courier){ return; }
+                    finalized = true;
+                    courierDlg.hide();
+                    frappe.call({
+                        method:'jarz_pos.jarz_pos.page.custom_pos.custom_pos.mark_courier_outstanding',
+                        args:{invoice_name:invoiceId, courier:values.courier},
+                        freeze:true,
+                        callback:function(){
+                            $card.find('.kanban-card-status-text').text('Courier Outstanding');
+                            // Highlight red and keep original status
+                            $card.addClass('status-courier');
+                            if($card.find('.courier-tag').length===0){
+                                $card.find('.kanban-card-status-text').append(' <span class="courier-tag">'+__('Outstanding Courier')+'</span>');
+                            }
+                            $('#column-out_for_delivery').prepend($card);
+                            jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
+                        },
+                        error:function(){ loadOrdersDataAndRevert(); }
+                    });
+                },
+                secondary_action_label: __('Cancel'),
+                secondary_action(){ finalized=false; courierDlg.hide(); loadOrdersDataAndRevert(); }
+            });
+
+            function loadOrdersDataAndRevert(){
+                revertCard();
+                jarz_pos.kanban.data.loadOrdersData();
+            }
+            courierDlg.show();
+        } else {
+            revertCard();
+            jarz_pos.kanban.data.loadOrdersData();
+        }
+    });
+
+    dlg.show();
+};
 
 jarz_pos.kanban.columns.loadKanbanConfiguration = function(profile) {
 	return new Promise(function(resolve) {
@@ -110,7 +238,9 @@ jarz_pos.kanban.columns.createKanbanColumns = function(config) {
 					</div>
 				</div>
 				<div class="kanban-column-body" id="column-${column.id}">
-					<!-- Cards will be loaded here -->
+					${column.id==='out_for_delivery' ? `
+						<!-- Cards will be loaded here -->
+					` : '<!-- Cards will be loaded here -->'}
 				</div>
 			</div>
 		`;
@@ -131,81 +261,32 @@ jarz_pos.kanban.columns.createKanbanColumns = function(config) {
 		// Initialize drag and drop for cards within columns
 		config.columns.forEach(function(column) {
 			var columnBody = document.getElementById(`column-${column.id}`);
-			if (columnBody) {
-				new Sortable(columnBody, {
-					group: 'kanban-cards',
-					animation: 150,
-					ghostClass: 'sortable-ghost',
-					dragClass: 'sortable-drag',
-					onEnd: function(evt) {
-						var cardElement = evt.item;
-						var invoiceId = cardElement.dataset.invoiceId;
-						var newColumnId = evt.to.parentElement.dataset.columnId;
-						var newStatus = evt.to.parentElement.dataset.status;
+			if (!columnBody) return;
 
-						// Special logic when moving to Out for Delivery and invoice is unpaid
-						if (newColumnId === 'out_for_delivery') {
-							var $card = $('#card-' + invoiceId);
-							var isPaid = $card.hasClass('status-paid');
+			new Sortable(columnBody, {
+				group: 'kanban-cards',
+				animation: 150,
+				ghostClass: 'sortable-ghost',
+				dragClass: 'sortable-drag',
+				onEnd: function(evt) {
+					var cardElement = evt.item;
+					var invoiceId = cardElement.dataset.invoiceId;
+					var newColumnId = evt.to.parentElement.dataset.columnId;
+					var oldColumnId = evt.from.parentElement.dataset.columnId;
+					var newStatus = evt.to.parentElement.dataset.status;
 
-							if (!isPaid) {
-								// Build card-style selection dialog
-								var dlg = new frappe.ui.Dialog({
-									title: __('Select Collection Method'),
-									fields:[{fieldtype:'HTML', fieldname:'options_html'}],
-									size:'small'
-								});
-
-								var html = `
-									<div style="display:flex;gap:24px;justify-content:center;padding:12px;">
-										<div class="pay-card-option" data-choice="Cash" style="cursor:pointer;border:2px solid #28a745;border-radius:8px;padding:16px;width:140px;text-align:center;">
-											<i class="fa fa-money-bill" style="font-size:32px;color:#28a745;"></i><br/><strong>Cash</strong>
-										</div>
-										<div class="pay-card-option" data-choice="Outstanding Courier" style="cursor:pointer;border:2px solid #6c757d;border-radius:8px;padding:16px;width:140px;text-align:center;">
-											<i class="fa fa-truck" style="font-size:32px;color:#6c757d;"></i><br/><strong>Courier</strong>
-										</div>
-									</div>`;
-
-								dlg.fields_dict.options_html.$wrapper.html(html);
-
-								dlg.$wrapper.find('.pay-card-option').on('click', function(){
-									var choice = $(this).data('choice');
-									dlg.hide();
-
-									if(choice === 'Cash'){
-										frappe.call({
-											method:'jarz_pos.jarz_pos.page.custom_pos.custom_pos.pay_invoice',
-											args:{invoice_name:invoiceId, payment_mode:'Cash', pos_profile: (window.currentPOSProfile ? window.currentPOSProfile.name : '')},
-											freeze:true,
-											callback:function(){
-												jarz_pos.kanban.cards.applyStatusClass($card,'Paid');
-												$card.find('.kanban-card-status-text').text('Paid');
-												$card.find('.mark-paid-btn').remove();
-												jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
-											},
-											error:function(){
-												// Revert move on error
-												jarz_pos.kanban.data.loadOrdersData();
-											}
-										});
-									} else if(choice === 'Outstanding Courier'){
-										jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
-									} else {
-										// Cancel move
-										jarz_pos.kanban.data.loadOrdersData();
-									}
-								});
-
-								dlg.show();
-								return; // Wait for prompt
-							}
+					if (newColumnId === 'out_for_delivery') {
+						var $card = $('#card-' + invoiceId);
+						var isPaid = $card.hasClass('status-paid');
+						if (!isPaid) {
+							jarz_pos.kanban.columns.handleOutForDeliveryMove(invoiceId, cardElement, newColumnId, newStatus, oldColumnId);
+							return;
 						}
-
-						// Default path
-						jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
 					}
-				});
-			}
+
+					jarz_pos.kanban.data.updateInvoiceStatus(invoiceId, newColumnId, newStatus);
+				}
+			});
 		});
 	}
 }
