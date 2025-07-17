@@ -6,10 +6,12 @@
  "engine": "InnoDB",
  "field_order": [
   "courier",
+  "status",
   "date",
   "type",
   "reference_invoice",
   "amount",
+  "shipping_amount",
   "notes"
  ],
  "fields": [
@@ -45,12 +47,29 @@
    "fieldname": "notes",
    "fieldtype": "Small Text",
    "label": "Notes"
+  },
+  {
+   "fieldname": "shipping_amount",
+   "fieldtype": "Currency",
+   "label": "Shipping Amount"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "bold": 1,
+   "default": "Unsettled",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_preview": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Settled\nUnsettled"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-07-13 22:51:49.964505",
+ "modified": "2025-07-16 00:24:40.992072",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Courier Transaction",

@@ -218,7 +218,7 @@ def create_sales_invoice(cart_json, customer_name, pos_profile_name, delivery_ch
         print(f"\n💾 Saving and submitting invoice...")
         si.save(ignore_permissions=True)
         print(f"   ✅ Invoice saved: {si.name}")
-
+        
         si.submit()
         print(f"   ✅ Invoice submitted: {si.name}")
 
@@ -343,7 +343,7 @@ def process_bundle_item(si, bundle, selling_price_list):
     child_discount_needed = max(child_items_total - bundle_price, 0)
     if child_items_total > 0:
         child_discount_percentage = child_discount_needed / child_items_total
-    else:
+        else:
         child_discount_percentage = 0
 
     print(f"\n   👶 Child discount calculations:")
@@ -357,13 +357,13 @@ def process_bundle_item(si, bundle, selling_price_list):
         final_rate = item_data["rate"] * (1 - child_discount_percentage)
         final_amount = final_rate * item_data["qty"]
         children_final_total += final_amount
-
+        
         print(f"      Child {i+1}: {item_data['item_code']}")
         print(f"         - qty: {item_data['qty']}")
         print(f"         - original_rate: {item_data['rate']}")
         print(f"         - final_rate: {final_rate}")
         print(f"         - final_amount: {final_amount}")
-
+        
         si.append("items", {
             "item_code": item_data["item_code"],
             "qty": item_data["qty"],
@@ -587,8 +587,47 @@ def pay_invoice(invoice_name: str, payment_mode: str, pos_profile: str | None = 
 	pe.party = inv.customer
 	pe.paid_from = paid_from_account
 	pe.paid_to = paid_to_account
-	pe.paid_amount = outstanding
+	pe.paid_amount = outstanding  # may be incremented below if deduction row added
 	pe.received_amount = outstanding
+
+	# ------------------------------------------------------------------
+	# 🚚  Delivery expense deduction when paying courier in CASH
+	# ------------------------------------------------------------------
+	delivery_expense = 0
+	if pm_clean.startswith("cash"):
+	    delivery_expense = _get_delivery_expense_amount(inv)
+	    print(f"💰 Delivery expense detected: {delivery_expense}")
+	    if delivery_expense and delivery_expense > 0:
+	        # Increase paid / received so that after deduction net equals outstanding
+	        pe.paid_amount = outstanding + delivery_expense
+	        pe.received_amount = outstanding + delivery_expense
+
+	        expense_account = get_account_for_company("Freight and Forwarding Charges", company)
+	        default_cc = frappe.db.get_value("Company", company, "cost_center")
+	        pe.append(
+	            "taxes",
+	            {
+	                "charge_type": "Actual",
+	                "account_head": expense_account,
+	                "cost_center": default_cc,
+	                "add_deduct_tax": "Deduct",
+	                "tax_amount": delivery_expense,
+	                "description": f"Delivery Expense – {inv.name}",
+	            },
+	        )
+	        print(
+	            f"📌 Added tax deduction row (-{delivery_expense}) to account {expense_account} (cost center: {default_cc})"
+	        )
+
+	# Debug: show Payment Entry draft values before save
+	print("\n📝 PAYMENT ENTRY DRAFT VALUES:")
+	print(f"   Paid Amount: {pe.paid_amount}")
+	print(f"   Received Amount: {pe.received_amount}")
+	print(f"   Total Taxes rows: {len(pe.get('taxes') or [])}")
+	for tx in pe.get("taxes", []) or []:
+	    print(
+	        f"   • {tx.account_head} | {tx.add_deduct_tax} | {tx.tax_amount} | Included: {tx.included_in_paid_amount}"
+	    )
 
 	# ------------------------------------------------------------------
 	# Bank validation fields – Payment Entry requires Reference No & Date
@@ -623,6 +662,18 @@ def pay_invoice(invoice_name: str, payment_mode: str, pos_profile: str | None = 
 	# Validation chain inside save() handles remaining missing values automatically
 	pe.save(ignore_permissions=True)
 	pe.submit()
+
+	# Debug: show Payment Entry final values after submit
+	print("\n✅ PAYMENT ENTRY SUBMITTED:")
+	print(f"   Name: {pe.name}")
+	print(f"   Paid Amount: {pe.paid_amount} | Paid After Tax: {pe.paid_amount_after_tax}")
+	print(f"   Received Amount: {pe.received_amount} | Received After Tax: {pe.received_amount_after_tax}")
+	print(f"   Total Taxes & Charges: {pe.total_taxes_and_charges or 0}")
+	for tx in pe.taxes:
+	    print(
+	        f"   • {tx.account_head} | {tx.add_deduct_tax} | {tx.tax_amount} | Included: {tx.included_in_paid_amount}"
+	    )
+	print("   ------------------------------------------------------------")
 
 	# Realtime update – let Kanban board refresh card colour/state
 	frappe.publish_realtime(
@@ -786,37 +837,80 @@ def mark_courier_outstanding(invoice_name: str, courier: str):
         frappe.throw(f"No receivable account found for company {company}.")
 
     # ------------------------------------------------------------------
-    # 3) Build & submit Journal Entry (move AR → Courier Outstanding)
+    # 3) Build & submit **Payment Entry** – marks invoice paid while
+    #    parking the receivable in *Courier Outstanding*.
     # ------------------------------------------------------------------
-    je = frappe.new_doc("Journal Entry")
-    je.voucher_type = "Journal Entry"
-    je.posting_date = frappe.utils.nowdate()
-    je.company = company
-    je.title = f"Courier Outstanding - {inv.name}"
 
-    amount = inv.grand_total
+    pe = frappe.new_doc("Payment Entry")
+    pe.payment_type = "Receive"
+    pe.company = company
+    pe.party_type = "Customer"
+    pe.party = inv.customer
+    pe.paid_from = paid_from_account  # Debtors (party account)
+    pe.paid_to = paid_to_account      # Courier Outstanding (asset/receivable)
+    pe.paid_amount = outstanding
+    pe.received_amount = outstanding
 
-    # Debit Debtors (Accounts Receivable) for the customer
-    je.append("accounts", {
-        "account": paid_from_account,
-        "debit_in_account_currency": amount,
-        "credit_in_account_currency": 0,
-        "party_type": "Customer",
-        "party": inv.customer,
-    })
+    # Allocate full amount to invoice to close it
+    pe.append(
+        "references",
+        {
+            "reference_doctype": "Sales Invoice",
+            "reference_name": inv.name,
+            "due_date": inv.get("due_date"),
+            "total_amount": inv.grand_total,
+            "outstanding_amount": outstanding,
+            "allocated_amount": outstanding,
+        },
+    )
 
-    # Credit Courier Outstanding
-    je.append("accounts", {
-        "account": paid_to_account,
-        "debit_in_account_currency": 0,
-        "credit_in_account_currency": amount,
-    })
+    # Minimal bank fields placeholders
+    pe.reference_no = f"COURIER-OUT-{inv.name}"
+    pe.reference_date = frappe.utils.nowdate()
 
-    je.save(ignore_permissions=True)
-    je.submit()
+    pe.save(ignore_permissions=True)
+    pe.submit()
 
     # ------------------------------------------------------------------
-    # 4) Create Courier Transaction log
+    # 4) Record SHIPPING EXPENSE via separate Journal Entry
+    # ------------------------------------------------------------------
+    shipping_exp = _get_delivery_expense_amount(inv)
+    je_name = None
+    if shipping_exp and shipping_exp > 0:
+        freight_acc = get_account_for_company("Freight and Forwarding Charges", company)
+
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.posting_date = frappe.utils.nowdate()
+        je.company = company
+        je.title = f"Courier Expense – {inv.name}"
+
+        # Debit Freight Expense
+        je.append(
+            "accounts",
+            {
+                "account": freight_acc,
+                "debit_in_account_currency": shipping_exp,
+                "credit_in_account_currency": 0,
+            },
+        )
+
+        # Credit Courier Outstanding (reduces receivable)
+        je.append(
+            "accounts",
+            {
+                "account": paid_to_account,
+                "debit_in_account_currency": 0,
+                "credit_in_account_currency": shipping_exp,
+            },
+        )
+
+        je.save(ignore_permissions=True)
+        je.submit()
+        je_name = je.name
+
+    # ------------------------------------------------------------------
+    # 5) Create Courier Transaction log
     # ------------------------------------------------------------------
     ct = frappe.new_doc("Courier Transaction")
     ct.courier = courier
@@ -824,17 +918,267 @@ def mark_courier_outstanding(invoice_name: str, courier: str):
     ct.type = "Pick-Up"
     ct.reference_invoice = inv.name
     ct.amount = outstanding
+    ct.shipping_amount = shipping_exp or 0
     ct.insert(ignore_permissions=True)
 
     # ------------------------------------------------------------------
-    # 5) Notify front-end & return (custom event)
+    # 6) Notify front-end & return (custom event)
     # ------------------------------------------------------------------
     frappe.publish_realtime(
         "jarz_pos_courier_outstanding",
-        {"invoice": inv.name, "journal_entry": je.name, "courier_transaction": ct.name},
+        {
+            "invoice": inv.name,
+            "payment_entry": pe.name,
+            "journal_entry": je_name,
+            "courier_transaction": ct.name,
+            "shipping_amount": shipping_exp or 0,
+        },
     )
 
-    return {"journal_entry": je.name, "courier_transaction": ct.name}
+    return {
+        "payment_entry": pe.name,
+        "journal_entry": je_name,
+        "courier_transaction": ct.name,
+        "shipping_amount": shipping_exp or 0,
+    }
+
+
+def _get_delivery_expense_amount(inv):
+    """Return delivery expense amount (float) for the given invoice using its city.
+
+    Tries to resolve city from the shipping / customer address linked to the invoice
+    and then fetches the *delivery_expense* field from the **City** DocType.
+    Returns ``0`` if city or expense could not be determined.
+    """
+    address_name = inv.get("shipping_address_name") or inv.get("customer_address")
+    if not address_name:
+        return 0.0
+
+    try:
+        addr = frappe.get_doc("Address", address_name)
+    except Exception:
+        return 0.0
+
+    city_id = getattr(addr, "city", None)
+    if not city_id:
+        return 0.0
+
+    try:
+        expense = frappe.db.get_value("City", city_id, "delivery_expense")  # type: ignore[attr-defined]
+        return float(expense or 0)
+    except Exception:
+        return 0.0
+
+
+@frappe.whitelist()
+def pay_delivery_expense(invoice_name: str, pos_profile: str):
+    """Create (or return existing) Journal Entry for paying the courier’s delivery
+    expense in cash and, **atomically**, set the invoice operational state to
+    “Out for delivery”.  This makes the endpoint idempotent – repeated calls for
+    the same invoice will NOT generate duplicate Journal Entries."""
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted.")
+
+    company = inv.company
+
+    # Ensure the invoice is marked Out for delivery before proceeding.
+    if inv.get("sales_invoice_state") != "Out for delivery":
+        inv.db_set("sales_invoice_state", "Out for delivery", update_modified=False)
+
+    # Determine expense amount based on invoice city
+    amount = _get_delivery_expense_amount(inv)
+    if amount <= 0:
+        frappe.throw("No delivery expense configured for the invoice city.")
+
+    # Idempotency guard – return existing submitted JE if already created
+    existing_je = frappe.db.get_value(
+        "Journal Entry",
+        {
+            "title": f"Courier Expense – {inv.name}",
+            "company": company,
+            "docstatus": 1,
+        },
+        "name",
+    )
+    if existing_je:
+        return {"journal_entry": existing_je, "amount": amount}
+
+    # Resolve ledgers for cash payment
+    paid_from = _get_cash_account(pos_profile, company)
+    paid_to = get_account_for_company("Freight and Forwarding Charges", company)
+
+    # Build Journal Entry (credit cash-in-hand, debit expense)
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Journal Entry"
+    je.posting_date = frappe.utils.nowdate()
+    je.company = company
+    je.title = f"Courier Expense – {inv.name}"
+
+    je.append(
+        "accounts",
+        {
+            "account": paid_from,
+            "credit_in_account_currency": amount,
+            "debit_in_account_currency": 0,
+        },
+    )
+    je.append(
+        "accounts",
+        {
+            "account": paid_to,
+            "debit_in_account_currency": amount,
+            "credit_in_account_currency": 0,
+        },
+    )
+
+    je.save(ignore_permissions=True)
+    je.submit()
+
+    # Fire realtime event so other sessions update cards instantly
+    frappe.publish_realtime(
+        "jarz_pos_courier_expense_paid",
+        {"invoice": inv.name, "journal_entry": je.name, "amount": amount},
+    )
+
+    return {"journal_entry": je.name, "amount": amount}
+
+
+@frappe.whitelist()
+def courier_delivery_expense_only(invoice_name: str, courier: str):
+    """Record courier delivery expense to be settled later.
+
+    Creates a **Courier Transaction** of type *Pick-Up* with **negative** amount
+    and note *delivery expense only* so that the courier’s outstanding balance is
+    reduced by the delivery fee they will collect from us.
+    """
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted.")
+
+    # Ensure state is Out for delivery (idempotent)
+    if inv.get("sales_invoice_state") != "Out for delivery":
+        inv.db_set("sales_invoice_state", "Out for delivery", update_modified=False)
+
+    amount = _get_delivery_expense_amount(inv)
+    if amount <= 0:
+        frappe.throw("No delivery expense configured for the invoice city.")
+
+    # Idempotency – avoid duplicate CTs for same purpose
+    existing_ct = frappe.db.get_value(
+        "Courier Transaction",
+        {
+            "reference_invoice": inv.name,
+            "type": "Pick-Up",
+            "notes": ["like", "%delivery expense only%"],
+        },
+        "name",
+    )
+    if existing_ct:
+        return {"courier_transaction": existing_ct, "amount": amount}
+
+    # Insert Courier Transaction recording shipping expense separately (positive)
+    ct = frappe.new_doc("Courier Transaction")
+    ct.courier = courier
+    ct.date = frappe.utils.now_datetime()
+    ct.type = "Pick-Up"
+    ct.reference_invoice = inv.name
+    ct.amount = 0  # No principal amount involved – only shipping expense
+    ct.shipping_amount = abs(amount)
+    ct.notes = "delivery expense only (pay later)"
+    ct.insert(ignore_permissions=True)
+
+    frappe.publish_realtime(
+        "jarz_pos_courier_expense_only",
+        {
+            "invoice": inv.name,
+            "courier_transaction": ct.name,
+            "shipping_amount": abs(amount),
+        },
+    )
+
+    return {"courier_transaction": ct.name, "shipping_amount": abs(amount)}
+
+
+# ---------------------------------------------------------------------------
+# 📊  COURIER BALANCES ENDPOINT
+#     Returns per-courier outstanding balance and detailed invoice list for UI
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def get_courier_balances():
+    """Return list of couriers with their current balance (= Σ amounts – Σ shipping)
+    together with per-invoice breakdown for popup view.
+
+    Output structure::
+        [
+            {
+                "courier": "COURIER-0001",
+                "courier_name": "FastEx",
+                "balance": 1250.0,
+                "details": [
+                    {"invoice": "ACC-SINV-0001", "city": "Downtown", "amount": 250.0, "shipping": 10.0},
+                    ...
+                ]
+            },
+            ...
+        ]
+    """
+
+    data = []
+    couriers = frappe.get_all("Courier", fields=["name", "courier_name"])
+    for c in couriers:
+        rows = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "courier": c.name,
+                "status": ["!=", "Settled"],  # Exclude settled transactions
+            },
+            fields=["reference_invoice", "amount", "shipping_amount"]
+        )
+
+        total_amount = sum(float(r.amount or 0) for r in rows)
+        total_shipping = sum(float(r.shipping_amount or 0) for r in rows)
+        balance = total_amount - total_shipping
+
+        details = []
+        for r in rows:
+            city = ""
+            if r.reference_invoice:
+                # Fetch shipping or customer address linked to the invoice
+                si_addr = frappe.db.get_value(
+                    "Sales Invoice",
+                    r.reference_invoice,
+                    ["shipping_address_name", "customer_address"],
+                    as_dict=True,
+                )
+                addr_name = None
+                if si_addr:
+                    addr_name = si_addr.get("shipping_address_name") or si_addr.get("customer_address")
+
+                if addr_name:
+                    city_id = frappe.db.get_value("Address", addr_name, "city")
+                    if city_id:
+                        city_name = frappe.db.get_value("City", city_id, "city_name")
+                        city = city_name or city_id or ""
+            details.append({
+                "invoice": r.reference_invoice,
+                "city": city,
+                "amount": float(r.amount or 0),
+                "shipping": float(r.shipping_amount or 0)
+            })
+
+        data.append({
+            "courier": c.name,
+            "courier_name": c.courier_name or c.name,
+            "balance": balance,
+            "details": details,
+        })
+
+    # Sort by balance desc for nicer UI
+    data.sort(key=lambda d: d["balance"], reverse=True)
+    return data
 
 
 def get_permission_query_conditions(user):
@@ -845,3 +1189,178 @@ def get_permission_query_conditions(user):
 def has_permission(doc, user):
     """Check if user has permission to access the page"""
     return True
+
+# ---------------------------------------------------------------------------
+# 💵  COURIER SETTLEMENT ENDPOINT
+#     Pays / collects money for ALL *Unsettled* Courier Transactions of a
+#     specific courier. Handles both scenarios automatically:
+#        1) Unpaid invoice → creates Payment Entry against Courier Outstanding.
+#        2) Paid invoice (shipping-only) → creates Journal Entry paying courier.
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def settle_courier(courier: str, pos_profile: str | None = None):
+    """Settle all *Unsettled* "Courier Transaction" rows for the given courier.
+
+    Args:
+        courier: Courier (DocType) ID.
+        pos_profile: POS Profile whose cash account should be credited/used.
+
+    Returns:
+        dict: Summary of documents created keyed by invoice / CT.
+    """
+    if not courier:
+        frappe.throw("Courier ID required")
+
+    if not pos_profile:
+        # Fallback: try to grab first enabled POS profile
+        pos_profile = frappe.db.get_value(
+            "POS Profile", {"disabled": 0}, "name"
+        )
+        if not pos_profile:
+            frappe.throw("POS Profile is required to resolve Cash account")
+
+    cts = frappe.get_all(
+        "Courier Transaction",
+        filters={"courier": courier, "status": ["!=", "Settled"]},
+        fields=["name", "amount", "shipping_amount"],
+    )
+
+    if not cts:
+        frappe.throw("No unsettled courier transactions found.")
+
+    # Compute NET balance: (amount - shipping) per row
+    net_balance = 0.0
+    for r in cts:
+        net_balance += float(r.amount or 0) - float(r.shipping_amount or 0)
+
+    # Determine company (assume all CTs share same company via linked invoice or default)
+    company = frappe.defaults.get_global_default("company") or frappe.db.get_single_value("Global Defaults", "default_company")
+
+    courier_outstanding_acc = _get_courier_outstanding_account(company)
+    cash_acc = _get_cash_account(pos_profile, company)
+
+    je_name = None
+    if abs(net_balance) > 0.005:
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.posting_date = frappe.utils.nowdate()
+        je.company = company
+        je.title = f"Courier Settlement – {courier}"
+
+        if net_balance > 0:
+            # Courier owes us money – we RECEIVE cash
+            je.append("accounts", {
+                "account": cash_acc,
+                "debit_in_account_currency": net_balance,
+                "credit_in_account_currency": 0,
+            })
+            je.append("accounts", {
+                "account": courier_outstanding_acc,
+                "debit_in_account_currency": 0,
+                "credit_in_account_currency": net_balance,
+            })
+        else:
+            amt = abs(net_balance)
+            # We owe courier – PAY cash
+            je.append("accounts", {
+                "account": courier_outstanding_acc,
+                "debit_in_account_currency": amt,
+                "credit_in_account_currency": 0,
+            })
+            je.append("accounts", {
+                "account": cash_acc,
+                "debit_in_account_currency": 0,
+                "credit_in_account_currency": amt,
+            })
+
+        je.save(ignore_permissions=True)
+        je.submit()
+        je_name = je.name
+
+    # Mark all CTs as settled
+    for r in cts:
+        frappe.db.set_value("Courier Transaction", r.name, "status", "Settled")
+
+    frappe.db.commit()
+
+    # Fire realtime event
+    frappe.publish_realtime(
+        "jarz_pos_courier_settled",
+        {"courier": courier, "journal_entry": je_name, "net_balance": net_balance},
+    )
+
+    return {"journal_entry": je_name, "net_balance": net_balance}
+
+# ---------------------------------------------------------------------------
+# 💵  SINGLE-INVOICE COURIER SETTLEMENT
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None):
+    """Settle courier outstanding for a single invoice.
+
+    Creates a Journal Entry between Cash-in-Hand and Courier Outstanding for the
+    net balance of **all** unsettled *Courier Transaction* rows linked to the
+    given invoice, then marks those rows as *Settled*.
+    """
+
+    if not invoice_name:
+        frappe.throw("Invoice ID required")
+
+    cts = frappe.get_all(
+        "Courier Transaction",
+        filters={"reference_invoice": invoice_name, "status": ["!=", "Settled"]},
+        fields=["name", "courier", "amount", "shipping_amount"],
+    )
+
+    if not cts:
+        frappe.throw("No unsettled courier transactions found for this invoice.")
+
+    courier = cts[0].courier
+    company = frappe.db.get_value("Sales Invoice", invoice_name, "company")
+    if not company:
+        frappe.throw("Could not determine company for invoice")
+
+    if not pos_profile:
+        pos_profile = frappe.db.get_value("POS Profile", {"disabled": 0}, "name")
+        if not pos_profile:
+            frappe.throw("POS Profile is required to resolve Cash account")
+
+    courier_outstanding_acc = _get_courier_outstanding_account(company)
+    cash_acc = _get_cash_account(pos_profile, company)
+
+    net_balance = sum(float(r.amount or 0) - float(r.shipping_amount or 0) for r in cts)
+
+    je_name = None
+    if abs(net_balance) > 0.005:
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.posting_date = frappe.utils.nowdate()
+        je.company = company
+        je.title = f"Courier Settlement – {invoice_name}"
+
+        if net_balance > 0:
+            # Courier owes us – receive cash
+            je.append("accounts", {"account": cash_acc, "debit_in_account_currency": net_balance})
+            je.append("accounts", {"account": courier_outstanding_acc, "credit_in_account_currency": net_balance})
+        else:
+            amt = abs(net_balance)
+            je.append("accounts", {"account": courier_outstanding_acc, "debit_in_account_currency": amt})
+            je.append("accounts", {"account": cash_acc, "credit_in_account_currency": amt})
+
+        je.save(ignore_permissions=True)
+        je.submit()
+        je_name = je.name
+
+    # Mark CTs settled
+    settled_ids = []
+    for r in cts:
+        frappe.db.set_value("Courier Transaction", r.name, "status", "Settled")
+        settled_ids.append(r.name)
+
+    frappe.db.commit()
+
+    frappe.publish_realtime("jarz_pos_courier_settled_single", {"invoice": invoice_name, "journal_entry": je_name, "net_balance": net_balance})
+
+    return {"journal_entry": je_name, "net_balance": net_balance, "courier": courier, "transactions": settled_ids}

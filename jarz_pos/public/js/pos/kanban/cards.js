@@ -73,14 +73,14 @@ jarz_pos.kanban.cards.loadInvoiceDetails = function(invoice) {
 	return new Promise(function(resolve) {
 		// Ensure bundle parent codes are ready first
 		jarz_pos.kanban.bundleParentCodesPromise.then(function(parentCodes) {
-			// Load full Sales Invoice document (includes child tables)
+		// Load full Sales Invoice document (includes child tables)
 			return frappe.call({
-				method: 'frappe.client.get',
-				args: {
-					doctype: 'Sales Invoice',
-					name: invoice.name
-				}
-			}).then(function(res) {
+			method: 'frappe.client.get',
+			args: {
+				doctype: 'Sales Invoice',
+				name: invoice.name
+			}
+		}).then(function(res) {
 				// res handling will use parentCodes below
 				return { res: res, parentCodes: parentCodes };
 			});
@@ -160,7 +160,11 @@ jarz_pos.kanban.cards.loadInvoiceDetails = function(invoice) {
 							}
 							// Update status color
 							var $cardEl = $('#card-' + invoice.name);
-							var isCourierOutstanding = ((invoice.status||'').toLowerCase()==='out for delivery' && (parseFloat(invoice.outstanding_amount||0)>0));
+							var isCourierOutstanding = Boolean(invoice.courier_outstanding_balance !== undefined && invoice.courier_outstanding_balance !== null);
+							if(!isCourierOutstanding){
+								// Fallback legacy check (pre-new logic)
+								isCourierOutstanding = ( (invoice.status||'').toLowerCase()==='out for delivery' && (parseFloat(invoice.outstanding_amount||0) > 0) );
+							}
 							if(isCourierOutstanding){
 								$cardEl.removeClass('status-paid status-unpaid status-overdue status-cancelled status-return status-draft');
 								$cardEl.addClass('status-courier');
@@ -216,7 +220,11 @@ jarz_pos.kanban.cards.createInvoiceCard = function(invoice) {
 	var statusCls = jarz_pos.kanban.cards.getStatusClass(erpStatus);
 
 	// Special case: *Outstanding Courier* (invoice unpaid & out for delivery)
-	var isCourierOutstanding = ( (invoice.status||'').toLowerCase()==='out for delivery' && (parseFloat(invoice.outstanding_amount||0) > 0) );
+	var isCourierOutstanding = Boolean(invoice.courier_outstanding_balance !== undefined && invoice.courier_outstanding_balance !== null);
+	if(!isCourierOutstanding){
+		// Fallback legacy check (pre-new logic)
+		isCourierOutstanding = ( (invoice.status||'').toLowerCase()==='out for delivery' && (parseFloat(invoice.outstanding_amount||0) > 0) );
+	}
 	var courierTag = isCourierOutstanding ? '<span class="courier-tag">'+__('Outstanding Courier')+'</span>' : '';
 	if(isCourierOutstanding){
 	    statusCls = 'status-courier';
@@ -254,6 +262,7 @@ jarz_pos.kanban.cards.createInvoiceCard = function(invoice) {
 							`<button class="btn btn-sm btn-success mark-paid-btn" data-invoice="${invoice.name}">
 								<i class="fa fa-check"></i> Mark Paid
 							</button>` : '' }
+						${ isCourierOutstanding ? `<button class="btn btn-sm btn-warning settle-courier-btn" data-invoice="${invoice.name}" data-balance="${invoice.courier_outstanding_balance||0}"><i class="fa fa-handshake"></i> ${__('Settle')}</button>` : '' }
 						`
 					}
 				</div>
@@ -378,6 +387,29 @@ jarz_pos.kanban.cards.addKanbanCardEventHandlers = function() {
 				}
 			});
 		}, __('Mark Invoice Paid'), __('Confirm'));
+	});
+
+	// Settle Courier button
+	$('.settle-courier-btn').off('click').on('click', function(e){
+		e.stopPropagation();
+		var invoiceName = $(this).data('invoice');
+		var balance = parseFloat($(this).data('balance')||0);
+		var fmt = function(val){ return (typeof frappe.format_value==='function') ? frappe.format_value(val,{fieldtype:'Currency'}) : (val||0).toFixed(2); };
+		var msg = (balance>=0) ? __('Staff should RECEIVE <strong>{0}</strong> from courier before settling.', [fmt(balance)]) : __('Staff should PAY <strong>{0}</strong> to courier before settling.', [fmt(Math.abs(balance))]);
+		frappe.confirm(msg, function(){
+			frappe.call({
+				method:'jarz_pos.jarz_pos.page.custom_pos.custom_pos.settle_courier_for_invoice',
+				args:{invoice_name: invoiceName, pos_profile:(window.currentPOSProfile ? window.currentPOSProfile.name : '')},
+				freeze:true,
+				callback:function(){
+					frappe.show_alert({message: __('Courier settled'), indicator:'green'});
+					var $card=$('#card-'+invoiceName);
+					$card.removeClass('status-courier');
+					$card.find('.courier-tag').remove();
+					$card.find('.settle-courier-btn').remove();
+				}
+			});
+		});
 	});
 
 	// Column delete button

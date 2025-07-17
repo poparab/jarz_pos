@@ -20,6 +20,7 @@ page_js = {
         "public/js/pos/cart.js",
         "public/js/pos/customer.js",
         "public/js/pos/item_loader.js",
+        "public/js/pos/couriers.js",  # sidebar courier balances
         "public/js/pos/core.js",
         "public/js/custom_pos.js"
     ]

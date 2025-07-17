@@ -264,7 +264,7 @@ class TestSalesInvoiceCreation(FrappeTestCase):
             None
         )
         self.assertIsNone(delivery_expense_tax)
-
+        
         # Invoice-level discount_amount remains unset
         self.assertIsNone(invoice.get("discount_amount"))
     
