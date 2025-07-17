@@ -5,7 +5,6 @@ __pycache__/
 
 # Frappe build artifacts
 assets/
-public/
 *.log
 
 # Node
