@@ -9,22 +9,9 @@ fixtures = [
     "Custom Field"
 ]
 
-page_js = {
-    "custom-pos": [
-        "public/js/pos/profile.js",
-        "public/js/pos/kanban/columns.js",
-        "public/js/pos/kanban/cards.js",
-        "public/js/pos/kanban/data.js",
-        "public/js/pos/kanban/board.js",
-        "public/js/pos/delivery_slots.js",  # new timetable/slot logic
-        "public/js/pos/cart.js",
-        "public/js/pos/customer.js",
-        "public/js/pos/item_loader.js",
-        "public/js/pos/couriers.js",  # sidebar courier balances
-        "public/js/pos/core.js",
-        "public/js/custom_pos.js"
-    ]
-}
+# The original POS frontend assets have been archived under `frontend_archive/`.
+# To keep this backend app headless/API-only, we disable page-level JS inclusion.
+page_js = {}
 
 
 # Apps
