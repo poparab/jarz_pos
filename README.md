@@ -421,3 +421,4 @@ For issues, feature requests, or support:
 - ✅ Enhanced error handling and debugging capabilities
 
 The Jarz POS system provides a complete, enterprise-grade point of sale solution with advanced features tailored for modern retail operations.
+\n\n---\n\nFor day-to-day POS operation instructions, refer to **USAGE.md**.
