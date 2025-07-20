@@ -6,6 +6,7 @@ __pycache__/
 # Frappe build artifacts
 assets/
 *.log
+frappe-bench/
 
 # Node
 node_modules/

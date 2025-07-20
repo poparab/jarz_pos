@@ -1,0 +1,137 @@
+# Jarz POS Mobile App – Prompt Library
+# ====================================
+# This file contains ready-to-copy prompt snippets (ChatGPT / Copilot / etc.)
+# for building and extending the **React-Native** mobile application that
+# consumes the headless Jarz POS backend.
+#
+# 🔄  Maintenance Guide
+# --------------------
+# • Each section is *idempotent* – running the prompt again should not break
+#   existing code (use proper guards / checks in the generated script).
+# • Keep prompts **imperative** & **concise** (start with verbs) as requested.
+# • Whenever a new business rule emerges, append a new section at the bottom
+#   under the `## Business Rules` heading.
+# • Use Markdown fenced blocks inside prompts when code output is expected.
+#
+# ===========================================================================
+
+## 1. Environment Setup
+
+**Prompt ID:** `env-setup`
+
+> "Create a fresh **Expo SPA React-Native** workspace named `JarzPOSMobile` with TypeScript support, ESLint + Prettier, and Husky pre-commit hooks. Add `react-native-paper`, `react-native-vector-icons`, `react-navigation` (stack & bottom-tabs), `@reduxjs/toolkit`, `react-redux`, `axios`, and `@react-native-async-storage/async-storage`. Configure absolute path aliases (`@components`, `@screens`, `@store`, `@utils`, `@api`). Ensure iOS & Android run without warnings. Output full shell commands followed by the generated directory tree summary."
+
+---
+
+## 2. Project Scaffolding & Best Practices
+
+**Prompt ID:** `project-scaffold`
+
+> "Refactor `JarzPOSMobile` to follow the **feature-folder** pattern. Create the following base folders with index barrels and example placeholders:
+> • `src/screens/` (SessionStack, POSScreen, KanbanScreen)
+> • `src/components/` (Cart, ItemCard, BundleCard, Header)
+> • `src/store/` (root store with slices: pos, cart, kanban, settings)
+> • `src/api/` (axios instance with interceptors, typed endpoint functions)
+> • `src/navigation/` (RootNavigator with Auth flow placeholder)
+> • `src/utils/` (currency, dates, validators)
+> Adopt **Redux Toolkit Query** for data fetching (replace raw axios where suitable). Provide updated directory tree and boilerplate code snippets."
+
+---
+
+## 3. Configure .env & API Base URL
+
+**Prompt ID:** `api-config`
+
+> "Add `react-native-dotenv` (or Expo dotenv config) support. Create `.env.example` with `API_BASE_URL=https://erp.example.com`. **Also create a ready-to-use `.env.local`** pointing to your **local ERPNext bench** (e.g. `API_BASE_URL=http://localhost:8000`). Modify axios instance to read the base URL from env and expose typed helper `callFrappe(methodPath, params)`. Ensure TypeScript types are propagated."
+
+> _Tip_: When running Expo on a physical device, replace `localhost` with your host machine’s LAN IP (e.g. `http://192.168.1.23:8000`).
+
+---
+
+## 3-b. User Authentication
+
+**Prompt ID:** `auth-flow`
+
+> "Implement secure authentication for the mobile app:
+> • Provide *two* options selectable via env var `AUTH_METHOD`: `session` or `apikey`.
+> • **Session**: hit `/api/method/login` with email/pass, store `sid` cookie via `@react-native-cookies/cookies`, auto-attach it to subsequent axios calls.
+> • **API key**: read `API_KEY` / `API_SECRET` from `.env.*`, send header `Authorization: token ${API_KEY}:${API_SECRET}` (Frappe default format).
+> • Create React Context `AuthContext` with `login`, `logout`, `isAuthenticated`, `token`.
+> • Persist creds in SecureStore (Expo) so the user stays logged-in.
+> • Add interceptor to refresh the cookie on 403 and redirect to login screen.
+> • Update README snippet showing how to generate API key/secret for the service user in ERPNext."
+
+---
+
+## 4. Build POS Screen (Touch-Optimised Sales)
+
+**Prompt ID:** `ui-pos-screen`
+
+> "Implement `POSScreen` adhering to the Jarz POS web layout but optimised for mobile:
+> 1. **Header** – POS profile selector, cart icon with badge, hamburger for settings.
+> 2. **Bundles Carousel** – horizontal scroll of bundles (`/api/method/jarz_pos.jarz_pos.api.invoices.create_sales_invoice` needs *erpnext_item* mapping).
+> 3. **Items Grid** – virtualised flat-list grouped by `item_group` (collapsible accordions).
+> 4. **Smart Search** – fuzzy search across items & bundles.
+> 5. **Cart Drawer** – slide-up modal with editable qty, remove, bundle edit, delivery selector.
+> 6. **Checkout Flow** – summary -> confirm -> API call `create_sales_invoice`.
+> Use **React Native Paper** components, `FlashList` (Shopify) for performance, maintain cart state via Redux slice. Include optimistic UI, loading indicators, and error toasts."
+
+---
+
+## 5. Build Kanban Screen (Order Tracking)
+
+**Prompt ID:** `ui-kanban-screen`
+
+> "Create `KanbanScreen` replicating the web kanban board:
+> • Fetch invoices via `/api/method/jarz_pos.jarz_pos.api.couriers.get_courier_balances` plus `/api/resource/Sales Invoice?filters=` for details.
+> • Standard columns: Received, Processing, Preparing, Out for Delivery, Completed (hide if empty toggle).
+> • Implement **drag-and-drop** (use `@th3rdwave/react-native-gesture-handler` + `react-native-reanimated` sortable list) to allow status moves – on drop call respective API (`mark_courier_outstanding` etc.).
+> • Integrate **WebSocket** realtime updates via Frappe’s `/socket.io` – subscribe to `jarz_pos_new_invoice`, `jarz_pos_invoice_paid` channels.
+> • Cards show status colour, amount, item count, courier tag; tap expands for actions (Print, Mark Paid, Settle)."
+
+---
+
+## 6. Accounting & Business Logic Helpers
+
+**Prompt ID:** `biz-helpers`
+
+> "Write utility functions:
+> • `computeCartTotals(cart, delivery)` – returns {net, deliveryIncome, grandTotal}.
+> • `deriveInvoiceState(doc)` – maps ERP status + `sales_invoice_state` to UI column.
+> • `formatCurrency(number)` – uses device locale.
+> • `resolveDeliveryExpense(cityId)` – cache city lookup; fallback to 0.
+> Include unit tests with Jest for each helper."
+
+---
+
+## 7. Offline Support
+
+**Prompt ID:** `offline-sync`
+
+> "Implement basic offline queuing: when `create_sales_invoice` fails due to network, persist the request payload in AsyncStorage under `pendingInvoices`, show badge, and sync when connection restores. Use NetInfo listener."
+
+---
+
+## 8. Continuous Integration (CI)
+
+**Prompt ID:** `ci-mobile`
+
+> "Add GitHub Actions workflow `mobile-ci.yml`:
+> • Node 18 / Expo prebuild cache
+> • Run `npm test -- --coverage`
+> • Run ESLint & Prettier checks
+> • Expo EAS build preview on pull request (skip for forks)"
+
+---
+
+## 9. Publishing
+
+**Prompt ID:** `publish-store`
+
+> "Guide to configure EAS, bundle identifiers, icons, splash, and submit to **App Store TestFlight** and **Google Play Internal Testing**. Output step-by-step shell commands and Expo config additions."
+
+---
+
+## Business Rules
+
+*Append new prompts below as requirements evolve.*

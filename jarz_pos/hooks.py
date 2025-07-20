@@ -185,7 +185,13 @@ doc_events = {
 # override_whitelisted_methods = {
 # 	"frappe.desk.doctype.event.event.get_events": "jarz_pos.event.get_events"
 # }
-#
+
+override_whitelisted_methods = {
+    "get_pos_profiles": "jarz_pos.api.pos.get_pos_profiles",
+    "get_profile_bundles": "jarz_pos.api.pos.get_profile_bundles",
+    "get_profile_products": "jarz_pos.api.pos.get_profile_products",
+}
+
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
 # along with any modifications made in other Frappe apps
