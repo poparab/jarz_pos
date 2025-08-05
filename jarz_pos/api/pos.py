@@ -32,27 +32,17 @@ def get_pos_profiles():
 
 @frappe.whitelist(allow_guest=False)
 def get_profile_bundles(profile: str):
-    """
-    Return all enabled Jarz Bundles with their selectable items.
+    """Return bundles with items available to the given POS profile."""
     
-    For each bundle, this will return the item groups and the quantity
-    of items to be selected from each group, along with the actual items
-    available within those groups.
-    """
-    meta = frappe.get_meta('Jarz Bundle')
-    has_disabled = any(df.fieldname == 'disabled' for df in meta.fields)
-    filters = {'disabled': 0} if has_disabled else {}
+    # For now, just get all available bundles
+    # Future: filter by POS profile permissions
+    filters = {}
 
     bundles = frappe.get_all(
         'Jarz Bundle',
         filters=filters,
         fields=['name as id', 'bundle_name as name', 'bundle_price as price'],
     )
-
-    try:
-        price_list = frappe.db.get_value('POS Profile', profile, 'selling_price_list')
-    except Exception:
-        price_list = None
 
     for b in bundles:
         bundle_item_groups = frappe.get_all(
@@ -70,6 +60,18 @@ def get_profile_bundles(profile: str):
                 fields=['name as id', 'item_name as name', 'standard_rate as price'],
             )
 
+            # Get warehouse from POS profile for stock quantities
+            # try:
+            #     wh = frappe.db.get_value('POS Profile', profile, 'warehouse')
+            # except Exception:
+            #     wh = None
+
+            # Use selling price list linked to POS profile when available
+            try:
+                price_list = frappe.db.get_value('POS Profile', profile, 'selling_price_list')
+            except Exception:
+                price_list = None
+
             if price_list:
                 for item in items_in_group:
                     rate = frappe.db.get_value(
@@ -79,6 +81,22 @@ def get_profile_bundles(profile: str):
                     )
                     if rate is not None:
                         item['price'] = rate
+
+            # attach stock qty per POS profile warehouse if defined (same as main items)
+            try:
+                wh = frappe.db.get_value('POS Profile', profile, 'warehouse')
+                print(f"Bundle items API - Profile: {profile} - Warehouse: {wh}")
+            except Exception:
+                wh = None
+                print(f"Bundle items API - Profile: {profile} - Warehouse: None (error)")
+
+            if wh:
+                for item in items_in_group:
+                    qty = frappe.db.get_value('Bin', {'warehouse': wh, 'item_code': item['id']}, 'actual_qty') or 0
+                    # Debug: Log the stock fetching for comparison
+                    print(f"Bundle item {item['name']} (ID: {item['id']}) - Warehouse: {wh} - Stock: {qty}")
+                    item['qty'] = qty
+                    item['actual_qty'] = qty  # Add both fields for consistency
 
             processed_groups.append({
                 'group_name': group_info['item_group'],
@@ -140,12 +158,16 @@ def get_profile_products(profile: str):
     # attach stock qty per POS profile warehouse if defined
     try:
         wh = frappe.db.get_value('POS Profile', profile, 'warehouse')
+        print(f"Main items API - Profile: {profile} - Warehouse: {wh}")
     except Exception:
         wh = None
+        print(f"Main items API - Profile: {profile} - Warehouse: None (error)")
 
     if wh:
         for itm in items:
             qty = frappe.db.get_value('Bin', {'warehouse': wh, 'item_code': itm['id']}, 'actual_qty') or 0
+            # Debug: Log the stock fetching for comparison
+            print(f"Main item {itm['name']} (ID: {itm['id']}) - Warehouse: {wh} - Stock: {qty}")
             itm['qty'] = qty
 
     return items 

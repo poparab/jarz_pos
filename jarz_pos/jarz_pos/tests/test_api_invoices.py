@@ -8,8 +8,8 @@ modules can be imported successfully inside the test runner environment.
 def test_api_modules_present():
     import importlib
 
-    invoices = importlib.import_module("jarz_pos.jarz_pos.api.invoices")
-    couriers = importlib.import_module("jarz_pos.jarz_pos.api.couriers")
+    invoices = importlib.import_module("jarz_pos.api.invoices")
+    couriers = importlib.import_module("jarz_pos.api.couriers")
 
     assert hasattr(invoices, "create_sales_invoice")
     assert hasattr(couriers, "get_courier_balances")

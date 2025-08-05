@@ -20,697 +20,385 @@ def get_context(context):
 
 
 @frappe.whitelist()
-def create_pos_invoice(cart_json, customer_name, pos_profile_name=None, delivery_charges_json=None, required_delivery_datetime=None):
+def create_pos_invoice(cart_json, customer_name, pos_profile_name=None):
     """
-    Create POS Sales Invoice using Frappe best practices with comprehensive logging
-    
-    Following Frappe/ERPNext best practices:
-    - Proper error handling with frappe.throw()
-    - Structured logging with frappe.log_error()
-    - Document validation before save/submit
-    - Handle delivery time slot for scheduled deliveries
-    - Proper field setting in correct order
+    Create POS Sales Invoice using Frappe best practices
+    - Uses only Frappe APIs (no direct database access)
+    - Handles only cart items (no shipping)
+    - Clean, simple implementation
     """
-    
-    # Frappe best practice: Create logger for this module
-    logger = frappe.logger("jarz_pos.custom_pos", allow_site=frappe.local.site)
-    
-    # Always log function entry for debugging
-    logger.info(f"create_pos_invoice called with customer: {customer_name}")
-    
-    print("\n" + "="*100)
-    print("🚀 CORE FUNCTION: create_pos_invoice")
-    print("="*100)
-    print(f"🕐 {frappe.utils.now()}")
-    
     try:
-        # STEP 1: Input Validation and Parsing
-        print(f"\n1️⃣ INPUT VALIDATION:")
-        logger.debug(f"Validating inputs: cart={bool(cart_json)}, customer={customer_name}")
+        frappe.logger().info("🚀 POS Invoice Creation Started")
         
-        # Validate required parameters
-        if not customer_name:
-            error_msg = "Customer name is required"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        if not cart_json:
-            error_msg = "Cart data is required"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # Parse cart JSON using Frappe best practice
-        try:
-            cart_items = frappe.parse_json(cart_json) if isinstance(cart_json, str) else cart_json
-            logger.debug(f"Parsed cart: {len(cart_items)} items")
-            print(f"   ✅ Cart parsed: {len(cart_items)} items")
-        except (ValueError, TypeError) as e:
-            error_msg = f"Invalid cart JSON format: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # Filter out shipping items - shipping should be handled separately, not as cart items
-        original_count = len(cart_items)
-        shipping_items = []
-        cart_items = [item for item in cart_items if item.get('item_code', '').upper() not in ['SHIPPING', 'DELIVERY', 'SHIPPING_FEE']]
-        
-        if len(cart_items) < original_count:
-            shipping_count = original_count - len(cart_items)
-            logger.info(f"Filtered out {shipping_count} shipping item(s) from cart")
-            print(f"   🚚 Filtered out {shipping_count} shipping item(s) - shipping should be handled separately")
-            print(f"   ✅ Remaining cart items: {len(cart_items)}")
+        # Parse and validate input
+        cart_items = frappe.parse_json(cart_json) if isinstance(cart_json, str) else cart_json
         
         if not cart_items:
-            error_msg = "Cart cannot be empty (after filtering out shipping items)"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
+            frappe.throw("Cart is empty")
         
-        # Parse delivery charges if provided
-        delivery_charges = []
-        if delivery_charges_json:
-            try:
-                delivery_charges = frappe.parse_json(delivery_charges_json) if isinstance(delivery_charges_json, str) else delivery_charges_json
-                logger.debug(f"Parsed delivery charges: {len(delivery_charges)} charges")
-                print(f"   📦 Delivery charges parsed: {len(delivery_charges)} charges")
-                for i, charge in enumerate(delivery_charges, 1):
-                    print(f"      {i}. {charge.get('charge_type', 'Unknown')}: ${charge.get('amount', 0)}")
-            except (ValueError, TypeError) as e:
-                error_msg = f"Invalid delivery charges JSON format: {str(e)}"
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
-        else:
-            print(f"   📦 No delivery charges provided")
+        if not customer_name:
+            frappe.throw("Customer name is required")
         
-        # Parse and validate required delivery datetime if provided
-        delivery_datetime = None
-        if required_delivery_datetime:
-            try:
-                if isinstance(required_delivery_datetime, str):
-                    # Parse ISO datetime string
-                    from dateutil import parser
-                    delivery_datetime = parser.parse(required_delivery_datetime)
-                    logger.debug(f"Parsed delivery datetime: {delivery_datetime}")
-                    print(f"   🕐 Delivery datetime parsed: {delivery_datetime}")
-                else:
-                    delivery_datetime = required_delivery_datetime
-                    print(f"   🕐 Delivery datetime provided: {delivery_datetime}")
-                
-                # Validate that delivery datetime is in the future
-                current_datetime = frappe.utils.now_datetime()
-                if delivery_datetime <= current_datetime:
-                    error_msg = f"Delivery datetime must be in the future. Provided: {delivery_datetime}, Current: {current_datetime}"
-                    logger.error(error_msg)
-                    print(f"   ❌ {error_msg}")
-                    frappe.throw(error_msg)
-                
-                print(f"   ✅ Delivery datetime validated: {delivery_datetime}")
-                
-            except Exception as e:
-                error_msg = f"Invalid delivery datetime format: {str(e)}"
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
-        else:
-            print(f"   🕐 No delivery datetime provided")
+        frappe.logger().info(f"Creating invoice for customer: {customer_name}")
+        frappe.logger().info(f"Cart has {len(cart_items)} items")
         
-        print(f"   ✅ Input validation passed")
-        
-        # STEP 2: Customer Validation
-        print(f"\n2️⃣ CUSTOMER VALIDATION:")
-        logger.debug(f"Validating customer: {customer_name}")
-        
-        # Frappe best practice: Use frappe.db.exists() for existence checks
+        # Ensure customer exists
         if not frappe.db.exists("Customer", customer_name):
-            error_msg = f"Customer '{customer_name}' does not exist. Please create the customer first."
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
+            frappe.throw(f"Customer '{customer_name}' not found")
         
-        # Get customer document for validation
-        try:
-            customer_doc = frappe.get_doc("Customer", customer_name)
-            logger.debug(f"Customer loaded: {customer_doc.customer_name}")
-            print(f"   ✅ Customer validated: {customer_doc.customer_name}")
-            print(f"      - Group: {customer_doc.customer_group}")
-            print(f"      - Territory: {customer_doc.territory}")
-        except Exception as e:
-            error_msg = f"Error loading customer '{customer_name}': {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # STEP 3: POS Profile Validation
-        print(f"\n3️⃣ POS PROFILE VALIDATION:")
-        
+        # Get POS Profile (use default if not provided)
         if pos_profile_name:
-            logger.debug(f"Validating provided POS Profile: {pos_profile_name}")
-            print(f"   Checking provided POS Profile: {pos_profile_name}")
-            
             if not frappe.db.exists("POS Profile", pos_profile_name):
-                error_msg = f"POS Profile '{pos_profile_name}' does not exist"
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
-            
-            try:
-                pos_profile = frappe.get_doc("POS Profile", pos_profile_name)
-                logger.debug(f"POS Profile loaded: {pos_profile.name}")
-            except Exception as e:
-                error_msg = f"Error loading POS Profile '{pos_profile_name}': {str(e)}"
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
+                frappe.throw(f"POS Profile '{pos_profile_name}' not found")
+            pos_profile = frappe.get_doc("POS Profile", pos_profile_name)
         else:
-            logger.debug("Finding default POS Profile")
-            print(f"   Finding default POS Profile...")
-            
-            # Frappe best practice: Use filters dict for complex queries
+            # Get default POS Profile
             pos_profile_name = frappe.db.get_value("POS Profile", {"disabled": 0}, "name")
             if not pos_profile_name:
-                error_msg = "No active POS Profile found. Please create and enable a POS Profile."
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
-            
-            try:
-                pos_profile = frappe.get_doc("POS Profile", pos_profile_name)
-                logger.debug(f"Default POS Profile: {pos_profile.name}")
-                print(f"   Using default POS Profile: {pos_profile.name}")
-            except Exception as e:
-                error_msg = f"Error loading default POS Profile: {str(e)}"
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
+                frappe.throw("No active POS Profile found")
+            pos_profile = frappe.get_doc("POS Profile", pos_profile_name)
         
-        # Validate POS Profile has required fields
-        if not pos_profile.company:
-            error_msg = f"POS Profile '{pos_profile.name}' has no company set"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
+        frappe.logger().info(f"Using POS Profile: {pos_profile.name}")
         
-        print(f"   ✅ POS Profile validated:")
-        print(f"      - Name: {pos_profile.name}")
-        print(f"      - Company: {pos_profile.company}")
-        print(f"      - Price List: {pos_profile.selling_price_list}")
-        print(f"      - Currency: {pos_profile.currency}")
+        # Create Sales Invoice document
+        invoice_doc = frappe.new_doc("Sales Invoice")
         
-        # STEP 4: Item Validation
-        print(f"\n4️⃣ ITEM VALIDATION:")
-        logger.debug(f"Validating {len(cart_items)} cart items")
+        # Set basic fields
+        invoice_doc.customer = customer_name
+        invoice_doc.pos_profile = pos_profile.name
+        invoice_doc.is_pos = 1
+        invoice_doc.company = pos_profile.company
+        invoice_doc.selling_price_list = pos_profile.selling_price_list
+        invoice_doc.currency = pos_profile.currency
         
-        validated_items = []
-        for i, item_data in enumerate(cart_items, 1):
-            print(f"   Item {i}: {item_data}")
-            
-            # Extract item details
+        # Add cart items
+        for item_data in cart_items:
             item_code = item_data.get("item_code")
             qty = item_data.get("qty", 1)
             rate = item_data.get("rate") or item_data.get("price", 0)
             
             if not item_code:
-                logger.warning(f"Item {i} missing item_code, skipping")
-                print(f"      ⚠️ Missing item_code, skipping")
                 continue
-            
+                
             # Validate item exists
             if not frappe.db.exists("Item", item_code):
-                error_msg = f"Item '{item_code}' does not exist"
-                logger.error(error_msg)
-                print(f"      ❌ {error_msg}")
-                frappe.throw(error_msg)
+                frappe.throw(f"Item '{item_code}' not found")
             
-            # Get item details
-            try:
-                item_doc = frappe.get_doc("Item", item_code)
-                logger.debug(f"Item validated: {item_doc.item_name}")
-                print(f"      ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
-                
-                validated_items.append({
-                    "item_code": item_code,
-                    "qty": float(qty),
-                    "rate": float(rate),
-                    "uom": item_doc.stock_uom
-                })
-            except Exception as e:
-                error_msg = f"Error loading item '{item_code}': {str(e)}"
-                logger.error(error_msg)
-                print(f"      ❌ {error_msg}")
-                frappe.throw(error_msg)
+            # Add item to invoice
+            invoice_doc.append("items", {
+                "item_code": item_code,
+                "qty": qty,
+                "rate": rate
+            })
         
-        if not validated_items:
-            error_msg = "No valid items found in cart"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
+        if not invoice_doc.items:
+            frappe.throw("No valid items found in cart")
         
-        print(f"   ✅ {len(validated_items)} items validated")
+        frappe.logger().info(f"Added {len(invoice_doc.items)} items to invoice")
         
-        # STEP 5: Create Sales Invoice Document
-        print(f"\n5️⃣ CREATING SALES INVOICE:")
-        logger.debug("Creating new Sales Invoice document")
+        # Save and submit using Frappe workflow
+        invoice_doc.insert()
+        invoice_doc.submit()
         
-        try:
-            # Frappe best practice: Use frappe.new_doc()
-            invoice_doc = frappe.new_doc("Sales Invoice")
-            logger.debug("Sales Invoice document created")
-            print(f"   ✅ New document created")
-        except Exception as e:
-            error_msg = f"Error creating Sales Invoice document: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
+        frappe.logger().info(f"✅ Invoice created successfully: {invoice_doc.name}")
         
-        # STEP 6: Set Document Fields (Following ERPNext field order)
-        print(f"\n6️⃣ SETTING DOCUMENT FIELDS:")
-        logger.debug("Setting document fields")
-        
-        try:
-            # Basic identification fields first
-            invoice_doc.naming_series = "ACC-SINV-.YYYY.-"
-            invoice_doc.customer = customer_name
-            invoice_doc.company = pos_profile.company
-            
-            # Date and time fields
-            invoice_doc.posting_date = frappe.utils.nowdate()
-            invoice_doc.posting_time = frappe.utils.nowtime()
-            invoice_doc.set_posting_time = 1
-            
-            # POS specific fields
-            invoice_doc.is_pos = 1
-            invoice_doc.pos_profile = pos_profile.name
-            
-            # Price and currency fields
-            invoice_doc.selling_price_list = pos_profile.selling_price_list
-            invoice_doc.currency = pos_profile.currency
-            invoice_doc.price_list_currency = pos_profile.currency
-            
-            # Customer related fields
-            invoice_doc.territory = customer_doc.territory
-            invoice_doc.customer_group = customer_doc.customer_group
-            
-            # Delivery datetime field (custom field for delivery time slot)
-            if delivery_datetime:
-                # Try to set delivery datetime as a custom field
-                try:
-                    # First, try to set as a standard field if it exists
-                    if hasattr(invoice_doc, 'delivery_date'):
-                        invoice_doc.delivery_date = delivery_datetime.date()
-                        print(f"      - Delivery date: {invoice_doc.delivery_date}")
-                    
-                    # Set delivery time in remarks or custom field
-                    delivery_info = f"Delivery scheduled for: {delivery_datetime.strftime('%A, %B %d, %Y at %I:%M %p')}"
-                    
-                    # Add to remarks if remarks field exists
-                    if hasattr(invoice_doc, 'remarks'):
-                        existing_remarks = invoice_doc.remarks or ""
-                        if existing_remarks:
-                            invoice_doc.remarks = f"{existing_remarks}\n{delivery_info}"
-                        else:
-                            invoice_doc.remarks = delivery_info
-                        print(f"      - Delivery info added to remarks")
-                    
-                    # Set the exact custom field name for delivery datetime
-                    field_name = 'required_delivery_datetime'
-                    field_set_successfully = False
-                    
-                    print(f"      - 🎯 Setting delivery datetime field: {field_name}")
-                    
-                    try:
-                        # Method 1: Try using direct attribute assignment
-                        if hasattr(invoice_doc, field_name):
-                            setattr(invoice_doc, field_name, delivery_datetime)
-                            print(f"      - ✅ Set {field_name} via hasattr/setattr: {delivery_datetime}")
-                            field_set_successfully = True
-                        else:
-                            # Method 2: Try using frappe's set method (works with custom fields)
-                            invoice_doc.set(field_name, delivery_datetime)
-                            print(f"      - ✅ Set {field_name} via set(): {delivery_datetime}")
-                            field_set_successfully = True
-                            
-                        # Verify the field was set correctly
-                        field_value = getattr(invoice_doc, field_name, None) or invoice_doc.get(field_name)
-                        print(f"      - 🔍 Verification: {field_name} = {field_value}")
-                        
-                    except Exception as field_error:
-                        print(f"      - ❌ Failed to set {field_name}: {str(field_error)}")
-                        
-                        # Method 3: Try alternative field setting approaches
-                        try:
-                            # Force set using the db_set method (bypasses validation)
-                            invoice_doc.db_set(field_name, delivery_datetime, update_modified=False)
-                            print(f"      - ✅ Set {field_name} via db_set(): {delivery_datetime}")
-                            field_set_successfully = True
-                        except Exception as db_error:
-                            print(f"      - ❌ db_set also failed: {str(db_error)}")
-                            
-                            # Method 4: Try setting via the document's __dict__
-                            try:
-                                invoice_doc.__dict__[field_name] = delivery_datetime
-                                print(f"      - ✅ Set {field_name} via __dict__: {delivery_datetime}")
-                                field_set_successfully = True
-                            except Exception as dict_error:
-                                print(f"      - ❌ __dict__ assignment failed: {str(dict_error)}")
-                    
-                    if not field_set_successfully:
-                        print(f"      - ⚠️ Could not set any delivery datetime field")
-                        
-                        # As a fallback, try to get all available fields and find delivery-related ones
-                        try:
-                            meta = frappe.get_meta("Sales Invoice")
-                            all_fields = [field.fieldname for field in meta.fields]
-                            delivery_fields = [f for f in all_fields if 'delivery' in f.lower() or 'required' in f.lower()]
-                            print(f"      - 📋 Available delivery-related fields: {delivery_fields}")
-                            
-                            # Try the first delivery-related field found
-                            if delivery_fields:
-                                first_delivery_field = delivery_fields[0]
-                                try:
-                                    invoice_doc.set(first_delivery_field, delivery_datetime)
-                                    print(f"      - ✅ Set fallback field {first_delivery_field}: {delivery_datetime}")
-                                    field_set_successfully = True
-                                except Exception as fallback_error:
-                                    print(f"      - ❌ Fallback field {first_delivery_field} failed: {str(fallback_error)}")
-                        except Exception as meta_error:
-                            print(f"      - ❌ Could not get meta fields: {str(meta_error)}")
-                    
-                    logger.debug(f"Delivery datetime field set: {field_set_successfully}")
-                    print(f"      - Delivery datetime field status: {'✅ Success' if field_set_successfully else '❌ Failed'}")
-                    
-                except Exception as e:
-                    logger.warning(f"Could not set delivery datetime: {str(e)}")
-                    print(f"      ⚠️ Warning: Could not set delivery datetime: {str(e)}")
-            
-            logger.debug("Basic fields set successfully")
-            print(f"   ✅ Basic fields set")
-            print(f"      - Customer: {invoice_doc.customer}")
-            print(f"      - Company: {invoice_doc.company}")
-            print(f"      - POS Profile: {invoice_doc.pos_profile}")
-            
-        except Exception as e:
-            error_msg = f"Error setting document fields: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # STEP 7: Add Items to Document
-        print(f"\n7️⃣ ADDING ITEMS:")
-        logger.debug(f"Adding {len(validated_items)} items")
-        
-        try:
-            for i, item_data in enumerate(validated_items, 1):
-                invoice_doc.append("items", {
-                    "item_code": item_data["item_code"],
-                    "qty": item_data["qty"],
-                    "rate": item_data["rate"],
-                    "uom": item_data["uom"]
-                })
-                
-                logger.debug(f"Added item: {item_data['item_code']}")
-                print(f"   Item {i}: {item_data['qty']} x {item_data['item_code']} @ {item_data['rate']}")
-            
-            print(f"   ✅ All {len(invoice_doc.items)} items added")
-            
-        except Exception as e:
-            error_msg = f"Error adding items to document: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # STEP 7.5: Add Delivery Charges as Taxes and Charges
-        if delivery_charges and len(delivery_charges) > 0:
-            print(f"\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
-            logger.debug(f"Adding {len(delivery_charges)} delivery charges as taxes")
-            
-            try:
-                for i, charge in enumerate(delivery_charges, 1):
-                    charge_type = charge.get('charge_type', 'Delivery')
-                    amount = float(charge.get('amount', 0))
-                    description = charge.get('description', f'{charge_type} Charge')
-                    
-                    if amount > 0:
-                        # Get the correct account name for the company
-                        company = pos_profile.company
-                        freight_account = None
-                        
-                        # Try to find the Freight and Forwarding Charges account for this company
-                        try:
-                            # Get company abbreviation from ERPNext
-                            company_abbr = frappe.db.get_value("Company", company, "abbr")
-                            
-                            if company_abbr:
-                                # Try with company abbreviation first (most likely format)
-                                freight_account_with_abbr = f"Freight and Forwarding Charges - {company_abbr}"
-                                if frappe.db.exists("Account", freight_account_with_abbr):
-                                    freight_account = freight_account_with_abbr
-                                    print(f"      - Found account with abbreviation: {freight_account}")
-                            
-                            # If not found with abbreviation, try other patterns
-                            if not freight_account:
-                                account_patterns = [
-                                    f"Freight and Forwarding Charges - {company}",
-                                    f"Freight and Forwarding Ch - {company_abbr}",
-                                    f"Freight and Forwarding Ch - {company}",
-                                    "Freight and Forwarding Charges"
-                                ]
-                                
-                                for pattern in account_patterns:
-                                    if frappe.db.exists("Account", pattern):
-                                        freight_account = pattern
-                                        print(f"      - Found account with pattern: {freight_account}")
-                                        break
-                            
-                            # If still no specific account found, search dynamically for any freight account
-                            if not freight_account:
-                                freight_accounts = frappe.db.sql("""
-                                    SELECT name FROM `tabAccount` 
-                                    WHERE account_name = 'Freight and Forwarding Charges'
-                                    AND company = %s 
-                                    AND is_group = 0
-                                    ORDER BY name
-                                    LIMIT 1
-                                """, (company,), as_dict=True)
-                                
-                                if freight_accounts:
-                                    freight_account = freight_accounts[0].name
-                                    print(f"      - Found account by search: {freight_account}")
-                        
-                        except Exception as account_error:
-                            logger.warning(f"Error finding freight account: {str(account_error)}")
-                            print(f"      - Error finding freight account: {str(account_error)}")
-                        
-                        # Fallback to a default account if freight account not found
-                        if not freight_account:
-                            company_abbr = frappe.db.get_value("Company", company, "abbr") or company
-                            freight_account = f"Miscellaneous Expenses - {company_abbr}"
-                            logger.warning(f"Using fallback account: {freight_account}")
-                            print(f"      - Warning: Using fallback account: {freight_account}")
-                        
-                        # Add as tax/charge entry
-                        invoice_doc.append("taxes", {
-                            "charge_type": "Actual",  # Fixed amount, not percentage
-                            "account_head": freight_account,
-                            "description": description,
-                            "tax_amount": amount,
-                            "total": 0,  # Will be calculated by ERPNext
-                            "rate": 0,   # Not applicable for Actual type
-                            # "row_id" is not needed for Actual charge type
-                            "included_in_print_rate": 0,
-                            "included_in_paid_amount": 0,
-                        })
-                        
-                        logger.debug(f"Added delivery charge: {charge_type} - ${amount}")
-                        print(f"   Charge {i}: {charge_type} - ${amount}")
-                        print(f"      - Account: {freight_account}")
-                        print(f"      - Type: Actual")
-                        print(f"      - Description: {description}")
-                    else:
-                        print(f"   Skipping charge {i}: Amount is zero")
-                
-                print(f"   ✅ Delivery charges added as taxes and charges")
-                
-            except Exception as e:
-                error_msg = f"Error adding delivery charges: {str(e)}"
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
-        else:
-            print(f"\n7️⃣.5️⃣ NO DELIVERY CHARGES TO ADD")
-        
-        # STEP 8: Validate Document (ERPNext workflow)
-        print(f"\n8️⃣ DOCUMENT VALIDATION:")
-        logger.debug("Running ERPNext document validation")
-        
-        try:
-            # Frappe best practice: Let ERPNext set missing values
-            print(f"   Running set_missing_values()...")
-            invoice_doc.set_missing_values()
-            
-            print(f"   Running calculate_taxes_and_totals()...")
-            invoice_doc.calculate_taxes_and_totals()
-            
-            logger.debug(f"Document validated - Total: {invoice_doc.grand_total}")
-            print(f"   ✅ Document validated:")
-            print(f"      - Net Total: {invoice_doc.net_total}")
-            print(f"      - Grand Total: {invoice_doc.grand_total}")
-            
-        except Exception as e:
-            error_msg = f"Error during document validation: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # STEP 9: Save Document
-        print(f"\n9️⃣ SAVING DOCUMENT:")
-        logger.debug("Saving document")
-        
-        try:
-            # Frappe best practice: Use insert() for new documents
-            invoice_doc.insert(ignore_permissions=True)
-            logger.info(f"Invoice saved: {invoice_doc.name}")
-            print(f"   ✅ Document saved: {invoice_doc.name}")
-            
-            # VERIFICATION: Check if delivery datetime field was set correctly after save
-            if delivery_datetime:
-                print(f"\n🔍 DELIVERY FIELD VERIFICATION AFTER SAVE:")
-                field_name = 'required_delivery_datetime'
-                
-                # Reload document to get fresh state from database
-                saved_doc = frappe.get_doc("Sales Invoice", invoice_doc.name)
-                
-                # Check multiple ways to verify the field value
-                field_value_attr = getattr(saved_doc, field_name, None)
-                field_value_get = saved_doc.get(field_name)
-                field_value_db = frappe.db.get_value("Sales Invoice", invoice_doc.name, field_name)
-                
-                print(f"   📊 Field verification for '{field_name}':")
-                print(f"      - Via getattr(): {field_value_attr}")
-                print(f"      - Via get(): {field_value_get}")
-                print(f"      - Via db.get_value(): {field_value_db}")
-                print(f"      - Expected value: {delivery_datetime}")
-                
-                # Determine if field was set successfully
-                field_is_set = any([field_value_attr, field_value_get, field_value_db])
-                
-                if field_is_set:
-                    print(f"   ✅ Delivery datetime field verified: {field_value_attr or field_value_get or field_value_db}")
-                else:
-                    print(f"   ❌ Delivery datetime field NOT SET - attempting correction...")
-                    
-                    # Try to set it again on the saved document
-                    try:
-                        saved_doc.set(field_name, delivery_datetime)
-                        saved_doc.save(ignore_permissions=True)
-                        print(f"   🔄 Re-saved document with delivery datetime")
-                        
-                        # Verify again
-                        final_value = frappe.db.get_value("Sales Invoice", invoice_doc.name, field_name)
-                        print(f"   🔍 Final verification: {final_value}")
-                    except Exception as correction_error:
-                        print(f"   ❌ Could not correct delivery datetime: {str(correction_error)}")
-                        # Don't throw error here, just log it
-                        logger.warning(f"Delivery datetime field could not be set: {str(correction_error)}")
-            
-        except Exception as e:
-            error_msg = f"Error saving document: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # STEP 10: Submit Document
-        print(f"\n🔟 SUBMITTING DOCUMENT:")
-        logger.debug("Submitting document")
-        
-        try:
-            # Frappe best practice: Submit after successful save
-            invoice_doc.submit()
-            logger.info(f"Invoice submitted: {invoice_doc.name}")
-            print(f"   ✅ Document submitted successfully!")
-            
-        except Exception as e:
-            error_msg = f"Error submitting document: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        # STEP 11: Prepare Response
-        print(f"\n� PREPARING RESPONSE:")
-        
-        result = {
+        # Return clean response
+        return {
             "success": True,
             "invoice_name": invoice_doc.name,
             "grand_total": invoice_doc.grand_total,
-            "net_total": invoice_doc.net_total,
             "customer": invoice_doc.customer,
-            "items_count": len(invoice_doc.items),
-            "status": invoice_doc.status,
-            "docstatus": invoice_doc.docstatus,
-            "posting_date": str(invoice_doc.posting_date),
-            "company": invoice_doc.company
+            "items_count": len(invoice_doc.items)
         }
         
-        # Add delivery information to response if provided
-        if delivery_datetime:
-            result["delivery_datetime"] = delivery_datetime.isoformat()
-            result["delivery_date"] = delivery_datetime.date().isoformat()
-            result["delivery_time"] = delivery_datetime.time().isoformat()
-            result["delivery_label"] = delivery_datetime.strftime('%A, %B %d, %Y at %I:%M %p')
-            print(f"      delivery_datetime: {result['delivery_datetime']}")
-            print(f"      delivery_label: {result['delivery_label']}")
-        
-        logger.info(f"Invoice creation successful: {invoice_doc.name}")
-        print(f"   ✅ Response prepared:")
-        for key, value in result.items():
-            print(f"      {key}: {value}")
-        
-        print(f"\n🎉 SUCCESS! Invoice creation completed!")
-        print("="*100)
-        
-        return result
-        
     except Exception as e:
-        # Comprehensive error logging following Frappe best practices
-        error_msg = f"Error in create_pos_invoice: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        
-        print(f"\n❌ FUNCTION ERROR:")
-        print(f"   Type: {type(e).__name__}")
-        print(f"   Message: {str(e)}")
-        
-        # Log full error details for debugging
-        import traceback
-        full_traceback = traceback.format_exc()
-        print(f"   Traceback:")
-        print(full_traceback)
-        
-        # Frappe best practice: Use frappe.log_error for persistent logging
-        frappe.log_error(
-            title=f"POS Invoice Creation Error: {type(e).__name__}",
-            message=f"""
-FUNCTION: create_pos_invoice
-ERROR: {str(e)}
-PARAMETERS:
-- customer_name: {customer_name}
-- pos_profile_name: {pos_profile_name}
-- cart_items: {len(cart_items) if 'cart_items' in locals() else 'N/A'} items
-
-TRACEBACK:
-{full_traceback}
-            """.strip()
-        )
-        
-        print("="*100)
-        
-        # Re-raise the exception (don't suppress)
-        raise
+        frappe.logger().error(f"❌ Error creating POS invoice: {str(e)}")
+        frappe.throw(f"Failed to create invoice: {str(e)}")
 
 
 @frappe.whitelist()
+def create_sales_invoice(cart_json, customer_name, pos_profile_name, delivery_charges_json=None, required_delivery_datetime=None):
+    """
+    Create Sales Invoice using the definitive, correct ERPNext workflow
+    """
+    try:
+        # 🔍 DEBUG: Log all incoming parameters
+        print("\n" + "="*80)
+        print("🚀 BUNDLE PRICING DEBUG - create_sales_invoice() CALLED")
+        print("="*80)
+        print(f"📍 File: {__file__}")
+        print(f"📍 Function: create_sales_invoice")
+        print(f"📍 Timestamp: {frappe.utils.now()}")
+        print(f"📋 Parameters received:")
+        print(f"   - cart_json: {cart_json}")
+        print(f"   - customer_name: {customer_name}")
+        print(f"   - pos_profile_name: {pos_profile_name}")
+        print(f"   - delivery_charges_json: {delivery_charges_json}")
+        
+        cart = json.loads(cart_json)
+        delivery_charges = json.loads(delivery_charges_json) if delivery_charges_json else {}
+
+        print(f"\n🛒 Parsed cart data:")
+        for i, item in enumerate(cart):
+            print(f"   Item {i+1}: {json.dumps(item, indent=4)}")
+
+        # Get POS profile and validate
+        if pos_profile_name and frappe.db.exists("POS Profile", pos_profile_name):
+            pos_profile = frappe.get_doc("POS Profile", pos_profile_name)
+        else:
+            # Fallback: fetch first enabled POS Profile for the current user/company
+            fallback_name = frappe.db.get_value(
+                "POS Profile",
+                {
+                    "disabled": 0,
+                    "company": ["!=", ""],  # ensure company is set
+                },
+                "name",
+            )
+            if not fallback_name:
+                frappe.throw("No valid POS Profile found. Please create or enable one.")
+            print(f"⚠️  Falling back to POS Profile: {fallback_name}")
+            pos_profile_name = fallback_name
+            pos_profile = frappe.get_doc("POS Profile", fallback_name)
+
+        company = pos_profile.company
+        selling_price_list = pos_profile.selling_price_list
+
+        print(f"\n⚙️ POS Profile settings:")
+        print(f"   - Company: {company}")
+        print(f"   - Selling Price List: {selling_price_list}")
+        print(f"   - Currency: {pos_profile.currency}")
+
+        if not company:
+            frappe.throw("Company not found in POS Profile")
+
+        # Create new Sales Invoice document
+        si = frappe.new_doc("Sales Invoice")
+
+        # Set basic fields
+        # Ensure customer exists or create a quick Walk-In customer record
+        if not frappe.db.exists("Customer", customer_name):
+            print(f"⚠️  Customer '{customer_name}' not found. Creating a temporary customer record…")
+            
+            # Get default customer group and territory
+            default_customer_group = frappe.db.get_single_value("Selling Settings", "customer_group") or "All Customer Groups"
+            default_territory = frappe.db.get_single_value("Selling Settings", "territory") or "All Territories"
+            
+            # Ensure the customer group exists
+            if not frappe.db.exists("Customer Group", default_customer_group):
+                default_customer_group = frappe.db.get_value("Customer Group", {"is_group": 0}, "name") or "All Customer Groups"
+            
+            # Ensure the territory exists  
+            if not frappe.db.exists("Territory", default_territory):
+                default_territory = frappe.db.get_value("Territory", {"is_group": 0}, "name") or "All Territories"
+            
+            print(f"   - Using Customer Group: {default_customer_group}")
+            print(f"   - Using Territory: {default_territory}")
+            
+            cust = frappe.new_doc("Customer")
+            cust.customer_name = customer_name
+            cust.customer_group = default_customer_group
+            cust.territory = default_territory
+            cust.customer_type = "Individual"
+            
+            # Set default price list if available
+            if selling_price_list:
+                cust.default_price_list = selling_price_list
+            
+            cust.insert(ignore_permissions=True)
+            print(f"   ✅ Customer created: {cust.name}")
+            
+            # Commit the transaction to ensure customer is available
+            frappe.db.commit()
+        # Verify customer exists before proceeding
+        customer_doc = frappe.get_doc("Customer", customer_name)
+        print(f"   ✅ Customer verified: {customer_doc.name}")
+        print(f"      - Customer Group: {customer_doc.customer_group}")
+        print(f"      - Territory: {customer_doc.territory}")
+        print(f"      - Customer Type: {customer_doc.customer_type}")
+        
+        si.customer = customer_name
+        si.pos_profile = pos_profile_name
+        si.is_pos = 1
+        si.company = company
+        si.selling_price_list = selling_price_list
+        si.currency = pos_profile.currency or frappe.get_cached_value("Company", company, "default_currency")
+
+        # VITAL: This flag tells ERPNext to not apply its own pricing rules
+        # and to accept the rates we provide.
+        si.ignore_pricing_rule = 1
+        
+        # Set required posting fields for proper document creation
+        si.posting_date = frappe.utils.nowdate()
+        si.posting_time = frappe.utils.nowtime()
+        si.set_posting_time = 1
+
+        print(f"\n📄 Sales Invoice created:")
+        print(f"   - Customer: {si.customer}")
+        print(f"   - Company: {si.company}")
+        print(f"   - Currency: {si.currency}")
+        print(f"   - ignore_pricing_rule: {si.ignore_pricing_rule}")
+        print(f"   - posting_date: {si.posting_date}")
+        print(f"   - posting_time: {si.posting_time}")
+
+        # Process cart items
+        bundle_count = 0
+        regular_count = 0
+        
+        for item in cart:
+            if item.get("is_bundle"):
+                bundle_count += 1
+                print(f"\n🎁 Processing BUNDLE item #{bundle_count}...")
+                process_bundle_item(si, item, selling_price_list)
+            else:
+                regular_count += 1
+                print(f"\n📦 Processing REGULAR item #{regular_count}...")
+                process_regular_item(si, item)
+
+        print(f"\n📊 Cart processing summary:")
+        print(f"   - Bundle items: {bundle_count}")
+        print(f"   - Regular items: {regular_count}")
+        print(f"   - Total invoice items: {len(si.items)}")
+
+        # Add delivery charges if any
+        if delivery_charges:
+            print(f"\n🚚 Adding delivery charges: {delivery_charges}")
+            add_delivery_charges(si, delivery_charges, company)
+
+        # Store requested delivery datetime (convert from ISO string)
+        if required_delivery_datetime:
+            try:
+                from frappe.utils import get_datetime
+                _dt = get_datetime(required_delivery_datetime)
+                if getattr(_dt, 'tzinfo', None):
+                    _dt = _dt.replace(tzinfo=None)
+                si.required_delivery_datetime = _dt
+                print(f"   🕒 Parsed delivery datetime (naive) set: {si.required_delivery_datetime}")
+            except Exception as e:
+                print(f"   ⚠️  Unable to parse or set delivery datetime: {str(e)}")
+
+        # Log all items before ERPNext processing
+        print(f"\n📋 Items added to Sales Invoice BEFORE ERPNext processing:")
+        for i, item in enumerate(si.items):
+            print(f"   Item {i+1}:")
+            print(f"      - item_code: {item.item_code}")
+            print(f"      - qty: {item.qty}")
+            print(f"      - rate: {item.rate}")
+            print(f"      - discount_amount: {getattr(item, 'discount_amount', 0)}")
+            print(f"      - amount: {item.amount}")
+            print(f"      - price_list_rate: {getattr(item, 'price_list_rate', 'N/A')}")
+            print(f"      - ignore_pricing_rule: {getattr(item, 'ignore_pricing_rule', 'N/A')}")
+            # Safely print description (handle None)
+            _desc_val = getattr(item, 'description', None)
+            _desc_snippet = str(_desc_val)[:50] if _desc_val else 'N/A'
+            print(f"      - description: {_desc_snippet}...")
+
+        # Set Sales Invoice State to "Received" for all new invoices
+        print(f"\n📋 Setting Sales Invoice State to 'Received'...")
+        si.sales_invoice_state = "Received"
+
+        # Try to set a custom naming series to avoid locks
+        print(f"\n🔧 Setting custom naming series...")
+        try:
+            # Use a simpler naming approach that's less likely to lock
+            si.naming_series = "ACC-SINV-.YYYY.-"
+        except Exception as naming_error:
+            print(f"   ⚠️  Naming series warning: {naming_error}")
+
+        # Follow ERPNext's standard workflow
+        print(f"\n⚡ Running ERPNext standard workflow...")
+        print(f"   1. set_missing_values()...")
+        si.set_missing_values()
+        
+        print(f"   2. calculate_taxes_and_totals()...")
+        si.calculate_taxes_and_totals()
+
+        # Log all items AFTER ERPNext processing
+        print(f"\n📋 Items AFTER ERPNext processing:")
+        total_amount = 0
+        for i, item in enumerate(si.items):
+            print(f"   Item {i+1}:")
+            print(f"      - item_code: {item.item_code}")
+            print(f"      - qty: {item.qty}")
+            print(f"      - rate: {item.rate}")
+            print(f"      - discount_amount: {getattr(item, 'discount_amount', 0)}")
+            print(f"      - amount: {item.amount}")
+            print(f"      - price_list_rate: {getattr(item, 'price_list_rate', 'N/A')}")
+            total_amount += item.amount
+
+        print(f"\n💰 Invoice totals:")
+        print(f"   - Net Total: {getattr(si, 'net_total', 'N/A')}")
+        print(f"   - Grand Total: {getattr(si, 'grand_total', 'N/A')}")
+        print(f"   - Calculated Total: {total_amount}")
+
+        # Save first, then submit (ERPNext best practice)
+        print(f"\n💾 Saving invoice (before submit)...")
+        
+        # Add retry logic for database locks
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # Add explicit transaction handling to prevent locks
+                frappe.db.begin()
+                
+                si.insert(ignore_permissions=True)
+                print(f"   ✅ Invoice inserted: {si.name}")
+                
+                # Reload to get the latest state
+                si.reload()
+                print(f"   🔄 Invoice reloaded after insert")
+                
+                print(f"\n📤 Submitting invoice...")
+                si.submit()
+                print(f"   ✅ Invoice submitted: {si.name}")
+                
+                # Commit the transaction
+                frappe.db.commit()
+                print(f"   ✅ Transaction committed successfully")
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                frappe.db.rollback()
+                retry_count += 1
+                error_msg = str(e)
+                
+                if "Lock wait timeout" in error_msg and retry_count < max_retries:
+                    print(f"   ⚠️  Lock timeout (attempt {retry_count}/{max_retries}), retrying in 2 seconds...")
+                    import time
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"   ❌ Transaction failed after {retry_count} attempts: {error_msg}")
+                    raise
+
+        print(f"\n🎉 SUCCESS! Sales Invoice created successfully!")
+        print(f"   - Invoice Number: {si.name}")
+        print(f"   - Final Grand Total: {si.grand_total}")
+        print("="*80)
+
+        # Clear caches to ensure UI refreshes properly
+        frappe.clear_cache(doctype="Sales Invoice")
+        
+        print(f"🔄 Cleared caches for: {si.name}")
+
+        # Reload one final time to ensure we have the committed state
+        si.reload()
+        return si.as_dict()
+
+    except Exception as e:
+        print(f"\n❌ ERROR in create_sales_invoice:")
+        print(f"   - Error: {str(e)}")
+        print(f"   - Type: {type(e).__name__}")
+        import traceback
+        print(f"   - Traceback: {traceback.format_exc()}")
+        print("="*80)
+        
+        frappe.log_error(f"Error creating sales invoice: {str(e)}")
+        frappe.throw(f"Error creating sales invoice: {str(e)}")
+
+
 def process_bundle_item(si, bundle, selling_price_list):
     """
     Process bundle item using ERPNext-compliant discount_amount approach.
