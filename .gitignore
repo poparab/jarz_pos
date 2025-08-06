@@ -15,3 +15,20 @@ node_modules/
 .vscode/
 *.swp
 "@ > .gitignore
+
+# Backup files
+*~
+*.bak
+*.tmp
+*_backup*
+*_old*
+*_copy*
+*_new*
+
+# OS specific files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Custom for Jarz_POS
+**/custom_pos_backup.py
