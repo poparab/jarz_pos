@@ -51,6 +51,33 @@ page_js = {}
 # include js in page
 # page_js = {"page" : "public/js/file.js"}
 
+# Workspaces
+# ----------
+
+# List of workspaces that should be created
+workspaces = [
+    {
+        "name": "JARZ POS",
+        "category": "Modules",
+        "public": 1,
+        "icon": "fa fa-shopping-cart",
+        "color": "#FF6B35",
+        "sequence_id": 1,
+        "charts": [],
+        "shortcuts": [
+            {
+                "label": "Sales Invoice Kanban",
+                "format": "{} Kanban",
+                "link_to": "kanban_board",
+                "type": "Page",
+                "icon": "fa fa-columns",
+                "color": "#3498db"
+            }
+        ],
+        "cards": []
+    }
+]
+
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
