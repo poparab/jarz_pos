@@ -7,19 +7,19 @@ including validation, document creation, and submission.
 
 import frappe
 import traceback
-from .bundle_processing import process_bundle_item
-from ..utils.validation_utils import (
+from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
+from jarz_pos.utils.validation_utils import (
     validate_cart_data, 
     validate_customer, 
     validate_pos_profile,
     validate_delivery_datetime
 )
-from ..utils.invoice_utils import (
+from jarz_pos.utils.invoice_utils import (
     set_invoice_fields,
     add_items_to_invoice,
-    add_delivery_charges_to_invoice,
     verify_invoice_totals
 )
+from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 
 
 @frappe.whitelist()
@@ -86,10 +86,42 @@ def create_pos_invoice(cart_json, customer_name, pos_profile_name=None, delivery
         print(f"\n7️⃣ ADDING ITEMS:")
         add_items_to_invoice(invoice_doc, processed_items, logger)
         
-        # STEP 7.5: Add Delivery Charges
+        # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
+        print(f"\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
+        try:
+            territory_name = getattr(customer_doc, 'territory', None)
+            if territory_name and frappe.db.exists('Territory', territory_name):
+                territory_doc = frappe.get_doc('Territory', territory_name)
+                shipping_income = getattr(territory_doc, 'delivery_income', 0) or 0
+                print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
+                if shipping_income and float(shipping_income) > 0:
+                    # Avoid duplicate insertion (idempotent)
+                    already_added = False
+                    if getattr(invoice_doc, 'taxes', None):
+                        for tax in invoice_doc.taxes:
+                            if (tax.get('description') or '').lower().startswith('shipping income'):
+                                already_added = True
+                                print("   ⚠️ Shipping income tax row already present – skipping")
+                                break
+                    if not already_added:
+                        add_delivery_charges_to_taxes(
+                            invoice_doc,
+                            shipping_income,
+                            delivery_description=f"Shipping Income ({territory_name})"
+                        )
+                        print("   ✅ Shipping income tax row appended")
+                else:
+                    print("   ℹ️ No positive delivery_income on territory – nothing added")
+            else:
+                print("   ℹ️ Customer territory not found – skipping shipping income")
+        except Exception as ship_err:
+            print(f"   ❌ Failed adding shipping income: {ship_err}")
+            # Do not abort – continue invoice creation
+        
+        # STEP 7.5: Add Delivery Charges (legacy param based)
         if delivery_charges:
             print(f"\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
-            add_delivery_charges_to_invoice(invoice_doc, delivery_charges, pos_profile, logger)
+            add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
         
         # STEP 8: Validate and Calculate Document
         print(f"\n8️⃣ DOCUMENT VALIDATION:")
@@ -158,6 +190,27 @@ def _process_cart_items(cart_items, pos_profile, logger):
         print(f"         - rate: {rate}")
         print(f"         - is_bundle: {is_bundle} (type: {type(is_bundle)})")
         
+        # Additional debug: Check if this item exists in different places
+        is_erpnext_item = frappe.db.exists("Item", item_code)
+        is_bundle_record = frappe.db.exists("Jarz Bundle", item_code)
+        bundle_with_erpnext_item = frappe.get_all("Jarz Bundle", 
+            filters={"erpnext_item": item_code}, 
+            fields=["name", "bundle_name"], 
+            limit=1)
+        
+        print(f"         - ERPNext Item exists: {is_erpnext_item}")
+        print(f"         - Jarz Bundle record exists: {is_bundle_record}")
+        print(f"         - Bundle with this ERPNext item: {bundle_with_erpnext_item}")
+        
+        if is_bundle and not bundle_with_erpnext_item and not is_bundle_record:
+            print(f"         ⚠️ WARNING: is_bundle=True but no bundle found for '{item_code}' (neither as ERPNext item nor bundle ID)")
+        elif is_bundle and (bundle_with_erpnext_item or is_bundle_record):
+            if bundle_with_erpnext_item:
+                print(f"         ✅ Bundle found by erpnext_item: {bundle_with_erpnext_item[0]['name']} ({bundle_with_erpnext_item[0]['bundle_name']})")
+            elif is_bundle_record:
+                bundle_doc = frappe.get_doc("Jarz Bundle", item_code)
+                print(f"         ✅ Bundle found by record ID: {item_code} ({bundle_doc.bundle_name})")
+        
         # Validate required fields
         if not item_code:
             logger.warning(f"Item {i} missing item_code, skipping")
@@ -196,14 +249,25 @@ def _process_cart_items(cart_items, pos_profile, logger):
 def _process_bundle_item(item_code, qty, rate, pos_profile, logger):
     """Process a bundle item."""
     print(f"      🎁 BUNDLE DETECTED: {item_code}")
-    print(f"      🔌 Passing bundle ID to process_bundle_item: {item_code}")
+    print(f"      🔌 Processing bundle using ERPNext item: {item_code}")
     
     try:
-        bundle_items = process_bundle_item(item_code, qty, rate, pos_profile.selling_price_list)
+        # Validate bundle configuration using ERPNext item code
+        is_valid, message, bundle_code = validate_bundle_configuration_by_item(item_code)
+        if not is_valid:
+            error_msg = f"Bundle validation failed for ERPNext item {item_code}: {message}"
+            logger.error(error_msg)
+            print(f"      ❌ {error_msg}")
+            frappe.throw(error_msg)
+        
+        print(f"      ✅ Found bundle: {bundle_code} for ERPNext item: {item_code}")
+        
+        # Process bundle using ERPNext item code (not bundle record ID)
+        bundle_items = process_bundle_for_invoice(item_code, qty)
         print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
         return bundle_items
     except Exception as bundle_error:
-        error_msg = f"Error processing bundle {item_code}: {str(bundle_error)}"
+        error_msg = f"Error processing bundle with ERPNext item {item_code}: {str(bundle_error)}"
         logger.error(error_msg)
         print(f"      ❌ {error_msg}")
         # Continue with other items instead of failing the entire invoice
@@ -261,6 +325,7 @@ def _log_processing_summary(processed_items, logger):
         bundle_type = item.get("bundle_type", "N/A")
         is_bundle = item.get("is_bundle_item", False)
         discount = item.get("discount_amount", 0)
+        rate = item.get("rate", item.get("price_list_rate", 0))  # Fix: fallback to price_list_rate if rate missing
         
         # Count items by type
         if bundle_type == "main":
@@ -270,7 +335,7 @@ def _log_processing_summary(processed_items, logger):
         elif not is_bundle:
             total_regular_items += 1
         
-        print(f"      Processed Item {i}: {item['item_code']} - Bundle: {is_bundle}, Type: {bundle_type}, Qty: {item['qty']}, Rate: {item['rate']}, Discount: ${discount}")
+        print(f"      Processed Item {i}: {item['item_code']} - Bundle: {is_bundle}, Type: {bundle_type}, Qty: {item['qty']}, Rate: {rate}, Discount: ${discount}")
     
     print(f"   📊 PROCESSING SUMMARY:")
     print(f"      - Total processed items: {len(processed_items)}")
@@ -305,41 +370,30 @@ def _create_invoice_document(logger):
 
 
 def _validate_and_calculate_document(invoice_doc, logger):
-    """Validate and calculate document totals."""
-    logger.debug("Running ERPNext document validation")
+    """Validate and calculate document totals using native ERPNext logic.
+    No custom discount preservation - let ERPNext handle discount_percentage naturally.
+    """
+    logger.debug("Running ERPNext document validation (native discount logic)...")
     try:
-        # Store all discount amounts before any calculations
-        print(f"   💾 STORING DISCOUNT AMOUNTS BEFORE CALCULATION...")
-        stored_item_discounts = _store_discount_amounts(invoice_doc)
-        
-        # Let ERPNext set missing values
+        print(f"   📋 Pre-calculation item summary:")
+        for idx, item in enumerate(invoice_doc.items, 1):
+            price_list_rate = getattr(item, 'price_list_rate', 0) or 0
+            discount_pct = getattr(item, 'discount_percentage', 0) or 0
+            qty = getattr(item, 'qty', 0) or 0
+            print(f"      {idx}. {item.item_code} | qty={qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}")
+
         print(f"   Running set_missing_values()...")
         invoice_doc.set_missing_values()
-        
-        # Restore discount amounts after set_missing_values
-        print(f"   🔄 RESTORING DISCOUNTS AFTER set_missing_values...")
-        _restore_discount_amounts(invoice_doc, stored_item_discounts)
-        
-        # Run initial calculation to set up the document properly
-        print(f"   Running initial calculate_taxes_and_totals()...")
+
+        print(f"   Running calculate_taxes_and_totals()...")
         invoice_doc.calculate_taxes_and_totals()
-        
-        # Process discount amounts after first calculation
-        print(f"   🔄 PROCESSING DISCOUNT AMOUNTS AFTER FIRST CALCULATION...")
-        _process_discount_amounts_after_calculation(invoice_doc, stored_item_discounts)
-        
-        # Run final calculation to apply all discounts and update totals
-        print(f"   Running final calculate_taxes_and_totals()...")
-        _final_calculation_with_discount_preservation(invoice_doc, stored_item_discounts)
-        
-        # Verify discount amounts are properly applied
-        _verify_discount_application(invoice_doc, logger)
-        
+
+        _log_discount_diagnostics_final(invoice_doc)
+
         logger.debug(f"Document validated - Total: {invoice_doc.grand_total}")
         print(f"   ✅ Document validated:")
         print(f"      - Net Total: {invoice_doc.net_total}")
         print(f"      - Grand Total: {invoice_doc.grand_total}")
-        
     except Exception as e:
         error_msg = f"Error during document validation: {str(e)}"
         logger.error(error_msg)
@@ -347,107 +401,52 @@ def _validate_and_calculate_document(invoice_doc, logger):
         frappe.throw(error_msg)
 
 
-def _store_discount_amounts(invoice_doc):
-    """Store discount amounts before calculations."""
-    stored_item_discounts = {}
-    for i, item in enumerate(invoice_doc.items):
-        discount_amt = getattr(item, 'discount_amount', 0) or 0
-        if discount_amt > 0:
-            stored_item_discounts[i] = discount_amt
-            print(f"      Stored discount for item {i+1} ({item.item_code}): ${discount_amt}")
-    print(f"   📋 Total items with discounts stored: {len(stored_item_discounts)}")
-    return stored_item_discounts
-
-
-def _restore_discount_amounts(invoice_doc, stored_item_discounts):
-    """Restore discount amounts after set_missing_values."""
-    for i, discount_amt in stored_item_discounts.items():
-        if i < len(invoice_doc.items):
-            current_discount = getattr(invoice_doc.items[i], 'discount_amount', 0) or 0
-            if current_discount != discount_amt:
-                invoice_doc.items[i].discount_amount = discount_amt
-                print(f"      Restored discount for item {i+1}: ${discount_amt}")
-
-
-def _process_discount_amounts_after_calculation(invoice_doc, stored_item_discounts):
-    """Process discount amounts after first calculation."""
-    total_items_with_discounts = 0
-    total_discount_amount = 0
+def _log_discount_diagnostics_final(invoice_doc):
+    """Log final discount application after ERPNext processing."""
+    print(f"   🔍 FINAL DISCOUNT DIAGNOSTICS (after ERPNext processing):")
+    total_discount_amount = 0.0
+    total_net_amount = 0.0
     
-    for i, item in enumerate(invoice_doc.items):
-        # Get the stored discount amount (original)
-        stored_discount = stored_item_discounts.get(i, 0)
-        current_discount = getattr(item, 'discount_amount', 0) or 0
+    for idx, item in enumerate(invoice_doc.items, 1):
+        discount_amt = float(getattr(item, 'discount_amount', 0) or 0)
+        disc_pct = float(getattr(item, 'discount_percentage', 0) or 0)
+        qty = float(item.qty or 0)
+        rate = float(item.rate or 0)
+        amount = float(item.amount or 0)
+        price_list_rate = float(getattr(item, 'price_list_rate', 0) or 0)
         
-        if stored_discount > 0:
-            total_items_with_discounts += 1
-            total_discount_amount += stored_discount
-            
-            # Check if discount was reset and restore it
-            if current_discount != stored_discount:
-                print(f"      Item {item.item_code}: discount was reset from ${stored_discount} to ${current_discount}, restoring...")
-                item.discount_amount = float(stored_discount)
-            
-            # Force calculation of the item amount
-            original_amount = item.qty * item.rate
-            item.amount = original_amount - stored_discount
-            item.net_amount = item.amount  # Ensure net_amount also reflects discount
-            print(f"      Item {item.item_code}: discount ${stored_discount}, amount ${item.amount}")
-    
-    print(f"   📊 Discount Summary: {total_items_with_discounts} items with ${total_discount_amount} total discount")
-
-
-def _final_calculation_with_discount_preservation(invoice_doc, stored_item_discounts):
-    """Run final calculation while preserving discounts."""
-    # Store discounts again before final calculation
-    final_stored_discounts = {}
-    for i, item in enumerate(invoice_doc.items):
-        discount_amt = getattr(item, 'discount_amount', 0) or 0
-        if discount_amt > 0:
-            final_stored_discounts[i] = discount_amt
-    
-    invoice_doc.calculate_taxes_and_totals()
-    
-    # FINAL RESTORE: Ensure discounts persist after final calculation
-    print(f"   🔄 FINAL DISCOUNT RESTORATION...")
-    for i, discount_amt in final_stored_discounts.items():
-        if i < len(invoice_doc.items):
-            current_discount = getattr(invoice_doc.items[i], 'discount_amount', 0) or 0
-            if current_discount != discount_amt:
-                print(f"      Final restore for item {i+1}: ${discount_amt}")
-                invoice_doc.items[i].discount_amount = discount_amt
-                original_amount = invoice_doc.items[i].qty * invoice_doc.items[i].rate
-                invoice_doc.items[i].amount = original_amount - discount_amt
-                invoice_doc.items[i].net_amount = invoice_doc.items[i].amount
-
-
-def _verify_discount_application(invoice_doc, logger):
-    """Verify that discounts are properly applied."""
-    print(f"   🔍 VERIFYING DISCOUNT APPLICATION:")
-    total_discount_applied = 0
-    
-    for i, item in enumerate(invoice_doc.items, 1):
-        item_discount = getattr(item, 'discount_amount', 0) or 0
-        item_amount = getattr(item, 'amount', 0) or 0
-        item_rate = getattr(item, 'rate', 0) or 0
-        item_qty = getattr(item, 'qty', 0) or 0
-        expected_original = item_rate * item_qty
-        expected_final = expected_original - item_discount
+        # ERPNext computed values
+        line_gross = price_list_rate * qty if price_list_rate > 0 else rate * qty
+        line_discount_total = discount_amt * qty if discount_amt > 0 else (line_gross * disc_pct / 100.0)
         
-        print(f"      Item {i} ({item.item_code}):")
-        print(f"        Rate: ${item_rate}, Qty: {item_qty}")
-        print(f"        Expected Original: ${expected_original}")
-        print(f"        Discount Amount: ${item_discount}")
-        print(f"        Expected Final: ${expected_final}")
-        print(f"        Actual Amount: ${item_amount}")
-        print(f"        ✅ Discount Applied: {'Yes' if abs(item_amount - expected_final) < 0.01 else 'No - ISSUE!'}")
+        total_discount_amount += line_discount_total
+        total_net_amount += amount
         
-        total_discount_applied += item_discount
+        print(f"      {idx}. {item.item_code}:")
+        print(f"         qty={qty} | price_list_rate={price_list_rate} | rate={rate} | amount={amount}")
+        print(f"         discount_pct={disc_pct}% | discount_amt={discount_amt} | line_discount_total={line_discount_total}")
+        
+        # Validation: check if ERPNext computed correctly
+        if disc_pct == 100:
+            expected_rate = 0.0
+            if abs(rate - expected_rate) > 0.01:
+                print(f"         ⚠️ Expected rate=0 for 100% discount, got rate={rate}")
+        elif price_list_rate > 0 and disc_pct > 0:
+            expected_rate = price_list_rate * (1 - disc_pct/100)
+            if abs(rate - expected_rate) > 0.01:
+                print(f"         ⚠️ Expected rate={expected_rate}, got rate={rate}")
     
-    print(f"   📊 TOTAL DISCOUNT SUMMARY:")
-    print(f"      - Total discount applied: ${total_discount_applied}")
-    print(f"      - Net Total: ${invoice_doc.net_total}")
-    print(f"      - Grand Total: ${invoice_doc.grand_total}")
+    print(f"   💰 FINAL TOTALS:")
+    print(f"      - Total discount applied: {total_discount_amount}")
+    print(f"      - Net amount (sum of line amounts): {total_net_amount}")
+    print(f"      - Document net_total: {invoice_doc.net_total}")
+    print(f"      - Document grand_total: {invoice_doc.grand_total}")
+    
+    # Verify net total matches sum of line amounts
+    if abs(total_net_amount - float(invoice_doc.net_total)) > 0.01:
+        print(f"      ⚠️ Net total mismatch! Line sum: {total_net_amount}, Doc total: {invoice_doc.net_total}")
+    else:
+        print(f"      ✅ Net total verified correctly")
 
 
 def _save_document(invoice_doc, delivery_datetime, logger):

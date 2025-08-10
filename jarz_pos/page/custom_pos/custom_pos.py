@@ -9,9 +9,9 @@ import json
 import frappe
 import traceback
 
-# Import from our modular structure
-from .modules.invoice_creation import create_pos_invoice
-from .modules.delivery_handling import (
+# Import from our services structure
+from jarz_pos.services.invoice_creation import create_pos_invoice
+from jarz_pos.services.delivery_handling import (
     mark_courier_outstanding,
     pay_delivery_expense,
     courier_delivery_expense_only,
@@ -19,7 +19,7 @@ from .modules.delivery_handling import (
     settle_courier,
     settle_courier_for_invoice
 )
-from .utils.account_utils import (
+from jarz_pos.utils.account_utils import (
     get_account_for_company,
     get_item_price,
     create_online_payment_entry

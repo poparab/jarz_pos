@@ -3,13 +3,13 @@ This module contains tests for the kanban API endpoints.
 """
 import unittest
 import frappe
-from jarz_pos.jarz_pos.api.kanban import (
+from jarz_pos.api.kanban import (
     get_kanban_columns,
     get_kanban_invoices,
     get_invoice_details,
     get_kanban_filters
 )
-from jarz_pos.jarz_pos.utils.invoice_utils import (
+from jarz_pos.utils.invoice_utils import (
     get_address_details,
     format_invoice_data,
     apply_invoice_filters

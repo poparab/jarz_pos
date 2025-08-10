@@ -5,14 +5,17 @@ app_description = "Customized POS for JARZ company."
 app_email = "abdelrahmanmamdouh1996@gmail.com"
 app_license = "mit"
 
+# Fixtures
 fixtures = [
-    "Custom Field"
+    {"dt": "Custom Field", "filters": [["dt", "in", [
+        "Print Settings", "Sales Invoice", "Address", "Supplier", "Quotation", "Sales Order", "Customer"
+    ]]]}
 ]
 
-# The original POS frontend assets have been archived under `frontend_archive/`.
-# To keep this backend app headless/API-only, we disable page-level JS inclusion.
-page_js = {}
-
+# Ensure conflicting Custom Fields are removed before fixtures import
+before_migrate = [
+    "jarz_pos.utils.cleanup.remove_conflicting_territory_delivery_fields",
+]
 
 # Apps
 # ------------------
@@ -66,12 +69,20 @@ workspaces = [
         "charts": [],
         "shortcuts": [
             {
-                "label": "Sales Invoice Kanban",
-                "format": "{} Kanban",
-                "link_to": "kanban_board",
-                "type": "Page",
-                "icon": "fa fa-columns",
+                "label": "Sales Invoice List",
+                "format": "{} List",
+                "link_to": "Sales Invoice",
+                "type": "DocType",
+                "icon": "fa fa-file-text",
                 "color": "#3498db"
+            },
+            {
+                "label": "POS Profile",
+                "format": "{} Settings",
+                "link_to": "POS Profile",
+                "type": "DocType",
+                "icon": "fa fa-cog",
+                "color": "#e74c3c"
             }
         ],
         "cards": []
@@ -176,7 +187,9 @@ workspaces = [
 doc_events = {
     "Sales Invoice": {
         # Emit WebSocket event after each POS invoice is inserted
-        "after_insert": "jarz_pos.jarz_pos.events.sales_invoice.publish_new_invoice"
+        "after_insert": "jarz_pos.events.sales_invoice.publish_new_invoice",
+        # Validate bundle items before submission
+        "before_submit": "jarz_pos.events.sales_invoice.validate_invoice_before_submit"
     }
 }
 
@@ -214,9 +227,20 @@ doc_events = {
 # }
 
 override_whitelisted_methods = {
+    # POS API Methods
     "get_pos_profiles": "jarz_pos.api.pos.get_pos_profiles",
+    "get_pos_profile_data": "jarz_pos.api.pos.get_pos_profile_data",
+    "get_products": "jarz_pos.api.pos.get_products",
+    "get_bundles": "jarz_pos.api.pos.get_bundles",
+    "create_pos_invoice": "jarz_pos.api.invoices.create_pos_invoice",
+    "simple_invoice": "jarz_pos.api.invoices.simple_invoice",
+    "get_pos_profiles_with_items": "jarz_pos.api.pos.get_pos_profiles_with_items",
+    "get_active_pos_profiles": "jarz_pos.api.pos.get_active_pos_profiles",
+    "update_profile_status": "jarz_pos.api.pos.update_profile_status",
+    "process_bundle": "jarz_pos.api.pos.process_bundle",
+    "get_item_details": "jarz_pos.api.pos.get_item_details",
     "get_profile_bundles": "jarz_pos.api.pos.get_profile_bundles",
-    "get_profile_products": "jarz_pos.api.pos.get_profile_products",
+    "test_bundle_debug": "jarz_pos.api.pos.test_bundle_debug",
 }
 
 # each overriding function accepts a `data` argument;

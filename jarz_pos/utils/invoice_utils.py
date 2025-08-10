@@ -6,6 +6,175 @@ import frappe
 from typing import Dict, List, Any, Optional, Union
 
 
+def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
+    """Set basic fields on the Sales Invoice document."""
+    logger.debug("Setting invoice fields...")
+    print(f"   Setting basic invoice fields...")
+    
+    # Set basic invoice fields
+    invoice_doc.customer = customer_doc.name
+    invoice_doc.customer_name = customer_doc.customer_name
+    invoice_doc.company = pos_profile.company
+    invoice_doc.pos_profile = pos_profile.name
+    invoice_doc.is_pos = 1
+    invoice_doc.selling_price_list = pos_profile.selling_price_list
+    invoice_doc.currency = pos_profile.currency
+    invoice_doc.territory = customer_doc.territory or "All Territories"
+    
+    # Set delivery datetime if provided
+    if delivery_datetime:
+        invoice_doc.set("required_delivery_datetime", delivery_datetime)
+    
+    # Set posting date and time
+    invoice_doc.posting_date = frappe.utils.today()
+    invoice_doc.posting_time = frappe.utils.nowtime()
+    
+    logger.debug(f"Invoice fields set: customer={invoice_doc.customer}, company={invoice_doc.company}")
+    print(f"   ✅ Basic fields set for customer: {invoice_doc.customer_name}")
+
+
+def add_items_to_invoice(invoice_doc, processed_items, logger):
+    """Add items to the Sales Invoice document following ERPNext discount logic.
+    Key insight: Set price_list_rate and discount_percentage, let ERPNext compute rate and discount_amount.
+    For 100% discount: ERPNext will set rate = 0.0 automatically.
+    For partial discount: ERPNext will compute rate = price_list_rate * (1 - discount_percentage/100).
+    """
+    logger.debug(f"Adding {len(processed_items)} items to invoice (ERPNext native discount logic)...")
+    print(f"   Adding {len(processed_items)} items to invoice...")
+
+    discount_items = 0
+    total_planned_discount = 0.0
+
+    for i, item_data in enumerate(processed_items, 1):
+        try:
+            invoice_item = invoice_doc.append("items", {})
+            invoice_item.item_code = item_data["item_code"]
+            invoice_item.item_name = item_data.get("item_name", item_data["item_code"])
+            invoice_item.qty = float(item_data.get("qty", 1))
+
+            # CRITICAL: Set price_list_rate first (ERPNext needs this for discount calculations)
+            if "price_list_rate" in item_data:
+                invoice_item.price_list_rate = float(item_data["price_list_rate"])
+                # Don't set rate - let ERPNext compute it from price_list_rate and discount_percentage
+            elif "rate" in item_data:
+                # Fallback: if no price_list_rate, use rate as both
+                invoice_item.price_list_rate = float(item_data["rate"])
+                # Still don't set rate - let ERPNext compute
+
+            # CRITICAL: Set discount_percentage (ERPNext will compute rate and discount_amount)
+            discount_pct = float(item_data.get("discount_percentage", 0) or 0)
+            if discount_pct > 0:
+                discount_items += 1
+                invoice_item.discount_percentage = discount_pct
+                # Estimate discount for logging
+                price_list_rate = getattr(invoice_item, 'price_list_rate', 0) or 0
+                estimated_discount = price_list_rate * invoice_item.qty * (discount_pct / 100.0)
+                total_planned_discount += estimated_discount
+
+            # Handle legacy discount_amount (convert to percentage if no percentage set)
+            if discount_pct == 0 and "discount_amount" in item_data:
+                discount_amt_per_unit = float(item_data["discount_amount"] or 0)
+                if discount_amt_per_unit > 0:
+                    price_list_rate = getattr(invoice_item, 'price_list_rate', 0) or 0
+                    if price_list_rate > 0:
+                        # Convert discount_amount to discount_percentage
+                        computed_pct = (discount_amt_per_unit / price_list_rate) * 100.0
+                        computed_pct = min(max(0.0, computed_pct), 100.0)
+                        invoice_item.discount_percentage = computed_pct
+                        discount_items += 1
+                        total_planned_discount += discount_amt_per_unit * invoice_item.qty
+
+            # Custom bundle flags (only set if fields exist)
+            for flag_field in ["is_bundle_parent", "is_bundle_child", "bundle_code", "parent_bundle"]:
+                if flag_field in item_data:
+                    try:
+                        setattr(invoice_item, flag_field, item_data[flag_field])
+                    except Exception:
+                        pass
+
+            # UOM resolution
+            if item_data.get("uom"):
+                invoice_item.uom = item_data["uom"]
+            else:
+                try:
+                    item_doc = frappe.get_doc("Item", item_data["item_code"])
+                    invoice_item.uom = item_doc.stock_uom
+                except Exception:
+                    pass
+
+            # Log what we set (rate will be computed by ERPNext)
+            price_list_rate = getattr(invoice_item, 'price_list_rate', 0) or 0
+            discount_pct = getattr(invoice_item, 'discount_percentage', 0) or 0
+            print(f"      {i}. {invoice_item.item_name} x {invoice_item.qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}% (rate will be computed by ERPNext)")
+            
+        except Exception as e:
+            error_msg = f"Error adding item {item_data.get('item_code','Unknown')}: {str(e)}"
+            logger.error(error_msg)
+            print(f"   ❌ {error_msg}")
+            raise
+
+    print(f"   ✅ All {len(processed_items)} items added successfully")
+    if discount_items:
+        print(f"   💸 Discount bearing lines: {discount_items}; Estimated total discount: {total_planned_discount}")
+    else:
+        print(f"   ℹ️ No discount lines detected in added items")
+
+
+def add_delivery_charges_to_invoice(invoice_doc, delivery_charges, pos_profile, logger):
+    """Add delivery charges to the Sales Invoice document.
+    
+    Note: Delivery charges are handled in the taxes section, not as items.
+    This function is kept for compatibility but doesn't add delivery as items.
+    """
+    logger.debug(f"Processing {len(delivery_charges)} delivery charges...")
+    print(f"   Processing {len(delivery_charges)} delivery charges...")
+    
+    if delivery_charges:
+        # Just log the delivery charges - they're handled elsewhere in taxes
+        total_delivery = sum(float(charge["amount"]) for charge in delivery_charges)
+        
+        logger.info(f"Delivery charges total: ${total_delivery:.2f} (handled in taxes section)")
+        print(f"   📦 Delivery charges total: ${total_delivery:.2f}")
+        print(f"   💡 Delivery charges are handled in taxes section, not as items")
+        
+        # Optionally add a note to the invoice remarks
+        for i, charge in enumerate(delivery_charges, 1):
+            charge_desc = charge.get("description", f"Delivery Charge - {charge.get('charge_type', 'Standard')}")
+            charge_amount = float(charge["amount"])
+            print(f"      {i}. {charge_desc}: ${charge_amount:.2f}")
+            
+    else:
+        print(f"   📦 No delivery charges to process")
+    
+    print(f"   ✅ Delivery charges processing completed (handled in taxes)")
+
+
+def verify_invoice_totals(invoice_doc, logger):
+    """Verify that invoice totals are calculated correctly."""
+    logger.debug("Verifying invoice totals...")
+    print(f"   Verifying invoice totals...")
+    
+    try:
+        # Calculate expected totals
+        expected_net_total = sum(item.amount for item in invoice_doc.items)
+        
+        # Basic validation
+        if abs(float(invoice_doc.net_total) - expected_net_total) > 0.01:
+            error_msg = f"Net total mismatch: Expected {expected_net_total}, Got {invoice_doc.net_total}"
+            logger.error(error_msg)
+            print(f"   ❌ {error_msg}")
+            frappe.throw(error_msg)
+        
+        logger.debug(f"Invoice totals verified: net_total={invoice_doc.net_total}, grand_total={invoice_doc.grand_total}")
+        print(f"   ✅ Totals verified: Net=${invoice_doc.net_total}, Grand=${invoice_doc.grand_total}")
+        
+    except Exception as e:
+        error_msg = f"Error verifying invoice totals: {str(e)}"
+        logger.error(error_msg)
+        print(f"   ❌ {error_msg}")
+        raise
+
+
 def get_address_details(address_name: str) -> str:
     """Get formatted address string from an Address document.
     

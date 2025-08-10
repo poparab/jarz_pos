@@ -8,8 +8,8 @@ from __future__ import annotations
 import frappe
 import json
 
-# Legacy implementation lives in the custom POS page controller
-from jarz_pos.jarz_pos.page.custom_pos import custom_pos as _legacy
+# Import from the refactored services
+from jarz_pos.services.invoice_creation import create_pos_invoice as _create_invoice
 
 
 # ---------------------------------------------------------------------------
@@ -18,20 +18,23 @@ from jarz_pos.jarz_pos.page.custom_pos import custom_pos as _legacy
 
 
 @frappe.whitelist()
-def create_pos_invoice(cart_json, customer_name, pos_profile_name=None, delivery_charges_json=None, required_delivery_datetime=None):
+def create_pos_invoice():
     """
     Create POS Sales Invoice - Clean implementation with comprehensive debugging
     
-    Args:
-        cart_json (str): JSON string containing cart items
-        customer_name (str): Name of the customer
-        pos_profile_name (str, optional): POS Profile to use
-        delivery_charges_json (str, optional): JSON string containing delivery charges
-        required_delivery_datetime (str, optional): ISO datetime string for delivery slot
+    This function reads parameters from frappe.form_dict instead of function parameters
+    to avoid Frappe's parameter mapping issues.
     
     Returns:
         dict: Invoice creation result
     """
+    
+    # Get parameters from frappe.form_dict (Frappe's way)
+    cart_json = frappe.form_dict.get('cart_json')
+    customer_name = frappe.form_dict.get('customer_name')
+    pos_profile_name = frappe.form_dict.get('pos_profile_name')
+    delivery_charges_json = frappe.form_dict.get('delivery_charges_json')
+    required_delivery_datetime = frappe.form_dict.get('required_delivery_datetime')
     
     # Frappe best practice: Use frappe.logger() for structured logging
     logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
@@ -45,6 +48,8 @@ TIMESTAMP: {frappe.utils.now()}
 USER: {frappe.session.user}
 SITE: {frappe.local.site}
 METHOD: {getattr(frappe.local.request, 'method', 'N/A')}
+
+FORM_DICT: {frappe.form_dict}
 
 RAW PARAMETERS:
 - cart_json (type: {type(cart_json)}): {cart_json}
@@ -96,8 +101,8 @@ RAW PARAMETERS:
         
         print(f"\n🔄 Calling core function...")
         
-        # Call the legacy function with proper error handling
-        result = _legacy.create_pos_invoice(cart_json, customer_name, pos_profile_name, delivery_charges_json, required_delivery_datetime)
+        # Call the refactored service function
+        result = _create_invoice(cart_json, customer_name, pos_profile_name, delivery_charges_json, required_delivery_datetime)
         
         # Log successful response
         print(f"\n✅ API CALL SUCCESSFUL!")
@@ -161,4 +166,5 @@ SITE: {frappe.local.site}
 @frappe.whitelist()
 def pay_invoice(invoice_name: str, payment_mode: str, pos_profile: str | None = None):
     """Register payment against a Sales Invoice."""
-    return _legacy.pay_invoice(invoice_name, payment_mode, pos_profile)
+    # TODO: Implement payment logic or import from appropriate service
+    frappe.throw("pay_invoice function needs to be implemented in services")
