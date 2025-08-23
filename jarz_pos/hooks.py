@@ -186,8 +186,10 @@ workspaces = [
 
 doc_events = {
     "Sales Invoice": {
-        # Emit WebSocket event after each POS invoice is inserted
-        "after_insert": "jarz_pos.events.sales_invoice.publish_new_invoice",
+    # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
+    "on_submit": "jarz_pos.events.sales_invoice.publish_new_invoice",
+    # Emit state-change events for already-submitted invoices edited elsewhere
+    "on_update_after_submit": "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
         # Validate bundle items before submission
         "before_submit": "jarz_pos.events.sales_invoice.validate_invoice_before_submit"
     }

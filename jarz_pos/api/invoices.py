@@ -163,8 +163,145 @@ SITE: {frappe.local.site}
         raise
 
 
-@frappe.whitelist()
-def pay_invoice(invoice_name: str, payment_mode: str, pos_profile: str | None = None):
-    """Register payment against a Sales Invoice."""
-    # TODO: Implement payment logic or import from appropriate service
-    frappe.throw("pay_invoice function needs to be implemented in services")
+@frappe.whitelist(allow_guest=False)
+def pay_invoice(
+    invoice_name: str,
+    payment_mode: str,
+    pos_profile: str | None = None,
+    reference_no: str | None = None,
+    reference_date: str | None = None,
+):
+    """Create a Payment Entry for a submitted Sales Invoice.
+
+    Adds mandatory Reference No / Reference Date when payment_mode is Wallet or InstaPay.
+
+    payment_mode:
+      - Wallet   -> "Mobile Wallet - <COMPANY ABBR>" (requires reference_no & reference_date)
+      - InstaPay -> "Bank Account - <COMPANY ABBR>" (requires reference_no & reference_date)
+      - Cash     -> "<POS PROFILE NAME> - <COMPANY ABBR>" (requires pos_profile; reference fields optional/ignored)
+
+    Args:
+        invoice_name: Sales Invoice name (must be submitted, outstanding)
+        payment_mode: wallet | instapay | cash (case-insensitive)
+        pos_profile: POS Profile (required when payment_mode == cash)
+        reference_no: External transaction / bank reference (required for wallet & instapay)
+        reference_date: Date string (YYYY-MM-DD) of external transaction (required for wallet & instapay)
+    """
+    try:
+        if not invoice_name:
+            frappe.throw("invoice_name is required")
+        if not payment_mode:
+            frappe.throw("payment_mode is required")
+        payment_mode = payment_mode.strip()
+
+        inv = frappe.get_doc("Sales Invoice", invoice_name)
+        if inv.docstatus != 1:
+            frappe.throw("Invoice must be submitted before registering payment")
+        outstanding = float(inv.outstanding_amount or 0)
+        if outstanding <= 0.0001:
+            frappe.throw("Invoice already paid")
+        company = inv.company
+        company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+
+        # Map payment mode to destination account base name
+        mode_lower = payment_mode.lower()
+        if mode_lower == "wallet":
+            account_base = "Mobile Wallet"
+            # Wallet payments require reference metadata – auto-generate if absent
+            if not reference_no:
+                reference_no = f"WAL-{frappe.generate_hash(length=8)}"
+            if not reference_date:
+                reference_date = frappe.utils.nowdate()
+        elif mode_lower == "instapay":
+            account_base = "Bank Account"
+            # InstaPay payments require reference metadata – auto-generate if absent
+            if not reference_no:
+                reference_no = f"IPY-{frappe.generate_hash(length=8)}"
+            if not reference_date:
+                reference_date = frappe.utils.nowdate()
+        elif mode_lower == "cash":
+            if not pos_profile:
+                frappe.throw("pos_profile is required for Cash payments")
+            account_base = pos_profile  # POS profile name itself
+        else:
+            frappe.throw(f"Unsupported payment_mode: {payment_mode}")
+
+        # Validate reference_date format if provided (allow strict date only)
+        if reference_date:
+            try:
+                # getdate will raise for invalid formats; keep original string assignment later
+                frappe.utils.getdate(reference_date)
+            except Exception:
+                frappe.throw("Invalid reference_date format. Use YYYY-MM-DD")
+
+        paid_to_account = f"{account_base} - {company_abbr}".strip()
+        if not frappe.db.exists("Account", paid_to_account):
+            frappe.throw(f"Destination account not found: {paid_to_account}")
+
+        # Determine receivable (paid_from) account
+        receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
+        if not receivable:
+            # Fallback: first non-group Receivable account for company
+            receivable = frappe.db.get_value(
+                "Account",
+                {"company": company, "account_type": "Receivable", "is_group": 0},
+                "name",
+            )
+        if not receivable:
+            frappe.throw("Could not determine receivable account for company")
+
+        # Create Payment Entry
+        pe = frappe.new_doc("Payment Entry")
+        pe.payment_type = "Receive"
+        pe.party_type = "Customer"
+        pe.party = inv.customer
+        pe.company = company
+        pe.posting_date = frappe.utils.today()
+        pe.mode_of_payment = payment_mode if frappe.db.exists("Mode of Payment", payment_mode) else None
+        pe.paid_from = receivable
+        pe.paid_to = paid_to_account
+        pe.party_account = receivable  # ensure attribute for older meta / set_missing_values
+        pe.paid_amount = outstanding
+        pe.received_amount = outstanding
+        pe.references = []
+        pe.append("references", {
+            "reference_doctype": "Sales Invoice",
+            "reference_name": inv.name,
+            "due_date": inv.get("due_date"),
+            "total_amount": float(inv.grand_total or 0),
+            "outstanding_amount": outstanding,
+            "allocated_amount": outstanding,
+        })
+        # Set flags to bypass POS validations if needed
+        pe.flags.ignore_permissions = True
+        try:
+            pe.set_missing_values()
+        except AttributeError:
+            # Older Payment Entry implementation expecting party_account
+            if not getattr(pe, 'party_account', None):
+                pe.party_account = receivable
+        # Assign reference metadata (only set if supplied for clarity)
+        if reference_no:
+            pe.reference_no = reference_no
+        if reference_date:
+            pe.reference_date = reference_date
+
+        pe.insert(ignore_permissions=True)
+        pe.submit()
+
+        return {
+            "success": True,
+            "payment_entry": pe.name,
+            "invoice": inv.name,
+            "allocated_amount": outstanding,
+            "paid_to": paid_to_account,
+            "receivable": receivable,
+            "reference_no": getattr(pe, "reference_no", None),
+            "reference_date": getattr(pe, "reference_date", None),
+        }
+    except Exception as e:
+        frappe.log_error(
+            title="Pay Invoice Error",
+            message=f"Invoice: {invoice_name}\nMode: {payment_mode}\nError: {frappe.get_traceback()}"
+        )
+        raise

@@ -5,32 +5,39 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "courier",
+  "party_type",
+  "party",
   "status",
   "date",
-  "type",
   "reference_invoice",
   "amount",
   "shipping_amount",
+  "payment_mode",
+  "journal_entry",
+  "idempotency_token",
   "notes"
  ],
  "fields": [
   {
-   "fieldname": "courier",
-   "fieldtype": "Link",
-   "label": "Courier",
-   "options": "Courier"
+   "fieldname": "party_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Party Type",
+   "options": "\nEmployee\nSupplier"
+  },
+  {
+   "fieldname": "party",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Party",
+   "options": "party_type"
   },
   {
    "fieldname": "date",
    "fieldtype": "Datetime",
    "label": "Date"
-  },
-  {
-   "fieldname": "type",
-   "fieldtype": "Select",
-   "label": "Type",
-   "options": "Pick-Up\nRemit"
   },
   {
    "fieldname": "reference_invoice",
@@ -42,11 +49,6 @@
    "fieldname": "amount",
    "fieldtype": "Currency",
    "label": "Amount"
-  },
-  {
-   "fieldname": "notes",
-   "fieldtype": "Small Text",
-   "label": "Notes"
   },
   {
    "fieldname": "shipping_amount",
@@ -64,12 +66,39 @@
    "in_standard_filter": 1,
    "label": "Status",
    "options": "Settled\nUnsettled"
+  },
+  {
+   "fieldname": "payment_mode",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_preview": 1,
+   "label": "Payment Mode",
+   "read_only": 1
+  },
+  {
+   "fieldname": "journal_entry",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "idempotency_token",
+   "fieldtype": "Data",
+   "label": "Idempotency Token",
+   "read_only": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-07-16 00:24:40.992072",
+ "modified": "2025-08-22 04:06:45.452723",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Courier Transaction",

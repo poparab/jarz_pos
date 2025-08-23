@@ -79,6 +79,77 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
     )
 
 
+# ------------------ NEW HELPER FUNCTIONS (centralized resolution) ------------------
+
+def get_freight_expense_account(company: str) -> str:
+    """Return Freight & Forwarding Charges account for company (validated)."""
+    acc = get_account_for_company("Freight and Forwarding Charges", company)
+    if not acc:
+        frappe.throw(f"Freight and Forwarding Charges account missing for {company}")
+    return acc
+
+
+def get_courier_outstanding_account(company: str) -> str:
+    """Return Courier Outstanding account (non-group) for company."""
+    acc = frappe.db.get_value(
+        "Account",
+        {
+            "company": company,
+            "account_name": ["like", "Courier Outstanding%"],
+            "is_group": 0,
+        },
+        "name",
+    )
+    if acc:
+        return acc
+    frappe.throw(
+        f"No 'Courier Outstanding' account found for company {company}. Create a ledger under Accounts Receivable."
+    )
+
+
+def get_pos_cash_account(pos_profile: str, company: str) -> str:
+    """Public wrapper for resolving POS profile cash-in-hand child account."""
+    return _get_cash_account(pos_profile, company)
+
+
+def validate_account_exists(account_name: str):
+    if not frappe.db.exists("Account", {"name": account_name}):
+        frappe.throw(f"Account '{account_name}' does not exist.")
+
+
+def get_creditors_account(company: str) -> str:
+    """Resolve the company's Creditors (Payable) account.
+
+    Strategy:
+    - Company.default_payable_account
+    - Exact 'Creditors - {abbr}'
+    - Any non-group Account with account_type='Payable' under the company
+    - Fallback to get_account_for_company('Creditors', company)
+    """
+    acc = frappe.get_value("Company", company, "default_payable_account")
+    if acc:
+        return acc
+
+    abbr = frappe.get_value("Company", company, "abbr")
+    if abbr and frappe.db.exists("Account", f"Creditors - {abbr}"):
+        return f"Creditors - {abbr}"
+
+    acc = frappe.db.get_value(
+        "Account",
+        {
+            "company": company,
+            "account_type": "Payable",
+            "is_group": 0,
+        },
+        "name",
+    )
+    if acc:
+        return acc
+
+    # Last resort: try by name + company via helper
+    return get_account_for_company("Creditors", company)
+
+
 @frappe.whitelist()
 def create_online_payment_entry(
     invoice_name: str,

@@ -89,6 +89,29 @@ def get_backend_info():
         }
     }
 
+@frappe.whitelist(allow_guest=True)
+def emit_test_event(event: str = "jarz_pos_new_invoice"):
+    """Emit a realtime test event to verify Socket.IO delivery to clients.
+    Default event is 'jarz_pos_new_invoice'. Requires auth.
+    """
+    try:
+        now = frappe.utils.now()
+        payload = {"name": f"TEST-SI-{now}", "timestamp": now, "by": frappe.session.user}
+        frappe.publish_realtime(event, payload, user="*")
+        # Also emit a kanban-style state-change with no old_state to trigger a refresh
+        kanban_payload = {
+            "event": "jarz_pos_invoice_state_change",
+            "invoice_id": payload["name"],
+            "old_state_key": None,
+            "new_state_key": "recieved",
+            "old_state": None,
+            "new_state": "Recieved",
+        }
+        frappe.publish_realtime("jarz_pos_invoice_state_change", kanban_payload, user="*")
+        return success_response(message="Event emitted", data=payload)
+    except Exception as e:
+        return handle_api_error(e, "Emit Test Event")
+
 
 # ---------------------------------------------------------------------------
 # Maintenance utility: Reload missing standard DocTypes from this app

@@ -181,7 +181,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         frappe.logger().debug("KANBAN API: get_kanban_invoices called with filters: {0}".format(filters))
         filter_conditions = apply_invoice_filters(filters)
         filter_conditions["docstatus"] = 1
-        filter_conditions["is_pos"] = 1
+        # Include both POS and Desk invoices; remove hard is_pos filter if present
+        try:
+            if isinstance(filter_conditions, dict) and "is_pos" in filter_conditions:
+                filter_conditions.pop("is_pos", None)
+        except Exception:
+            pass
         
         # Fetch all matching Sales Invoices
         fields = [
@@ -264,6 +269,18 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
             state_key = state.lower().replace(' ', '_')
             terr_ship = _get_territory_shipping(inv.get("territory") or "")
+            # Determine if there exists any UNSETTLED courier transaction for this invoice
+            has_unsettled = False
+            try:
+                has_unsettled = frappe.db.exists(
+                    "Courier Transaction",
+                    {
+                        "reference_invoice": inv.name,
+                        "status": ["!=", "Settled"],
+                    },
+                )
+            except Exception:
+                has_unsettled = False
             # Create invoice card data
             invoice_card = {
                 "name": inv.name,
@@ -272,7 +289,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "customer": inv.customer,
                 "territory": inv.territory or "",
                 "required_delivery_date": inv.required_delivery_datetime,
-                "status": state,
+                "status": state,  # Kanban state (custom field)
+                "doc_status": inv.status,  # ERPNext document status (Submitted, Paid, etc.)
                 "posting_date": str(inv.posting_date),
                 "grand_total": float(inv.grand_total or 0),
                 "net_total": float(inv.net_total or 0),
@@ -281,6 +299,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "items": invoice_items.get(inv.name, []),
                 "shipping_income": terr_ship.get("income", 0.0),
                 "shipping_expense": terr_ship.get("expense", 0.0),
+                "has_unsettled_courier_txn": bool(has_unsettled),
             }
             
             # Add to appropriate state column
@@ -321,14 +340,55 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
         if invoice.docstatus != 1:
             return _failure("Only submitted (docstatus=1) Sales Invoices can change state")
-        old_state = invoice.get("custom_sales_invoice_state") or invoice.get("sales_invoice_state")
+        # Capture old state from any known field variant (priority order)
+        old_state = (
+            invoice.get("custom_sales_invoice_state")
+            or invoice.get("sales_invoice_state")
+            or invoice.get("custom_state")
+            or invoice.get("state")
+        )
         if old_state == new_state:
             return _success(message="State unchanged (already set)", invoice_id=invoice_id, state=new_state)
+
+        # We will attempt to update BOTH fields (primary custom + legacy) if they exist on the DocType
+        # This prevents divergence where frontend reads one while backend only sets the other.
+        meta = frappe.get_meta("Sales Invoice")
+        fields_to_update = []
+        for candidate in [
+            "custom_sales_invoice_state",
+            "sales_invoice_state",
+            "custom_state",
+            "state",
+        ]:
+            if meta.get_field(candidate):
+                fields_to_update.append(candidate)
+        if not fields_to_update:
+            # Fallback; nothing to update (?) -> throw to indicate configuration problem
+            return _failure("No sales invoice state fields found (expected custom_sales_invoice_state or sales_invoice_state)")
+
+        # Perform updates individually using db_set for atomicity; fallback to save if db_set fails
+        updated_fields = []
+        for f in fields_to_update:
+            try:
+                invoice.db_set(f, new_state, update_modified=True)
+                updated_fields.append(f)
+            except Exception:
+                try:
+                    invoice.set(f, new_state)
+                    invoice.save(ignore_permissions=True, ignore_version=True)
+                    updated_fields.append(f + "(saved)")
+                except Exception as inner_ex:
+                    frappe.logger().error(f"Failed updating field {f} on {invoice_id}: {inner_ex}")
+
+        # Explicit commit to ensure other workers / websocket listeners see change immediately
         try:
-            invoice.db_set("custom_sales_invoice_state", new_state, update_modified=True)
-        except Exception:
-            invoice.set("custom_sales_invoice_state", new_state)
-            invoice.save(ignore_permissions=True, ignore_version=True)
+            frappe.db.commit()
+        except Exception as commit_ex:
+            frappe.logger().warning(f"Explicit DB commit after state update failed: {commit_ex}")
+
+        frappe.logger().info(
+            f"KANBAN API: Invoice {invoice_id} state change {old_state} -> {new_state}; fields updated: {updated_fields}"
+        )
         payload = {
             "invoice_id": invoice_id,
             "old_state": old_state,
@@ -340,7 +400,13 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         }
         frappe.publish_realtime("jarz_pos_invoice_state_change", payload, user="*")
         frappe.publish_realtime("kanban_update", payload, user="*")
-        return _success(message=f"Invoice {invoice_id} state updated", invoice_id=invoice_id, state=new_state)
+        return _success(
+            message=f"Invoice {invoice_id} state updated",
+            invoice_id=invoice_id,
+            state=new_state,
+            updated_fields=updated_fields,
+            final_state=new_state,
+        )
     except Exception as e:
         error_msg = f"Error updating invoice state: {str(e)}"
         frappe.logger().error(error_msg)
@@ -361,6 +427,16 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         frappe.logger().debug(f"KANBAN API: get_invoice_details - Invoice: {invoice_id}")
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
         data = format_invoice_data(invoice)
+        # Augment with unsettled courier txn flag
+        try:
+            data["has_unsettled_courier_txn"] = bool(
+                frappe.db.exists(
+                    "Courier Transaction",
+                    {"reference_invoice": invoice.name, "status": ["!=", "Settled"]},
+                )
+            )
+        except Exception:
+            data["has_unsettled_courier_txn"] = False
         return _success(data=data)
     except Exception as e:
         error_msg = f"Error getting invoice details: {str(e)}"

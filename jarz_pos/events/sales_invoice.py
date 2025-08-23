@@ -3,12 +3,17 @@ from frappe import _
 
 
 def publish_new_invoice(doc, method):
-    """Publish a realtime event whenever a POS Sales Invoice is created."""
+    """Publish a realtime event whenever a Sales Invoice is created."""
     try:
-        # Only push POS invoices (avoid noise from back-office invoices)
-        if not getattr(doc, "is_pos", 0):
+        # Log the event for debugging
+        frappe.log_error(f"[JARZ_NOTIFICATIONS] publish_new_invoice triggered for {doc.name}, method={method}, docstatus={doc.docstatus}, is_pos={getattr(doc, 'is_pos', 'N/A')}", "Jarz Invoice Events")
+        
+        # Only emit for submitted invoices
+        if int(getattr(doc, "docstatus", 0) or 0) != 1:
+            frappe.log_error(f"[JARZ_NOTIFICATIONS] Invoice {doc.name} not submitted (docstatus={doc.docstatus}), skipping emit", "Jarz Invoice Events")
             return
 
+        # Emit for all submitted Sales Invoices (Desk or POS)
         payload = {
             "name": doc.name,
             "customer_name": doc.get("customer_name") or doc.customer,
@@ -16,16 +21,88 @@ def publish_new_invoice(doc, method):
             "grand_total": float(doc.grand_total or 0),
             "status": doc.status,
             "sales_invoice_state": doc.get("sales_invoice_state"),
+            "custom_sales_invoice_state": doc.get("custom_sales_invoice_state"),
             "posting_date": str(doc.posting_date),
             "posting_time": str(doc.posting_time),
-            "pos_profile": doc.pos_profile or ""
+            "pos_profile": doc.pos_profile or "",
+            "creation_source": "POS" if getattr(doc, 'is_pos', 0) else "Desk",
+            "timestamp": frappe.utils.now()
         }
 
-        frappe.publish_realtime("jarz_pos_new_invoice", payload, user="*")  # type: ignore[attr-defined]
+        # Broadcast both a generic and a kanban-friendly event
+        frappe.log_error(f"[JARZ_NOTIFICATIONS] Emitting jarz_pos_new_invoice for {doc.name}", "Jarz Invoice Events")
+        # Broadcast to all users and to current site room for multi-site setups
+        frappe.publish_realtime("jarz_pos_new_invoice", payload, user="*", room=getattr(frappe.local, "site", None))  # type: ignore[attr-defined]
+
+        try:
+            # Normalize state key used by the kanban map in frontend
+            state = (doc.get("custom_sales_invoice_state") or doc.get("sales_invoice_state") or "Received")
+            state_key = str(state).strip().lower().replace(" ", "_")
+            kanban_payload = {
+                "event": "jarz_pos_invoice_state_change",
+                "invoice_id": doc.name,
+                "old_state_key": None,
+                "new_state_key": state_key,
+                "old_state": None,
+                "new_state": state,
+                "timestamp": frappe.utils.now()
+            }
+            frappe.log_error(f"[JARZ_NOTIFICATIONS] Emitting jarz_pos_invoice_state_change for {doc.name}, state={state}", "Jarz Invoice Events")
+            frappe.publish_realtime("jarz_pos_invoice_state_change", kanban_payload, user="*", room=getattr(frappe.local, "site", None))  # type: ignore[attr-defined]
+            # Redundant generic event to trigger board refresh listeners
+            frappe.publish_realtime("kanban_update", kanban_payload, user="*", room=getattr(frappe.local, "site", None))  # type: ignore[attr-defined]
+        except Exception as inner_e:
+            frappe.log_error(f"[JARZ_NOTIFICATIONS] Kanban event failed for {doc.name}: {inner_e}", "Jarz Invoice Events")
+
     except Exception as e:
-        frappe.log_error(f"Realtime publish failed: {e}")  # type: ignore[attr-defined] 
+        frappe.log_error(f"[JARZ_NOTIFICATIONS] Realtime publish failed for {doc.name}: {e}", "Jarz Invoice Events")
+def publish_state_change_if_needed(doc, method):
+    """Publish a realtime kanban update when invoice state changes after submit.
 
+    Triggers on on_update_after_submit so external edits (other devices, scripts)
+    propagate to mobile clients immediately.
+    """
+    try:
+        # Log the event for debugging
+        frappe.log_error(f"[JARZ_NOTIFICATIONS] publish_state_change_if_needed triggered for {doc.name}, method={method}", "Jarz Invoice Events")
 
+        # Only handle submitted invoices
+        if int(getattr(doc, "docstatus", 0) or 0) != 1:
+            frappe.log_error(f"[JARZ_NOTIFICATIONS] Invoice {doc.name} not submitted (docstatus={doc.docstatus}), skipping state change emit", "Jarz Invoice Events")
+            return
+
+        # Determine current and previous state values from any known fields
+        current = doc.get("custom_sales_invoice_state") or doc.get("sales_invoice_state") or None
+        # Try to get the previous db value to detect change
+        prev = frappe.db.get_value("Sales Invoice", doc.name, ["custom_sales_invoice_state", "sales_invoice_state"], as_dict=True)
+        old_val = None
+        if prev:
+            old_val = prev.get("custom_sales_invoice_state") or prev.get("sales_invoice_state")
+
+        frappe.log_error(f"[JARZ_NOTIFICATIONS] State comparison for {doc.name}: current='{current}', old='{old_val}'", "Jarz Invoice Events")
+
+        if (current or "") == (old_val or ""):
+            frappe.log_error(f"[JARZ_NOTIFICATIONS] No state change for {doc.name}, skipping", "Jarz Invoice Events")
+            return
+
+        payload = {
+            "event": "jarz_pos_invoice_state_change",
+            "invoice_id": doc.name,
+            "old_state": old_val,
+            "new_state": current,
+            "old_state_key": (old_val or "").strip().lower().replace(" ", "_") if old_val else None,
+            "new_state_key": (current or "").strip().lower().replace(" ", "_") if current else None,
+            "timestamp": frappe.utils.now()
+        }
+
+        frappe.log_error(f"[JARZ_NOTIFICATIONS] Emitting state change event for {doc.name}: {old_val} -> {current}", "Jarz Invoice Events")
+        # Broadcast to all users and site room for reliability
+        frappe.publish_realtime("jarz_pos_invoice_state_change", payload, user="*", room=getattr(frappe.local, "site", None))
+        # Also emit a generic kanban update for clients only listening to this event
+        frappe.publish_realtime("kanban_update", payload, user="*", room=getattr(frappe.local, "site", None))
+
+    except Exception as e:
+        frappe.log_error(f"[JARZ_NOTIFICATIONS] Failed to publish state change for {doc.name}: {e}", "Jarz Invoice Events")
 def validate_invoice_before_submit(doc, method):
     """
     Hook method to validate invoice before submission
