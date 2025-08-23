@@ -369,12 +369,16 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     )
 
     order_amount = 0.0
-    # pick first with amount>0
+    # pick first unsettled CT amount>0
     for r in cts:
         amt = float(r.get("amount") or 0)
         if amt > 0:
             order_amount = amt
             break
+    invoice_total = float(inv.grand_total or 0)
+    # Fallback: if no unsettled CT amount (already settled or none created yet) but invoice total exists and unpaid scenario desired
+    if order_amount <= 0 and invoice_total > 0:
+        order_amount = invoice_total
 
     net_amount = order_amount - shipping
     # Special case: pure shipping (order_amount == 0 < shipping)
@@ -398,7 +402,8 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         "invoice": inv.name,
         "party_type": party_type,
         "party": party,
-        "order_amount": order_amount,
+    "order_amount": order_amount,
+    "invoice_total": invoice_total,
         "shipping_amount": shipping,
     "scenario": scenario,
     "branch_action": branch_action,
