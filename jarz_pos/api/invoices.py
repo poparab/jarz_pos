@@ -312,11 +312,14 @@ def pay_invoice(
 def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = None, party: str | None = None):
     """Return settlement preview for confirmation popup.
 
-    Logic:
-      - Look for any unsettled Courier Transaction for this invoice & party.
-      - If none with amount>0, it's a shipping-only scenario: branch will PAY courier shipping.
-      - If amount>0 and amount >= shipping -> branch COLLECTS (amount - shipping) from courier.
-      - If amount>0 and shipping > amount -> branch PAYS (shipping - amount) to courier.
+        Logic (updated):
+            - Determine order_amount from first unsettled Courier Transaction amount (>0) else 0.
+            - shipping_amount derived from helper.
+            - net_amount = order_amount - shipping_amount.
+                * If net_amount > 0 => branch collects that positive amount from courier.
+                * If net_amount < 0 => branch pays ABS(net_amount) to courier.
+                * If net_amount == 0 and shipping>0 with no order_amount => pay shipping (treat as negative net for clarity).
+            - scenario kept for backward compatibility but not required by frontend; branch_action derives from sign.
 
     Returns:
       {
@@ -373,22 +376,23 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
             order_amount = amt
             break
 
-    if order_amount <= 0:  # shipping only
-        scenario = "shipping_only"
+    net_amount = order_amount - shipping
+    # Special case: pure shipping (order_amount == 0 < shipping)
+    if order_amount == 0 and shipping > 0:
+        net_amount = -shipping
+
+    if net_amount > 0:
+        scenario = "collect"
+        branch_action = "collect"
+        msg = f"Collect {net_amount:.2f} from courier (order {order_amount:.2f} - shipping {shipping:.2f})"
+    elif net_amount < 0:
+        scenario = "pay" if order_amount == 0 else "pay_excess"
         branch_action = "pay"
-        courier_amount = shipping
-        msg = f"Pay courier shipping expense {shipping:.2f}" if shipping > 0 else "No shipping expense to pay"
-    else:
-        if order_amount >= shipping:
-            scenario = "collect"
-            branch_action = "collect"
-            courier_amount = order_amount - shipping
-            msg = f"Collect {courier_amount:.2f} from courier (order {order_amount:.2f} - shipping {shipping:.2f})"
-        else:
-            scenario = "pay_excess"
-            branch_action = "pay"
-            courier_amount = shipping - order_amount
-            msg = f"Pay courier {courier_amount:.2f} (shipping {shipping:.2f} - order {order_amount:.2f})"
+        msg = f"Pay courier {abs(net_amount):.2f} (shipping {shipping:.2f} - order {order_amount:.2f})"
+    else:  # net_amount == 0
+        scenario = "even"
+        branch_action = "none"
+        msg = "Nothing to pay or collect"
 
     return {
         "invoice": inv.name,
@@ -396,8 +400,10 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         "party": party,
         "order_amount": order_amount,
         "shipping_amount": shipping,
-        "scenario": scenario,
-        "branch_action": branch_action,
-        "courier_amount": courier_amount,
-        "message": msg,
+    "scenario": scenario,
+    "branch_action": branch_action,
+    "net_amount": net_amount,
+    "collect_amount": net_amount if net_amount > 0 else 0,
+    "pay_amount": abs(net_amount) if net_amount < 0 else 0,
+    "message": msg,
     }
