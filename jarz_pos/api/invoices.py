@@ -10,6 +10,7 @@ import json
 
 # Import from the refactored services
 from jarz_pos.services.invoice_creation import create_pos_invoice as _create_invoice
+from jarz_pos.services import delivery_handling as _delivery
 
 
 # ---------------------------------------------------------------------------
@@ -305,3 +306,98 @@ def pay_invoice(
             message=f"Invoice: {invoice_name}\nMode: {payment_mode}\nError: {frappe.get_traceback()}"
         )
         raise
+
+
+@frappe.whitelist()
+def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = None, party: str | None = None):
+    """Return settlement preview for confirmation popup.
+
+    Logic:
+      - Look for any unsettled Courier Transaction for this invoice & party.
+      - If none with amount>0, it's a shipping-only scenario: branch will PAY courier shipping.
+      - If amount>0 and amount >= shipping -> branch COLLECTS (amount - shipping) from courier.
+      - If amount>0 and shipping > amount -> branch PAYS (shipping - amount) to courier.
+
+    Returns:
+      {
+        invoice, party_type, party,
+        order_amount, shipping_amount,
+        scenario: shipping_only | collect | pay_excess,
+        branch_action: pay | collect,
+        courier_amount: numeric amount branch pays (+) or collects (+) expressed as positive number,
+        message: human readable string
+      }
+    """
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    # Derive party if missing from any CT
+    if not (party_type and party):
+        existing_party = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": invoice_name,
+                "party_type": ["not in", [None, ""]],
+                "party": ["not in", [None, ""]],
+            },
+            fields=["party_type", "party"],
+            limit=1,
+        )
+        if existing_party:
+            party_type = existing_party[0].get("party_type")
+            party = existing_party[0].get("party")
+
+    shipping = _delivery._get_delivery_expense_amount(inv) or 0.0  # protected helper reused
+
+    # Fetch unsettled CTs
+    cts = frappe.get_all(
+        "Courier Transaction",
+        filters={
+            "reference_invoice": invoice_name,
+            "status": ["!=", "Settled"],
+            "party_type": party_type if party_type else ["in", [party_type, None, ""]],
+            "party": party if party else ["in", [party, None, ""]],
+        },
+        fields=["name", "amount", "shipping_amount"],
+    )
+
+    order_amount = 0.0
+    # pick first with amount>0
+    for r in cts:
+        amt = float(r.get("amount") or 0)
+        if amt > 0:
+            order_amount = amt
+            break
+
+    if order_amount <= 0:  # shipping only
+        scenario = "shipping_only"
+        branch_action = "pay"
+        courier_amount = shipping
+        msg = f"Pay courier shipping expense {shipping:.2f}" if shipping > 0 else "No shipping expense to pay"
+    else:
+        if order_amount >= shipping:
+            scenario = "collect"
+            branch_action = "collect"
+            courier_amount = order_amount - shipping
+            msg = f"Collect {courier_amount:.2f} from courier (order {order_amount:.2f} - shipping {shipping:.2f})"
+        else:
+            scenario = "pay_excess"
+            branch_action = "pay"
+            courier_amount = shipping - order_amount
+            msg = f"Pay courier {courier_amount:.2f} (shipping {shipping:.2f} - order {order_amount:.2f})"
+
+    return {
+        "invoice": inv.name,
+        "party_type": party_type,
+        "party": party,
+        "order_amount": order_amount,
+        "shipping_amount": shipping,
+        "scenario": scenario,
+        "branch_action": branch_action,
+        "courier_amount": courier_amount,
+        "message": msg,
+    }
