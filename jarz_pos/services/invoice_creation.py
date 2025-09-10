@@ -22,11 +22,164 @@ from jarz_pos.utils.invoice_utils import (
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 
 
+def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
+    """Populate new delivery slot fields on the Sales Invoice from a datetime.
+
+    Fields:
+      - custom_delivery_date (Date)
+      - custom_delivery_time_from (Time)
+      - custom_delivery_duration (Duration, stored in SECONDS)
+
+    Notes:
+      - Historically code treated duration as minutes. We now standardize to seconds.
+      - If a small integer value (< 1000) is detected, it's assumed to be minutes and converted to seconds.
+      - Parse optional request param 'delivery_duration' if present: supports '4h', '240m', '2:30', or plain numbers.
+    """
+    def _parse_duration_to_seconds(raw) -> int | None:
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, (int, float)):
+                val = float(raw)
+                # Heuristic: treat small numbers as minutes (legacy), otherwise seconds
+                return int(val * 60) if val < 1000 else int(val)
+            s = str(raw).strip().lower()
+            if not s:
+                return None
+            # HH:MM or H:MM
+            if ":" in s:
+                parts = s.split(":", 1)
+                h = int(parts[0] or 0)
+                m = int(parts[1] or 0)
+                return h * 3600 + m * 60
+            # Suffix-based
+            if s.endswith(("hours", "hour", "hrs", "hr", "h")):
+                num = float(s.rstrip("hoursr h"))
+                return int(num * 3600)
+            if s.endswith(("minutes", "minute", "mins", "min", "m")):
+                num = float(s.rstrip("minutesin m"))
+                return int(num * 60)
+            # Plain number: assume minutes (legacy)
+            return int(float(s) * 60)
+        except Exception:
+            return None
+
+    if not delivery_datetime:
+        return
+    try:
+        dt = frappe.utils.get_datetime(delivery_datetime)
+        invoice_doc.custom_delivery_date = dt.date()
+        invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
+
+        # If request provided an explicit duration, parse it
+        try:
+            raw_duration = getattr(frappe, "form_dict", {}).get("delivery_duration")
+        except Exception:
+            raw_duration = None
+        parsed_seconds = _parse_duration_to_seconds(raw_duration)
+
+        current_val = getattr(invoice_doc, "custom_delivery_duration", None)
+        if parsed_seconds is not None:
+            invoice_doc.custom_delivery_duration = parsed_seconds
+        elif current_val:
+            # Normalize existing value to seconds if it looks like minutes
+            try:
+                cur = float(current_val)
+                invoice_doc.custom_delivery_duration = int(cur * 60) if cur < 1000 else int(cur)
+            except Exception:
+                invoice_doc.custom_delivery_duration = 3600
+        else:
+            # Default: 1 hour in seconds
+            invoice_doc.custom_delivery_duration = 3600
+    except Exception:
+        # Non-fatal; let validation hook catch missing fields if required
+        pass
+
+
+def _set_initial_state_for_sales_partner(invoice_doc, logger):
+    """If a Sales Partner is set on the invoice, initialize the Kanban state to 'In Progress'.
+
+    We don't assume a specific custom field name. Instead, we probe common candidates and
+    set whichever exist on the Sales Invoice meta so the Kanban board (which reads these
+    fields) will place the new order under the 'In Progress' column.
+
+    Candidate fields (in priority order):
+      - custom_sales_invoice_state (preferred)
+      - sales_invoice_state
+      - custom_state
+      - state
+    """
+    try:
+        if not getattr(invoice_doc, "sales_partner", None):
+            return
+        target_state = "In Progress"
+        meta = frappe.get_meta("Sales Invoice")
+        candidates = [
+            "custom_sales_invoice_state",
+            "sales_invoice_state",
+            "custom_state",
+            "state",
+        ]
+        updated = []
+        for f in candidates:
+            try:
+                field = meta.get_field(f)
+                if field:
+                    value_to_set = target_state
+                    # If it's a Select field, ensure option exists (case-insensitive)
+                    try:
+                        if getattr(field, "fieldtype", "") == "Select":
+                            raw_options = getattr(field, "options", "") or ""
+                            opts = [o.strip() for o in str(raw_options).split("\n") if o.strip()]
+                            if opts:
+                                match = next((o for o in opts if o.lower() == target_state.lower()), None)
+                                if match:
+                                    value_to_set = match
+                                else:
+                                    # Skip setting this field if 'In Progress' isn't an allowed option
+                                    print(f"   ℹ️ Field '{f}' is Select without 'In Progress' option – skipping")
+                                    field = None
+                    except Exception:
+                        pass
+                    if field:
+                        # Prefer using setter to ensure ORM picks change up
+                        try:
+                            invoice_doc.set(f, value_to_set)
+                        except Exception:
+                            setattr(invoice_doc, f, value_to_set)
+                        updated.append(f)
+            except Exception:
+                # Ignore meta access issues per-field and continue
+                continue
+        if updated:
+            logger.info(
+                f"Initial Kanban state set to '{target_state}' on fields: {updated} (sales_partner present)"
+            )
+            print(f"   🧭 Initial state set to '{target_state}' on {updated}")
+        else:
+            logger.warning(
+                "Sales partner present, but no known Kanban state field found to set initial state"
+            )
+    except Exception as e:
+        try:
+            logger.warning(f"Could not set initial Kanban state for sales partner: {e}")
+        except Exception:
+            pass
+
+
 @frappe.whitelist()
-def create_pos_invoice(cart_json, customer_name, pos_profile_name=None, delivery_charges_json=None, required_delivery_datetime=None):
+def create_pos_invoice(
+    cart_json,
+    customer_name,
+    pos_profile_name=None,
+    delivery_charges_json=None,
+    required_delivery_datetime=None,
+    sales_partner: str | None = None,
+    payment_type: str | None = None,
+):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
-    
+
     Following Frappe/ERPNext best practices:
     - Proper error handling with frappe.throw()
     - Structured logging with frappe.log_error()
@@ -34,72 +187,86 @@ def create_pos_invoice(cart_json, customer_name, pos_profile_name=None, delivery
     - Handle delivery time slot for scheduled deliveries
     - Proper field setting in correct order
     """
-    
+
     # Frappe best practice: Create logger for this module
     logger = frappe.logger("jarz_pos.custom_pos", allow_site=frappe.local.site)
-    
+
     # Always log function entry for debugging
     logger.info(f"create_pos_invoice called with customer: {customer_name}")
-    
-    print("\n" + "="*100)
+
+    print("\n" + "=" * 100)
     print("🚀 CORE FUNCTION: create_pos_invoice")
-    print("="*100)
+    print("=" * 100)
     print(f"🕐 {frappe.utils.now()}")
-    
+
     try:
         # STEP 1: Input Validation and Parsing
-        print(f"\n1️⃣ INPUT VALIDATION:")
+        print("\n1️⃣ INPUT VALIDATION:")
         logger.debug(f"Validating inputs: cart={bool(cart_json)}, customer={customer_name}")
-        
+
         # Validate and parse cart data
         cart_items = validate_cart_data(cart_json, logger)
-        
+
         # Parse delivery charges if provided
         delivery_charges = _parse_delivery_charges(delivery_charges_json, logger)
-        
+
         # Parse and validate delivery datetime
         delivery_datetime = validate_delivery_datetime(required_delivery_datetime, logger)
-        
-        print(f"   ✅ Input validation passed")
-        
+
+        print("   ✅ Input validation passed")
+
         # STEP 2: Customer Validation
-        print(f"\n2️⃣ CUSTOMER VALIDATION:")
+        print("\n2️⃣ CUSTOMER VALIDATION:")
         customer_doc = validate_customer(customer_name, logger)
-        
+
         # STEP 3: POS Profile Validation
-        print(f"\n3️⃣ POS PROFILE VALIDATION:")
+        print("\n3️⃣ POS PROFILE VALIDATION:")
         pos_profile = validate_pos_profile(pos_profile_name, logger)
-        
+
         # STEP 4: Item and Bundle Processing
-        print(f"\n4️⃣ ITEM AND BUNDLE PROCESSING:")
+        print("\n4️⃣ ITEM AND BUNDLE PROCESSING:")
         processed_items = _process_cart_items(cart_items, pos_profile, logger)
-        
+
         # STEP 5: Create Sales Invoice Document
-        print(f"\n5️⃣ CREATING SALES INVOICE:")
+        print("\n5️⃣ CREATING SALES INVOICE:")
         invoice_doc = _create_invoice_document(logger)
-        
+
         # STEP 6: Set Document Fields
-        print(f"\n6️⃣ SETTING DOCUMENT FIELDS:")
+        print("\n6️⃣ SETTING DOCUMENT FIELDS:")
         set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
-        
+
+        # STEP 6.1: Optional Sales Partner assignment (touch-friendly picker from POS)
+        if sales_partner:
+            try:
+                if frappe.db.exists("Sales Partner", sales_partner):
+                    invoice_doc.sales_partner = sales_partner
+                    print(f"   🤝 Sales Partner set: {sales_partner}")
+                else:
+                    print(f"   ⚠️ Sales Partner not found: {sales_partner} (ignored)")
+            except Exception as sp_err:
+                print(f"   ⚠️ Could not set Sales Partner: {sp_err}")
+
+        # STEP 6.2: Initialize Kanban state to 'In Progress' when a Sales Partner is set
+        _set_initial_state_for_sales_partner(invoice_doc, logger)
+
         # STEP 7: Add Items to Document
-        print(f"\n7️⃣ ADDING ITEMS:")
+        print("\n7️⃣ ADDING ITEMS:")
         add_items_to_invoice(invoice_doc, processed_items, logger)
-        
+
         # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
-        print(f"\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
+        print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
         try:
-            territory_name = getattr(customer_doc, 'territory', None)
-            if territory_name and frappe.db.exists('Territory', territory_name):
-                territory_doc = frappe.get_doc('Territory', territory_name)
-                shipping_income = getattr(territory_doc, 'delivery_income', 0) or 0
+            territory_name = getattr(customer_doc, "territory", None)
+            if territory_name and frappe.db.exists("Territory", territory_name):
+                territory_doc = frappe.get_doc("Territory", territory_name)
+                shipping_income = getattr(territory_doc, "delivery_income", 0) or 0
                 print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
                 if shipping_income and float(shipping_income) > 0:
                     # Avoid duplicate insertion (idempotent)
                     already_added = False
-                    if getattr(invoice_doc, 'taxes', None):
+                    if getattr(invoice_doc, "taxes", None):
                         for tax in invoice_doc.taxes:
-                            if (tax.get('description') or '').lower().startswith('shipping income'):
+                            if (tax.get("description") or "").lower().startswith("shipping income"):
                                 already_added = True
                                 print("   ⚠️ Shipping income tax row already present – skipping")
                                 break
@@ -107,7 +274,7 @@ def create_pos_invoice(cart_json, customer_name, pos_profile_name=None, delivery
                         add_delivery_charges_to_taxes(
                             invoice_doc,
                             shipping_income,
-                            delivery_description=f"Shipping Income ({territory_name})"
+                            delivery_description=f"Shipping Income ({territory_name})",
                         )
                         print("   ✅ Shipping income tax row appended")
                 else:
@@ -117,32 +284,43 @@ def create_pos_invoice(cart_json, customer_name, pos_profile_name=None, delivery
         except Exception as ship_err:
             print(f"   ❌ Failed adding shipping income: {ship_err}")
             # Do not abort – continue invoice creation
-        
+
         # STEP 7.5: Add Delivery Charges (legacy param based)
         if delivery_charges:
-            print(f"\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
+            print("\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
             add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
-        
+
         # STEP 8: Validate and Calculate Document
-        print(f"\n8️⃣ DOCUMENT VALIDATION:")
+        print("\n8️⃣ DOCUMENT VALIDATION:")
         _validate_and_calculate_document(invoice_doc, logger)
-        
+
         # STEP 9: Save Document
-        print(f"\n9️⃣ SAVING DOCUMENT:")
+        print("\n9️⃣ SAVING DOCUMENT:")
         _save_document(invoice_doc, delivery_datetime, logger)
-        
+
         # STEP 10: Submit Document
-        print(f"\n🔟 SUBMITTING DOCUMENT:")
+        print("\n🔟 SUBMITTING DOCUMENT:")
         _submit_document(invoice_doc, logger)
-        
-        # STEP 11: Prepare Response
-        print(f"\n🎯 PREPARING RESPONSE:")
+
+        # STEP 11: If payment_type == 'online' and invoice has a sales partner, create a Payment Entry
+        try:
+            _maybe_register_online_payment_to_partner(invoice_doc, sales_partner, payment_type, logger)
+        except Exception as pay_err:
+            # Don't fail invoice creation if payment step fails; log and proceed
+            print(f"   ❌ Online payment registration failed: {pay_err}")
+            try:
+                logger.warning(f"Online payment registration failed: {pay_err}")
+            except Exception:
+                pass
+
+        # STEP 12: Prepare Response
+        print("\n🎯 PREPARING RESPONSE:")
         result = _prepare_response(invoice_doc, delivery_datetime, logger)
-        
-        print(f"\n🎉 SUCCESS! Invoice creation completed!")
-        print("="*100)
+
+        print("\n🎉 SUCCESS! Invoice creation completed!")
+        print("=" * 100)
         return result
-        
+
     except Exception as e:
         # Comprehensive error logging following Frappe best practices
         _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger)
@@ -453,6 +631,10 @@ def _save_document(invoice_doc, delivery_datetime, logger):
     """Save the invoice document."""
     logger.debug("Saving document")
     try:
+        # Set new delivery slot fields before insert if delivery datetime provided
+        if delivery_datetime:
+            _apply_delivery_slot_fields(invoice_doc, delivery_datetime)
+
         # Frappe best practice: Use insert() for new documents
         invoice_doc.insert(ignore_permissions=True)
         logger.info(f"Invoice saved: {invoice_doc.name}")
@@ -470,43 +652,33 @@ def _save_document(invoice_doc, delivery_datetime, logger):
 
 
 def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger):
-    """Verify delivery datetime field was set correctly after save."""
-    print(f"\n🔍 DELIVERY FIELD VERIFICATION AFTER SAVE:")
-    field_name = 'required_delivery_datetime'
-    
+    """Verify delivery slot fields were set correctly after save."""
+    print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
     # Reload document to get fresh state from database
     saved_doc = frappe.get_doc("Sales Invoice", invoice_doc.name)
-    
-    # Check multiple ways to verify the field value
-    field_value_attr = getattr(saved_doc, field_name, None)
-    field_value_get = saved_doc.get(field_name)
-    field_value_db = frappe.db.get_value("Sales Invoice", invoice_doc.name, field_name)
-    
-    print(f"   📊 Field verification for '{field_name}':")
-    print(f"      - Via getattr(): {field_value_attr}")
-    print(f"      - Via get(): {field_value_get}")
-    print(f"      - Via db.get_value(): {field_value_db}")
-    print(f"      - Expected value: {delivery_datetime}")
-    
-    # Determine if field was set successfully
-    field_is_set = any([field_value_attr, field_value_get, field_value_db])
-    
-    if field_is_set:
-        print(f"   ✅ Delivery datetime field verified: {field_value_attr or field_value_get or field_value_db}")
-    else:
-        print(f"   ❌ Delivery datetime field NOT SET - attempting correction...")
-        # Try to set it again on the saved document
+
+    # Fetch new fields
+    date_attr = getattr(saved_doc, "custom_delivery_date", None)
+    time_from_attr = getattr(saved_doc, "custom_delivery_time_from", None)
+    duration_attr = getattr(saved_doc, "custom_delivery_duration", None)
+
+    print(f"   📊 custom_delivery_date: {date_attr}")
+    print(f"   📊 custom_delivery_time_from: {time_from_attr}")
+    print(f"   📊 custom_delivery_duration: {duration_attr}")
+
+    if not (date_attr and time_from_attr and duration_attr):
+        # Attempt to apply from provided delivery_datetime again
         try:
-            saved_doc.set(field_name, delivery_datetime)
+            _apply_delivery_slot_fields(saved_doc, delivery_datetime)
             saved_doc.save(ignore_permissions=True)
-            print(f"   🔄 Re-saved document with delivery datetime")
-            # Verify again
-            final_value = frappe.db.get_value("Sales Invoice", invoice_doc.name, field_name)
-            print(f"   🔍 Final verification: {final_value}")
+            # Reload values
+            date_attr = getattr(saved_doc, "custom_delivery_date", None)
+            time_from_attr = getattr(saved_doc, "custom_delivery_time_from", None)
+            duration_attr = getattr(saved_doc, "custom_delivery_duration", None)
+            print(f"   � Re-saved with delivery slot fields")
         except Exception as correction_error:
-            print(f"   ❌ Could not correct delivery datetime: {str(correction_error)}")
-            # Don't throw error here, just log it
-            logger.warning(f"Delivery datetime field could not be set: {str(correction_error)}")
+            print(f"   ❌ Could not set delivery slot fields: {str(correction_error)}")
+            logger.warning(f"Delivery slot fields could not be set: {str(correction_error)}")
 
 
 def _submit_document(invoice_doc, logger):
@@ -545,12 +717,34 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
     
     # Add delivery information to response if provided
     if delivery_datetime:
-        result["delivery_datetime"] = delivery_datetime.isoformat()
-        result["delivery_date"] = delivery_datetime.date().isoformat()
-        result["delivery_time"] = delivery_datetime.time().isoformat()
-        result["delivery_label"] = delivery_datetime.strftime('%A, %B %d, %Y at %I:%M %p')
-        print(f"      delivery_datetime: {result['delivery_datetime']}")
-        print(f"      delivery_label: {result['delivery_label']}")
+        try:
+            result["delivery_datetime"] = delivery_datetime.isoformat()
+            result["delivery_date"] = delivery_datetime.date().isoformat()
+            result["delivery_time_from"] = delivery_datetime.time().isoformat()
+            # Duration is stored in seconds; include both seconds and minutes for clients
+            dur_seconds = int(float(getattr(invoice_doc, "custom_delivery_duration", 3600) or 3600))
+            result["delivery_duration_seconds"] = dur_seconds
+            result["delivery_duration_minutes"] = int(round(dur_seconds / 60))
+            # Compute a human-readable label
+            try:
+                end_dt = frappe.utils.add_to_date(delivery_datetime, seconds=dur_seconds)
+                mins = int(round(dur_seconds / 60))
+                hrs = mins // 60
+                rem = mins % 60
+                if hrs > 0 and rem == 0:
+                    dur_label = f"{hrs}h"
+                elif hrs > 0:
+                    dur_label = f"{hrs}h {rem}m"
+                else:
+                    dur_label = f"{mins}m"
+                result["delivery_slot_label"] = f"{delivery_datetime.strftime('%H:%M')} - {end_dt.strftime('%H:%M')} ({dur_label})"
+            except Exception:
+                pass
+            result["delivery_label"] = delivery_datetime.strftime('%A, %B %d, %Y at %I:%M %p')
+            print(f"      delivery_datetime: {result['delivery_datetime']}")
+            print(f"      delivery_label: {result['delivery_label']}")
+        except Exception:
+            pass
     
     logger.info(f"Invoice creation successful: {invoice_doc.name}")
     print(f"   ✅ Response prepared:")
@@ -558,6 +752,151 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
         print(f"      {key}: {value}")
     
     return result
+
+
+def _get_company_receivable(company: str) -> str:
+    receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
+    if receivable:
+        return receivable
+    receivable = frappe.db.get_value(
+        "Account",
+        {"company": company, "account_type": "Receivable", "is_group": 0},
+        "name",
+    )
+    if not receivable:
+        frappe.throw("Could not determine receivable account for company")
+    return receivable
+
+
+def _ensure_partner_subaccount(parent_receivable: str, company: str, partner_name: str) -> str:
+    """Ensure an AR child account named exactly as sales partner exists under company receivable.
+
+    Returns the account name (e.g., "Partner X - CmpAbbr").
+    """
+    # Parent format like "Accounts Receivable - CmpAbbr"; derive company abbr suffix
+    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+    desired = f"{partner_name} - {company_abbr}".strip()
+    if frappe.db.exists("Account", desired):
+        return desired
+
+    parent_doc = frappe.get_doc("Account", parent_receivable)
+    # Create new leaf account under receivable
+    acc = frappe.new_doc("Account")
+    acc.account_name = partner_name
+    acc.parent_account = parent_doc.name
+    acc.company = company
+    acc.is_group = 0
+    acc.account_type = "Receivable"
+    acc.insert(ignore_permissions=True)
+    return acc.name
+
+
+def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | None, payment_type: str | None, logger):
+    """When payment_type == 'online', mark invoice paid and allocate to a Payment Entry whose paid_to is
+    the Sales Partner subaccount under Receivables. This keeps AR by sales partner while clearing customer AR.
+    """
+    if not payment_type or str(payment_type).strip().lower() != "online":
+        return
+    try:
+        # Only proceed for submitted invoices with outstanding
+        if int(invoice_doc.docstatus) != 1:
+            return
+        outstanding = float(getattr(invoice_doc, "outstanding_amount", 0) or 0)
+        if outstanding <= 0.0001:
+            return
+        company = invoice_doc.company
+        receivable = _get_company_receivable(company)
+
+        # Determine destination account: Sales Partner subaccount under receivable; if no partner, fallback to receivable
+        if sales_partner and frappe.db.exists("Sales Partner", sales_partner):
+            paid_to = _ensure_partner_subaccount(receivable, company, sales_partner)
+        else:
+            # Fallback: single consolidated AR account (still clears invoice)
+            paid_to = receivable
+
+        try:
+            # Create Payment Entry (Receive)
+            pe = frappe.new_doc("Payment Entry")
+            pe.payment_type = "Receive"
+            pe.party_type = "Customer"
+            pe.party = invoice_doc.customer
+            pe.company = company
+            pe.posting_date = frappe.utils.today()
+            pe.mode_of_payment = None  # optional; could be set to "Online"
+            pe.paid_from = receivable
+            pe.paid_to = paid_to
+            pe.party_account = receivable
+            pe.paid_amount = outstanding
+            pe.received_amount = outstanding
+            pe.append("references", {
+                "reference_doctype": "Sales Invoice",
+                "reference_name": invoice_doc.name,
+                "due_date": getattr(invoice_doc, "due_date", None),
+                "total_amount": float(getattr(invoice_doc, "grand_total", 0) or 0),
+                "outstanding_amount": outstanding,
+                "allocated_amount": outstanding,
+            })
+            pe.flags.ignore_permissions = True
+            try:
+                pe.set_missing_values()
+            except AttributeError:
+                if not getattr(pe, 'party_account', None):
+                    pe.party_account = receivable
+            pe.insert(ignore_permissions=True)
+            pe.submit()
+
+            print(f"   ✅ Online Payment Entry created: {pe.name} → {paid_to}")
+            try:
+                logger.info(f"Online Payment Entry created: {pe.name} to {paid_to}")
+            except Exception:
+                pass
+            return
+        except Exception as pe_err:
+            # Fallback: create a Journal Entry to transfer AR -> partner subaccount and knock off invoice
+            print(f"   ⚠️ Payment Entry validation failed, falling back to Journal Entry: {pe_err}")
+            try:
+                je = frappe.new_doc("Journal Entry")
+                je.voucher_type = "Journal Entry"
+                je.company = company
+                je.posting_date = frappe.utils.today()
+                je.title = f"Online Payment – {invoice_doc.name}"
+                # Debit partner AR subaccount
+                je.append("accounts", {
+                    "account": paid_to,
+                    "debit_in_account_currency": outstanding,
+                    "credit_in_account_currency": 0,
+                    "party_type": None,
+                    "party": None,
+                })
+                # Credit customer receivable with reference to SI (to close it)
+                je.append("accounts", {
+                    "account": receivable,
+                    "credit_in_account_currency": outstanding,
+                    "debit_in_account_currency": 0,
+                    "party_type": "Customer",
+                    "party": invoice_doc.customer,
+                    "reference_type": "Sales Invoice",
+                    "reference_name": invoice_doc.name,
+                })
+                je.flags.ignore_permissions = True
+                je.insert(ignore_permissions=True)
+                je.submit()
+                print(f"   ✅ Journal Entry created to transfer AR: {je.name} (Deb {paid_to} / Cr {receivable})")
+                try:
+                    logger.info(f"JE fallback created: {je.name}")
+                except Exception:
+                    pass
+            except Exception as je_err:
+                print(f"   ❌ JE fallback failed: {je_err}")
+                try:
+                    logger.error(f"JE fallback failed: {je_err}")
+                except Exception:
+                    pass
+                # Re-raise original Payment Entry error to be handled by caller
+                raise pe_err
+    except Exception as e:
+        # Surface exception to caller to log, but do not break invoice creation
+        raise
 
 
 def _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger):

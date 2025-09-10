@@ -1,4 +1,5 @@
 import frappe
+from typing import Optional
 
 @frappe.whitelist(allow_guest=False)
 def get_pos_profiles():
@@ -171,3 +172,64 @@ def get_profile_products(profile: str):
             itm['qty'] = qty
 
     return items 
+
+
+@frappe.whitelist(allow_guest=False)
+def get_sales_partners(search: Optional[str] = None, limit: int = 10):
+    """Return a short, touch-friendly list of Sales Partners.
+
+    Args:
+        search: Optional search text to filter by name/partner_name (case-insensitive LIKE)
+        limit: Max number of partners to return (default 10)
+
+    Returns: List of { name, partner_name, title }
+    """
+    # Some ERPNext versions have 'enabled' instead of 'disabled' on Sales Partner
+    filters = {}
+    try:
+        if frappe.db.has_column("Sales Partner", "enabled"):
+            filters["enabled"] = 1
+        elif frappe.db.has_column("Sales Partner", "disabled"):
+            filters["disabled"] = 0
+    except Exception:
+        # If meta check fails, proceed without status filter
+        pass
+
+    # Ensure limit is an int (Frappe may pass query args as strings)
+    try:
+        limit_i = int(limit) if limit else 10
+    except Exception:
+        limit_i = 10
+
+    # Apply simple search on name or partner_name
+    # Note: LIKE filters use % wildcard in MariaDB
+    try:
+        if search:
+            like = f"%{search}%"
+            partners = frappe.get_all(
+                "Sales Partner",
+                filters=filters,
+                or_filters=[
+                    ["Sales Partner", "name", "like", like],
+                    ["Sales Partner", "partner_name", "like", like],
+                ],
+                fields=["name", "partner_name"],
+                order_by="partner_name asc",
+                limit_page_length=limit_i,
+            )
+        else:
+            partners = frappe.get_all(
+                "Sales Partner",
+                filters=filters,
+                fields=["name", "partner_name"],
+                order_by="partner_name asc",
+                limit_page_length=limit_i,
+            )
+    except Exception as err:
+        frappe.log_error(f"get_sales_partners failed: {err}", "Jarz POS get_sales_partners")
+        partners = []
+
+    # Add a unified display title used by the mobile client
+    for p in partners:
+        p["title"] = p.get("partner_name") or p.get("name")
+    return partners

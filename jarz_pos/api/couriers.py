@@ -22,6 +22,14 @@ from jarz_pos.services.delivery_handling import (
     settle_courier_collected_payment as _settle_courier_collected_payment,
 )
 from jarz_pos.services.delivery_party import create_delivery_party as _create_delivery_party
+from jarz_pos.jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
+from jarz_pos.services import delivery_handling as _delivery_services
+from jarz_pos.jarz_pos.utils.account_utils import (
+    get_freight_expense_account,
+    get_pos_cash_account,
+    validate_account_exists,
+)
+from frappe.utils import now_datetime, get_datetime
 
 
 # ---------------------------------------------------------------------------
@@ -225,3 +233,247 @@ def create_delivery_party(
         first_name=first_name,
         last_name=last_name,
     )
+
+
+# ---------------------------------------------------------------------------
+# Two-step settlement (Preview + Confirm) – server-driven, atomic on confirm
+# ---------------------------------------------------------------------------
+
+def _seconds_since(ts_str: str | None) -> int | None:
+    if not ts_str:
+        return None
+    try:
+        dt = get_datetime(ts_str)
+        if not dt:
+            return None
+        return int((now_datetime() - dt).total_seconds())
+    except Exception:
+        return None
+
+
+def _latest_payment_info(inv_name: str) -> dict | None:
+    try:
+        refs = frappe.get_all(
+            "Payment Entry Reference",
+            filters={"reference_doctype": "Sales Invoice", "reference_name": inv_name},
+            pluck="parent",
+        )
+        if not refs:
+            return None
+        rows = frappe.get_all(
+            "Payment Entry",
+            filters={"name": ["in", refs], "docstatus": 1, "payment_type": "Receive"},
+            fields=["name", "creation", "posting_date", "posting_time", "modified"],
+            order_by="creation desc",
+            limit=1,
+        )
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def generate_settlement_preview(invoice: str, party_type: str | None = None, party: str | None = None, mode: str = "pay_now", recent_payment_seconds: int = 30):
+    """Produce a settlement preview and mint a short-lived token to be used on confirmation.
+
+    Returns:
+      {
+        invoice, party_type, party, mode,
+        order_amount, shipping_amount, net_amount,
+        is_unpaid_effective, last_payment_seconds,
+        preview_token, expires_in
+      }
+    """
+    if not invoice:
+        frappe.throw("invoice is required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    # derive shipping via service helper (territory-aware in your services)
+    try:
+        shipping = float(_delivery_services._get_delivery_expense_amount(inv) or 0.0)  # type: ignore[attr-defined]
+    except Exception:
+        shipping = 0.0
+
+    outstanding = float(inv.outstanding_amount or 0)
+    status_l = (inv.status or "").strip().lower()
+
+    last_pe = _latest_payment_info(inv.name)
+    last_pe_seconds = _seconds_since(last_pe["creation"]) if last_pe else None
+
+    # Effective unpaid when truly unpaid OR payment is too recent (within threshold)
+    unpaid_status = status_l in {"unpaid", "overdue", "partially paid", "partly paid"}
+    is_unpaid_effective = (outstanding > 0.009) or unpaid_status or (last_pe_seconds is not None and last_pe_seconds <= int(recent_payment_seconds))
+
+    order_amount = float(inv.grand_total or 0) if is_unpaid_effective else 0.0
+    net_amount = order_amount - shipping
+
+    # include resolved party if not provided – from any existing CT linked to invoice
+    if not (party_type and party):
+        existing_party = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": inv.name,
+                "party_type": ["not in", [None, ""]],
+                "party": ["not in", [None, ""]],
+            },
+            fields=["party_type", "party"],
+            limit=1,
+        )
+        if existing_party:
+            party_type = existing_party[0].get("party_type")
+            party = existing_party[0].get("party")
+
+    token = frappe.generate_hash(length=16)
+    cache_key = f"jarz_pos:settle_preview:{token}"
+    frappe.cache().hset(
+        cache_key,
+        "data",
+        {
+            "invoice": inv.name,
+            "party_type": party_type,
+            "party": party,
+            "mode": mode,
+            "order_amount": order_amount,
+            "shipping_amount": shipping,
+            "net_amount": net_amount,
+            "is_unpaid_effective": is_unpaid_effective,
+            "last_payment_seconds": last_pe_seconds,
+        },
+    )
+    # expire after 3 minutes
+    frappe.cache().expire(cache_key, 180)
+
+    return {
+        "invoice": inv.name,
+        "party_type": party_type,
+        "party": party,
+        "mode": mode,
+        "order_amount": order_amount,
+        "shipping_amount": shipping,
+        "net_amount": net_amount,
+        "is_unpaid_effective": is_unpaid_effective,
+        "last_payment_seconds": last_pe_seconds,
+        "preview_token": token,
+        "expires_in": 180,
+    }
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile: str | None = None, party_type: str | None = None, party: str | None = None, payment_mode: str = "Cash"):
+    """Confirm a previously previewed settlement atomically.
+
+    If preview indicated unpaid and mode==pay_now, creates a Payment Entry, then performs
+    Out For Delivery transition using unified delivery party details. All inside one transaction.
+    """
+    if not invoice:
+        frappe.throw("invoice is required")
+    if not preview_token:
+        frappe.throw("preview_token is required")
+
+    cache_key = f"jarz_pos:settle_preview:{preview_token}"
+    data = frappe.cache().hget(cache_key, "data")
+    if not data:
+        frappe.throw("Preview expired or invalid. Please reopen the dialog.")
+    if data.get("invoice") != invoice:
+        frappe.throw("Preview does not match invoice. Please reopen the dialog.")
+
+    # adopt party from preview if not provided
+    party_type = party_type or data.get("party_type")
+    party = party or data.get("party")
+
+    # Build a non-empty courier label for legacy 'courier' arg required by services layer
+    def _courier_label(pt: str | None, p: str | None) -> str:
+        pt = (pt or "").strip()
+        p = (p or "").strip()
+        if not p:
+            return "Courier"
+        try:
+            if pt == "Employee":
+                return frappe.db.get_value("Employee", p, "employee_name") or p
+            if pt == "Supplier":
+                return frappe.db.get_value("Supplier", p, "supplier_name") or p
+        except Exception:
+            pass
+        return p
+
+    try:
+        frappe.db.savepoint("confirm_settlement")
+        # If unpaid and pay_now, create a cash PE first
+        if data.get("is_unpaid_effective") and (mode or data.get("mode")) == "pay_now":
+            if not pos_profile and payment_mode.lower() == "cash":
+                frappe.throw("pos_profile is required for Cash payments")
+            _pay_invoice(invoice_name=invoice, payment_mode=payment_mode, pos_profile=pos_profile)  # type: ignore[arg-type]
+
+        # Then perform OFD transition; services currently require a non-empty 'courier' label
+        _handle_out_for_delivery_transition(
+            invoice_name=invoice,
+            courier=_courier_label(party_type, party),
+            mode=mode,
+            pos_profile=pos_profile or "",
+            idempotency_token=None,
+            party_type=party_type,
+            party=party,
+        )
+
+        # As an additional guard, ensure the Courier Expense JE exists for unpaid+pay_now.
+        # Some environments may skip the OFD-created JE naming; we backfill idempotently.
+        try:
+            inv_doc = frappe.get_doc("Sales Invoice", invoice)
+            company = inv_doc.company
+            shipping = float(_delivery_services._get_delivery_expense_amount(inv_doc) or 0.0)  # type: ignore[attr-defined]
+            if shipping > 0 and (data.get("is_unpaid_effective") and (mode or data.get("mode")) == "pay_now"):
+                # If a JE already exists by either title, skip
+                ofd_title = f"Out For Delivery – {inv_doc.name}"
+                cxp_title = f"Courier Expense – {inv_doc.name}"
+                existing = frappe.get_all(
+                    "Journal Entry",
+                    filters={"company": company, "docstatus": 1, "title": ["in", [ofd_title, cxp_title]]},
+                    pluck="name",
+                    limit_page_length=1,
+                )
+                if not existing:
+                    # Create DR Freight / CR Cash with POS Cash account
+                    if not pos_profile:
+                        frappe.throw("POS Profile required to book courier expense payment")
+                    cash_acc = get_pos_cash_account(pos_profile, company)
+                    freight_acc = get_freight_expense_account(company)
+                    for acc in (cash_acc, freight_acc):
+                        validate_account_exists(acc)
+                    je = frappe.new_doc("Journal Entry")
+                    je.voucher_type = "Journal Entry"
+                    je.posting_date = frappe.utils.nowdate()
+                    je.company = company
+                    je.title = cxp_title
+                    je.append("accounts", {"account": freight_acc, "debit_in_account_currency": shipping, "credit_in_account_currency": 0})
+                    je.append("accounts", {"account": cash_acc, "debit_in_account_currency": 0, "credit_in_account_currency": shipping})
+                    je.save(ignore_permissions=True)
+                    je.submit()
+        except Exception:
+            # Do not fail confirmation if the backfill JE experiences a non-critical issue.
+            frappe.logger().warning("confirm_settlement: optional courier expense JE backfill failed", exc_info=True)
+
+        frappe.db.commit()
+        # Invalidate token to prevent replays
+        try:
+            frappe.cache().delete_value(cache_key)
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "invoice": invoice,
+            "mode": mode,
+            "order_amount": data.get("order_amount"),
+            "shipping_amount": data.get("shipping_amount"),
+            "net_amount": data.get("net_amount"),
+            "is_unpaid_effective": data.get("is_unpaid_effective"),
+            "party_type": party_type,
+            "party": party,
+        }
+    except Exception as e:
+        frappe.db.rollback(save_point="confirm_settlement")
+        frappe.log_error(frappe.get_traceback(), "confirm_settlement failed")
+        raise

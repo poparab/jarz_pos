@@ -2,6 +2,122 @@ import frappe
 from frappe import _
 
 
+def _enforce_and_migrate_delivery_slot(doc):
+    """Ensure the new delivery slot fields are used and valid.
+
+    - If legacy required_delivery_datetime exists and new fields are empty, migrate it.
+    - If any of the new fields is provided, require all of them and validate.
+    - Ensure start datetime is in the future and duration > 0.
+    """
+    try:
+        # Treat invoices with Woo mapping as imported
+        imported = bool(getattr(doc, "woo_order_id", None) or getattr(doc, "woo_order_number", None))
+        # Read new fields (may be absent depending on Custom Field presence)
+        delivery_date = getattr(doc, "custom_delivery_date", None)
+        time_from = getattr(doc, "custom_delivery_time_from", None)
+        duration = getattr(doc, "custom_delivery_duration", None)
+
+        # Migrate from legacy single datetime if present and new fields not yet set
+        legacy = getattr(doc, "required_delivery_datetime", None)
+        if legacy and not (delivery_date and time_from):
+            try:
+                dt = frappe.utils.get_datetime(legacy)
+                doc.custom_delivery_date = dt.date()
+                doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
+                if not getattr(doc, "custom_delivery_duration", None):
+                    doc.custom_delivery_duration = 3600  # default 1h in seconds
+                # Best-effort: clear legacy to avoid confusion if field still exists
+                try:
+                    doc.required_delivery_datetime = None
+                except Exception:
+                    pass
+                delivery_date = doc.custom_delivery_date
+                time_from = doc.custom_delivery_time_from
+                duration = getattr(doc, "custom_delivery_duration", None)
+            except Exception:
+                # If legacy unparsable, ignore; downstream validation may still pass if fields are optional
+                pass
+
+        # If none of the fields provided, allow submission (feature optional for some invoices)
+        any_provided = bool(delivery_date or time_from or duration)
+        if not any_provided:
+            return
+
+        # Require all fields when any is provided (skip for imported invoices)
+        missing = []
+        if not delivery_date:
+            missing.append("Delivery Date")
+        if not time_from:
+            missing.append("Start Time")
+        if not duration:
+            missing.append("Duration (seconds)")
+        if missing:
+            if imported:
+                # Allow incomplete slot for imported invoices
+                return
+            frappe.throw(_(f"Please provide complete Delivery Slot fields: {', '.join(missing)}."))
+
+        # Validate future datetime and positive duration
+        try:
+            start_dt = frappe.utils.get_datetime(f"{delivery_date} {time_from}")
+        except Exception:
+            frappe.throw(_("Invalid Delivery Slot date/time format."))
+
+        # Normalize duration to seconds and apply a safe hours heuristic
+        try:
+            dur_seconds = int(float(duration or 0))
+        except Exception:
+            dur_seconds = 0
+        if dur_seconds <= 0:
+            if imported:
+                # Default to 1 hour for imported invoices if duration invalid
+                dur_seconds = 3600
+                try:
+                    doc.custom_delivery_duration = dur_seconds
+                except Exception:
+                    pass
+            else:
+                frappe.throw(_("Delivery Slot duration must be greater than 0 seconds."))
+
+        # Heuristic: if value looks like a tiny minute count (<= 12m), interpret as hours
+        # Example: 4m (240 seconds) -> 4 hours (14400 seconds)
+        if 60 <= dur_seconds <= 12 * 60 and dur_seconds % 60 == 0:
+            dur_seconds = dur_seconds * 60
+            try:
+                doc.custom_delivery_duration = dur_seconds
+            except Exception:
+                pass
+
+        now = frappe.utils.now_datetime()
+        if not imported and start_dt <= now:
+            frappe.throw(_(f"Delivery Slot start must be in the future. Provided: {start_dt}, Now: {now}"))
+
+        # Compute and set a human-readable slot label for Desk display
+        try:
+            end_dt = frappe.utils.add_to_date(start_dt, seconds=dur_seconds)
+            mins = int(round(dur_seconds / 60))
+            hrs = mins // 60
+            rem = mins % 60
+            if hrs > 0 and rem == 0:
+                dur_label = f"{hrs}h"
+            elif hrs > 0:
+                dur_label = f"{hrs}h {rem}m"
+            else:
+                dur_label = f"{mins}m"
+            slot_label = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')} ({dur_label})"
+            try:
+                setattr(doc, "custom_delivery_slot_label", slot_label)
+            except Exception:
+                pass
+        except Exception:
+            # Non-fatal; label is optional UI sugar
+            pass
+
+    except Exception as e:
+        # Never block submission due to enforcement failure debugging; raise with clear message
+        frappe.throw(_(f"Delivery Slot validation error: {str(e)}"))
+
+
 def publish_new_invoice(doc, method):
     """Publish a realtime event whenever a Sales Invoice is created."""
     try:
@@ -114,32 +230,39 @@ def validate_invoice_before_submit(doc, method):
     - Total amounts match expected bundle pricing
     """
     try:
+        # Enforce/migrate delivery slot prior to other validations
+        _enforce_and_migrate_delivery_slot(doc)
         frappe.log_error(f"Validating invoice {doc.name} before submit", "Bundle Validation")
-        
+
         # Check if invoice contains bundle items
         has_bundle_items = any(
-            item.get('is_bundle_parent') or item.get('is_bundle_child') 
+            item.get('is_bundle_parent') or item.get('is_bundle_child')
             for item in doc.items
         )
-        
+
         if not has_bundle_items:
-            frappe.log_error(f"Invoice {doc.name} has no bundle items, skipping bundle validation", "Bundle Validation")
+            frappe.log_error(
+                f"Invoice {doc.name} has no bundle items, skipping bundle validation",
+                "Bundle Validation",
+            )
             return
-            
+
         print(f"\n🔍 BUNDLE VALIDATION FOR INVOICE: {doc.name}")
-        
+
         # Validate bundle parent items
         _validate_bundle_parents(doc)
-        
+
         # Validate bundle child items
         _validate_bundle_children(doc)
-        
+
         # Validate bundle totals
         _validate_bundle_totals(doc)
-        
+
         print(f"✅ Bundle validation passed for invoice {doc.name}")
-        frappe.log_error(f"Bundle validation passed for invoice {doc.name}", "Bundle Validation")
-        
+        frappe.log_error(
+            f"Bundle validation passed for invoice {doc.name}", "Bundle Validation"
+        )
+
     except Exception as e:
         error_msg = f"Bundle validation failed for invoice {doc.name}: {str(e)}"
         frappe.log_error(error_msg, "Bundle Validation")

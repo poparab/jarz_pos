@@ -14,6 +14,146 @@ from jarz_pos.jarz_pos.utils.account_utils import (
     get_creditors_account,
 )
 
+# ---------------------------------------------------------------------------
+# Delivery Note Auto-Creation Helper
+# Centralized so ALL Out For Delivery transitions (courier endpoints, kanban,
+# future automation) reuse identical logic & logging.
+# ---------------------------------------------------------------------------
+
+DN_LOGIC_VERSION = "2025-09-07a"
+
+def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
+    """Idempotently ensure a submitted Delivery Note exists for Sales Invoice.
+
+    Strategy (in order):
+      1. Reuse an existing submitted Delivery Note whose remarks already embeds invoice name
+         (pattern used by earlier logic) OR that has a custom link field if present.
+      2. Create new Delivery Note copying items (with per-row warehouse fallback):
+            * Use first available item.warehouse as default (set_warehouse)
+            * If no warehouses at all, leave blank (stock validation may still pass for non-stock items).
+
+    Returns dict:
+        {
+          "delivery_note": str | None,
+          "reused": bool,
+          "error": str | None,
+          "logic_version": DN_LOGIC_VERSION
+        }
+    Raises (propagates) only on unexpected internal errors AFTER logging.
+    """
+    out = {"delivery_note": None, "reused": False, "error": None, "logic_version": DN_LOGIC_VERSION}
+    try:
+        si = frappe.get_doc("Sales Invoice", invoice_name)
+        if si.docstatus != 1:
+            out["error"] = "Invoice must be submitted before creating Delivery Note"
+            return out
+
+        # Idempotency / reuse search: remarks OR (optional) custom link field if exists
+        try:
+            # Try custom field first (if admin later adds one, this code adapts automatically)
+            dn_link_field = None
+            dn_meta = frappe.get_meta("Delivery Note")
+            for candidate in ["sales_invoice", "against_sales_invoice", "reference_invoice", "jarz_sales_invoice_ref"]:
+                if dn_meta.get_field(candidate):
+                    dn_link_field = candidate
+                    break
+            existing = []
+            if dn_link_field:
+                existing = frappe.get_all(
+                    "Delivery Note",
+                    filters={dn_link_field: invoice_name, "docstatus": 1},
+                    pluck="name",
+                    limit_page_length=1,
+                )
+            if not existing:
+                existing = frappe.get_all(
+                    "Delivery Note",
+                    filters={"docstatus": 1, "remarks": ["like", f"%{invoice_name}%"]},
+                    pluck="name",
+                    limit_page_length=1,
+                )
+            if existing:
+                out["delivery_note"] = existing[0]
+                out["reused"] = True
+                try:
+                    # Force completed state (order already shipped)
+                    dn_doc = frappe.get_doc("Delivery Note", existing[0])
+                    if int(getattr(dn_doc, "docstatus", 0) or 0) == 1:
+                        try:
+                            dn_doc.db_set("per_billed", 100, update_modified=False)
+                        except Exception:
+                            pass
+                        try:
+                            dn_doc.db_set("status", "Completed", update_modified=False)
+                        except Exception:
+                            pass
+                except Exception as _mark_err:
+                    frappe.logger().warning(f"AUTO_DN reuse mark-completed failed for {existing[0]}: {_mark_err}")
+                frappe.logger().info(f"AUTO_DN reuse Delivery Note {existing[0]} for {invoice_name}")
+                return out
+        except Exception as reuse_err:
+            # Non-fatal – continue to creation path
+            frappe.logger().warning(f"AUTO_DN reuse lookup failed for {invoice_name}: {reuse_err}")
+
+        # Build new Delivery Note
+        frappe.logger().info(f"AUTO_DN creating Delivery Note for {invoice_name}")
+        dn = frappe.new_doc("Delivery Note")
+        dn.customer = si.customer
+        dn.company = si.company
+        dn.posting_date = frappe.utils.getdate()
+        dn.posting_time = frappe.utils.nowtime()
+        dn.remarks = f"Auto-created from Sales Invoice {si.name} (state -> Out for Delivery)"
+
+        default_wh = None
+        for it in si.items:
+            if it.get("warehouse"):
+                default_wh = it.get("warehouse")
+                break
+        if default_wh:
+            dn.set_warehouse = default_wh
+
+        for it in si.items:
+            dn.append("items", {
+                "item_code": it.item_code,
+                "item_name": it.item_name,
+                "description": it.description,
+                "qty": it.qty,
+                "uom": it.uom,
+                "stock_uom": it.stock_uom,
+                "conversion_factor": getattr(it, "conversion_factor", 1) or 1,
+                "rate": it.rate,
+                "amount": it.amount,
+                "warehouse": it.get("warehouse") or default_wh,
+            })
+        # Attempt to set link field if exists (does not break if absent)
+        try:
+            for candidate in ["sales_invoice", "against_sales_invoice", "reference_invoice", "jarz_sales_invoice_ref"]:
+                if hasattr(dn, candidate):
+                    setattr(dn, candidate, si.name)
+                    break
+        except Exception:
+            pass
+
+        dn.flags.ignore_permissions = True
+        dn.insert(ignore_permissions=True)
+        dn.submit()
+        # Mark completed (fully billed) per business rule
+        try:
+            dn.db_set("per_billed", 100, update_modified=False)
+        except Exception:
+            pass
+        try:
+            dn.db_set("status", "Completed", update_modified=False)
+        except Exception:
+            pass
+        out["delivery_note"] = dn.name
+        frappe.logger().info(f"AUTO_DN created Delivery Note {dn.name} for {invoice_name}")
+        return out
+    except Exception as err:
+        out["error"] = str(err)
+        frappe.logger().error(f"AUTO_DN failed for {invoice_name}: {err}\n{frappe.get_traceback()}")
+        return out
+
 
 @frappe.whitelist()
 def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None):
@@ -47,17 +187,10 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     outstanding = float(inv.outstanding_amount or 0)
     order_amount = float(inv.grand_total or outstanding)
 
-    paid_to_account = _get_courier_outstanding_account(company)
-    paid_from_account = _get_receivable_account(company)
-    pe = _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding)
-
+    # Compute shipping first for CT and later JE
     shipping_exp = _get_delivery_expense_amount(inv)
-    je_name = None
-    if shipping_exp and shipping_exp > 0:
-        creditors_acc = get_creditors_account(company)
-        je_name = _create_shipping_expense_to_creditors_je(inv, shipping_exp, creditors_acc, party_type, party)
 
-    # Create Courier Transaction (values set before insert, no post set_value call)
+    # Create Courier Transaction BEFORE creating Payment Entry so that preview timing treats this as unpaid-effective
     ct = frappe.new_doc("Courier Transaction")
     ct.party_type = party_type
     ct.party = party
@@ -69,6 +202,17 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     ct.payment_mode = "Deferred"
     ct.notes = "Courier Outstanding (collect order amount from courier)"
     ct.insert(ignore_permissions=True)
+
+    # Now move receivable to Courier Outstanding via Payment Entry (this will mark invoice Paid in ERP terms)
+    paid_to_account = _get_courier_outstanding_account(company)
+    paid_from_account = _get_receivable_account(company)
+    pe = _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding)
+
+    # Accrue courier shipping payable to Creditors (party line) if configured
+    je_name = None
+    if shipping_exp and shipping_exp > 0:
+        creditors_acc = get_creditors_account(company)
+        je_name = _create_shipping_expense_to_creditors_je(inv, shipping_exp, creditors_acc, party_type, party)
 
     # Update state (defer state commit to end of request)
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
@@ -128,10 +272,10 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
         inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=False)
     
-    # Determine expense amount based on invoice city
+    # Determine expense amount based on invoice territory
     amount = _get_delivery_expense_amount(inv)
     if amount <= 0:
-        frappe.throw("No delivery expense configured for the invoice city.")
+        frappe.throw("No delivery expense configured for the invoice territory.")
     
     # Idempotency guard – return existing submitted JE if already created
     existing_je = frappe.db.get_value(
@@ -197,7 +341,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     
     amount = _get_delivery_expense_amount(inv)
     if amount <= 0:
-        frappe.throw("No delivery expense configured for the invoice city.")
+        frappe.throw("No delivery expense configured for the invoice territory.")
     
     # Idempotency – avoid duplicate CTs for same purpose
     existing_ct = frappe.db.get_value(
@@ -317,9 +461,11 @@ def get_courier_balances():
         ship = float(r.get("shipping_amount") or 0)
         grp["balance"] += amt - ship
         inv = r.get("reference_invoice")
+        loc_label = _get_invoice_city(inv)
         grp["details"].append({
             "invoice": inv,
-            "city": _get_invoice_city(inv),
+            "city": loc_label,       # back-compat key kept
+            "territory": loc_label,  # new explicit key
             "amount": amt,
             "shipping": ship,
         })
@@ -494,6 +640,11 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
     company = inv.company
     shipping_exp = _get_delivery_expense_amount(inv) or 0.0
 
+    # Ensure / create Delivery Note (abort if failure per business requirement)
+    dn_result = ensure_delivery_note_for_invoice(inv.name)
+    if dn_result.get("error"):
+        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+
     # Update operational state idempotently
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
         try:
@@ -598,6 +749,9 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         "journal_entry": je_name,
         "courier_transaction": ct_name,
         "settlement": settlement,
+        "delivery_note": dn_result.get("delivery_note"),
+        "delivery_note_reused": dn_result.get("reused"),
+        "dn_logic_version": DN_LOGIC_VERSION,
     }
     frappe.publish_realtime("jarz_pos_out_for_delivery_transition", payload, user="*")
     return {"success": True, **payload}
@@ -625,8 +779,22 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
 
         if not invoice_name:
             frappe.throw("invoice_name required")
+        # Accept empty courier for newer clients; derive a display label from party if missing
+        def _derive_courier_label(pt: str | None, p: str | None) -> str:
+            pt = (pt or '').strip()
+            p = (p or '').strip()
+            if not p:
+                return 'Courier'
+            try:
+                if pt == 'Employee':
+                    return frappe.db.get_value('Employee', p, 'employee_name') or p
+                if pt == 'Supplier':
+                    return frappe.db.get_value('Supplier', p, 'supplier_name') or p
+            except Exception:
+                pass
+            return p
         if not courier:
-            frappe.throw("courier required (legacy label)")
+            courier = _derive_courier_label(party_type, party)
         if mode not in {"pay_now", "settle_later"}:
             frappe.throw("mode must be 'pay_now' or 'settle_later'")
         if not pos_profile:
@@ -656,7 +824,7 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
         if float(inv.outstanding_amount or 0) > 0.01:
             frappe.throw("Invoice must be fully paid before marking Out for Delivery")
 
-        # ---- Shipping Expense (from city) ----
+    # ---- Shipping Expense (from territory) ----
         shipping_exp = _get_delivery_expense_amount(inv) or 0.0
 
         # ---- Account Resolution ----
@@ -795,6 +963,11 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
 
     # Frappe will commit automatically at end of request if no exception
 
+        # Delivery Note auto-create AFTER state update (abort on failure)
+        dn_result = ensure_delivery_note_for_invoice(inv.name)
+        if dn_result.get("error"):
+            frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+
         payload = {
             "invoice": inv.name,
             "courier": courier,
@@ -807,6 +980,9 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
             "idempotent": idempotent_flag,
             "idempotency_token": token,
             "has_idempotency_column": has_idem_col,
+            "delivery_note": dn_result.get("delivery_note"),
+            "delivery_note_reused": dn_result.get("reused"),
+            "dn_logic_version": DN_LOGIC_VERSION,
         }
         try:
             payload["amount"] = float(inv.grand_total or 0)
@@ -885,7 +1061,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     company = inv.company
     shipping_exp = _get_delivery_expense_amount(inv) or 0.0
     if shipping_exp <= 0:
-        frappe.throw("No shipping expense configured for this invoice")
+        frappe.throw("No shipping expense configured for this invoice's territory")
 
     cash_acc = get_pos_cash_account(pos_profile, company)
     creditors_acc = get_creditors_account(company)
@@ -1022,15 +1198,16 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             je.posting_date = frappe.utils.nowdate()
             je.company = company
             je.title = title
-            # Shipping-only immediate payment: recognize expense now and credit cash
-            freight_acc = get_freight_expense_account(company)
-            validate_account_exists(freight_acc)
-            je.append("accounts", {  # DR Freight Expense
-                "account": freight_acc,
+            # Always clear previously accrued payable: DR Creditors / CR Cash.
+            # (Expense was recognized at Out For Delivery stage.)
+            je.append("accounts", {
+                "account": creditors_acc,
+                "party_type": party_type,
+                "party": party,
                 "debit_in_account_currency": shipping_exp,
                 "credit_in_account_currency": 0,
             })
-            je.append("accounts", {  # CR Cash
+            je.append("accounts", {
                 "account": cash_acc,
                 "debit_in_account_currency": 0,
                 "credit_in_account_currency": shipping_exp,
@@ -1223,66 +1400,82 @@ def _get_receivable_account(company):
 
 def _get_delivery_expense_amount(inv):
     """
-    Return delivery expense amount (float) for the given invoice using its city.
-    Tries to resolve city from the shipping / customer address linked to the invoice
-    and then fetches the *delivery_expense* field from the **City** DocType.
-    Returns ``0`` if city or expense could not be determined.
+    Return delivery expense amount (float) for the given invoice using its Territory.
+
+    Robust strategy:
+      1) Resolve Territory from Sales Invoice (inv.territory), else from Customer.
+      2) Discover available Territory columns and probe common field names for shipping/expense
+         (both custom_ and standard-style) WITHOUT triggering unknown-column errors.
+      3) If zero/None, walk up the territory tree via parent_territory until root.
+
+    Returns 0.0 if not found.
     """
-    address_name = inv.get("shipping_address_name") or inv.get("customer_address")
-    if not address_name:
+    # Resolve territory from invoice, then customer as fallback
+    territory = (inv.get("territory") or "").strip()
+    if not territory:
+        try:
+            territory = (frappe.db.get_value("Customer", inv.customer, "territory") or "").strip()
+        except Exception:
+            territory = ""
+    if not territory:
+        # Nothing to resolve from
         return 0.0
-    
-    try:
-        addr = frappe.get_doc("Address", address_name)
-    except Exception:
-        return 0.0
-    
-    city_id = getattr(addr, "city", None)
-    if not city_id:
-        return 0.0
-    
-    # Primary direct lookup (assumes city field holds the City doc name/id)
-    try:
-        expense = frappe.db.get_value("City", city_id, "delivery_expense")
-        if expense is not None:
-            val = float(expense or 0)
-            if val > 0:
-                return val
-    except Exception:
-        pass
 
-    # Fallback 1: match by city_name (case-insensitive) if Address.city stored a plain name
+    # Discover real columns on Territory to avoid unknown-column failures
     try:
-        fallback_name = frappe.db.get_value(
-            "City",
-            {"city_name": ["=", city_id]},
-            "delivery_expense",
-        )
-        if fallback_name is not None and float(fallback_name or 0) > 0:
-            return float(fallback_name or 0)
+        columns = set(frappe.db.get_table_columns("Territory") or [])
     except Exception:
-        pass
+        columns = set()
 
-    # Fallback 2: case-insensitive city_name search
-    try:
-        rows = frappe.get_all(
-            "City",
-            filters={"city_name": ["like", city_id]},
-            fields=["delivery_expense"],
-            limit_page_length=1,
-        )
-        if rows:
-            val = float(rows[0].get("delivery_expense") or 0)
-            if val > 0:
-                return val
-    except Exception:
-        pass
+    # Priority-ordered candidate field names (first positive wins)
+    candidate_fields = [
+        "custom_delivery_expense",
+        "custom_shipping_expense",
+        "custom_delivery_fee",
+        "custom_shipping_fee",
+        "delivery_expense",
+        "shipping_expense",
+        "delivery_fee",
+        "shipping_fee",
+    ]
+    valid_fields = [f for f in candidate_fields if f in columns]
+
+    def first_positive_value(territory_name: str) -> float:
+        # Probe one field at a time to avoid unknown-column errors
+        for fld in valid_fields:
+            try:
+                val = frappe.db.get_value("Territory", territory_name, fld)
+                val_f = float(val or 0)
+                if val_f > 0:
+                    return val_f
+            except Exception:
+                # Ignore conversion/errors and try next field
+                continue
+        return 0.0
+
+    # Walk up the territory tree until we find a configured amount
+    current = territory
+    visited = set()
+    while current and current not in visited:
+        visited.add(current)
+        amt = first_positive_value(current)
+        if amt > 0:
+            return amt
+        try:
+            current = frappe.db.get_value("Territory", current, "parent_territory") or None
+        except Exception:
+            current = None
 
     # Debug logging when expense not found – assists diagnosing zero shipping_amount
     try:
         frappe.log_error(
-            title="Delivery Expense Resolution Miss",
-            message=f"Invoice: {inv.name}\nAddress: {address_name}\nCity Raw: {city_id}\nResolved 0 expense via all strategies"
+            title="Delivery Expense Resolution Miss (Territory)",
+            message=(
+                f"Invoice: {inv.name}\n"
+                f"Resolved from Territory chain starting at: {territory}\n"
+                f"Checked fields: {', '.join(valid_fields) or '<none>'}\n"
+                f"No positive value found on any ancestor"
+            ),
         )
     except Exception:
         pass
@@ -1290,29 +1483,40 @@ def _get_delivery_expense_amount(inv):
 
 
 def _get_invoice_city(invoice_name):
-    """Get the city name for an invoice."""
+    """Back-compat: return a label for the invoice location; now uses Territory.
+
+    We keep the function name and return value purpose the same to avoid breaking
+    clients expecting a 'city' label. The value returned will be the Territory's
+    display name.
+    """
     if not invoice_name:
         return ""
-    
-    # Fetch shipping or customer address linked to the invoice
-    si_addr = frappe.db.get_value(
-        "Sales Invoice",
-        invoice_name,
-        ["shipping_address_name", "customer_address"],
-        as_dict=True,
-    )
-    
-    addr_name = None
-    if si_addr:
-        addr_name = si_addr.get("shipping_address_name") or si_addr.get("customer_address")
-    
-    if addr_name:
-        city_id = frappe.db.get_value("Address", addr_name, "city")
-        if city_id:
-            city_name = frappe.db.get_value("City", city_id, "city_name")
-            return city_name or city_id or ""
-    
-    return ""
+
+    try:
+        inv = frappe.db.get_value(
+            "Sales Invoice",
+            invoice_name,
+            ["territory", "customer"],
+            as_dict=True,
+        )
+    except Exception:
+        inv = None
+    territory = ""
+    if inv:
+        territory = (inv.get("territory") or "").strip()
+        if not territory:
+            try:
+                territory = (frappe.db.get_value("Customer", inv.get("customer"), "territory") or "").strip()
+            except Exception:
+                territory = ""
+    if not territory:
+        return ""
+
+    try:
+        name, disp = frappe.db.get_value("Territory", territory, ["name", "territory_name"]) or (None, None)
+        return (disp or name or "").strip()
+    except Exception:
+        return territory
 
 
 def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding):

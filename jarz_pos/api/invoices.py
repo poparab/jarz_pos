@@ -36,6 +36,12 @@ def create_pos_invoice():
     pos_profile_name = frappe.form_dict.get('pos_profile_name')
     delivery_charges_json = frappe.form_dict.get('delivery_charges_json')
     required_delivery_datetime = frappe.form_dict.get('required_delivery_datetime')
+    sales_partner = frappe.form_dict.get('sales_partner')
+    payment_type = frappe.form_dict.get('payment_type')  # 'cash' | 'online' (optional)
+    # New delivery slot fields (optional; preferred)
+    delivery_date = frappe.form_dict.get('delivery_date')
+    delivery_time_from = frappe.form_dict.get('delivery_time_from')
+    delivery_duration = frappe.form_dict.get('delivery_duration')
     
     # Frappe best practice: Use frappe.logger() for structured logging
     logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
@@ -77,6 +83,7 @@ RAW PARAMETERS:
     print(f"   pos_profile_name: {pos_profile_name} (type: {type(pos_profile_name)})")
     print(f"   delivery_charges_json: {delivery_charges_json} (type: {type(delivery_charges_json)})")
     print(f"   required_delivery_datetime: {required_delivery_datetime} (type: {type(required_delivery_datetime)})")
+    print(f"   delivery_date: {delivery_date} | delivery_time_from: {delivery_time_from} | delivery_duration: {delivery_duration}")
     
     try:
         # Validate parameters before calling legacy function
@@ -102,8 +109,24 @@ RAW PARAMETERS:
         
         print(f"\n🔄 Calling core function...")
         
+        # Prefer new delivery slot fields; if provided, synthesize a delivery_datetime for service layer
+        if delivery_date and delivery_time_from:
+            try:
+                # Construct ISO string; duration is handled inside service/hook
+                required_delivery_datetime = f"{delivery_date} {delivery_time_from}"
+            except Exception:
+                pass
+
         # Call the refactored service function
-        result = _create_invoice(cart_json, customer_name, pos_profile_name, delivery_charges_json, required_delivery_datetime)
+        result = _create_invoice(
+            cart_json,
+            customer_name,
+            pos_profile_name,
+            delivery_charges_json,
+            required_delivery_datetime,
+            sales_partner,
+            payment_type,
+        )
         
         # Log successful response
         print(f"\n✅ API CALL SUCCESSFUL!")
@@ -356,47 +379,141 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
 
     shipping = _delivery._get_delivery_expense_amount(inv) or 0.0  # protected helper reused
 
-    # Fetch unsettled CTs
+    # Fetch unsettled CTs; when party not provided, do NOT filter by party to avoid excluding valid rows
+    ct_filters = {
+        "reference_invoice": invoice_name,
+        "status": ["!=", "Settled"],
+    }
+    if party_type and party:
+        ct_filters["party_type"] = party_type
+        ct_filters["party"] = party
     cts = frappe.get_all(
         "Courier Transaction",
-        filters={
-            "reference_invoice": invoice_name,
-            "status": ["!=", "Settled"],
-            "party_type": party_type if party_type else ["in", [party_type, None, ""]],
-            "party": party if party else ["in", [party, None, ""]],
-        },
-        fields=["name", "amount", "shipping_amount"],
+        filters=ct_filters,
+        fields=["name", "amount", "shipping_amount", "party_type", "party"],
     )
 
     order_amount = 0.0
+    any_ct_order = False
     # pick first unsettled CT amount>0
     for r in cts:
         amt = float(r.get("amount") or 0)
         if amt > 0:
             order_amount = amt
+            any_ct_order = True
             break
     invoice_total = float(inv.grand_total or 0)
-    # Fallback: if no unsettled CT amount (already settled or none created yet) but invoice total exists and unpaid scenario desired
-    if order_amount <= 0 and invoice_total > 0:
+    has_ct_rows = bool(cts)
+    status_l = (str(inv.get("status") or "") or "").strip().lower()
+    outstanding = float(inv.outstanding_amount or 0)
+    is_unpaid = (
+        outstanding > 0.01
+        or status_l in {"unpaid", "overdue", "partially paid"}
+    )
+    is_paid = (outstanding <= 0.01 and status_l in {"paid", "credit note issued"})
+
+    # Determine if customer actually paid via Payment Entry (Receive)
+    has_customer_payment = False
+    pe_names = []
+    pe_first_creation = None
+    try:
+        ref_parents = frappe.get_all(
+            "Payment Entry Reference",
+            filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+            pluck="parent",
+        )
+        if ref_parents:
+            rows = frappe.get_all(
+                "Payment Entry",
+                filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+                fields=["name", "creation", "posting_date", "reference_no"],
+            )
+            pe_names = [r["name"] for r in rows]
+            has_customer_payment = bool(rows)
+            if rows:
+                pe_first_creation = min([r["creation"] for r in rows if r.get("creation")])
+    except Exception:
+        # Ignore lookup errors; default to False
+        has_customer_payment = False
+
+    # Detect if OFD JE/CT exists and its creation timestamp
+    ofd_creation = None
+    try:
+        ofd_rows = frappe.get_all(
+            "Journal Entry",
+            filters={"title": ["like", f"Out For Delivery – {inv.name}%"], "docstatus": 1, "company": inv.company},
+            fields=["name", "creation"],
+            limit_page_length=1,
+        )
+        if ofd_rows:
+            ofd_creation = ofd_rows[0].get("creation")
+        if not ofd_creation:
+            ct_rows = frappe.get_all(
+                "Courier Transaction",
+                filters={"reference_invoice": inv.name},
+                fields=["name", "creation"],
+                limit_page_length=1,
+            )
+            if ct_rows:
+                ofd_creation = ct_rows[0].get("creation")
+    except Exception:
+        pass
+
+    # Key rule: For unpaid/overdue invoices (settle now path), always collect total - shipping
+    # regardless of existing shipping-only courier transactions.
+    # If system says Paid but payment seems to have been created AFTER OFD transition, treat as unpaid for preview
+    paid_after_ofd = False
+    if not is_unpaid and is_paid and pe_first_creation and ofd_creation and pe_first_creation > ofd_creation:
+        paid_after_ofd = True
+        is_unpaid = True
+
+    if is_unpaid:
         order_amount = invoice_total
+    else:
+        if any_ct_order:
+            # respect explicit CT order amount
+            pass
+        elif has_customer_payment or is_paid:
+            # Customer paid -> shipping only
+            order_amount = 0.0
+        else:
+            # No evidence of customer payment -> treat as settle-now
+            order_amount = invoice_total
 
     net_amount = order_amount - shipping
     # Special case: pure shipping (order_amount == 0 < shipping)
     if order_amount == 0 and shipping > 0:
         net_amount = -shipping
 
+    # Debug trace for diagnostics
+    try:
+        frappe.log_error(
+            title="Settlement Preview Trace",
+            message=(
+                f"Invoice: {inv.name}\n"
+                f"Status: {status_l} | Outstanding: {outstanding}\n"
+                f"is_unpaid: {is_unpaid} | is_paid: {is_paid}\n"
+                f"invoice_total: {invoice_total} | order_amount: {order_amount} | shipping: {shipping}\n"
+                f"net_amount: {net_amount} | CTs: {len(cts)}"
+            ),
+        )
+    except Exception:
+        pass
+
+    paid_note = "Paid" if (is_paid and not paid_after_ofd) else ("Unpaid" if is_unpaid else status_l.capitalize() or "Unknown")
+
     if net_amount > 0:
         scenario = "collect"
         branch_action = "collect"
-        msg = f"Collect {net_amount:.2f} from courier (order {order_amount:.2f} - shipping {shipping:.2f})"
+        msg = f"Collect {net_amount:.2f} from courier (order {order_amount:.2f} - shipping {shipping:.2f}) – Invoice: {paid_note}"
     elif net_amount < 0:
         scenario = "pay" if order_amount == 0 else "pay_excess"
         branch_action = "pay"
-        msg = f"Pay courier {abs(net_amount):.2f} (shipping {shipping:.2f} - order {order_amount:.2f})"
+        msg = f"Pay courier {abs(net_amount):.2f} (shipping {shipping:.2f} - order {order_amount:.2f}) – Invoice: {paid_note}"
     else:  # net_amount == 0
         scenario = "even"
         branch_action = "none"
-        msg = "Nothing to pay or collect"
+        msg = f"Nothing to pay or collect – Invoice: {paid_note}"
 
     return {
         "invoice": inv.name,
@@ -410,5 +527,13 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     "net_amount": net_amount,
     "collect_amount": net_amount if net_amount > 0 else 0,
     "pay_amount": abs(net_amount) if net_amount < 0 else 0,
+    "invoice_status": status_l,
+    "outstanding": outstanding,
+    "is_unpaid_effective": is_unpaid,
+    "is_paid_now": is_paid,
+    "paid_after_ofd": paid_after_ofd,
+    "payment_entries": pe_names,
+    "payment_first_creation": pe_first_creation,
+    "ofd_creation": ofd_creation,
     "message": msg,
     }

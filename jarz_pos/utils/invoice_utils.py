@@ -21,9 +21,17 @@ def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime
     invoice_doc.currency = pos_profile.currency
     invoice_doc.territory = customer_doc.territory or "All Territories"
     
-    # Set delivery datetime if provided
+    # Set delivery slot fields when delivery_datetime provided (new model)
     if delivery_datetime:
-        invoice_doc.set("required_delivery_datetime", delivery_datetime)
+        try:
+            dt = frappe.utils.get_datetime(delivery_datetime)
+            invoice_doc.custom_delivery_date = dt.date()
+            invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
+            if not getattr(invoice_doc, "custom_delivery_duration", None):
+                invoice_doc.custom_delivery_duration = 60
+        except Exception:
+            # Non-fatal: let hooks enforce completeness if partially provided later
+            pass
     
     # Set posting date and time
     invoice_doc.posting_date = frappe.utils.today()
@@ -226,13 +234,17 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         })
     
     # Create formatted invoice data
-    return {
+    data = {
         "name": invoice.name,
         "invoice_id_short": invoice.name.split('-')[-1] if '-' in invoice.name else invoice.name,
         "customer_name": invoice.customer_name or invoice.customer,
         "customer": invoice.customer,
         "territory": invoice.territory or "",
-        "required_delivery_date": invoice.get("required_delivery_datetime"),
+    # New delivery slot fields
+        "delivery_date": invoice.get("custom_delivery_date"),
+        "delivery_time_from": invoice.get("custom_delivery_time_from"),
+        "delivery_duration": invoice.get("custom_delivery_duration"),
+    "delivery_slot_label": invoice.get("custom_delivery_slot_label"),
         "status": invoice.get("sales_invoice_state") or "Received",
         "posting_date": str(invoice.posting_date),
         "grand_total": float(invoice.grand_total or 0),
@@ -241,6 +253,7 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         "full_address": full_address,
         "items": items
     }
+    return data
 
 
 def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
