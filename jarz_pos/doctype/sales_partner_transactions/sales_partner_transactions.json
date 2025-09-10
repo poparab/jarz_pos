@@ -1,17 +1,17 @@
 {
  "actions": [],
  "allow_rename": 1,
- "creation": "2025-07-13 22:45:35.242752",
+ "creation": "2025-09-10 20:23:17.801204",
+ "default_view": "List",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "party_type",
-  "party",
+  "sales_partner",
   "status",
   "date",
   "reference_invoice",
   "amount",
-  "shipping_amount",
+  "partner_fees",
   "payment_mode",
   "journal_entry",
   "idempotency_token",
@@ -19,12 +19,16 @@
  ],
  "fields": [
   {
-   "fieldname": "party_type",
+   "allow_in_quick_entry": 1,
+   "bold": 1,
+   "default": "Unsettled",
+   "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
+   "in_preview": 1,
    "in_standard_filter": 1,
-   "label": "Party Type",
-   "options": "\nEmployee\nSupplier"
+   "label": "Status",
+   "options": "Settled\nUnsettled"
   },
   {
    "fieldname": "date",
@@ -41,23 +45,6 @@
    "fieldname": "amount",
    "fieldtype": "Currency",
    "label": "Amount"
-  },
-  {
-   "fieldname": "shipping_amount",
-   "fieldtype": "Currency",
-   "label": "Shipping Amount"
-  },
-  {
-   "allow_in_quick_entry": 1,
-   "bold": 1,
-   "default": "Unsettled",
-   "fieldname": "status",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "in_preview": 1,
-   "in_standard_filter": 1,
-   "label": "Status",
-   "options": "Settled\nUnsettled"
   },
   {
    "fieldname": "payment_mode",
@@ -87,21 +74,26 @@
    "label": "Notes"
   },
   {
-   "fieldname": "party",
-   "fieldtype": "Dynamic Link",
+   "fieldname": "sales_partner",
+   "fieldtype": "Link",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "label": "Party",
-   "options": "party_type"
+   "label": "Sales partner",
+   "options": "Sales Partner"
+  },
+  {
+   "fieldname": "partner_fees",
+   "fieldtype": "Currency",
+   "label": "Partner fees"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-09-10 20:41:36.629974",
+ "modified": "2025-09-10 21:01:36.345595",
  "modified_by": "Administrator",
  "module": "jarz pos",
- "name": "Courier Transaction",
+ "name": "Sales Partner Transactions",
  "owner": "Administrator",
  "permissions": [
   {
