@@ -2,6 +2,36 @@ import frappe
 from frappe import _
 
 
+def sync_kanban_profile(doc, method):
+    """Ensure custom_kanban_profile mirrors pos_profile on every validation/save.
+
+    This keeps the custom field in sync regardless of how the invoice is created
+    (Desk, POS, API). If pos_profile is empty, clear the custom field too.
+    """
+    try:
+        pos_prof = getattr(doc, "pos_profile", None)
+        # Normalize to string or empty
+        pos_prof = (str(pos_prof).strip() or None) if pos_prof is not None else None
+        if pos_prof:
+            try:
+                setattr(doc, "custom_kanban_profile", pos_prof)
+            except Exception:
+                # If custom field missing, don't block save
+                pass
+        else:
+            # Clear when no POS Profile selected
+            try:
+                setattr(doc, "custom_kanban_profile", None)
+            except Exception:
+                pass
+    except Exception as e:
+        # Never block invoice operations due to this sync; log for diagnostics
+        try:
+            frappe.log_error(f"Failed to sync custom_kanban_profile: {e}", "JARZ POS – Sales Invoice Hooks")
+        except Exception:
+            pass
+
+
 def _enforce_and_migrate_delivery_slot(doc):
     """Ensure the new delivery slot fields are used and valid.
 

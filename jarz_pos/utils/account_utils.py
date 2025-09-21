@@ -150,6 +150,80 @@ def get_creditors_account(company: str) -> str:
     return get_account_for_company("Creditors", company)
 
 
+# ------------------ Sales Partner AR routing helpers ------------------
+
+def get_company_receivable_account(company: str) -> str:
+    """Return the company's default leaf Receivable account.
+
+    Tries Company.default_receivable_account, then any non-group Account with
+    account_type='Receivable' for that company. Throws if not found.
+    """
+    receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
+    if receivable:
+        return receivable
+    receivable = frappe.db.get_value(
+        "Account",
+        {"company": company, "account_type": "Receivable", "is_group": 0},
+        "name",
+    )
+    if not receivable:
+        frappe.throw(f"Could not determine receivable account for company {company}")
+    return receivable
+
+
+def ensure_partner_receivable_subaccount(company: str, partner_name: str) -> str:
+    """Ensure an AR child account named exactly as sales partner exists under a Receivables group.
+
+    Uses the parent of the company's default receivable if that default is a leaf. Falls back to any
+    Receivable group under the company. Returns the account name (e.g., "Partner X - CmpAbbr").
+    """
+    leaf_receivable = get_company_receivable_account(company)
+    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+    desired = f"{partner_name} - {company_abbr}".strip()
+    if frappe.db.exists("Account", desired):
+        return desired
+
+    parent_name = None
+    try:
+        leaf_doc = frappe.get_doc("Account", leaf_receivable)
+        if int(getattr(leaf_doc, "is_group", 0)) == 1:
+            parent_name = leaf_doc.name
+        else:
+            parent_name = getattr(leaf_doc, "parent_account", None)
+    except Exception:
+        parent_name = None
+
+    if not parent_name:
+        # Fallback: find any Receivable group account for the company
+        parent_name = frappe.db.get_value(
+            "Account",
+            {"company": company, "account_type": "Receivable", "is_group": 1},
+            "name",
+        )
+    if not parent_name:
+        frappe.throw(f"Could not find a Receivable group account to create partner subaccount for {company}")
+
+    acc = frappe.new_doc("Account")
+    acc.account_name = partner_name
+    acc.parent_account = parent_name
+    acc.company = company
+    acc.is_group = 0
+    acc.account_type = "Receivable"
+    acc.insert(ignore_permissions=True)
+    return acc.name
+
+
+def resolve_online_partner_paid_to(company: str, sales_partner: str | None) -> str:
+    """Resolve the destination account for online payments when a Sales Partner is present.
+
+    If a partner is provided and exists, return/ensure the partner AR subaccount under
+    Receivables; otherwise fallback to the company receivable (to still close the SI).
+    """
+    if sales_partner and frappe.db.exists("Sales Partner", sales_partner):
+        return ensure_partner_receivable_subaccount(company, sales_partner)
+    return get_company_receivable_account(company)
+
+
 @frappe.whitelist()
 def create_online_payment_entry(
     invoice_name: str,

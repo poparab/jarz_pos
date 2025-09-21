@@ -8,6 +8,22 @@ import json
 import traceback
 from typing import Dict, List, Any, Optional, Union, Tuple
 
+# Accounting helpers
+try:
+    from jarz_pos.utils.account_utils import (
+        get_company_receivable_account,
+        get_pos_cash_account,
+        ensure_partner_receivable_subaccount,
+    )
+except Exception:
+    # Fallback dummies (should not normally trigger)
+    def get_company_receivable_account(company: str) -> str:  # type: ignore
+        return frappe.get_cached_value("Company", company, "default_receivable_account")
+    def get_pos_cash_account(pos_profile: str, company: str) -> str:  # type: ignore
+        return frappe.get_cached_value("Company", company, "default_cash_account") or "Cash"  # type: ignore
+    def ensure_partner_receivable_subaccount(company: str, partner: str) -> str:  # type: ignore
+        return get_company_receivable_account(company)
+
 # Import utility functions with fallback if they don't exist
 try:
     from jarz_pos.utils.invoice_utils import (
@@ -111,6 +127,24 @@ def _get_state_field_options() -> List[str]:
         frappe.logger().error(f"Error getting state field options: {str(e)}")
         return ["Received", "In Progress", "Ready", "Out for Delivery", "Delivered", "Cancelled"]
 
+def _get_current_user_pos_profiles() -> List[str]:
+    """Return names of POS Profiles linked to the current session user (and not disabled)."""
+    try:
+        user = frappe.session.user
+        # POS Profile linkage is via child table 'POS Profile User' (parent is the profile name)
+        linked = frappe.get_all('POS Profile User', filters={'user': user}, pluck='parent') or []
+        if not linked:
+            return []
+        profiles = frappe.get_all(
+            'POS Profile',
+            filters={'name': ['in', linked], 'disabled': 0},
+            pluck='name',
+        ) or []
+        return profiles
+    except Exception as e:
+        frappe.logger().warning(f"KANBAN API: Failed to resolve user POS profiles: {e}")
+        return []
+
 # Backwards compatibility wrappers (kept in case referenced elsewhere in file)
 
 def _get_state_custom_field():  # noqa: intentionally returns None now
@@ -184,34 +218,98 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
     """
     try:
         frappe.logger().debug("KANBAN API: get_kanban_invoices called with filters: {0}".format(filters))
+
         filter_conditions = apply_invoice_filters(filters)
         filter_conditions["docstatus"] = 1
-        # Include both POS and Desk invoices; remove hard is_pos filter if present
+
+        # Performance guardrails:
+        # - Default to POS invoices and a recent date window when client doesn't specify
+        # - Allow overriding via explicit filters
         try:
-            if isinstance(filter_conditions, dict) and "is_pos" in filter_conditions:
-                filter_conditions.pop("is_pos", None)
+            if isinstance(filter_conditions, dict):
+                # If no explicit posting_date filter, restrict to last 14 days
+                if "posting_date" not in filter_conditions:
+                    filter_conditions["posting_date"] = [">=", frappe.utils.add_days(frappe.utils.today(), -14)]
+                # Default to POS only unless caller provided is_pos explicitly (True/False)
+                if "is_pos" not in filter_conditions:
+                    filter_conditions["is_pos"] = 1
         except Exception:
             pass
-        
+
+        # Restrict to POS Profile(s) assigned to the current user
+        allowed_profiles = _get_current_user_pos_profiles()
+
+        # Initialize columns up-front for possible early return
+        all_states = _get_state_field_options()
+        kanban_data: Dict[str, List[Dict[str, Any]]] = {}
+        for state in all_states:
+            st = (state or '').strip()
+            if st:
+                kanban_data[_state_key(st)] = []
+
+        if not allowed_profiles:
+            frappe.logger().info("KANBAN API: No POS Profile linked to user; returning empty board")
+            return _success(data=kanban_data)
+
+        # Optional client-provided branches list (subset of allowed profiles)
+        client_selected_branches: List[str] = []
+        try:
+            raw = filters
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = {}
+            if isinstance(raw, dict):
+                maybe = raw.get("branches")
+                if isinstance(maybe, list):
+                    client_selected_branches = [str(x) for x in maybe if str(x).strip()]
+        except Exception:
+            client_selected_branches = []
+
+        # Compute enforced branch list = intersection(allowed, client_selected) if client provided any; otherwise allowed only
+        enforced_branches = allowed_profiles
+        if client_selected_branches:
+            enforced_branches = [p for p in allowed_profiles if p in set(client_selected_branches)]
+            # If intersection is empty, return empty board (no access to requested branches)
+            if not enforced_branches:
+                return _success(data=kanban_data)
+
+        # Enforce branch filter using new source of truth when available
+        try:
+            si_meta = frappe.get_meta("Sales Invoice")
+            if si_meta.get_field("custom_kanban_profile"):
+                filter_conditions["custom_kanban_profile"] = ["in", enforced_branches]
+            else:
+                # Fallback to legacy field
+                filter_conditions["pos_profile"] = ["in", enforced_branches]
+        except Exception:
+            # Safe fallback
+            filter_conditions["pos_profile"] = ["in", enforced_branches]
+
         # Fetch all matching Sales Invoices
         fields = [
             "name", "customer", "customer_name", "territory", "posting_date",
             "posting_time", "grand_total", "net_total", "total_taxes_and_charges",
             "status", "custom_sales_invoice_state", "sales_invoice_state",
-            "sales_partner",
+            "sales_partner", "pos_profile", "custom_kanban_profile",
             # New delivery slot fields
             "custom_delivery_date", "custom_delivery_time_from", "custom_delivery_duration",
             "shipping_address_name", "customer_address"
         ]
-        
+
+        # Cap results to avoid large payloads; client can paginate via additional filters
         invoices = frappe.get_all(
             "Sales Invoice",
             filters=filter_conditions,
             fields=fields,
-            order_by="posting_date desc, posting_time desc"
+            order_by="posting_date desc, posting_time desc",
+            limit=250,
         )
+
         # Territory shipping cache
         territory_cache: Dict[str, Dict[str, float]] = {}
+
         def _get_territory_shipping(territory_name: str) -> Dict[str, float]:
             if not territory_name:
                 return {"income": 0.0, "expense": 0.0}
@@ -231,52 +329,101 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 for f in income_field_candidates:
                     if f in terr.as_dict():
                         try:
-                            income = float(terr.get(f) or 0) ; break
+                            income = float(terr.get(f) or 0)
+                            break
                         except Exception:
                             pass
                 for f in expense_field_candidates:
                     if f in terr.as_dict():
                         try:
-                            expense = float(terr.get(f) or 0) ; break
+                            expense = float(terr.get(f) or 0)
+                            break
                         except Exception:
                             pass
             except Exception:
                 pass
             territory_cache[territory_name] = {"income": income, "expense": expense}
             return territory_cache[territory_name]
-        # Get address information for invoices
-        invoice_addresses = {}
-        for inv in invoices:
-            address_name = inv.get("shipping_address_name") or inv.get("customer_address")
-            invoice_addresses[inv.name] = get_address_details(address_name)
-        
-        # Get items for each invoice
-        invoice_items = {}
-        for inv in invoices:
-            items = frappe.get_all(
-                "Sales Invoice Item",
-                filters={"parent": inv.name},
-                fields=["item_code", "item_name", "qty", "rate", "amount"]
-            )
-            invoice_items[inv.name] = items
-        
-        # Organize invoices by state
-        kanban_data = {}
-        
-        # Get all possible states
-        all_states = _get_state_field_options()
-        # Initialize
-        kanban_data = {}
-        for state in all_states:
-            state = state.strip()
-            if state:
-                kanban_data[_state_key(state)] = []
-        
+
+        # Get address information for invoices (batch compute via helper on names)
+        invoice_addresses: Dict[str, str] = {}
+        try:
+            addr_name_by_inv = {}
+            for inv in invoices:
+                addr_name_by_inv[inv.name] = inv.get("shipping_address_name") or inv.get("customer_address")
+            for inv_name, addr_name in addr_name_by_inv.items():
+                invoice_addresses[inv_name] = get_address_details(addr_name)
+        except Exception:
+            # Fallback: empty addresses
+            invoice_addresses = {inv.name: "" for inv in invoices}
+
+        # Batch fetch items for all invoices (avoid N+1 queries)
+        invoice_items: Dict[str, List[Dict[str, Any]]] = {inv.name: [] for inv in invoices}
+        try:
+            if invoices:
+                items_rows = frappe.get_all(
+                    "Sales Invoice Item",
+                    filters={"parent": ["in", [inv.name for inv in invoices]]},
+                    fields=["parent", "item_code", "item_name", "qty", "rate", "amount"],
+                    limit=5000,
+                )
+                for row in items_rows:
+                    parent = row.get("parent")
+                    if parent in invoice_items:
+                        invoice_items[parent].append({
+                            "item_code": row.get("item_code"),
+                            "item_name": row.get("item_name"),
+                            "qty": row.get("qty"),
+                            "rate": row.get("rate"),
+                            "amount": row.get("amount"),
+                        })
+        except Exception:
+            # Fallback to per-invoice if batch fails
+            for inv in invoices:
+                try:
+                    items = frappe.get_all(
+                        "Sales Invoice Item",
+                        filters={"parent": inv.name},
+                        fields=["item_code", "item_name", "qty", "rate", "amount"],
+                        limit=100,
+                    )
+                    invoice_items[inv.name] = items
+                except Exception:
+                    invoice_items[inv.name] = []
+
         # Organize invoices by their current state
         for inv in invoices:
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
             state_key = state.lower().replace(' ', '_')
             terr_ship = _get_territory_shipping(inv.get("territory") or "")
+
+            # Resolve customer phone/mobile via primary Contact if possible (cached per customer)
+            customer_phone = ""
+            try:
+                cust = inv.get("customer")
+                if cust:
+                    if "__customer_contact_cache" not in frappe.local.cache:  # type: ignore
+                        frappe.local.cache["__customer_contact_cache"] = {}  # type: ignore
+                    cache_key = f"cust_phone::{cust}"
+                    ccache = frappe.local.cache["__customer_contact_cache"]  # type: ignore
+                    if cache_key in ccache:
+                        customer_phone = ccache[cache_key]
+                    else:
+                        # Try to find primary contact
+                        contact_name = frappe.db.get_value(
+                            "Dynamic Link",
+                            {"link_doctype": "Customer", "link_name": cust, "parenttype": "Contact"},
+                            "parent",
+                        )
+                        if contact_name:
+                            contact_doc = frappe.get_doc("Contact", contact_name)
+                            raw_mobile = getattr(contact_doc, "mobile_no", None) or getattr(contact_doc, "phone", None)
+                            if raw_mobile:
+                                customer_phone = str(raw_mobile)
+                        ccache[cache_key] = customer_phone
+            except Exception:
+                customer_phone = ""
+
             # Determine if there exists any UNSETTLED courier transaction for this invoice
             has_unsettled = False
             try:
@@ -289,7 +436,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 )
             except Exception:
                 has_unsettled = False
-            # Create invoice card data
+
             # Normalize ERPNext doc status for board (treat Overdue as Unpaid)
             doc_status_label = str(inv.status or "").strip()
             if doc_status_label.lower() == "overdue":
@@ -318,13 +465,14 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "shipping_income": terr_ship.get("income", 0.0),
                 "shipping_expense": terr_ship.get("expense", 0.0),
                 "has_unsettled_courier_txn": bool(has_unsettled),
+                "customer_phone": customer_phone,
             }
-            
+
             # Add to appropriate state column
             if state_key not in kanban_data:
                 kanban_data[state_key] = []
             kanban_data[state_key].append(invoice_card)
-        
+
         # Return unified success
         return _success(data=kanban_data)
     except Exception as e:
@@ -383,42 +531,151 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
 
         normalized_target = (new_state or "").strip().lower()
         create_dn = normalized_target in {"out for delivery", "out_for_delivery"}
-        dn_logic_version = "2025-09-04b"
+        dn_logic_version = "2025-09-11a"
         frappe.logger().info(
             f"KANBAN API: State change requested -> {invoice_id} to '{new_state}' (normalized='{normalized_target}'), create_dn={create_dn}, logic_version={dn_logic_version}"
         )
         print(f"Normalized Target: {normalized_target} | create_dn: {create_dn} | logic_version: {dn_logic_version}")
 
         created_delivery_note: Optional[str] = None
+        created_cash_payment_entry: Optional[str] = None
+        created_partner_txn: Optional[str] = None
+
+        # ------------------------------------------------------------------
+        # Helper: Ensure CASH Payment Entry for Sales Partner invoices when
+        # moving to Out For Delivery (business rule 2025-09). Only trigger if:
+        #   - invoice has sales_partner
+        #   - invoice still has outstanding_amount > 0
+        #   - payment not already fully paid (no existing PE closing it)
+        #   - new state is Out For Delivery
+        # The Payment Entry will credit the company Receivable and debit
+        # the POS Profile cash account (branch cash) – representing branch
+        # taking cash from rider on dispatch.
+        # Idempotency: if a PE already exists allocating full outstanding,
+        # function returns gracefully.
+        # ------------------------------------------------------------------
+        def _ensure_cash_payment_entry_for_partner(si_doc) -> Optional[str]:
+            try:
+                if not getattr(si_doc, "sales_partner", None):
+                    return None
+                outstanding = float(getattr(si_doc, "outstanding_amount", 0) or 0)
+                if outstanding <= 0.0001:
+                    return None
+                existing = frappe.get_all(
+                    "Payment Entry Reference",
+                    filters={
+                        "reference_doctype": "Sales Invoice",
+                        "reference_name": si_doc.name,
+                    },
+                    fields=["parent", "allocated_amount", "total_amount", "outstanding_amount"],
+                    limit=20,
+                )
+                for ref in existing:
+                    try:
+                        if float(ref.get("allocated_amount") or 0) >= outstanding - 0.0001:
+                            return None
+                    except Exception:
+                        continue
+                company = si_doc.company
+                # Source of truth: custom_kanban_profile; fallback to pos_profile
+                pos_profile = getattr(si_doc, "custom_kanban_profile", None) or getattr(si_doc, "pos_profile", None)
+                if not pos_profile:
+                    return None
+                try:
+                    cash_account = get_pos_cash_account(pos_profile, company)
+                except Exception:
+                    return None
+                receivable = get_company_receivable_account(company)
+                pe = frappe.new_doc("Payment Entry")
+                pe.payment_type = "Receive"
+                pe.company = company
+                pe.posting_date = frappe.utils.getdate()
+                pe.posting_time = frappe.utils.nowtime()
+                pe.mode_of_payment = "Cash"
+                pe.party_type = "Customer"
+                pe.party = si_doc.customer
+                pe.paid_from = receivable
+                pe.paid_to = cash_account
+                pe.party_account = receivable
+                pe.paid_amount = outstanding
+                pe.received_amount = outstanding
+                # Propagate branch to Payment Entry if custom field exists
+                try:
+                    pe_meta = frappe.get_meta("Payment Entry")
+                    if pe_meta.get_field("custom_kanban_profile"):
+                        pe.custom_kanban_profile = pos_profile
+                except Exception:
+                    pass
+                pe.append("references", {
+                    "reference_doctype": "Sales Invoice",
+                    "reference_name": si_doc.name,
+                    "due_date": getattr(si_doc, "due_date", None),
+                    "total_amount": float(getattr(si_doc, "grand_total", 0) or 0),
+                    "outstanding_amount": outstanding,
+                    "allocated_amount": outstanding,
+                })
+                pe.flags.ignore_permissions = True
+                try:
+                    pe.set_missing_values()
+                except Exception:
+                    pass
+                pe.insert(ignore_permissions=True)
+                pe.submit()
+                frappe.logger().info(
+                    f"KANBAN API: Cash Payment Entry {pe.name} created for partner invoice {si_doc.name} on OFD transition"
+                )
+                return pe.name
+            except Exception as ce:
+                frappe.logger().warning(f"KANBAN API: Cash PE creation skipped for {si_doc.name}: {ce}")
+                return None
 
         def _create_delivery_note_from_invoice(si_doc) -> str:
             frappe.logger().info(f"KANBAN API: Attempting Delivery Note creation for {si_doc.name}")
-            existing = frappe.get_all(
-                "Delivery Note",
-                filters={"docstatus": 1, "remarks": ["like", f"%{si_doc.name}%"]},
-                fields=["name"],
-                limit=1,
-            )
-            if existing:
-                dn_name = existing[0].name
-                frappe.logger().info(
-                    f"KANBAN API: Reusing existing Delivery Note {dn_name} for invoice {si_doc.name}"
+            # Avoid filtering by remarks at SQL level (table name has spaces). Instead,
+            # fetch recent Delivery Notes for this customer and inspect remarks in Python.
+            try:
+                candidates = frappe.get_all(
+                    "Delivery Note",
+                    filters={
+                        "docstatus": 1,
+                        "customer": si_doc.customer,
+                        # Narrow by date window to keep list small; last 7 days
+                        "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -7)],
+                    },
+                    fields=["name", "posting_date", "posting_time"],
+                    order_by="posting_date desc, posting_time desc",
+                    limit=50,
                 )
-                # Ensure completed state on reuse
+            except Exception:
+                candidates = []
+            for row in candidates:
                 try:
-                    dn_doc = frappe.get_doc("Delivery Note", dn_name)
-                    if int(getattr(dn_doc, "docstatus", 0) or 0) == 1:
+                    dn_name_try = row.get("name") if isinstance(row, dict) else getattr(row, "name", None)
+                    if not dn_name_try:
+                        continue
+                    dn_doc_try = frappe.get_doc("Delivery Note", dn_name_try)
+                    remarks_text = (getattr(dn_doc_try, "remarks", None) or "").strip()
+                    if remarks_text and si_doc.name in remarks_text:
+                        frappe.logger().info(
+                            f"KANBAN API: Reusing existing Delivery Note {dn_name_try} for invoice {si_doc.name} (found by remarks scan)"
+                        )
+                        # Ensure completed state on reuse
                         try:
-                            dn_doc.db_set("per_billed", 100, update_modified=False)
+                            if int(getattr(dn_doc_try, "docstatus", 0) or 0) == 1:
+                                try:
+                                    dn_doc_try.db_set("per_billed", 100, update_modified=False)
+                                except Exception:
+                                    pass
+                                try:
+                                    dn_doc_try.db_set("status", "Completed", update_modified=False)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
-                        try:
-                            dn_doc.db_set("status", "Completed", update_modified=False)
-                        except Exception:
-                            pass
+                        return dn_name_try
                 except Exception:
-                    pass
-                return dn_name
+                    # ignore a single candidate failure and continue
+                    continue
             dn = frappe.new_doc("Delivery Note")
             dn.customer = si_doc.customer
             dn.company = si_doc.company
@@ -445,6 +702,13 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
                     "amount": it.amount,
                     "warehouse": it.get("warehouse") or default_wh,
                 })
+            # Propagate branch to Delivery Note when custom field exists
+            try:
+                dn_meta = frappe.get_meta("Delivery Note")
+                if dn_meta.get_field("custom_kanban_profile"):
+                    dn.custom_kanban_profile = getattr(si_doc, "custom_kanban_profile", None)
+            except Exception:
+                pass
             dn.flags.ignore_permissions = True
             dn.insert(ignore_permissions=True)
             dn.submit()
@@ -478,6 +742,51 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
                 )
                 fail_resp["dn_logic_version"] = dn_logic_version
                 return fail_resp
+            # After (or even if reusing) DN creation, ensure branch cash PE if partner invoice
+            try:
+                created_cash_payment_entry = _ensure_cash_payment_entry_for_partner(invoice)
+                if created_cash_payment_entry:
+                    print(f"Cash Payment Entry created: {created_cash_payment_entry}")
+            except Exception as cash_ex:
+                print(f"Cash Payment Entry creation FAILED (non-fatal): {cash_ex}")
+                frappe.logger().warning(
+                    f"KANBAN API: Cash Payment Entry creation failed for {invoice_id}: {cash_ex}"
+                )
+            # Create Sales Partner Transaction record (idempotent)
+            try:
+                sales_partner_val = getattr(invoice, 'sales_partner', None)
+                if sales_partner_val:
+                    # Idempotency token pattern: SPTRN::<invoice_name>
+                    idem_token = f"SPTRN::{invoice.name}"
+                    if not frappe.db.exists("Sales Partner Transactions", {"idempotency_token": idem_token}):
+                        txn = frappe.new_doc("Sales Partner Transactions")
+                        txn.sales_partner = sales_partner_val
+                        txn.status = "Unsettled"  # always unsettle on creation
+                        # Use original invoice creation datetime (invoice.creation is str/datetime)
+                        try:
+                            txn.date = getattr(invoice, 'creation', frappe.utils.now())
+                        except Exception:
+                            txn.date = frappe.utils.now()
+                        txn.reference_invoice = invoice.name
+                        txn.amount = float(getattr(invoice, 'grand_total', 0) or 0)
+                        # partner_fees left blank for now; user will update later
+                        # Determine payment mode: cash if cash PE created, else Online
+                        payment_mode_val = 'Cash' if created_cash_payment_entry else 'Online'
+                        txn.payment_mode = payment_mode_val
+                        txn.idempotency_token = idem_token
+                        txn.insert(ignore_permissions=True)
+                        created_partner_txn = txn.name
+                        print(f"Sales Partner Transaction created: {created_partner_txn} ({payment_mode_val})")
+                        frappe.logger().info(
+                            f"KANBAN API: Sales Partner Transaction {txn.name} created for invoice {invoice_id}"
+                        )
+                    else:
+                        print("Sales Partner Transaction already exists (idempotent skip)")
+            except Exception as sp_txn_err:
+                print(f"Sales Partner Transaction creation FAILED (non-fatal): {sp_txn_err}")
+                frappe.logger().warning(
+                    f"KANBAN API: Sales Partner Transaction creation failed for {invoice_id}: {sp_txn_err}"
+                )
 
         updated_fields: List[str] = []
         for f in fields_to_update:
@@ -515,6 +824,8 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
             "timestamp": frappe.utils.now(),
             "delivery_note": created_delivery_note if create_dn else None,
             "dn_logic_version": dn_logic_version,
+            "cash_payment_entry": created_cash_payment_entry,
+            "sales_partner_transaction": created_partner_txn,
         }
         frappe.publish_realtime("jarz_pos_invoice_state_change", payload, user="*")
         frappe.publish_realtime("kanban_update", payload, user="*")
@@ -526,6 +837,8 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
             final_state=new_state,
             delivery_note=created_delivery_note if create_dn else None,
             dn_logic_version=dn_logic_version,
+            cash_payment_entry=created_cash_payment_entry,
+            sales_partner_transaction=created_partner_txn,
         )
     except Exception as e:
         print(f"GENERAL FAILURE update_invoice_state: {e}")
@@ -548,6 +861,34 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         frappe.logger().debug(f"KANBAN API: get_invoice_details - Invoice: {invoice_id}")
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
         data = format_invoice_data(invoice)
+        # Enrich with customer_phone (reuse logic from get_kanban_invoices for consistency)
+        try:
+            customer_phone = ""
+            cust = invoice.get("customer")
+            if cust:
+                if "__customer_contact_cache" not in frappe.local.cache:  # type: ignore
+                    frappe.local.cache["__customer_contact_cache"] = {}  # type: ignore
+                cache_key = f"cust_phone::{cust}"
+                ccache = frappe.local.cache["__customer_contact_cache"]  # type: ignore
+                if cache_key in ccache:
+                    customer_phone = ccache[cache_key]
+                else:
+                    contact_name = frappe.db.get_value(
+                        "Dynamic Link",
+                        {"link_doctype": "Customer", "link_name": cust, "parenttype": "Contact"},
+                        "parent",
+                    )
+                    if contact_name:
+                        contact_doc = frappe.get_doc("Contact", contact_name)
+                        raw_mobile = getattr(contact_doc, "mobile_no", None) or getattr(contact_doc, "phone", None)
+                        if raw_mobile:
+                            customer_phone = str(raw_mobile)
+                    ccache[cache_key] = customer_phone
+            if customer_phone:
+                data["customer_phone"] = customer_phone
+        except Exception:
+            # Silently ignore phone enrichment failure
+            pass
         # Augment with unsettled courier txn flag
         try:
             data["has_unsettled_courier_txn"] = bool(

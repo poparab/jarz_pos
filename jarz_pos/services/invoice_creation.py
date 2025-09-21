@@ -20,6 +20,11 @@ from jarz_pos.utils.invoice_utils import (
     verify_invoice_totals
 )
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
+from jarz_pos.utils.account_utils import (
+    get_company_receivable_account,
+    ensure_partner_receivable_subaccount,
+    resolve_online_partner_paid_to,
+)
 
 
 def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
@@ -235,6 +240,16 @@ def create_pos_invoice(
         print("\n6️⃣ SETTING DOCUMENT FIELDS:")
         set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
 
+        # Ensure custom_kanban_profile mirrors POS profile at creation time (defensive in addition to hook)
+        try:
+            if getattr(invoice_doc, "pos_profile", None):
+                invoice_doc.custom_kanban_profile = invoice_doc.pos_profile
+            else:
+                invoice_doc.custom_kanban_profile = None
+        except Exception:
+            # If custom field missing, don't fail invoice creation
+            pass
+
         # STEP 6.1: Optional Sales Partner assignment (touch-friendly picker from POS)
         if sales_partner:
             try:
@@ -253,46 +268,85 @@ def create_pos_invoice(
         print("\n7️⃣ ADDING ITEMS:")
         add_items_to_invoice(invoice_doc, processed_items, logger)
 
-        # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
-        print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
-        try:
-            territory_name = getattr(customer_doc, "territory", None)
-            if territory_name and frappe.db.exists("Territory", territory_name):
-                territory_doc = frappe.get_doc("Territory", territory_name)
-                shipping_income = getattr(territory_doc, "delivery_income", 0) or 0
-                print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
-                if shipping_income and float(shipping_income) > 0:
-                    # Avoid duplicate insertion (idempotent)
-                    already_added = False
-                    if getattr(invoice_doc, "taxes", None):
-                        for tax in invoice_doc.taxes:
-                            if (tax.get("description") or "").lower().startswith("shipping income"):
-                                already_added = True
-                                print("   ⚠️ Shipping income tax row already present – skipping")
-                                break
-                    if not already_added:
-                        add_delivery_charges_to_taxes(
-                            invoice_doc,
-                            shipping_income,
-                            delivery_description=f"Shipping Income ({territory_name})",
-                        )
-                        print("   ✅ Shipping income tax row appended")
+        # STEP 7.3: Sales Partner Tax Suppression Rule
+        # Business Rule (2025-09): If an invoice has a Sales Partner, it must have NO rows in
+        # the "Sales Taxes and Charges" table. We therefore:
+        #   1. Clear any default taxes added by POS Profile / Tax Template.
+        #   2. Skip adding Shipping Income (territory delivery income) rows.
+        #   3. Skip adding legacy delivery_charges rows.
+        partner_tax_suppressed = False
+        if getattr(invoice_doc, "sales_partner", None):
+            try:
+                existing_taxes = len(getattr(invoice_doc, "taxes", []) or [])
+                if existing_taxes:
+                    print(f"\n7️⃣.3️⃣ SALES PARTNER MODE: Clearing {existing_taxes} pre-populated tax rows")
+                # Reset taxes child table fully (use set to ensure ORM awareness)
+                try:
+                    invoice_doc.set("taxes", [])
+                except Exception:
+                    invoice_doc.taxes = []  # fallback
+                partner_tax_suppressed = True
+                print("   ✅ Sales Partner present → all tax rows suppressed")
+            except Exception as clear_err:
+                print(f"   ⚠️ Could not clear existing taxes: {clear_err}")
+        
+        # STEP 7.4 & 7.5 only execute when NOT in Sales Partner mode
+        if not partner_tax_suppressed:
+            # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
+            print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
+            try:
+                territory_name = getattr(customer_doc, "territory", None)
+                if territory_name and frappe.db.exists("Territory", territory_name):
+                    territory_doc = frappe.get_doc("Territory", territory_name)
+                    shipping_income = getattr(territory_doc, "delivery_income", 0) or 0
+                    print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
+                    if shipping_income and float(shipping_income) > 0:
+                        # Avoid duplicate insertion (idempotent)
+                        already_added = False
+                        if getattr(invoice_doc, "taxes", None):
+                            for tax in invoice_doc.taxes:
+                                if (tax.get("description") or "").lower().startswith("shipping income"):
+                                    already_added = True
+                                    print("   ⚠️ Shipping income tax row already present – skipping")
+                                    break
+                        if not already_added:
+                            add_delivery_charges_to_taxes(
+                                invoice_doc,
+                                shipping_income,
+                                delivery_description=f"Shipping Income ({territory_name})",
+                            )
+                            print("   ✅ Shipping income tax row appended")
+                    else:
+                        print("   ℹ️ No positive delivery_income on territory – nothing added")
                 else:
-                    print("   ℹ️ No positive delivery_income on territory – nothing added")
-            else:
-                print("   ℹ️ Customer territory not found – skipping shipping income")
-        except Exception as ship_err:
-            print(f"   ❌ Failed adding shipping income: {ship_err}")
-            # Do not abort – continue invoice creation
+                    print("   ℹ️ Customer territory not found – skipping shipping income")
+            except Exception as ship_err:
+                print(f"   ❌ Failed adding shipping income: {ship_err}")
+                # Do not abort – continue invoice creation
 
-        # STEP 7.5: Add Delivery Charges (legacy param based)
-        if delivery_charges:
-            print("\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
-            add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
+            # STEP 7.5: Add Delivery Charges (legacy param based)
+            if delivery_charges:
+                print("\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
+                add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
+        else:
+            print("\n7️⃣.4️⃣ & 7️⃣.5️⃣ SKIPPED: Sales Partner tax suppression active")
 
         # STEP 8: Validate and Calculate Document
         print("\n8️⃣ DOCUMENT VALIDATION:")
         _validate_and_calculate_document(invoice_doc, logger)
+
+        # STEP 8.1: Stock update suppression for Sales Partner invoices (ALL payment types)
+        # Business Rule (2025-09-16): If invoice has a Sales Partner, do NOT update stock at SI creation time.
+        # Rationale: Stock movement is effected via Delivery Note upon Out For Delivery; this keeps SI accounting-only.
+        try:
+            if getattr(invoice_doc, 'sales_partner', None):
+                if hasattr(invoice_doc, 'update_stock'):
+                    invoice_doc.update_stock = 0  # int flag expected by ERPNext
+                    print("   🚚 Stock update disabled (sales partner present)")
+                else:
+                    print("   ℹ️ 'update_stock' field not present on Sales Invoice; skipping suppression")
+        except Exception as _ustk_err:
+            print(f"   ⚠️ Could not suppress stock update: {_ustk_err}")
 
         # STEP 9: Save Document
         print("\n9️⃣ SAVING DOCUMENT:")
@@ -702,6 +756,20 @@ def _submit_document(invoice_doc, logger):
 
 def _prepare_response(invoice_doc, delivery_datetime, logger):
     """Prepare the response data."""
+    # Detect if tax suppression was applied (flag set earlier) or by heuristic
+    partner_tax_suppressed = False
+    try:
+        partner_tax_suppressed = bool(getattr(getattr(invoice_doc, "flags", object()), "partner_tax_suppressed", False))
+    except Exception:
+        partner_tax_suppressed = False
+    if not partner_tax_suppressed:
+        # Heuristic: sales_partner present AND no taxes rows
+        try:
+            if getattr(invoice_doc, "sales_partner", None) and len(getattr(invoice_doc, "taxes", []) or []) == 0:
+                partner_tax_suppressed = True
+        except Exception:
+            pass
+
     result = {
         "success": True,
         "invoice_name": invoice_doc.name,
@@ -712,7 +780,8 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
         "status": invoice_doc.status,
         "docstatus": invoice_doc.docstatus,
         "posting_date": str(invoice_doc.posting_date),
-        "company": invoice_doc.company
+    "company": invoice_doc.company,
+    "partner_tax_suppressed": partner_tax_suppressed,
     }
     
     # Add delivery information to response if provided
@@ -754,43 +823,6 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
     return result
 
 
-def _get_company_receivable(company: str) -> str:
-    receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
-    if receivable:
-        return receivable
-    receivable = frappe.db.get_value(
-        "Account",
-        {"company": company, "account_type": "Receivable", "is_group": 0},
-        "name",
-    )
-    if not receivable:
-        frappe.throw("Could not determine receivable account for company")
-    return receivable
-
-
-def _ensure_partner_subaccount(parent_receivable: str, company: str, partner_name: str) -> str:
-    """Ensure an AR child account named exactly as sales partner exists under company receivable.
-
-    Returns the account name (e.g., "Partner X - CmpAbbr").
-    """
-    # Parent format like "Accounts Receivable - CmpAbbr"; derive company abbr suffix
-    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
-    desired = f"{partner_name} - {company_abbr}".strip()
-    if frappe.db.exists("Account", desired):
-        return desired
-
-    parent_doc = frappe.get_doc("Account", parent_receivable)
-    # Create new leaf account under receivable
-    acc = frappe.new_doc("Account")
-    acc.account_name = partner_name
-    acc.parent_account = parent_doc.name
-    acc.company = company
-    acc.is_group = 0
-    acc.account_type = "Receivable"
-    acc.insert(ignore_permissions=True)
-    return acc.name
-
-
 def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | None, payment_type: str | None, logger):
     """When payment_type == 'online', mark invoice paid and allocate to a Payment Entry whose paid_to is
     the Sales Partner subaccount under Receivables. This keeps AR by sales partner while clearing customer AR.
@@ -804,15 +836,12 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
         outstanding = float(getattr(invoice_doc, "outstanding_amount", 0) or 0)
         if outstanding <= 0.0001:
             return
-        company = invoice_doc.company
-        receivable = _get_company_receivable(company)
 
-        # Determine destination account: Sales Partner subaccount under receivable; if no partner, fallback to receivable
-        if sales_partner and frappe.db.exists("Sales Partner", sales_partner):
-            paid_to = _ensure_partner_subaccount(receivable, company, sales_partner)
-        else:
-            # Fallback: single consolidated AR account (still clears invoice)
-            paid_to = receivable
+        company = invoice_doc.company
+        receivable = get_company_receivable_account(company)
+
+        # Determine destination account centrally
+        paid_to = resolve_online_partner_paid_to(company, sales_partner)
 
         try:
             # Create Payment Entry (Receive)
@@ -886,6 +915,7 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
                     logger.info(f"JE fallback created: {je.name}")
                 except Exception:
                     pass
+                return
             except Exception as je_err:
                 print(f"   ❌ JE fallback failed: {je_err}")
                 try:
@@ -894,7 +924,7 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
                     pass
                 # Re-raise original Payment Entry error to be handled by caller
                 raise pe_err
-    except Exception as e:
+    except Exception:
         # Surface exception to caller to log, but do not break invoice creation
         raise
 

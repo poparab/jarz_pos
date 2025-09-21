@@ -7,13 +7,13 @@
  "engine": "InnoDB",
  "field_order": [
   "sales_partner",
+  "pos_profile",
   "status",
   "date",
   "reference_invoice",
   "amount",
   "partner_fees",
   "payment_mode",
-  "journal_entry",
   "idempotency_token",
   "notes"
  ],
@@ -47,26 +47,26 @@
    "label": "Amount"
   },
   {
+   "allow_in_quick_entry": 1,
+   "bold": 1,
    "fieldname": "payment_mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_preview": 1,
+   "in_standard_filter": 1,
+   "label": "Payment Mode",
+   "options": "Cash\nOnline"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "bold": 1,
+   "fieldname": "idempotency_token",
    "fieldtype": "Data",
    "in_list_view": 1,
    "in_preview": 1,
-   "label": "Payment Mode",
-   "read_only": 1
-  },
-  {
-   "fieldname": "journal_entry",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Journal Entry",
-   "options": "Journal Entry",
-   "read_only": 1
-  },
-  {
-   "fieldname": "idempotency_token",
-   "fieldtype": "Data",
+   "in_standard_filter": 1,
    "label": "Idempotency Token",
-   "read_only": 1
+   "unique": 1
   },
   {
    "fieldname": "notes",
@@ -85,12 +85,20 @@
    "fieldname": "partner_fees",
    "fieldtype": "Currency",
    "label": "Partner fees"
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "POS Profile",
+   "options": "POS Profile"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-09-10 21:01:36.345595",
+ "modified": "2025-09-16 22:29:26.594517",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Sales Partner Transactions",

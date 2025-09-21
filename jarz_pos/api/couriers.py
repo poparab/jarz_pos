@@ -24,6 +24,7 @@ from jarz_pos.services.delivery_handling import (
 from jarz_pos.services.delivery_party import create_delivery_party as _create_delivery_party
 from jarz_pos.jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
 from jarz_pos.services import delivery_handling as _delivery_services
+from jarz_pos.services.settlement_strategies import dispatch_settlement as _dispatch_settlement
 from jarz_pos.jarz_pos.utils.account_utils import (
     get_freight_expense_account,
     get_pos_cash_account,
@@ -401,59 +402,17 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
 
     try:
         frappe.db.savepoint("confirm_settlement")
-        # If unpaid and pay_now, create a cash PE first
-        if data.get("is_unpaid_effective") and (mode or data.get("mode")) == "pay_now":
-            if not pos_profile and payment_mode.lower() == "cash":
-                frappe.throw("pos_profile is required for Cash payments")
-            _pay_invoice(invoice_name=invoice, payment_mode=payment_mode, pos_profile=pos_profile)  # type: ignore[arg-type]
-
-        # Then perform OFD transition; services currently require a non-empty 'courier' label
-        _handle_out_for_delivery_transition(
-            invoice_name=invoice,
-            courier=_courier_label(party_type, party),
-            mode=mode,
-            pos_profile=pos_profile or "",
-            idempotency_token=None,
+        # Map preview mode to our strategy mode keys
+        strat_mode = "now" if (mode or data.get("mode")) in {"pay_now", "now"} else "later"
+        # Use separated strategies to perform the correct accounting and CT/JE actions
+        res = _dispatch_settlement(
+            inv_name=invoice,
+            mode=strat_mode,
+            pos_profile=pos_profile,
+            payment_type=payment_mode,
             party_type=party_type,
             party=party,
         )
-
-        # As an additional guard, ensure the Courier Expense JE exists for unpaid+pay_now.
-        # Some environments may skip the OFD-created JE naming; we backfill idempotently.
-        try:
-            inv_doc = frappe.get_doc("Sales Invoice", invoice)
-            company = inv_doc.company
-            shipping = float(_delivery_services._get_delivery_expense_amount(inv_doc) or 0.0)  # type: ignore[attr-defined]
-            if shipping > 0 and (data.get("is_unpaid_effective") and (mode or data.get("mode")) == "pay_now"):
-                # If a JE already exists by either title, skip
-                ofd_title = f"Out For Delivery – {inv_doc.name}"
-                cxp_title = f"Courier Expense – {inv_doc.name}"
-                existing = frappe.get_all(
-                    "Journal Entry",
-                    filters={"company": company, "docstatus": 1, "title": ["in", [ofd_title, cxp_title]]},
-                    pluck="name",
-                    limit_page_length=1,
-                )
-                if not existing:
-                    # Create DR Freight / CR Cash with POS Cash account
-                    if not pos_profile:
-                        frappe.throw("POS Profile required to book courier expense payment")
-                    cash_acc = get_pos_cash_account(pos_profile, company)
-                    freight_acc = get_freight_expense_account(company)
-                    for acc in (cash_acc, freight_acc):
-                        validate_account_exists(acc)
-                    je = frappe.new_doc("Journal Entry")
-                    je.voucher_type = "Journal Entry"
-                    je.posting_date = frappe.utils.nowdate()
-                    je.company = company
-                    je.title = cxp_title
-                    je.append("accounts", {"account": freight_acc, "debit_in_account_currency": shipping, "credit_in_account_currency": 0})
-                    je.append("accounts", {"account": cash_acc, "debit_in_account_currency": 0, "credit_in_account_currency": shipping})
-                    je.save(ignore_permissions=True)
-                    je.submit()
-        except Exception:
-            # Do not fail confirmation if the backfill JE experiences a non-critical issue.
-            frappe.logger().warning("confirm_settlement: optional courier expense JE backfill failed", exc_info=True)
 
         frappe.db.commit()
         # Invalidate token to prevent replays
@@ -462,7 +421,7 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
         except Exception:
             pass
 
-        return {
+        base = {
             "success": True,
             "invoice": invoice,
             "mode": mode,
@@ -473,6 +432,8 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
             "party_type": party_type,
             "party": party,
         }
+        base.update({k: v for k, v in (res or {}).items() if k not in base})
+        return base
     except Exception as e:
         frappe.db.rollback(save_point="confirm_settlement")
         frappe.log_error(frappe.get_traceback(), "confirm_settlement failed")

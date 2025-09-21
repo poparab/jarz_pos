@@ -190,6 +190,8 @@ workspaces = [
 
 doc_events = {
     "Sales Invoice": {
+        # Always mirror POS Profile into custom_kanban_profile
+        "validate": "jarz_pos.events.sales_invoice.sync_kanban_profile",
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
     "on_submit": "jarz_pos.events.sales_invoice.publish_new_invoice",
     # Emit state-change events for already-submitted invoices edited elsewhere
@@ -248,6 +250,14 @@ override_whitelisted_methods = {
     "get_profile_bundles": "jarz_pos.api.pos.get_profile_bundles",
     "test_bundle_debug": "jarz_pos.api.pos.test_bundle_debug",
 }
+
+# Ensure manager endpoints are whitelisted on import
+try:
+    from jarz_pos.api import manager as _mgr
+    _mgr.get_manager_dashboard_summary
+    _mgr.get_manager_orders
+except Exception:
+    pass
 
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,

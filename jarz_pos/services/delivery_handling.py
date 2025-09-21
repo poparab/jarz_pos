@@ -22,6 +22,53 @@ from jarz_pos.jarz_pos.utils.account_utils import (
 
 DN_LOGIC_VERSION = "2025-09-07a"
 
+# Constant VAT rate on partner fees
+PARTNER_FEES_VAT_RATE = 0.14  # 14%
+
+def _compute_sales_partner_fees(inv, sales_partner: str, online: bool) -> dict:
+    """Compute partner fees (commission + optional online fee) plus VAT.
+
+    Args:
+        inv: Sales Invoice doc
+        sales_partner: Sales Partner name
+        online: True if transaction is paid online (apply online_payment_fees), False for cash
+
+    Returns:
+        dict with keys: base_fees, vat, total_fees, commission_rate, online_rate
+    """
+    def _to_float(v, default=0.0):
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+    try:
+        sp = frappe.get_doc("Sales Partner", sales_partner)
+        commission_rate = _to_float(getattr(sp, "commission_rate", None) or getattr(sp, "commission_rate_percent", None) or 0)
+        online_rate = _to_float(getattr(sp, "online_payment_fees", None) or getattr(sp, "online_payment_fee", None) or 0)
+    except Exception:
+        commission_rate = 0.0
+        online_rate = 0.0
+
+    amount = float(getattr(inv, "grand_total", 0) or 0)
+    commission_fee = amount * (commission_rate / 100.0)
+    online_fee = amount * (online_rate / 100.0) if online else 0.0
+    base = commission_fee + online_fee
+    vat = base * PARTNER_FEES_VAT_RATE
+    total = base + vat
+    # Round to 2 decimals for display/storage
+    def r2(x: float) -> float:
+        try:
+            return round(float(x), 2)
+        except Exception:
+            return float(x)
+    return {
+        "base_fees": r2(base),
+        "vat": r2(vat),
+        "total_fees": r2(total),
+        "commission_rate": commission_rate,
+        "online_rate": online_rate,
+    }
+
 def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
     """Idempotently ensure a submitted Delivery Note exists for Sales Invoice.
 
@@ -48,7 +95,11 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
             out["error"] = "Invoice must be submitted before creating Delivery Note"
             return out
 
-        # Idempotency / reuse search: remarks OR (optional) custom link field if exists
+        # Idempotency / reuse search sequence (broadened to avoid duplicate DN creation):
+        #   a) Custom link field (if any of known candidates exists)
+        #   b) Remarks contains invoice name (legacy pattern)
+        #   c) Heuristic match: submitted DN for same customer, same total qty & amount (within recent 3 days)
+        #      that already has 'Auto-created from Sales Invoice' in remarks (covers earlier creation path)
         try:
             # Try custom field first (if admin later adds one, this code adapts automatically)
             dn_link_field = None
@@ -72,6 +123,32 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
                     pluck="name",
                     limit_page_length=1,
                 )
+            # Heuristic fallback (recent auto-created for same customer & qty/amount)
+            if not existing:
+                try:
+                    total_qty = sum([float(it.qty or 0) for it in si.items])
+                except Exception:
+                    total_qty = None
+                heuristics = frappe.get_all(
+                    "Delivery Note",
+                    filters={
+                        "docstatus": 1,
+                        "customer": si.customer,
+                        "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -3)],
+                        "remarks": ["like", "%Auto-created from Sales Invoice%"],
+                    },
+                    fields=["name"],
+                    limit_page_length=5,
+                )
+                for cand in heuristics:
+                    # Light check: ensure not already matched by remarks but amounts align
+                    try:
+                        dn_doc = frappe.get_doc("Delivery Note", cand.name)
+                        if abs(float(dn_doc.get("total_qty") or 0) - (total_qty or 0)) < 0.0001:
+                            existing = [cand.name]
+                            break
+                    except Exception:
+                        continue
             if existing:
                 out["delivery_note"] = existing[0]
                 out["reused"] = True
@@ -180,33 +257,86 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted before marking as courier outstanding.")
-    if inv.outstanding_amount <= 0:
-        frappe.throw("Invoice already paid – no outstanding amount to allocate.")
+    # Re-check latest outstanding directly from DB to avoid stale cache
+    try:
+        latest_outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
+    except Exception:
+        latest_outstanding = float(inv.outstanding_amount or 0)
+    if latest_outstanding <= 0.0001:
+        # Do not hard-fail; continue with CT/JE to keep operational flow going (idempotent behavior)
+        frappe.logger().warning(f"mark_courier_outstanding: Invoice {inv.name} appears fully paid (latest outstanding={latest_outstanding}). Skipping Payment Entry and proceeding with CT/JE if needed.")
 
     company = inv.company
-    outstanding = float(inv.outstanding_amount or 0)
-    order_amount = float(inv.grand_total or outstanding)
+    outstanding = latest_outstanding
+    order_amount = float(inv.grand_total or (outstanding or 0))
 
     # Compute shipping first for CT and later JE
     shipping_exp = _get_delivery_expense_amount(inv)
 
-    # Create Courier Transaction BEFORE creating Payment Entry so that preview timing treats this as unpaid-effective
-    ct = frappe.new_doc("Courier Transaction")
-    ct.party_type = party_type
-    ct.party = party
-    ct.date = frappe.utils.now_datetime()
-    ct.reference_invoice = inv.name
-    ct.amount = order_amount
-    ct.shipping_amount = float(shipping_exp or 0)
-    ct.status = "Unsettled"
-    ct.payment_mode = "Deferred"
-    ct.notes = "Courier Outstanding (collect order amount from courier)"
-    ct.insert(ignore_permissions=True)
+    # Create Courier Transaction BEFORE creating Payment Entry so preview treats this as unpaid-effective
+    # Idempotency: avoid duplicate CTs for same purpose
+    existing_ct = frappe.get_all(
+        "Courier Transaction",
+        filters={
+            "reference_invoice": inv.name,
+            "party_type": party_type,
+            "party": party,
+            "status": ["!=", "Settled"],
+            "notes": ["like", "%Courier Outstanding (%"],
+        },
+        pluck="name",
+        limit_page_length=1,
+    )
+    if existing_ct:
+        ct_name = existing_ct[0]
+    else:
+        ct = frappe.new_doc("Courier Transaction")
+        ct.party_type = party_type
+        ct.party = party
+        ct.date = frappe.utils.now_datetime()
+        ct.reference_invoice = inv.name
+        ct.amount = order_amount
+        ct.shipping_amount = float(shipping_exp or 0)
+        ct.status = "Unsettled"
+        ct.payment_mode = "Deferred"
+        ct.notes = "Courier Outstanding (collect order amount from courier)"
+        ct.insert(ignore_permissions=True)
+        ct_name = ct.name
 
     # Now move receivable to Courier Outstanding via Payment Entry (this will mark invoice Paid in ERP terms)
+    # Reuse existing PE to Courier Outstanding if already booked
     paid_to_account = _get_courier_outstanding_account(company)
     paid_from_account = _get_receivable_account(company)
-    pe = _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding)
+    pe_name = None
+    try:
+        ref_parents = frappe.get_all(
+            "Payment Entry Reference",
+            filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+            pluck="parent",
+        )
+        if ref_parents:
+            rows = frappe.get_all(
+                "Payment Entry",
+                filters={"name": ["in", ref_parents], "docstatus": 1},
+                fields=["name", "paid_to"],
+            )
+            for r in rows:
+                if (r.get("paid_to") or "").startswith("Courier Outstanding"):
+                    pe_name = r["name"]
+                    break
+    except Exception:
+        pe_name = None
+    if not pe_name and outstanding > 0.0001:
+        try:
+            pe = _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding)
+            pe_name = pe.name
+        except Exception as pe_err:
+            # Handle validation where SI is already fully paid; proceed without blocking
+            msg = str(pe_err)
+            if "already been fully paid" in msg or "already paid" in msg.lower():
+                frappe.logger().warning(f"mark_courier_outstanding: Skipping PE creation for {inv.name} – {msg}")
+            else:
+                raise
 
     # Accrue courier shipping payable to Creditors (party line) if configured
     je_name = None
@@ -222,36 +352,339 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
             inv.set("custom_sales_invoice_state", "Out for Delivery")
             inv.save(ignore_permissions=True)
 
-    frappe.publish_realtime(
-        "jarz_pos_courier_outstanding",
-        {
-            "event": "jarz_pos_courier_outstanding",
-            "invoice": inv.name,
-            "courier": courier,
-            "party_type": party_type,
-            "party": party,
-            "payment_entry": pe.name,
-            "journal_entry": je_name,
-            "courier_transaction": ct.name,
-            "amount": order_amount,
-            "shipping_amount": shipping_exp or 0,
-            "net_to_collect": (order_amount - float(shipping_exp or 0)),
-            "mode": "settle_later",
-        },
-    )
-    return {
+    # Mandatory Delivery Note creation (enforced across all flows)
+    dn_result = ensure_delivery_note_for_invoice(inv.name)
+    if dn_result.get("error"):
+        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+
+    payload = {
+        "event": "jarz_pos_courier_outstanding",
         "invoice": inv.name,
         "courier": courier,
         "party_type": party_type,
         "party": party,
-        "payment_entry": pe.name,
+        "payment_entry": pe_name,
         "journal_entry": je_name,
-        "courier_transaction": ct.name,
+        "courier_transaction": ct_name,
         "amount": order_amount,
         "shipping_amount": shipping_exp or 0,
         "net_to_collect": (order_amount - float(shipping_exp or 0)),
         "mode": "settle_later",
+        "delivery_note": dn_result.get("delivery_note"),
+        "delivery_note_reused": dn_result.get("reused"),
+        "dn_logic_version": DN_LOGIC_VERSION,
     }
+    frappe.publish_realtime("jarz_pos_courier_outstanding", payload)
+    return payload
+
+
+@frappe.whitelist()
+def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, mode_of_payment: str = "Cash"):
+    """Handle Out For Delivery transition for an UNPAID Sales Invoice that has a Sales Partner.
+
+    Business rule:
+      * Skip courier selection / settlement logic entirely.
+      * Immediately collect full outstanding amount in cash (Payment Entry to POS Profile cash account).
+      * Transition operational state to 'Out for Delivery'.
+      * Idempotent: if payment already created, reuse it; do not duplicate Delivery Note.
+      * Always ensure Delivery Note exists (reuse/create via ensure_delivery_note_for_invoice).
+
+    Args:
+        invoice_name: Sales Invoice (submitted)
+        pos_profile: POS Profile name (to resolve cash account)
+        mode_of_payment: Mode of Payment label (default 'Cash')
+    Returns:
+        dict { success, payment_entry, delivery_note, delivery_note_reused, outstanding_settled, amount }
+    """
+    invoice_name = (invoice_name or '').strip()
+    pos_profile = (pos_profile or '').strip()
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+    if not pos_profile:
+        frappe.throw("pos_profile required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    # Confirm sales partner presence
+    sales_partner = getattr(inv, "sales_partner", None) or getattr(inv, "sales_partner_name", None)
+    if not sales_partner:
+        frappe.throw("Invoice has no Sales Partner; use regular flow")
+
+    # Determine outstanding (fresh from DB)
+    try:
+        outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
+    except Exception:
+        outstanding = float(inv.outstanding_amount or 0)
+    if outstanding <= 0.0001:
+        # Already paid – just ensure state + DN and return gracefully
+        outstanding = 0.0
+
+    company = inv.company
+
+    # Resolve accounts
+    cash_acc = get_pos_cash_account(pos_profile, company)
+    receivable_acc = getattr(inv, "debit_to", None) or frappe.db.get_value("Company", company, "default_receivable_account")
+    if not receivable_acc:
+        frappe.throw("Could not resolve receivable account for invoice")
+    validate_account_exists(cash_acc)
+    validate_account_exists(receivable_acc)
+
+    # Step 0: Proactively prompt UI to collect cash BEFORE creating Payment Entry (two-step UX)
+    try:
+        frappe.publish_realtime(
+            "jarz_pos_sales_partner_collect_prompt",
+            {
+                "invoice": inv.name,
+                "sales_partner": sales_partner,
+                "amount": float(inv.grand_total or 0),
+                "outstanding": float(outstanding or 0),
+                "mode": "sales_partner_collect_prompt",
+            },
+            user="*",
+        )
+    except Exception:
+        pass
+
+    # Create / reuse Payment Entry if still outstanding
+    pe_name = None
+    if outstanding > 0.0001:
+        # Look for existing PE that already allocated full amount to invoice & paid_to matches cash account
+        ref_parents = frappe.get_all(
+            "Payment Entry Reference",
+            filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+            pluck="parent",
+        )
+        if ref_parents:
+            rows = frappe.get_all(
+                "Payment Entry",
+                filters={"name": ["in", ref_parents], "docstatus": 1, "paid_to": cash_acc, "payment_type": "Receive"},
+                fields=["name", "paid_amount"],
+            )
+            for r in rows:
+                pe_name = r["name"]
+                break
+        if not pe_name:
+            pe = frappe.new_doc("Payment Entry")
+            pe.payment_type = "Receive"
+            pe.company = company
+            pe.posting_date = frappe.utils.nowdate()
+            pe.mode_of_payment = mode_of_payment
+            pe.party_type = "Customer"
+            pe.party = inv.customer
+            pe.paid_from = receivable_acc
+            pe.paid_to = cash_acc
+            pe.paid_amount = outstanding
+            pe.received_amount = outstanding
+            pe.append("references", {
+                "reference_doctype": "Sales Invoice",
+                "reference_name": inv.name,
+                "allocated_amount": outstanding,
+            })
+            # Flags for silent operation
+            pe.flags.ignore_permissions = True
+            pe.insert(ignore_permissions=True)
+            pe.submit()
+            pe_name = pe.name
+
+    # Update operational state
+    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
+        try:
+            inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
+        except Exception:
+            inv.set("custom_sales_invoice_state", "Out for Delivery")
+            inv.save(ignore_permissions=True)
+
+    # Delivery Note
+    dn_result = ensure_delivery_note_for_invoice(inv.name)
+    if dn_result.get("error"):
+        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+
+    # Create/ensure Sales Partner Transaction record (idempotent)
+    try:
+        idemp = f"{inv.name}::sales_partner_unpaid_cash"
+        existing_spt = frappe.get_all(
+            "Sales Partner Transactions",
+            filters={"idempotency_token": idemp},
+            pluck="name",
+            limit_page_length=1,
+        )
+        if not existing_spt:
+            # Compute partner fees (Cash -> no online fee)
+            fees = _compute_sales_partner_fees(inv, sales_partner, online=False)
+            spt = frappe.new_doc("Sales Partner Transactions")
+            spt.sales_partner = sales_partner
+            spt.date = frappe.utils.now_datetime()
+            spt.reference_invoice = inv.name
+            spt.amount = float(inv.grand_total or 0)
+            spt.partner_fees = fees.get("total_fees")
+            spt.payment_mode = "Cash"
+            spt.idempotency_token = idemp
+            spt.status = "Unsettled"
+            # Store POS Profile on the transaction (from SI if set, else the function arg)
+            try:
+                spt.pos_profile = getattr(inv, "pos_profile", None) or pos_profile
+            except Exception:
+                pass
+            spt.notes = (
+                "Unpaid partner OFD – cash collected by staff | "
+                f"fees: base={fees.get('base_fees')} vat={fees.get('vat')} total={fees.get('total_fees')} | "
+                f"rates: commission={fees.get('commission_rate')}% online={fees.get('online_rate')}%"
+            )
+            spt.insert(ignore_permissions=True)
+        else:
+            # Backfill pos_profile if missing on existing record
+            try:
+                doc = frappe.get_doc("Sales Partner Transactions", existing_spt[0])
+                current_pp = getattr(doc, "pos_profile", None)
+                if not current_pp:
+                    pp_val = getattr(inv, "pos_profile", None) or pos_profile
+                    if pp_val:
+                        doc.db_set("pos_profile", pp_val, update_modified=False)
+            except Exception as _spt_backfill_err:
+                frappe.logger().warning(f"SPT pos_profile backfill (unpaid) failed for {inv.name}: {_spt_backfill_err}")
+    except Exception as _spt_err:
+        frappe.logger().warning(f"SPT create (unpaid) failed for {inv.name}: {_spt_err}")
+
+    payload = {
+        "success": True,
+        "invoice": inv.name,
+        "payment_entry": pe_name,
+        "delivery_note": dn_result.get("delivery_note"),
+        "delivery_note_reused": dn_result.get("reused"),
+        "amount": float(inv.grand_total or 0),
+        "outstanding_before": outstanding,
+        "sales_partner": sales_partner,
+        "mode": "sales_partner_unpaid_cash",
+    }
+    frappe.publish_realtime("jarz_pos_sales_partner_unpaid_ofd", payload, user="*")
+    return payload
+
+
+@frappe.whitelist()
+def sales_partner_paid_out_for_delivery(invoice_name: str):
+    """Handle Out For Delivery transition for a PAID Sales Partner invoice.
+
+    Use case: Invoice already fully paid (e.g. online payment). We still need to:
+      * Set operational state to 'Out for Delivery'.
+      * Ensure Delivery Note exists (to effect stock movement if update_stock was disabled at SI creation time).
+      * Publish realtime event for Kanban/UI patching.
+    Idempotent: Re-running will NOT create duplicate Delivery Notes.
+    """
+    invoice_name = (invoice_name or '').strip()
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    sales_partner = getattr(inv, "sales_partner", None) or getattr(inv, "sales_partner_name", None)
+    if not sales_partner:
+        frappe.throw("Invoice has no Sales Partner; use regular flow")
+
+    # Set state
+    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
+        try:
+            inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
+        except Exception:
+            inv.set("custom_sales_invoice_state", "Out for Delivery")
+            inv.save(ignore_permissions=True)
+
+    # Ensure DN (handles idempotent reuse)
+    dn_result = ensure_delivery_note_for_invoice(inv.name)
+    if dn_result.get("error"):
+        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+
+    # Record Sales Partner Transaction for paid invoices as well
+    try:
+        idemp = f"{inv.name}::sales_partner_paid"
+        existing_spt = frappe.get_all(
+            "Sales Partner Transactions",
+            filters={"idempotency_token": idemp},
+            pluck="name",
+            limit_page_length=1,
+        )
+        if not existing_spt:
+            # Infer if paid online from either:
+            #  1) SI POS payments child table (any non-cash payment)
+            #  2) Linked submitted Payment Entries' mode_of_payment (any non-cash)
+            is_online = False
+            try:
+                # Check POS payments table first (present on POS-style invoices)
+                for p in (getattr(inv, "payments", []) or []):
+                    mode = (p.get("mode_of_payment") or "").strip().lower()
+                    amt = float(p.get("amount") or p.get("base_amount") or 0)
+                    if amt > 0 and mode and mode != "cash":
+                        is_online = True
+                        break
+                # If still undetermined, inspect linked Payment Entries
+                if not is_online:
+                    pe_parents = frappe.get_all(
+                        "Payment Entry Reference",
+                        filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+                        pluck="parent",
+                    )
+                    if pe_parents:
+                        rows = frappe.get_all(
+                            "Payment Entry",
+                            filters={"name": ["in", pe_parents], "docstatus": 1},
+                            fields=["name", "mode_of_payment", "paid_amount"],
+                        )
+                        for r in rows:
+                            mode = (r.get("mode_of_payment") or "").strip().lower()
+                            amt = float(r.get("paid_amount") or 0)
+                            if amt > 0 and mode and mode != "cash":
+                                is_online = True
+                                break
+            except Exception:
+                # Default to cash if uncertain to avoid applying extra fees by mistake
+                is_online = False
+            fees = _compute_sales_partner_fees(inv, sales_partner, online=is_online)
+            spt = frappe.new_doc("Sales Partner Transactions")
+            spt.sales_partner = sales_partner
+            spt.date = frappe.utils.now_datetime()
+            spt.reference_invoice = inv.name
+            spt.amount = float(inv.grand_total or 0)
+            spt.partner_fees = fees.get("total_fees")
+            spt.payment_mode = "Online" if is_online else "Cash"
+            spt.idempotency_token = idemp
+            spt.status = "Unsettled"
+            # Store POS Profile from the Sales Invoice if available
+            try:
+                spt.pos_profile = getattr(inv, "pos_profile", None)
+            except Exception:
+                pass
+            spt.notes = (
+                ("Paid partner OFD – online payment" if is_online else "Paid partner OFD – cash payment")
+                + " | "
+                + f"fees: base={fees.get('base_fees')} vat={fees.get('vat')} total={fees.get('total_fees')} | "
+                + f"rates: commission={fees.get('commission_rate')}% online={fees.get('online_rate')}%"
+            )
+            spt.insert(ignore_permissions=True)
+        else:
+            # Backfill pos_profile if missing on existing record
+            try:
+                doc = frappe.get_doc("Sales Partner Transactions", existing_spt[0])
+                if not getattr(doc, "pos_profile", None):
+                    pp_val = getattr(inv, "pos_profile", None)
+                    if pp_val:
+                        doc.db_set("pos_profile", pp_val, update_modified=False)
+            except Exception as _spt_backfill_err:
+                frappe.logger().warning(f"SPT pos_profile backfill (paid) failed for {inv.name}: {_spt_backfill_err}")
+    except Exception as _spt_err:
+        frappe.logger().warning(f"SPT create (paid) failed for {inv.name}: {_spt_err}")
+
+    payload = {
+        "success": True,
+        "invoice": inv.name,
+        "delivery_note": dn_result.get("delivery_note"),
+        "delivery_note_reused": dn_result.get("reused"),
+        "sales_partner": sales_partner,
+        "mode": "sales_partner_paid",
+    }
+    frappe.publish_realtime("jarz_pos_sales_partner_paid_ofd", payload, user="*")
+    return payload
 
 
 @frappe.whitelist()
@@ -714,6 +1147,12 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
             je_name = je.name
 
         # Courier Transaction idempotency
+        # Desired amount logic (business rule update 2025-09-12):
+        #   For immediate cash settlement (settlement == 'cash_now') the CT.amount
+        #   should reflect the full invoice grand total so courier collection
+        #   reporting shows the principal moved at this transition.
+        #   For 'later' we continue to record 0 principal (only shipping expense accrued).
+        desired_amount = float(inv.grand_total or 0) if settlement == "cash_now" else 0.0
         # Idempotency now does not rely on legacy 'courier' link
         ct_filters = {
             "reference_invoice": inv.name,
@@ -722,6 +1161,28 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         existing_ct = frappe.get_all("Courier Transaction", filters=ct_filters, pluck="name", limit_page_length=1)
         if existing_ct:
             ct_name = existing_ct[0]
+            # Backfill amount / shipping if prior logic stored 0 for cash_now path
+            if settlement == "cash_now":
+                try:
+                    ct_doc = frappe.get_doc("Courier Transaction", ct_name)
+                    current_amt = float(ct_doc.get("amount") or 0)
+                    if abs(current_amt - desired_amount) > 0.005:
+                        # Update without bumping modified timestamp noisily
+                        frappe.db.set_value(
+                            "Courier Transaction",
+                            ct_name,
+                            {
+                                "amount": desired_amount,
+                                "shipping_amount": shipping_exp,
+                                "status": "Settled",
+                                "payment_mode": "cash_now",
+                            },
+                            update_modified=False,
+                        )
+                except Exception as _ct_update_err:
+                    frappe.logger().warning(
+                        f"OFD CT backfill failed for {ct_name}: {_ct_update_err}"
+                    )
         else:
             ct = frappe.new_doc("Courier Transaction")
             # Do not set legacy 'courier' field (target DocType removed)
@@ -729,10 +1190,11 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
             ct.party = party
             ct.date = frappe.utils.now_datetime()
             ct.reference_invoice = inv.name
-            ct.amount = 0
+            ct.amount = desired_amount
             ct.shipping_amount = shipping_exp
             ct.status = "Settled" if settlement == "cash_now" else "Unsettled"
-            ct.payment_mode = settlement  # custom field expected
+            # Normalize payment_mode values for consistency (legacy used settlement values)
+            ct.payment_mode = "cash_now" if settlement == "cash_now" else "later"
             ct.notes = "Out For Delivery transition - courier expense settlement" if shipping_exp else "Out For Delivery transition"
             ct.insert(ignore_permissions=True)
             ct_name = ct.name
