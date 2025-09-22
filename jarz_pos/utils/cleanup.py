@@ -1,3 +1,90 @@
+"""Install/migrate-time cleanup utilities.
+
+These functions are called via hooks.before_migrate. They must be safe to run multiple
+times and should never raise unhandled exceptions. If a field doesn't exist, they should
+quietly skip.
+"""
+from __future__ import annotations
+from typing import Optional
+
+import frappe
+
+
+def _safe_remove_custom_field(dt: str, fieldname: str) -> None:
+    """Remove a Custom Field record if it exists, ignoring errors."""
+    try:
+        name = frappe.db.get_value("Custom Field", {"dt": dt, "fieldname": fieldname}, "name")
+        if name:
+            try:
+                frappe.delete_doc("Custom Field", name, ignore_permissions=True, force=True)
+            except Exception:
+                # As fallback, mark as deleted
+                try:
+                    frappe.db.sql("UPDATE `tabCustom Field` SET docstatus=2 WHERE name=%s", name)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def remove_conflicting_territory_delivery_fields() -> None:
+    """Remove legacy or conflicting delivery-related fields if present.
+
+    This prevents duplicate fieldname collisions when fixtures are applied.
+    """
+    # Example legacy names that may conflict; adjust as needed
+    legacy_fields = [
+        ("Sales Invoice", "required_delivery_datetime"),
+        ("Sales Invoice", "delivery_datetime"),
+        ("Sales Invoice", "delivery_time"),
+        ("Sales Invoice", "delivery_duration"),
+        ("Sales Invoice", "state"),
+    ]
+    for dt, fn in legacy_fields:
+        _safe_remove_custom_field(dt, fn)
+
+
+def ensure_delivery_slot_fields() -> None:
+    """Ensure new split delivery fields exist prior to fixtures import.
+
+    This function is defensive: it will create fields if missing with minimal settings,
+    so that downstream code relying on them doesn't fail.
+    """
+    try:
+        # Minimal field specs matching fixtures intent
+        needed = [
+            ("Sales Invoice", "custom_delivery_date", "Date", "posting_time"),
+            ("Sales Invoice", "custom_delivery_time_from", "Time", "custom_delivery_date"),
+            ("Sales Invoice", "custom_delivery_duration", "Duration", "custom_delivery_time_from"),
+            ("Sales Invoice", "custom_sales_invoice_state", "Select", "custom_delivery_duration"),
+            ("Sales Invoice", "custom_kanban_profile", "Link", "pos_profile", "POS Profile"),
+        ]
+        for dt, fieldname, fieldtype, insert_after, *rest in needed:
+            exists = frappe.db.exists("Custom Field", {"dt": dt, "fieldname": fieldname})
+            if exists:
+                continue
+            doc = frappe.get_doc({
+                "doctype": "Custom Field",
+                "dt": dt,
+                "fieldname": fieldname,
+                "fieldtype": fieldtype,
+                "label": fieldname.replace("_", " ").title(),
+                "insert_after": insert_after,
+                "allow_on_submit": 1 if fieldname.startswith("custom_") else 0,
+            })
+            if rest:
+                doc.options = rest[0]
+            try:
+                doc.insert(ignore_permissions=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def remove_required_delivery_datetime_field() -> None:
+    """Drop the legacy required_delivery_datetime field if present."""
+    _safe_remove_custom_field("Sales Invoice", "required_delivery_datetime")
 import frappe
 
 
