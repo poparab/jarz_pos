@@ -5,6 +5,8 @@ All functions are designed to be import-safe and idempotent so migrations never 
 from __future__ import annotations
 
 from typing import Iterable, Optional
+import json
+import os
 
 try:
     import frappe
@@ -175,3 +177,47 @@ def remove_required_delivery_datetime_field() -> None:
         _safe_remove_custom_field("Sales Invoice", "required_delivery_datetime")
     except Exception as e:
         _log(f"remove_required_delivery_datetime_field error: {e}")
+
+
+def remove_colliding_custom_fields_for_fixtures() -> None:
+    """Ensure fixture Custom Fields can be inserted by removing conflicting existing ones.
+
+    For each Custom Field in our fixtures (dt+fieldname), if a Custom Field already exists
+    with the SAME (dt, fieldname) but a DIFFERENT name, delete the existing one so the
+    fixture import can proceed without DuplicateEntry.
+    """
+    try:
+        if not frappe:
+            return
+        # Locate fixtures/custom_field.json within this app
+        app_path = None
+        try:
+            app_path = frappe.get_app_path("jarz_pos")
+        except Exception:
+            # Fallback: try relative from this file
+            app_path = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+        fx_path = os.path.join(app_path, "fixtures", "custom_field.json")
+        if not os.path.exists(fx_path):
+            return
+        with open(fx_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return
+        for doc in data:
+            try:
+                dt = doc.get("dt")
+                fieldname = doc.get("fieldname")
+                fx_name = doc.get("name")
+                if not dt or not fieldname or not fx_name:
+                    continue
+                existing = frappe.db.get_value("Custom Field", {"dt": dt, "fieldname": fieldname}, "name")
+                if existing and existing != fx_name:
+                    try:
+                        frappe.delete_doc("Custom Field", existing, ignore_permissions=True)
+                        _log(f"Removed colliding Custom Field {dt}.{fieldname} (existing: {existing}) to allow fixture {fx_name}")
+                    except Exception as de:
+                        _log(f"Failed removing colliding Custom Field {dt}.{fieldname}: {de}")
+            except Exception as inner:
+                _log(f"Fixture collision scan error: {inner}")
+    except Exception as e:
+        _log(f"remove_colliding_custom_fields_for_fixtures error: {e}")

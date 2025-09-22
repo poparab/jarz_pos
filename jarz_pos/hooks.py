@@ -15,6 +15,8 @@ fixtures = [
 # Ensure conflicting Custom Fields are removed before fixtures import
 before_migrate = [
     "jarz_pos.utils.cleanup.remove_conflicting_territory_delivery_fields",
+    # Remove any existing Custom Fields that collide with our fixtures by dt+fieldname
+    "jarz_pos.utils.cleanup.remove_colliding_custom_fields_for_fixtures",
     # Ensure new delivery slot fields exist before fixtures import / migrations
     "jarz_pos.utils.cleanup.ensure_delivery_slot_fields",
     # Remove legacy single datetime field
