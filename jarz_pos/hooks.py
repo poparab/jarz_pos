@@ -141,8 +141,9 @@ workspaces = [
 # Uninstallation
 # ------------
 
-# before_uninstall = "jarz_pos.uninstall.before_uninstall"
-# after_uninstall = "jarz_pos.uninstall.after_uninstall"
+# Provide a light uninstall cleanup to remove legacy fields (safe no-ops if absent)
+before_uninstall = "jarz_pos.utils.cleanup.remove_conflicting_territory_delivery_fields"
+after_uninstall = "jarz_pos.utils.cleanup.remove_required_delivery_datetime_field"
 
 # Integration Setup
 # ------------------
