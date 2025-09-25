@@ -1,1 +1,3 @@
 jarz pos
+# NOTE: DocTypes must reside under jarz_pos/jarz_pos/<module_slug>/doctype/
+# Current module slug: jarz_pos (lowercase). Ensure production structure matches.
