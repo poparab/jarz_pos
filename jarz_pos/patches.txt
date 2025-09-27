@@ -1,7 +1,7 @@
 [pre_model_sync]
 # Patches added in this section will be executed before doctypes are migrated
 # Read docs to understand patches: https://frappeframework.com/docs/v14/user/en/database-migrations
-jarz_pos.Patches.v0_0_4.remove_conflicting_territory_delivery_fields
+jarz_pos.patches.v0_0_4.remove_conflicting_territory_delivery_fields
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
@@ -10,3 +10,6 @@ jarz_pos.Patches.v0_0_4.remove_conflicting_territory_delivery_fields
 # older site that requires these specific transformations, re-enable as needed.
 # jarz_pos.Patches.v0_0_2.add_required_delivery_datetime_field
 # jarz_pos.Patches.v0_0_3.add_sales_invoice_state_field
+
+# Restore essential DocTypes after restructuring
+jarz_pos.patches.v1_0.restore_essential_doctypes

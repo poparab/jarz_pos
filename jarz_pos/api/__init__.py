@@ -1,28 +1,36 @@
-from .pos import get_pos_profiles, get_profile_bundles, get_profile_products
-from .delivery_slots import get_available_delivery_slots, get_next_available_slot 
-from .customer import search_customers, get_territories, create_customer 
-from .couriers import (
-    mark_courier_outstanding, 
-    pay_delivery_expense, 
-    courier_delivery_expense_only, 
-    get_courier_balances, 
-    settle_courier, 
-    settle_courier_for_invoice
-)
-from .invoices import create_pos_invoice, pay_invoice 
-# Added explicit imports for kanban endpoints to guarantee decorator registration on bench restart
-from .kanban import (
-    get_kanban_columns,
-    get_kanban_invoices,
-    update_invoice_state,
-    get_invoice_details,
-    get_kanban_filters,
-)
-# Import global methods to register them at module level
-from .global_methods import (
-    get_kanban_columns as global_get_kanban_columns,
-    get_kanban_invoices as global_get_kanban_invoices,
-    update_invoice_state as global_update_invoice_state,
-    get_invoice_details as global_get_invoice_details,
-    get_kanban_filters as global_get_kanban_filters,
-)
+"""Compatibility shim package.
+
+This package allows imports of the form `jarz_pos.jarz_pos.api.<module>` to resolve
+to the actual top-level API modules `jarz_pos.api.<module>`.
+
+It is safe to keep and works in both local and production setups.
+"""
+
+from importlib import import_module as _import_module
+import sys as _sys
+
+# Expose the top-level API package as this package to support attribute access
+_base = _import_module("jarz_pos.api")
+
+# Ensure submodule discovery works by borrowing the base package path
+try:
+    __path__ = _base.__path__  # type: ignore[attr-defined]
+except Exception:
+    pass
+
+# Optional: export common names from the base package (not strictly required)
+for _name in getattr(_base, "__all__", []):
+    try:
+        globals()[_name] = getattr(_base, _name)
+    except Exception:
+        pass
+
+def __getattr__(name: str):
+    """Lazily import submodules (e.g., user, couriers) under this shim.
+
+    This lets `import jarz_pos.jarz_pos.api.user` work by mapping to
+    `jarz_pos.api.user` under the hood and caching the alias in sys.modules.
+    """
+    mod = _import_module(f"jarz_pos.api.{name}")
+    _sys.modules[__name__ + "." + name] = mod
+    return mod
