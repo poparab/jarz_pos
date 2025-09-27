@@ -22,10 +22,10 @@ from jarz_pos.services.delivery_handling import (
     settle_courier_collected_payment as _settle_courier_collected_payment,
 )
 from jarz_pos.services.delivery_party import create_delivery_party as _create_delivery_party
-from jarz_pos.jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
+from jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
 from jarz_pos.services import delivery_handling as _delivery_services
 from jarz_pos.services.settlement_strategies import dispatch_settlement as _dispatch_settlement
-from jarz_pos.jarz_pos.utils.account_utils import (
+from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
     get_pos_cash_account,
     validate_account_exists,

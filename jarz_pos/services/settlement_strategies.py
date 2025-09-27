@@ -14,14 +14,14 @@ from __future__ import annotations
 from typing import Optional, Dict, Any
 import frappe
 
-from jarz_pos.jarz_pos.services.delivery_handling import (
+from jarz_pos.services.delivery_handling import (
     _get_delivery_expense_amount,
     ensure_delivery_note_for_invoice,
     _get_courier_outstanding_account,
     _get_receivable_account,
     _create_payment_entry,
 )
-from jarz_pos.jarz_pos.utils.account_utils import (
+from jarz_pos.utils.account_utils import (
     get_pos_cash_account,
     get_freight_expense_account,
     get_creditors_account,
@@ -80,7 +80,7 @@ def handle_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Optional[st
 
     # After payment, perform Out For Delivery transition with immediate courier cash settlement
     # Reuse robust paid-handler that creates JE (DR Freight / CR Cash), CT (Settled), DN, and state update
-    from jarz_pos.jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
+    from jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
     courier_label = "Courier"
     ofd = _ofd_paid(inv.name, courier_label, settlement="cash_now", pos_profile=pos_profile, party_type=party_type, party=party)
 
@@ -104,7 +104,7 @@ def handle_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Optional[st
 
 
 def handle_unpaid_settle_later(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]) -> Dict[str, Any]:
-    from jarz_pos.jarz_pos.services.delivery_handling import mark_courier_outstanding as _mark
+    from jarz_pos.services.delivery_handling import mark_courier_outstanding as _mark
     # mark_courier_outstanding now enforces Delivery Note creation and returns DN info
     res = _mark(inv.name, courier=None, party_type=party_type, party=party)
     if isinstance(res, dict):
@@ -114,7 +114,7 @@ def handle_unpaid_settle_later(inv, *, pos_profile: str, payment_type: Optional[
 
 def handle_paid_settle_now(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]) -> Dict[str, Any]:
     # Paid already – no PE; perform Out For Delivery transition with immediate courier cash settlement
-    from jarz_pos.jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
+    from jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
     courier_label = "Courier"
     ofd = _ofd_paid(inv.name, courier_label, settlement="cash_now", pos_profile=pos_profile, party_type=party_type, party=party)
     # Return OFD artifacts
@@ -128,7 +128,7 @@ def handle_paid_settle_now(inv, *, pos_profile: str, payment_type: Optional[str]
 
 def handle_paid_settle_later(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]) -> Dict[str, Any]:
     # No PE; accrue shipping and create Unsettled CT via existing transition path for paid invoices
-    from jarz_pos.jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
+    from jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
     courier_label = "Courier"
     return _ofd_paid(inv.name, courier_label, settlement="later", pos_profile=pos_profile, party_type=party_type, party=party)
 

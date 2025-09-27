@@ -6,7 +6,7 @@ including outstanding management, expense tracking, and settlement.
 """
 
 import frappe
-from jarz_pos.jarz_pos.utils.account_utils import (
+from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
     get_courier_outstanding_account,
     get_pos_cash_account,

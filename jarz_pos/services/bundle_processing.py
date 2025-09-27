@@ -447,7 +447,7 @@ def test_bundle_pricing(bundle_identifier, qty: int = 1):
     """Utility endpoint to test bundle pricing & rounding.
     Returns diagnostic info including computed discount percentage and reconciliation.
     Usage (bench):
-      bench execute jarz_pos.jarz_pos.services.bundle_processing.test_bundle_pricing --kwargs '{"bundle_identifier": "ITEM-CODE", "qty": 2}'
+    bench execute jarz_pos.services.bundle_processing.test_bundle_pricing --kwargs '{"bundle_identifier": "ITEM-CODE", "qty": 2}'
     """
     processor = BundleProcessor(bundle_identifier, qty)
     processor.load_bundle()
