@@ -7,6 +7,7 @@
  "field_order": [
   "bundle_name",
   "bundle_price",
+    "free_shipping",
   "items",
   "erpnext_item"
  ],
@@ -26,6 +27,14 @@
    "non_negative": 1,
    "reqd": 1
   },
+    {
+     "fieldname": "free_shipping",
+     "fieldtype": "Check",
+     "label": "Free Shipping",
+     "default": "0",
+     "in_list_view": 1,
+     "description": "If enabled, orders including this bundle will have delivery charge waived."
+    },
   {
    "fieldname": "items",
    "fieldtype": "Table",
@@ -44,7 +53,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-07-06 16:55:30.403689",
+ "modified": "2025-09-28 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Bundle",

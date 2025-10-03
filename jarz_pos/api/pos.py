@@ -42,7 +42,7 @@ def get_profile_bundles(profile: str):
     bundles = frappe.get_all(
         'Jarz Bundle',
         filters=filters,
-        fields=['name as id', 'bundle_name as name', 'bundle_price as price'],
+        fields=['name as id', 'bundle_name as name', 'bundle_price as price', 'free_shipping'],
     )
 
     for b in bundles:
@@ -106,6 +106,11 @@ def get_profile_bundles(profile: str):
             })
             
         b['item_groups'] = processed_groups
+        # Normalize flag for clients
+        try:
+            b['free_shipping'] = 1 if int(b.get('free_shipping') or 0) else 0
+        except Exception:
+            b['free_shipping'] = 0
 
     return bundles
 

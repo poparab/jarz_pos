@@ -181,6 +181,7 @@ def create_pos_invoice(
     required_delivery_datetime=None,
     sales_partner: str | None = None,
     payment_type: str | None = None,
+    pickup: bool | None = None,
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -240,6 +241,37 @@ def create_pos_invoice(
         print("\n6️⃣ SETTING DOCUMENT FIELDS:")
         set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
 
+        # STEP 6.0: Mark pickup flag if provided
+        is_pickup = bool(pickup)
+        if is_pickup:
+            try:
+                # Try common custom fields if they exist; don't fail if missing
+                for fld in [
+                    "custom_is_pickup",
+                    "is_pickup",
+                    "pickup",
+                ]:
+                    try:
+                        if frappe.get_meta("Sales Invoice").get_field(fld):
+                            try:
+                                invoice_doc.set(fld, 1)
+                            except Exception:
+                                setattr(invoice_doc, fld, 1)
+                            break
+                    except Exception:
+                        continue
+                # Add a remark marker for downstream helpers to detect
+                try:
+                    existing = (getattr(invoice_doc, "remarks", "") or "").strip()
+                    marker = "[PICKUP]"
+                    if marker not in existing:
+                        invoice_doc.remarks = (existing + "\n" if existing else "") + marker
+                except Exception:
+                    pass
+                print("   🚏 Pickup mode enabled – shipping suppressed")
+            except Exception as _mkpu_err:
+                print(f"   ⚠️ Could not mark pickup flag: {_mkpu_err}")
+
         # Ensure custom_kanban_profile mirrors POS profile at creation time (defensive in addition to hook)
         try:
             if getattr(invoice_doc, "pos_profile", None):
@@ -290,8 +322,35 @@ def create_pos_invoice(
             except Exception as clear_err:
                 print(f"   ⚠️ Could not clear existing taxes: {clear_err}")
         
-        # STEP 7.4 & 7.5 only execute when NOT in Sales Partner mode
-        if not partner_tax_suppressed:
+        # Determine if cart includes any free-shipping bundle to suppress shipping income insertion
+        free_shipping_waived = False
+        try:
+            # Inspect processed_items for any bundle link and query Jarz Bundle.free_shipping
+            bundle_candidates = []
+            for it in processed_items:
+                bcode = it.get('bundle_code') or it.get('parent_bundle')
+                if bcode and bcode not in bundle_candidates:
+                    bundle_candidates.append(bcode)
+                # Also consider ERPNext parent items that map to a bundle
+                code = it.get('item_code')
+                if code and not bcode:
+                    try:
+                        rows = frappe.get_all('Jarz Bundle', filters={'erpnext_item': code}, pluck='name')
+                        for r in rows:
+                            if r not in bundle_candidates:
+                                bundle_candidates.append(r)
+                    except Exception:
+                        pass
+            if bundle_candidates:
+                cols = set(frappe.db.get_table_columns('Jarz Bundle') or [])
+                if 'free_shipping' in cols:
+                    any_free = frappe.get_all('Jarz Bundle', filters={'name': ['in', bundle_candidates], 'free_shipping': 1}, pluck='name')
+                    free_shipping_waived = bool(any_free)
+        except Exception:
+            free_shipping_waived = False
+
+        # STEP 7.4 & 7.5 only execute when NOT in Sales Partner mode and no free-shipping waiver
+        if not partner_tax_suppressed and not free_shipping_waived and not bool(pickup):
             # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
             print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
             try:
@@ -330,6 +389,8 @@ def create_pos_invoice(
                 add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
         else:
             print("\n7️⃣.4️⃣ & 7️⃣.5️⃣ SKIPPED: Sales Partner tax suppression active")
+            if free_shipping_waived:
+                print("   🚚 Free-shipping bundle detected – shipping income suppressed")
 
         # STEP 8: Validate and Calculate Document
         print("\n8️⃣ DOCUMENT VALIDATION:")
@@ -370,6 +431,10 @@ def create_pos_invoice(
         # STEP 12: Prepare Response
         print("\n🎯 PREPARING RESPONSE:")
         result = _prepare_response(invoice_doc, delivery_datetime, logger)
+        try:
+            result["pickup"] = bool(pickup)
+        except Exception:
+            pass
 
         print("\n🎉 SUCCESS! Invoice creation completed!")
         print("=" * 100)

@@ -1221,236 +1221,131 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
 
 @frappe.whitelist()
 def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: str, pos_profile: str, idempotency_token: str | None = None, party_type: str | None = None, party: str | None = None):
-    """Unified Out For Delivery transition (Phase 2: add Journal Entry branch logic).
+    """Unified Out For Delivery transition (Simplified per 2025-09 rules).
 
-    Adds to Phase 1:
-      * Determine shipping expense
-      * Resolve accounts (freight, courier outstanding, POS cash)
-      * Create single Journal Entry per invoice+mode (idempotent by title)
-
-    (Courier Transaction creation deferred to Phase 3.)
+    New business rules:
+      - "Settle Later" is not supported anymore (client always passes pay_now, but we ignore mode).
+      - If invoice is already PAID: do NOT create any Journal Entry or Courier Transaction.
+        Only update state to Out For Delivery and ensure a Delivery Note exists.
+      - If invoice is UNPAID: create a Cash Payment Entry for the full outstanding amount
+        to the POS Profile's cash account; then update state & ensure Delivery Note.
+      - Courier info (party_type/party) is optional and ignored in this simplified flow.
+      - A realtime "collect cash" prompt is published for unpaid invoices.
     """
     try:
-
-        # ---- Input Normalization & Validation ----
+        # ---- Normalize inputs ----
         invoice_name = (invoice_name or '').strip()
         courier = (courier or '').strip()
-        mode = (mode or '').strip().lower()
         pos_profile = (pos_profile or '').strip()
         token = (idempotency_token or '').strip() or None
-
         if not invoice_name:
             frappe.throw("invoice_name required")
-        # Accept empty courier for newer clients; derive a display label from party if missing
-        def _derive_courier_label(pt: str | None, p: str | None) -> str:
-            pt = (pt or '').strip()
-            p = (p or '').strip()
-            if not p:
-                return 'Courier'
-            try:
-                if pt == 'Employee':
-                    return frappe.db.get_value('Employee', p, 'employee_name') or p
-                if pt == 'Supplier':
-                    return frappe.db.get_value('Supplier', p, 'supplier_name') or p
-            except Exception:
-                pass
-            return p
-        if not courier:
-            courier = _derive_courier_label(party_type, party)
-        if mode not in {"pay_now", "settle_later"}:
-            frappe.throw("mode must be 'pay_now' or 'settle_later'")
         if not pos_profile:
             frappe.throw("pos_profile required")
-
-        if not (party_type and party):
-            fallback = frappe.get_all(
-                "Courier Transaction",
-                filters={
-                    "reference_invoice": invoice_name,
-                    "status": ["!=", "Settled"],
-                    "party_type": ["not in", [None, ""]],
-                    "party": ["not in", [None, ""]],
-                },
-                fields=["party_type", "party"],
-                limit=1,
-            )
-            if fallback:
-                party_type = fallback[0].get("party_type")
-                party = fallback[0].get("party")
-            else:
-                frappe.throw("party_type & party required (Employee/Supplier)")
 
         inv = frappe.get_doc("Sales Invoice", invoice_name)
         if inv.docstatus != 1:
             frappe.throw("Invoice must be submitted")
-        if float(inv.outstanding_amount or 0) > 0.01:
-            frappe.throw("Invoice must be fully paid before marking Out for Delivery")
 
-    # ---- Shipping Expense (from territory) ----
-        shipping_exp = _get_delivery_expense_amount(inv) or 0.0
-
-        # ---- Account Resolution ----
-        company = inv.company
-        freight_acc = get_freight_expense_account(company)
-        courier_outstanding_acc = get_courier_outstanding_account(company)
-        cash_acc = get_pos_cash_account(pos_profile, company)
-        creditors_acc = get_creditors_account(company)
-        for acc in (freight_acc, courier_outstanding_acc, cash_acc, creditors_acc):
-            validate_account_exists(acc)
-
-        # ---- Journal Entry (idempotent) ----
-        je_title = f"Out For Delivery – {inv.name}"
-        existing_je = frappe.get_all(
-            "Journal Entry",
-            filters={"company": company, "title": je_title, "docstatus": 1},
-            pluck="name",
-            limit_page_length=1,
-        )
-        je_name = existing_je[0] if existing_je else None
-        if not je_name and shipping_exp > 0:
-            try:
-                frappe.db.savepoint("ofdelivery_je")
-                je = frappe.new_doc("Journal Entry")
-                je.voucher_type = "Journal Entry"
-                je.posting_date = frappe.utils.nowdate()
-                je.company = company
-                je.title = je_title
-                if mode == "pay_now":
-                    je.append("accounts", {
-                        "account": freight_acc,
-                        "debit_in_account_currency": shipping_exp,
-                        "credit_in_account_currency": 0,
-                    })
-                    je.append("accounts", {
-                        "account": cash_acc,
-                        "debit_in_account_currency": 0,
-                        "credit_in_account_currency": shipping_exp,
-                    })
-                else:  # settle_later
-                    je.append("accounts", {
-                        "account": freight_acc,
-                        "debit_in_account_currency": shipping_exp,
-                        "credit_in_account_currency": 0,
-                    })
-                    je.append("accounts", {
-                        "account": creditors_acc,
-                        "party_type": party_type,
-                        "party": party,
-                        "debit_in_account_currency": 0,
-                        "credit_in_account_currency": shipping_exp,
-                    })
-                je.save(ignore_permissions=True)
-                je.submit()
-                je_name = je.name
-                frappe.db.release_savepoint("ofdelivery_je")
-            except Exception as err:
-                frappe.db.rollback(save_point="ofdelivery_je")
-                frappe.log_error(f"OFD JE creation failed: {err}", "Jarz POS OFD JE")
-                frappe.throw(f"Failed creating Out For Delivery journal entry: {err}")
-
-        # ---- Courier Transaction (idempotent) ----
-        ct_name = None
-        idempotent_flag = False
-        existing_ct: list[str] = []
+        # Determine outstanding (fresh from DB)
         try:
-            columns = frappe.db.get_table_columns("Courier Transaction") or []
+            outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
         except Exception:
-            columns = []
-        has_idem_col = "idempotency_token" in columns
+            outstanding = float(inv.outstanding_amount or 0)
 
-        if token and has_idem_col:
+        company = inv.company
+        cash_acc = get_pos_cash_account(pos_profile, company)
+        validate_account_exists(cash_acc)
+
+        # If UNPAID: publish prompt and create Payment Entry to POS cash account
+        payment_entry_name = None
+        if outstanding > 0.0001:
             try:
-                existing_ct = frappe.get_all(
-                    "Courier Transaction",
-                    filters={"reference_invoice": inv.name, "idempotency_token": token},
-                    pluck="name", limit_page_length=1,
+                # Publish a realtime prompt first so UI can show "Collect Cash"
+                try:
+                    frappe.publish_realtime(
+                        "jarz_pos_collect_cash",
+                        {
+                            "invoice": inv.name,
+                            "amount": float(inv.grand_total or 0),
+                            "outstanding": float(outstanding or 0),
+                            "mode": "collect_cash",
+                        },
+                        user="*",
+                    )
+                except Exception:
+                    pass
+
+                # Reuse existing cash PE if already allocated
+                ref_parents = frappe.get_all(
+                    "Payment Entry Reference",
+                    filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+                    pluck="parent",
                 )
-            except Exception as err:
-                if "Unknown column" not in str(err):
-                    frappe.log_error(f"Courier Transaction token lookup failed: {err}", "Jarz POS OFD CT Lookup")
-                existing_ct = []
-        if not existing_ct:
-            existing_ct = frappe.get_all(
-                "Courier Transaction",
-                filters={"reference_invoice": inv.name, "notes": ["like", "%Out For Delivery transition%"]},
-                pluck="name", limit_page_length=1,
-            )
-        if existing_ct:
-            ct_name = existing_ct[0]
-            idempotent_flag = True
-            try:
-                ct_doc = frappe.get_doc("Courier Transaction", ct_name)
-                if je_name and not getattr(ct_doc, "journal_entry", None):
-                    ct_doc.db_set("journal_entry", je_name, update_modified=False)
-                desired_amount = float(inv.grand_total or 0)
-                if mode == "pay_now" and abs(float(ct_doc.get("amount") or 0) - desired_amount) > 0.005:
-                    frappe.db.set_value("Courier Transaction", ct_name, {
-                        "amount": desired_amount,
-                        "shipping_amount": float(shipping_exp or 0),
-                    }, update_modified=False)
-            except Exception as err:
-                frappe.log_error(f"Failed updating CT links/amounts: {err}", "Jarz POS OFD CT Backfill")
-        else:
-            try:
-                frappe.db.savepoint("ofdelivery_ct")
-                ct = frappe.new_doc("Courier Transaction")
-                ct.party_type = party_type
-                ct.party = party
-                ct.date = frappe.utils.now_datetime()
-                ct.reference_invoice = inv.name
-                ct.amount = float(inv.grand_total or 0) if mode == "pay_now" else 0
-                ct.shipping_amount = shipping_exp
-                ct.status = "Settled" if mode == "pay_now" else "Unsettled"
-                ct.payment_mode = "Cash" if mode == "pay_now" else "Deferred"
-                ct.journal_entry = je_name
-                if token and has_idem_col:
-                    ct.idempotency_token = token
-                ct.notes = f"Out For Delivery transition ({'pay now' if mode=='pay_now' else 'settle later'})"
-                ct.insert(ignore_permissions=True)
-                ct_name = ct.name
-                frappe.db.release_savepoint("ofdelivery_ct")
-            except Exception as err:
-                frappe.db.rollback(save_point="ofdelivery_ct")
-                frappe.log_error(f"OFD Courier Transaction failed: {err}", "Jarz POS OFD CT")
-                frappe.throw(f"Failed creating courier transaction: {err}")
+                if ref_parents:
+                    rows = frappe.get_all(
+                        "Payment Entry",
+                        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive", "paid_to": cash_acc},
+                        fields=["name", "paid_amount"],
+                    )
+                    if rows:
+                        payment_entry_name = rows[0]["name"]
+                if not payment_entry_name:
+                    # Resolve receivable
+                    receivable_acc = getattr(inv, "debit_to", None) or frappe.db.get_value("Company", company, "default_receivable_account")
+                    if not receivable_acc:
+                        frappe.throw("Could not resolve receivable account for invoice")
+                    pe = frappe.new_doc("Payment Entry")
+                    pe.payment_type = "Receive"
+                    pe.company = company
+                    pe.posting_date = frappe.utils.nowdate()
+                    pe.mode_of_payment = "Cash"
+                    pe.party_type = "Customer"
+                    pe.party = inv.customer
+                    pe.paid_from = receivable_acc
+                    pe.paid_to = cash_acc
+                    pe.paid_amount = outstanding
+                    pe.received_amount = outstanding
+                    pe.append("references", {
+                        "reference_doctype": "Sales Invoice",
+                        "reference_name": inv.name,
+                        "allocated_amount": outstanding,
+                    })
+                    pe.flags.ignore_permissions = True
+                    pe.insert(ignore_permissions=True)
+                    pe.submit()
+                    payment_entry_name = pe.name
+            except Exception as pe_err:
+                # If invoice is already fully paid due to race, continue gracefully
+                msg = str(pe_err)
+                if "already been fully paid" not in msg and "already paid" not in msg.lower():
+                    raise
 
-        # ---- State Update (post operations) ----
-        state_now = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state")
-        if state_now != "Out for Delivery":
+        # Update operational state idempotently
+        if inv.get("custom_sales_invoice_state") != "Out for Delivery":
             try:
                 inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
             except Exception:
                 inv.set("custom_sales_invoice_state", "Out for Delivery")
                 inv.save(ignore_permissions=True)
 
-    # Frappe will commit automatically at end of request if no exception
-
-        # Delivery Note auto-create AFTER state update (abort on failure)
+        # Ensure Delivery Note exists (reuse/create)
         dn_result = ensure_delivery_note_for_invoice(inv.name)
         if dn_result.get("error"):
             frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
 
+        # Emit unified realtime event for Kanban patching
         payload = {
             "invoice": inv.name,
-            "courier": courier,
-            "mode": mode,
-            "payment_mode": mode,
-            "shipping_amount": shipping_exp,
-            "journal_entry": je_name,
-            "courier_transaction": ct_name,
-            "status": "Settled" if mode == "pay_now" else "Unsettled",
-            "idempotent": idempotent_flag,
-            "idempotency_token": token,
-            "has_idempotency_column": has_idem_col,
+            "courier": courier or "",
+            "mode": "collect_cash" if outstanding > 0.0001 else "paid_noops",
+            "payment_entry": payment_entry_name,
+            "amount": float(inv.grand_total or 0),
+            "outstanding_before": float(outstanding or 0),
             "delivery_note": dn_result.get("delivery_note"),
             "delivery_note_reused": dn_result.get("reused"),
             "dn_logic_version": DN_LOGIC_VERSION,
         }
-        try:
-            payload["amount"] = float(inv.grand_total or 0)
-            payload["net_to_collect"] = float(inv.grand_total or 0) - float(shipping_exp or 0)
-        except Exception:
-            pass
         frappe.publish_realtime("jarz_pos_out_for_delivery_transition", payload, user="*")
         return {"success": True, **payload}
 
@@ -1862,9 +1757,12 @@ def _get_receivable_account(company):
 
 def _get_delivery_expense_amount(inv):
     """
-    Return delivery expense amount (float) for the given invoice using its Territory.
+    Return delivery expense amount (float) for the given invoice.
 
-    Robust strategy:
+    Waiver rule (highest priority): If the invoice contains a Jarz Bundle that
+    has the Free Shipping flag enabled, return 0.0 regardless of Territory setup.
+
+    Default strategy when no waiver applies:
       1) Resolve Territory from Sales Invoice (inv.territory), else from Customer.
       2) Discover available Territory columns and probe common field names for shipping/expense
          (both custom_ and standard-style) WITHOUT triggering unknown-column errors.
@@ -1872,7 +1770,69 @@ def _get_delivery_expense_amount(inv):
 
     Returns 0.0 if not found.
     """
-    # Resolve territory from invoice, then customer as fallback
+    # 0) Pickup short-circuit (highest priority overall)
+    try:
+        # Check common custom fields
+        pickup_fields = ["custom_is_pickup", "is_pickup", "pickup"]
+        for f in pickup_fields:
+            try:
+                val = getattr(inv, f, None)
+                if val is None:
+                    # Try DB value directly to avoid cache misses
+                    val = frappe.db.get_value("Sales Invoice", inv.name, f)
+                if (val is True) or (str(val).strip() in {"1", "True", "true", "YES", "yes"}):
+                    return 0.0
+            except Exception:
+                continue
+        # Fallback: remarks marker
+        try:
+            remarks = (getattr(inv, "remarks", "") or "")
+            if "[PICKUP]" in remarks:
+                return 0.0
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # 1) Free-shipping bundle short-circuit
+    try:
+        # Detect either parent or child lines associated with a Jarz Bundle that has free_shipping=1
+        # Parent heuristic: Sales Invoice Item has is_bundle_parent flag or matches a Jarz Bundle's erpnext_item
+        bundle_ids = set()
+        for it in getattr(inv, 'items', []) or []:
+            code = (getattr(it, 'item_code', None) or '').strip()
+            if not code:
+                continue
+            # Direct match via bundle record (when parent/child helper stored bundle_code)
+            try:
+                bcode = getattr(it, 'bundle_code', None) or getattr(it, 'parent_bundle', None)
+                if bcode and frappe.db.exists('Jarz Bundle', bcode):
+                    bundle_ids.add(bcode)
+            except Exception:
+                pass
+            # Heuristic: parent line is ERPNext item equal to bundle.erpnext_item
+            try:
+                rows = frappe.get_all('Jarz Bundle', filters={'erpnext_item': code}, pluck='name')
+                for r in rows:
+                    bundle_ids.add(r)
+            except Exception:
+                pass
+        if bundle_ids:
+            # Any of these bundles free_shipping?
+            cols = set()
+            try:
+                cols = set(frappe.db.get_table_columns('Jarz Bundle') or [])
+            except Exception:
+                cols = set()
+            has_flag = 'free_shipping' in cols
+            if has_flag:
+                flags = frappe.get_all('Jarz Bundle', filters={'name': ['in', list(bundle_ids)], 'free_shipping': 1}, pluck='name')
+                if flags:
+                    return 0.0
+    except Exception:
+        # If detection fails, fall back to territory logic
+        pass
+    # 2) Resolve territory from invoice, then customer as fallback
     territory = (inv.get("territory") or "").strip()
     if not territory:
         try:

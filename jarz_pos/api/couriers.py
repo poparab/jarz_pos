@@ -90,6 +90,12 @@ def get_active_couriers():
       {"party_type": "Employee"|"Supplier", "party": name, "display_name": label}
     """
     out = []
+    # Utility: check if a DocType has a given column in DB
+    def _has_column(doctype: str, column: str) -> bool:
+        try:
+            return bool(frappe.db.has_column(doctype, column))
+        except Exception:
+            return False
     # Employees in Employee Group 'Delivery'
     emp_group = frappe.db.get_value("Employee Group", {"employee_group_name": "Delivery"}, "name")
     if emp_group:
@@ -124,28 +130,30 @@ def get_active_couriers():
                         found_any = True
                         break
             if employee_names:
+                emp_fields = ["name", "employee_name"] + (["branch"] if _has_column("Employee", "branch") else [])
                 emps = frappe.get_all(
                     "Employee",
-                    fields=["name", "employee_name", "branch"],
+                    fields=emp_fields,
                     filters={"name": ["in", list(employee_names)]},
                 )
                 out.extend({
                     "party_type": "Employee",
                     "party": e.name,
-                    "display_name": e.employee_name or e.name,
-                    "branch": getattr(e, "branch", None),
+                    "display_name": (e.employee_name or e.name),
+                    "branch": getattr(e, "branch", None) if hasattr(e, "branch") else (e.get("branch") if isinstance(e, dict) else None),
                 } for e in emps)
         except Exception as err:
             frappe.log_error(f"Failed to read Employee Group members: {err}", "Jarz POS get_active_couriers")
     # Suppliers in Supplier Group 'Delivery'
     sup_group = frappe.db.get_value("Supplier Group", {"supplier_group_name": "Delivery"}, "name")
     if sup_group:
-        sups = frappe.get_all("Supplier", fields=["name", "supplier_name", "branch"], filters={"supplier_group": sup_group})
+        sup_fields = ["name", "supplier_name"] + (["branch"] if _has_column("Supplier", "branch") else [])
+        sups = frappe.get_all("Supplier", fields=sup_fields, filters={"supplier_group": sup_group})
         out.extend({
             "party_type": "Supplier",
             "party": s.name,
-            "display_name": s.supplier_name or s.name,
-            "branch": getattr(s, "branch", None),
+            "display_name": (s.supplier_name or s.name),
+            "branch": getattr(s, "branch", None) if hasattr(s, "branch") else (s.get("branch") if isinstance(s, dict) else None),
         } for s in sups)
     return out
 

@@ -38,6 +38,16 @@ def create_pos_invoice():
     required_delivery_datetime = frappe.form_dict.get('required_delivery_datetime')
     sales_partner = frappe.form_dict.get('sales_partner')
     payment_type = frappe.form_dict.get('payment_type')  # 'cash' | 'online' (optional)
+    # New: pickup flag (no delivery fee)
+    raw_pickup = frappe.form_dict.get('pickup')
+    is_pickup = False
+    try:
+        if isinstance(raw_pickup, (int, float)):
+            is_pickup = int(raw_pickup) == 1
+        elif isinstance(raw_pickup, str):
+            is_pickup = raw_pickup.strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        is_pickup = False
     # New delivery slot fields (optional; preferred)
     delivery_date = frappe.form_dict.get('delivery_date')
     delivery_time_from = frappe.form_dict.get('delivery_time_from')
@@ -84,6 +94,7 @@ RAW PARAMETERS:
     print(f"   delivery_charges_json: {delivery_charges_json} (type: {type(delivery_charges_json)})")
     print(f"   required_delivery_datetime: {required_delivery_datetime} (type: {type(required_delivery_datetime)})")
     print(f"   delivery_date: {delivery_date} | delivery_time_from: {delivery_time_from} | delivery_duration: {delivery_duration}")
+    print(f"   pickup: {is_pickup}")
     
     try:
         # Validate parameters before calling legacy function
@@ -126,6 +137,7 @@ RAW PARAMETERS:
             required_delivery_datetime,
             sales_partner,
             payment_type,
+            is_pickup,
         )
         
         # Log successful response
@@ -221,9 +233,32 @@ def pay_invoice(
         inv = frappe.get_doc("Sales Invoice", invoice_name)
         if inv.docstatus != 1:
             frappe.throw("Invoice must be submitted before registering payment")
-        outstanding = float(inv.outstanding_amount or 0)
+        # Always re-read the latest outstanding from the database to avoid cache/stale values
+        try:
+            latest_outstanding = frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount")
+            outstanding = float(latest_outstanding or 0)
+        except Exception:
+            outstanding = float(inv.outstanding_amount or 0)
         if outstanding <= 0.0001:
-            frappe.throw("Invoice already paid")
+            # Try to hint if a Payment Entry already exists
+            try:
+                ref_parents = frappe.get_all(
+                    "Payment Entry Reference",
+                    filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+                    pluck="parent",
+                )
+                pe_list = []
+                if ref_parents:
+                    pe_list = frappe.get_all(
+                        "Payment Entry",
+                        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+                        pluck="name",
+                    )
+                if pe_list:
+                    frappe.throw(f"Invoice already paid. Existing Payment Entry: {', '.join(pe_list)}")
+            except Exception:
+                pass
+            frappe.throw("Invoice already paid (no outstanding amount)")
         company = inv.company
         company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
 
@@ -310,8 +345,39 @@ def pay_invoice(
         if reference_date:
             pe.reference_date = reference_date
 
-        pe.insert(ignore_permissions=True)
-        pe.submit()
+        try:
+            pe.insert(ignore_permissions=True)
+            pe.submit()
+        except Exception as pe_err:
+            # Provide a clearer message when invoice is already settled
+            msg = str(pe_err)
+            if "already been fully paid" in msg.lower() or "fully paid" in msg.lower():
+                # Re-evaluate outstanding to report precise state
+                try:
+                    latest = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
+                except Exception:
+                    latest = outstanding
+                hint = f"(current outstanding={latest:.2f})"
+                # Include any existing Payment Entry name if present
+                try:
+                    ref_parents = frappe.get_all(
+                        "Payment Entry Reference",
+                        filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+                        pluck="parent",
+                    )
+                    if ref_parents:
+                        frappe.throw(
+                            f"Invoice already paid. Existing Payment Entry: {', '.join(ref_parents)} {hint}"
+                        )
+                except Exception:
+                    pass
+                frappe.throw(f"Invoice already paid {hint}")
+            # Bubble other errors unchanged after logging
+            frappe.log_error(
+                title="Pay Invoice Submission Error",
+                message=f"Invoice: {invoice_name}\nError: {frappe.get_traceback()}",
+            )
+            raise
 
         return {
             "success": True,

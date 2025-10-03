@@ -31,6 +31,10 @@ def __getattr__(name: str):
     This lets `import jarz_pos.jarz_pos.api.user` work by mapping to
     `jarz_pos.api.user` under the hood and caching the alias in sys.modules.
     """
+    # Do not intercept Python's magic attributes
+    if name.startswith("__"):
+        raise AttributeError(name)
+    # Try to import the corresponding submodule from the base package
     mod = _import_module(f"jarz_pos.api.{name}")
     _sys.modules[__name__ + "." + name] = mod
     return mod

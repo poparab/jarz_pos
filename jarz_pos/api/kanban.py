@@ -127,6 +127,48 @@ def _get_state_field_options() -> List[str]:
         frappe.logger().error(f"Error getting state field options: {str(e)}")
         return ["Received", "In Progress", "Ready", "Out for Delivery", "Delivered", "Cancelled"]
 
+def _coerce_bool(val: Any) -> bool:
+    try:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return float(val) != 0.0
+        s = str(val).strip().lower()
+        return s in {"1", "true", "yes", "y", "on"}
+    except Exception:
+        return False
+
+def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
+    """Detect pickup flag on a Sales Invoice robustly across possible custom field names.
+    Checks any of: custom_is_pickup, is_pickup, pickup, custom_pickup, or remarks contains [PICKUP].
+    """
+    try:
+        getter = inv.get if isinstance(inv, dict) else getattr
+        # Direct fields (several candidates)
+        field_candidates = [
+            "custom_is_pickup",
+            "is_pickup",
+            "pickup",
+            "custom_pickup",
+        ]
+        for f in field_candidates:
+            try:
+                val = getter(inv, f) if getter is getattr else getter(f)
+            except Exception:
+                val = None
+            if _coerce_bool(val):
+                return True
+        # Remarks marker
+        try:
+            remarks = getter(inv, "remarks") if getter is getattr else getter("remarks")
+            if isinstance(remarks, str) and "[pickup]" in remarks.lower():
+                return True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return False
+
 def _get_current_user_pos_profiles() -> List[str]:
     """Return names of POS Profiles linked to the current session user (and not disabled)."""
     try:
@@ -288,15 +330,29 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             filter_conditions["pos_profile"] = ["in", enforced_branches]
 
         # Fetch all matching Sales Invoices
+        # Start with a stable base set of fields that always exist (or are known fixtures)
         fields = [
             "name", "customer", "customer_name", "territory", "posting_date",
             "posting_time", "grand_total", "net_total", "total_taxes_and_charges",
             "status", "custom_sales_invoice_state", "sales_invoice_state",
             "sales_partner", "pos_profile", "custom_kanban_profile",
-            # New delivery slot fields
+            # New delivery slot fields (these are in our fixtures; safe to select)
             "custom_delivery_date", "custom_delivery_time_from", "custom_delivery_duration",
-            "shipping_address_name", "customer_address"
+            "shipping_address_name", "customer_address",
+            # Always-safe system field
+            "remarks",
         ]
+
+        # Append pickup-related fields ONLY if they exist in meta to avoid SQL errors
+        try:
+            si_meta = frappe.get_meta("Sales Invoice")
+            pickup_candidates = ["custom_is_pickup", "is_pickup", "pickup", "custom_pickup"]
+            for fn in pickup_candidates:
+                if si_meta.get_field(fn):
+                    fields.append(fn)
+        except Exception:
+            # If meta access fails, do not add optional fields
+            pass
 
         # Cap results to avoid large payloads; client can paginate via additional filters
         invoices = frappe.get_all(
@@ -396,6 +452,10 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
             state_key = state.lower().replace(' ', '_')
             terr_ship = _get_territory_shipping(inv.get("territory") or "")
+            # Detect pickup and zero shipping amounts accordingly
+            is_pickup = _is_pickup_invoice(inv)
+            if is_pickup:
+                terr_ship = {"income": 0.0, "expense": 0.0}
 
             # Resolve customer phone/mobile via primary Contact if possible (cached per customer)
             customer_phone = ""
@@ -466,6 +526,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "shipping_expense": terr_ship.get("expense", 0.0),
                 "has_unsettled_courier_txn": bool(has_unsettled),
                 "customer_phone": customer_phone,
+                "is_pickup": bool(is_pickup),
             }
 
             # Add to appropriate state column
@@ -861,6 +922,15 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         frappe.logger().debug(f"KANBAN API: get_invoice_details - Invoice: {invoice_id}")
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
         data = format_invoice_data(invoice)
+        # Add is_pickup flag consistently
+        try:
+            data["is_pickup"] = _is_pickup_invoice(invoice)
+            if data["is_pickup"]:
+                # Ensure shipping fields are zeroed for pickup in details too
+                data["shipping_income"] = 0.0
+                data["shipping_expense"] = 0.0
+        except Exception:
+            pass
         # Enrich with customer_phone (reuse logic from get_kanban_invoices for consistency)
         try:
             customer_phone = ""
