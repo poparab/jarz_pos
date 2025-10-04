@@ -297,7 +297,7 @@ def submit_reconciliation(
     sr.purpose = "Stock Reconciliation"
 
     diffs = 0
-    allow_zero_val = bool(frappe.get_single_value("Stock Settings", "allow_zero_valuation_rate") or 0)
+    allow_zero_val = bool(frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate") or 0)
     for code, counted_stock_qty in counted.items():
         current = float(cur_qty_map.get(code, 0))
         if abs(counted_stock_qty - current) < 1e-9:
