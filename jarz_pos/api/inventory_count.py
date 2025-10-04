@@ -76,6 +76,48 @@ def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
     return out
 
 
+# Public helper used by both list and submit to infer a plausible valuation rate
+def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
+    try:
+        # Latest SLE in this warehouse
+        rows = frappe.get_all(
+            "Stock Ledger Entry",
+            filters={"item_code": item_code, "warehouse": warehouse},
+            fields=["valuation_rate"],
+            order_by="posting_date desc, posting_time desc, creation desc",
+            limit=1,
+        )
+        if rows and rows[0].get("valuation_rate") is not None:
+            return float(rows[0]["valuation_rate"])  # type: ignore
+        # Any SLE for the item
+        rows_any = frappe.get_all(
+            "Stock Ledger Entry",
+            filters={"item_code": item_code},
+            fields=["valuation_rate"],
+            order_by="posting_date desc, posting_time desc, creation desc",
+            limit=1,
+        )
+        if rows_any and rows_any[0].get("valuation_rate") is not None:
+            return float(rows_any[0]["valuation_rate"])  # type: ignore
+        # last_purchase_rate
+        lpr = frappe.db.get_value("Item", item_code, "last_purchase_rate")
+        if lpr is not None:
+            return float(lpr)
+        # Buying Item Price
+        ip = frappe.get_all(
+            "Item Price",
+            filters={"item_code": item_code, "buying": 1},
+            fields=["price_list_rate"],
+            order_by="modified desc",
+            limit=1,
+        )
+        if ip and ip[0].get("price_list_rate") is not None:
+            return float(ip[0]["price_list_rate"])  # type: ignore
+    except Exception:
+        pass
+    return None
+
+
 @frappe.whitelist()
 def list_items_for_count(
     warehouse: str,
@@ -107,6 +149,8 @@ def list_items_for_count(
     for it in items:
         code = it["item_code"]
         stock_uom = it.get("stock_uom") or "Nos"
+        # Attempt to provide valuation info for the UI (optional)
+        val = _resolve_item_valuation(code, warehouse)  # may be None
         out.append({
             "item_code": code,
             "item_name": it.get("item_name") or code,
@@ -114,6 +158,7 @@ def list_items_for_count(
             "stock_uom": stock_uom,
             "current_qty": float(qty_map.get(code, 0)),
             "uoms": _get_uom_conversions(code),
+            "valuation_rate": val,
         })
     return out
 
