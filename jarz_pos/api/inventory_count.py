@@ -183,8 +183,66 @@ def submit_reconciliation(
     # Current quantities
     cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
+    # Helper to fetch a sensible valuation rate when ERPNext requires one
+    def _resolve_valuation_rate(item_code: str, wh: str) -> Optional[float]:
+        # 1) Latest Stock Ledger Entry for this warehouse
+        rows = frappe.get_all(
+            "Stock Ledger Entry",
+            filters={"item_code": item_code, "warehouse": wh},
+            fields=["valuation_rate"],
+            order_by="posting_date desc, posting_time desc, creation desc",
+            limit=1,
+        )
+        if rows and rows[0].get("valuation_rate") is not None:
+            try:
+                return float(rows[0]["valuation_rate"])  # type: ignore
+            except Exception:
+                pass
+
+        # 2) Any SLE for the item (other warehouses)
+        rows_any = frappe.get_all(
+            "Stock Ledger Entry",
+            filters={"item_code": item_code},
+            fields=["valuation_rate"],
+            order_by="posting_date desc, posting_time desc, creation desc",
+            limit=1,
+        )
+        if rows_any and rows_any[0].get("valuation_rate") is not None:
+            try:
+                return float(rows_any[0]["valuation_rate"])  # type: ignore
+            except Exception:
+                pass
+
+        # 3) Item.last_purchase_rate
+        lpr = frappe.db.get_value("Item", item_code, "last_purchase_rate")
+        try:
+            if lpr is not None:
+                return float(lpr)
+        except Exception:
+            pass
+
+        # 4) Any Buying Item Price
+        ip = frappe.get_all(
+            "Item Price",
+            filters={"item_code": item_code, "buying": 1},
+            fields=["price_list_rate"],
+            order_by="modified desc",
+            limit=1,
+        )
+        if ip and ip[0].get("price_list_rate") is not None:
+            try:
+                return float(ip[0]["price_list_rate"])  # type: ignore
+            except Exception:
+                pass
+
+        return None
+
     # Create Stock Reconciliation only for differences
     sr = frappe.new_doc("Stock Reconciliation")
+    # Set company from warehouse to align with stock rules across environments
+    wh_company = frappe.db.get_value("Warehouse", warehouse, "company")
+    if wh_company:
+        sr.company = wh_company
     if posting_date:
         sr.posting_date = posting_date
     else:
@@ -194,15 +252,31 @@ def submit_reconciliation(
     sr.purpose = "Stock Reconciliation"
 
     diffs = 0
+    allow_zero_val = bool(frappe.get_single_value("Stock Settings", "allow_zero_valuation_rate") or 0)
     for code, counted_stock_qty in counted.items():
         current = float(cur_qty_map.get(code, 0))
         if abs(counted_stock_qty - current) < 1e-9:
             continue
-        sr.append("items", {
+        # If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
+        row: Dict[str, Any] = {
             "item_code": code,
             "warehouse": warehouse,
             "qty": counted_stock_qty,
-        })
+        }
+
+        is_increase = counted_stock_qty > current
+        if is_increase:
+            vr = _resolve_valuation_rate(code, warehouse)
+            if vr is None and allow_zero_val:
+                vr = 0.0
+            if vr is None:
+                # As a last resort, fail with a clear message rather than a generic ValidationError
+                frappe.throw(_(
+                    "Valuation Rate required for Item {0}. Please set a Buying Item Price or enable 'Allow Zero Valuation Rate' in Stock Settings."
+                ).format(code))
+            row["valuation_rate"] = float(vr)
+
+        sr.append("items", row)
         diffs += 1
 
     if diffs == 0:
