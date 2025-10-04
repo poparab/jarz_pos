@@ -312,6 +312,9 @@ def submit_reconciliation(
         is_increase = counted_stock_qty > current
         if is_increase:
             vr = _resolve_valuation_rate(code, warehouse)
+            # If zero or negative, treat as missing unless zero valuation is allowed
+            if vr is not None and float(vr) <= 0:
+                vr = None if not allow_zero_val else 0.0
             if vr is None and allow_zero_val:
                 vr = 0.0
             if vr is None:
