@@ -137,6 +137,18 @@ def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
+def list_bom_items(limit: int = 100) -> List[Dict[str, Any]]:
+    """Alias for list_default_bom_items for consistency with mobile app expectations"""
+    return list_default_bom_items(search=None)
+
+
+@frappe.whitelist()
+def search_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
+    """Search BOM items - alias for list_default_bom_items with search"""
+    return list_default_bom_items(search=search)
+
+
+@frappe.whitelist()
 def get_bom_details(item_code: str) -> Dict[str, Any]:
     """Return default BOM details for an Item, including components.
 

@@ -45,6 +45,20 @@ def list_warehouses(company: Optional[str] = None) -> List[Dict[str, Any]]:
     return frappe.get_all("Warehouse", filters=filters, fields=["name", "company"], order_by="name asc")
 
 
+@frappe.whitelist()
+def list_item_groups(search: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List item groups for filtering inventory count"""
+    _ensure_manager_access()
+    filters: Dict[str, Any] = {"is_group": 0}  # Only leaf nodes
+    or_filters: List[Any] = []
+    if search:
+        like = f"%{search}%"
+        or_filters = [["Item Group", "name", "like", like], ["Item Group", "item_group_name", "like", like]]
+    
+    fields = ["name", "item_group_name"]
+    return frappe.get_all("Item Group", filters=filters, or_filters=or_filters, fields=fields, order_by="name asc", limit=100)
+
+
 def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
     if not item_codes:
         return {}

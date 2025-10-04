@@ -95,6 +95,38 @@ def get_customers(search=None):
         return []
 
 @frappe.whitelist()
+def get_recent_customers(limit=10):
+    """Get recently created/modified customers for quick access"""
+    try:
+        fields = [
+            "name",
+            "customer_name", 
+            "mobile_no",
+            "customer_primary_address",
+            "customer_primary_contact",
+            "territory",
+            "customer_group",
+            "modified"
+        ]
+        
+        customers = frappe.get_all(
+            "Customer",
+            fields=fields,
+            order_by="modified desc",
+            limit=int(limit)
+        )
+        
+        # Augment with territory info
+        for c in customers:
+            _augment_customer_with_territory(c)
+            
+        return customers
+        
+    except Exception as e:
+        frappe.log_error(f"Error fetching recent customers: {str(e)}")
+        return []
+
+@frappe.whitelist()
 def search_customers(name=None, phone=None):
     """Enhanced search for customers by name or phone using direct SQL."""
 

@@ -59,6 +59,12 @@ def get_courier_balances():
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
+def get_couriers():
+    """Get list of all active couriers (delivery parties)"""
+    return get_active_couriers()
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
 def settle_courier(courier: str | None = None, pos_profile: str | None = None, party_type: str | None = None, party: str | None = None):
     """Backward-compatible settlement API.
 
