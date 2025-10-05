@@ -205,6 +205,7 @@ def submit_reconciliation(
     posting_date: Optional[str],
     lines: Any,
     enforce_all: int = 1,
+    debug: int = 0,
 ) -> Dict[str, Any]:
     """Create a Stock Reconciliation for counted items.
 
@@ -343,6 +344,27 @@ def submit_reconciliation(
         sr.posting_date = today()
     sr.set_posting_time = 1
     sr.purpose = "Stock Reconciliation"
+    # Ensure accounting defaults to avoid validation failures on some sites
+    if sr.company:
+        comp = frappe.get_all(
+            "Company",
+            filters={"name": sr.company},
+            fields=["stock_adjustment_account", "cost_center"],
+            limit=1,
+        )
+        if comp:
+            diff_acct = comp[0].get("stock_adjustment_account")
+            if diff_acct:
+                try:
+                    sr.difference_account = diff_acct
+                except Exception:
+                    pass
+            cc = comp[0].get("cost_center")
+            if cc:
+                try:
+                    sr.cost_center = cc
+                except Exception:
+                    pass
 
     diffs = 0
     allow_zero_val = bool(frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate") or 0)
@@ -417,8 +439,13 @@ def submit_reconciliation(
         sr.submit()
         frappe.db.commit()
     except Exception as e:
-        # Log full traceback for diagnostics and raise a concise message to the client
-        frappe.log_error(frappe.get_traceback(), "jarz_pos.submit_reconciliation")
+        # Log full traceback for diagnostics
+        tb = frappe.get_traceback()
+        frappe.log_error(tb, "jarz_pos.submit_reconciliation")
+        if int(debug or 0):
+            # Return as a readable payload for client-side diagnostics
+            return {"ok": False, "error": str(e), "traceback": tb}
+        # Default behavior: raise a concise message
         frappe.throw(_(f"Submit reconciliation failed: {e}"))
 
     return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
