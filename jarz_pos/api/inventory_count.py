@@ -379,7 +379,13 @@ def submit_reconciliation(
                         pass
 
         diffs = 0
-        allow_zero_val = bool(frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate") or 0)
+        # Allow zero valuation flag: some sites may not have this field; default to False
+        allow_zero_val = False
+        try:
+            _allow_zero_val = frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate")
+            allow_zero_val = bool(_allow_zero_val or 0)
+        except Exception:
+            allow_zero_val = False
         for code, counted_stock_qty in counted.items():
             current = float(cur_qty_map.get(code, 0))
             if abs(counted_stock_qty - current) < 1e-9:
