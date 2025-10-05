@@ -367,10 +367,15 @@ def submit_reconciliation(
     if diffs == 0:
         return {"ok": True, "stock_reconciliation": None, "message": "No differences found"}
 
-    sr.flags.ignore_permissions = True
-    sr.insert()
-    sr.flags.ignore_permissions = True
-    sr.submit()
-    frappe.db.commit()
+    try:
+        sr.flags.ignore_permissions = True
+        sr.insert()
+        sr.flags.ignore_permissions = True
+        sr.submit()
+        frappe.db.commit()
+    except Exception as e:
+        # Log full traceback for diagnostics and raise a concise message to the client
+        frappe.log_error(frappe.get_traceback(), "jarz_pos.submit_reconciliation")
+        frappe.throw(_(f"Submit reconciliation failed: {e}"))
 
     return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
