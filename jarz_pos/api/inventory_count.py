@@ -113,6 +113,16 @@ def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
         )
         if ip and ip[0].get("price_list_rate") is not None:
             return float(ip[0]["price_list_rate"])  # type: ignore
+        # Fallback: Selling Item Price (as last resort)
+        ips = frappe.get_all(
+            "Item Price",
+            filters={"item_code": item_code, "selling": 1},
+            fields=["price_list_rate"],
+            order_by="modified desc",
+            limit=1,
+        )
+        if ips and ips[0].get("price_list_rate") is not None:
+            return float(ips[0]["price_list_rate"])  # type: ignore
     except Exception:
         pass
     return None
@@ -277,6 +287,19 @@ def submit_reconciliation(
         if ip and ip[0].get("price_list_rate") is not None:
             try:
                 return float(ip[0]["price_list_rate"])  # type: ignore
+            except Exception:
+                pass
+        # 5) Fallback: Selling Item Price
+        ips = frappe.get_all(
+            "Item Price",
+            filters={"item_code": item_code, "selling": 1},
+            fields=["price_list_rate"],
+            order_by="modified desc",
+            limit=1,
+        )
+        if ips and ips[0].get("price_list_rate") is not None:
+            try:
+                return float(ips[0]["price_list_rate"])  # type: ignore
             except Exception:
                 pass
 
