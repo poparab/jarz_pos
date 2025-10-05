@@ -217,6 +217,7 @@ def submit_reconciliation(
 
     # Build a map of counted qty in stock UOM
     counted: Dict[str, float] = {}
+    provided_vr: Dict[str, Optional[float]] = {}
     for ln in lines:
         if not isinstance(ln, dict):
             frappe.throw(_("Each line must be an object"))
@@ -226,6 +227,14 @@ def submit_reconciliation(
         qty = float(ln.get("counted_qty") or ln.get("qty") or 0)
         uom = ln.get("uom")
         counted[code] = _to_stock_qty(code, qty, uom)
+        # Optional valuation_rate provided by client
+        try:
+            if ln.get("valuation_rate") is not None:
+                provided_vr[str(code)] = float(ln.get("valuation_rate"))
+            else:
+                provided_vr[str(code)] = None
+        except Exception:
+            provided_vr[str(code)] = None
 
     # Enforce all items counted (subset: items matching the search criteria we expose)
     if int(enforce_all or 0):
@@ -334,7 +343,12 @@ def submit_reconciliation(
 
         is_increase = counted_stock_qty > current
         if is_increase:
-            vr = _resolve_valuation_rate(code, warehouse)
+            # Prefer client-provided valuation_rate if valid (> 0)
+            vr = provided_vr.get(code)
+            if vr is not None and float(vr) <= 0:
+                vr = None
+            if vr is None:
+                vr = _resolve_valuation_rate(code, warehouse)
             # If zero or negative, treat as missing unless zero valuation is allowed
             if vr is not None and float(vr) <= 0:
                 vr = None if not allow_zero_val else 0.0
