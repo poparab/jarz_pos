@@ -213,239 +213,257 @@ def submit_reconciliation(
     If enforce_all=1, require that each item from list_items_for_count(warehouse) is present in lines.
     Only differences are added to the reconciliation to reduce noise.
     """
-    _ensure_manager_access()
+    # Normalize debug flag early so we can honor it for all failures
     try:
+        debug_flag = int(debug or 0)
+    except Exception:
+        debug_flag = 0
+
+    try:
+        _ensure_manager_access()
+
+        # Parse lines if JSON string
         import json
         if isinstance(lines, str):
-            lines = json.loads(lines)
-    except Exception:
-        frappe.throw(_("Invalid JSON for lines"))
-    if not isinstance(lines, list) or not lines:
-        frappe.throw(_("lines must be a non-empty list"))
-    if not warehouse:
-        frappe.throw(_("warehouse is required"))
-
-    # Build a map of counted qty in stock UOM
-    counted: Dict[str, float] = {}
-    provided_vr: Dict[str, Optional[float]] = {}
-    provided_batch: Dict[str, Optional[str]] = {}
-    provided_serials: Dict[str, Optional[str]] = {}
-    for ln in lines:
-        if not isinstance(ln, dict):
-            frappe.throw(_("Each line must be an object"))
-        code = ln.get("item_code") or ln.get("item")
-        if not code:
-            frappe.throw(_("Missing item_code in a line"))
-        qty = float(ln.get("counted_qty") or ln.get("qty") or 0)
-        uom = ln.get("uom")
-        counted[code] = _to_stock_qty(code, qty, uom)
-        # Optional valuation_rate provided by client
-        try:
-            if ln.get("valuation_rate") is not None:
-                provided_vr[str(code)] = float(ln.get("valuation_rate"))
-            else:
-                provided_vr[str(code)] = None
-        except Exception:
-            provided_vr[str(code)] = None
-        # Optional batch/serial
-        bno = ln.get("batch_no")
-        provided_batch[str(code)] = str(bno) if bno else None
-        sno = ln.get("serial_no") or ln.get("serial_nos")
-        provided_serials[str(code)] = str(sno) if sno else None
-
-    # Enforce all items counted (subset: items matching the search criteria we expose)
-    if int(enforce_all or 0):
-        expected = list_items_for_count(warehouse=warehouse)  # type: ignore
-        expected_codes = {e["item_code"] for e in expected}
-        missing = [c for c in expected_codes if c not in counted]
-        if missing:
-            frappe.throw(_("You must count all items in this warehouse. Missing: {0}").format(", ".join(sorted(missing)[:10]) + (" ..." if len(missing) > 10 else "")))
-
-    # Current quantities
-    cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
-
-    # Helper to fetch a sensible valuation rate when ERPNext requires one
-    def _resolve_valuation_rate(item_code: str, wh: str) -> Optional[float]:
-        # 1) Latest Stock Ledger Entry for this warehouse
-        rows = frappe.get_all(
-            "Stock Ledger Entry",
-            filters={"item_code": item_code, "warehouse": wh},
-            fields=["valuation_rate"],
-            order_by="posting_date desc, posting_time desc, creation desc",
-            limit=1,
-        )
-        if rows and rows[0].get("valuation_rate") is not None:
             try:
-                return float(rows[0]["valuation_rate"])  # type: ignore
+                lines = json.loads(lines)
             except Exception:
-                pass
+                frappe.throw(_("Invalid JSON for lines"))
 
-        # 2) Any SLE for the item (other warehouses)
-        rows_any = frappe.get_all(
-            "Stock Ledger Entry",
-            filters={"item_code": item_code},
-            fields=["valuation_rate"],
-            order_by="posting_date desc, posting_time desc, creation desc",
-            limit=1,
-        )
-        if rows_any and rows_any[0].get("valuation_rate") is not None:
+        if not isinstance(lines, list) or not lines:
+            frappe.throw(_("lines must be a non-empty list"))
+        if not warehouse:
+            frappe.throw(_("warehouse is required"))
+
+        # Build a map of counted qty in stock UOM
+        counted: Dict[str, float] = {}
+        provided_vr: Dict[str, Optional[float]] = {}
+        provided_batch: Dict[str, Optional[str]] = {}
+        provided_serials: Dict[str, Optional[str]] = {}
+        for ln in lines:
+            if not isinstance(ln, dict):
+                frappe.throw(_("Each line must be an object"))
+            code = ln.get("item_code") or ln.get("item")
+            if not code:
+                frappe.throw(_("Missing item_code in a line"))
+            qty = float(ln.get("counted_qty") or ln.get("qty") or 0)
+            uom = ln.get("uom")
+            counted[code] = _to_stock_qty(code, qty, uom)
+            # Optional valuation_rate provided by client
             try:
-                return float(rows_any[0]["valuation_rate"])  # type: ignore
-            except Exception:
-                pass
-
-        # 3) Item.last_purchase_rate
-        lpr = frappe.db.get_value("Item", item_code, "last_purchase_rate")
-        try:
-            if lpr is not None:
-                return float(lpr)
-        except Exception:
-            pass
-
-        # 4) Any Buying Item Price
-        ip = frappe.get_all(
-            "Item Price",
-            filters={"item_code": item_code, "buying": 1},
-            fields=["price_list_rate"],
-            order_by="modified desc",
-            limit=1,
-        )
-        if ip and ip[0].get("price_list_rate") is not None:
-            try:
-                return float(ip[0]["price_list_rate"])  # type: ignore
-            except Exception:
-                pass
-        # 5) Fallback: Selling Item Price
-        ips = frappe.get_all(
-            "Item Price",
-            filters={"item_code": item_code, "selling": 1},
-            fields=["price_list_rate"],
-            order_by="modified desc",
-            limit=1,
-        )
-        if ips and ips[0].get("price_list_rate") is not None:
-            try:
-                return float(ips[0]["price_list_rate"])  # type: ignore
-            except Exception:
-                pass
-
-        return None
-
-    # Create Stock Reconciliation only for differences
-    sr = frappe.new_doc("Stock Reconciliation")
-    # Set company from warehouse to align with stock rules across environments
-    wh_company = frappe.db.get_value("Warehouse", warehouse, "company")
-    if wh_company:
-        sr.company = wh_company
-    if posting_date:
-        sr.posting_date = posting_date
-    else:
-        from frappe.utils import today
-        sr.posting_date = today()
-    sr.set_posting_time = 1
-    sr.purpose = "Stock Reconciliation"
-    # Ensure accounting defaults to avoid validation failures on some sites
-    if sr.company:
-        comp = frappe.get_all(
-            "Company",
-            filters={"name": sr.company},
-            fields=["stock_adjustment_account", "cost_center"],
-            limit=1,
-        )
-        if comp:
-            diff_acct = comp[0].get("stock_adjustment_account")
-            if diff_acct:
-                try:
-                    sr.difference_account = diff_acct
-                except Exception:
-                    pass
-            cc = comp[0].get("cost_center")
-            if cc:
-                try:
-                    sr.cost_center = cc
-                except Exception:
-                    pass
-
-    diffs = 0
-    allow_zero_val = bool(frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate") or 0)
-    for code, counted_stock_qty in counted.items():
-        current = float(cur_qty_map.get(code, 0))
-        if abs(counted_stock_qty - current) < 1e-9:
-            continue
-        # If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
-        row: Dict[str, Any] = {
-            "item_code": code,
-            "warehouse": warehouse,
-            "qty": counted_stock_qty,
-        }
-
-        is_increase = counted_stock_qty > current
-        if is_increase:
-            # Prefer client-provided valuation_rate if valid (> 0)
-            vr = provided_vr.get(code)
-            if vr is not None and float(vr) <= 0:
-                vr = None
-            if vr is None:
-                vr = _resolve_valuation_rate(code, warehouse)
-            # If zero or negative, treat as missing unless zero valuation is allowed
-            if vr is not None and float(vr) <= 0:
-                vr = None if not allow_zero_val else 0.0
-            if vr is None and allow_zero_val:
-                vr = 0.0
-            if vr is None:
-                # As a last resort, fail with a clear message rather than a generic ValidationError
-                frappe.throw(_(
-                    "Valuation Rate required for Item {0}. Please set a Buying Item Price or enable 'Allow Zero Valuation Rate' in Stock Settings."
-                ).format(code))
-            row["valuation_rate"] = float(vr)
-
-        # Handle batch/serial requirements
-        has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)
-        has_serial = bool(frappe.db.get_value("Item", code, "has_serial_no") or 0)
-        if has_serial and is_increase:
-            # For increases, serial numbers are mandatory and cannot be auto-generated safely here
-            serials = provided_serials.get(code)
-            if not serials:
-                frappe.throw(_(
-                    "Serial No is required for Item {0}. Please provide serial_no/serial_nos in the submitted lines."
-                ).format(code))
-            row["serial_no"] = serials
-        if has_batch and is_increase:
-            bno = provided_batch.get(code)
-            if not bno:
-                # Try reuse any existing batch for this item; else create a simple batch
-                ex = frappe.get_all("Batch", filters={"item": code}, fields=["name"], limit=1)
-                if ex:
-                    bno = ex[0]["name"]
+                if ln.get("valuation_rate") is not None:
+                    provided_vr[str(code)] = float(ln.get("valuation_rate"))
                 else:
-                    from frappe.utils import today
-                    b = frappe.new_doc("Batch")
-                    b.item = code
-                    b.batch_id = f"AUTO-{code}-{today()}"
-                    b.insert(ignore_permissions=True)
-                    bno = b.name
-            row["batch_no"] = bno
+                    provided_vr[str(code)] = None
+            except Exception:
+                provided_vr[str(code)] = None
+            # Optional batch/serial
+            bno = ln.get("batch_no")
+            provided_batch[str(code)] = str(bno) if bno else None
+            sno = ln.get("serial_no") or ln.get("serial_nos")
+            provided_serials[str(code)] = str(sno) if sno else None
 
-        sr.append("items", row)
-        diffs += 1
+        # Enforce all items counted (subset: items matching the search criteria we expose)
+        if int(enforce_all or 0):
+            expected = list_items_for_count(warehouse=warehouse)  # type: ignore
+            expected_codes = {e["item_code"] for e in expected}
+            missing = [c for c in expected_codes if c not in counted]
+            if missing:
+                frappe.throw(_("You must count all items in this warehouse. Missing: {0}").format(
+                    ", ".join(sorted(missing)[:10]) + (" ..." if len(missing) > 10 else "")
+                ))
 
-    if diffs == 0:
-        return {"ok": True, "stock_reconciliation": None, "message": "No differences found"}
+        # Current quantities
+        cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
-    try:
-        sr.flags.ignore_permissions = True
-        sr.insert()
-        sr.flags.ignore_permissions = True
-        sr.submit()
-        frappe.db.commit()
+        # Helper to fetch a sensible valuation rate when ERPNext requires one
+        def _resolve_valuation_rate(item_code: str, wh: str) -> Optional[float]:
+            # 1) Latest Stock Ledger Entry for this warehouse
+            rows = frappe.get_all(
+                "Stock Ledger Entry",
+                filters={"item_code": item_code, "warehouse": wh},
+                fields=["valuation_rate"],
+                order_by="posting_date desc, posting_time desc, creation desc",
+                limit=1,
+            )
+            if rows and rows[0].get("valuation_rate") is not None:
+                try:
+                    return float(rows[0]["valuation_rate"])  # type: ignore
+                except Exception:
+                    pass
+
+            # 2) Any SLE for the item (other warehouses)
+            rows_any = frappe.get_all(
+                "Stock Ledger Entry",
+                filters={"item_code": item_code},
+                fields=["valuation_rate"],
+                order_by="posting_date desc, posting_time desc, creation desc",
+                limit=1,
+            )
+            if rows_any and rows_any[0].get("valuation_rate") is not None:
+                try:
+                    return float(rows_any[0]["valuation_rate"])  # type: ignore
+                except Exception:
+                    pass
+
+            # 3) Item.last_purchase_rate
+            lpr = frappe.db.get_value("Item", item_code, "last_purchase_rate")
+            try:
+                if lpr is not None:
+                    return float(lpr)
+            except Exception:
+                pass
+
+            # 4) Any Buying Item Price
+            ip = frappe.get_all(
+                "Item Price",
+                filters={"item_code": item_code, "buying": 1},
+                fields=["price_list_rate"],
+                order_by="modified desc",
+                limit=1,
+            )
+            if ip and ip[0].get("price_list_rate") is not None:
+                try:
+                    return float(ip[0]["price_list_rate"])  # type: ignore
+                except Exception:
+                    pass
+            # 5) Fallback: Selling Item Price
+            ips = frappe.get_all(
+                "Item Price",
+                filters={"item_code": item_code, "selling": 1},
+                fields=["price_list_rate"],
+                order_by="modified desc",
+                limit=1,
+            )
+            if ips and ips[0].get("price_list_rate") is not None:
+                try:
+                    return float(ips[0]["price_list_rate"])  # type: ignore
+                except Exception:
+                    pass
+
+            return None
+
+        # Create Stock Reconciliation only for differences
+        sr = frappe.new_doc("Stock Reconciliation")
+        # Set company from warehouse to align with stock rules across environments
+        wh_company = frappe.db.get_value("Warehouse", warehouse, "company")
+        if wh_company:
+            sr.company = wh_company
+        if posting_date:
+            sr.posting_date = posting_date
+        else:
+            from frappe.utils import today
+            sr.posting_date = today()
+        sr.set_posting_time = 1
+        sr.purpose = "Stock Reconciliation"
+        # Ensure accounting defaults to avoid validation failures on some sites
+        if sr.company:
+            comp = frappe.get_all(
+                "Company",
+                filters={"name": sr.company},
+                fields=["stock_adjustment_account", "cost_center"],
+                limit=1,
+            )
+            if comp:
+                diff_acct = comp[0].get("stock_adjustment_account")
+                if diff_acct:
+                    try:
+                        sr.difference_account = diff_acct
+                    except Exception:
+                        pass
+                cc = comp[0].get("cost_center")
+                if cc:
+                    try:
+                        sr.cost_center = cc
+                    except Exception:
+                        pass
+
+        diffs = 0
+        allow_zero_val = bool(frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate") or 0)
+        for code, counted_stock_qty in counted.items():
+            current = float(cur_qty_map.get(code, 0))
+            if abs(counted_stock_qty - current) < 1e-9:
+                continue
+            # If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
+            row: Dict[str, Any] = {
+                "item_code": code,
+                "warehouse": warehouse,
+                "qty": counted_stock_qty,
+            }
+
+            is_increase = counted_stock_qty > current
+            if is_increase:
+                # Prefer client-provided valuation_rate if valid (> 0)
+                vr = provided_vr.get(code)
+                if vr is not None and float(vr) <= 0:
+                    vr = None
+                if vr is None:
+                    vr = _resolve_valuation_rate(code, warehouse)
+                # If zero or negative, treat as missing unless zero valuation is allowed
+                if vr is not None and float(vr) <= 0:
+                    vr = None if not allow_zero_val else 0.0
+                if vr is None and allow_zero_val:
+                    vr = 0.0
+                if vr is None:
+                    # As a last resort, fail with a clear message rather than a generic ValidationError
+                    frappe.throw(_(
+                        "Valuation Rate required for Item {0}. Please set a Buying Item Price or enable 'Allow Zero Valuation Rate' in Stock Settings."
+                    ).format(code))
+                row["valuation_rate"] = float(vr)
+
+            # Handle batch/serial requirements
+            has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)
+            has_serial = bool(frappe.db.get_value("Item", code, "has_serial_no") or 0)
+            if has_serial and is_increase:
+                # For increases, serial numbers are mandatory and cannot be auto-generated safely here
+                serials = provided_serials.get(code)
+                if not serials:
+                    frappe.throw(_(
+                        "Serial No is required for Item {0}. Please provide serial_no/serial_nos in the submitted lines."
+                    ).format(code))
+                row["serial_no"] = serials
+            if has_batch and is_increase:
+                bno = provided_batch.get(code)
+                if not bno:
+                    # Try reuse any existing batch for this item; else create a simple batch
+                    ex = frappe.get_all("Batch", filters={"item": code}, fields=["name"], limit=1)
+                    if ex:
+                        bno = ex[0]["name"]
+                    else:
+                        from frappe.utils import today
+                        b = frappe.new_doc("Batch")
+                        b.item = code
+                        b.batch_id = f"AUTO-{code}-{today()}"
+                        b.insert(ignore_permissions=True)
+                        bno = b.name
+                row["batch_no"] = bno
+
+            sr.append("items", row)
+            diffs += 1
+
+        if diffs == 0:
+            return {"ok": True, "stock_reconciliation": None, "message": "No differences found"}
+
+        # Save & submit
+        try:
+            sr.flags.ignore_permissions = True
+            sr.insert()
+            sr.flags.ignore_permissions = True
+            sr.submit()
+            frappe.db.commit()
+        except Exception as e:
+            tb = frappe.get_traceback()
+            frappe.log_error(tb, "jarz_pos.submit_reconciliation")
+            if debug_flag:
+                return {"ok": False, "error": str(e), "traceback": tb}
+            frappe.throw(_(f"Submit reconciliation failed: {e}"))
+
+        return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
+
     except Exception as e:
-        # Log full traceback for diagnostics
         tb = frappe.get_traceback()
         frappe.log_error(tb, "jarz_pos.submit_reconciliation")
-        if int(debug or 0):
-            # Return as a readable payload for client-side diagnostics
+        if debug_flag:
             return {"ok": False, "error": str(e), "traceback": tb}
-        # Default behavior: raise a concise message
-        frappe.throw(_(f"Submit reconciliation failed: {e}"))
-
-    return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
+        # Re-raise to preserve HTTP error semantics when not debugging
+        raise
