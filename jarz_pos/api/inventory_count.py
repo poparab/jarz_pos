@@ -150,7 +150,14 @@ def list_items_for_count(
     if search:
         like = f"%{search}%"
         or_filters = [["Item", "name", "like", like], ["Item", "item_name", "like", like]]
-    fields = ["name as item_code", "item_name", "item_group", "stock_uom"]
+    fields = [
+        "name as item_code",
+        "item_name",
+        "item_group",
+        "stock_uom",
+        "has_batch_no",
+        "has_serial_no",
+    ]
     items = frappe.get_all("Item", filters=filters, or_filters=or_filters, fields=fields, order_by="modified desc", limit=limit)
     codes = [it["item_code"] for it in items]
     qty_map = _get_bin_qty_map(warehouse, codes)
@@ -166,6 +173,8 @@ def list_items_for_count(
             "item_name": it.get("item_name") or code,
             "item_group": it.get("item_group"),
             "stock_uom": stock_uom,
+            "has_batch_no": bool(it.get("has_batch_no") or 0),
+            "has_serial_no": bool(it.get("has_serial_no") or 0),
             "current_qty": float(qty_map.get(code, 0)),
             "uoms": _get_uom_conversions(code),
             "valuation_rate": val,
@@ -218,6 +227,8 @@ def submit_reconciliation(
     # Build a map of counted qty in stock UOM
     counted: Dict[str, float] = {}
     provided_vr: Dict[str, Optional[float]] = {}
+    provided_batch: Dict[str, Optional[str]] = {}
+    provided_serials: Dict[str, Optional[str]] = {}
     for ln in lines:
         if not isinstance(ln, dict):
             frappe.throw(_("Each line must be an object"))
@@ -235,6 +246,11 @@ def submit_reconciliation(
                 provided_vr[str(code)] = None
         except Exception:
             provided_vr[str(code)] = None
+        # Optional batch/serial
+        bno = ln.get("batch_no")
+        provided_batch[str(code)] = str(bno) if bno else None
+        sno = ln.get("serial_no") or ln.get("serial_nos")
+        provided_serials[str(code)] = str(sno) if sno else None
 
     # Enforce all items counted (subset: items matching the search criteria we expose)
     if int(enforce_all or 0):
@@ -360,6 +376,33 @@ def submit_reconciliation(
                     "Valuation Rate required for Item {0}. Please set a Buying Item Price or enable 'Allow Zero Valuation Rate' in Stock Settings."
                 ).format(code))
             row["valuation_rate"] = float(vr)
+
+        # Handle batch/serial requirements
+        has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)
+        has_serial = bool(frappe.db.get_value("Item", code, "has_serial_no") or 0)
+        if has_serial and is_increase:
+            # For increases, serial numbers are mandatory and cannot be auto-generated safely here
+            serials = provided_serials.get(code)
+            if not serials:
+                frappe.throw(_(
+                    "Serial No is required for Item {0}. Please provide serial_no/serial_nos in the submitted lines."
+                ).format(code))
+            row["serial_no"] = serials
+        if has_batch and is_increase:
+            bno = provided_batch.get(code)
+            if not bno:
+                # Try reuse any existing batch for this item; else create a simple batch
+                ex = frappe.get_all("Batch", filters={"item": code}, fields=["name"], limit=1)
+                if ex:
+                    bno = ex[0]["name"]
+                else:
+                    from frappe.utils import today
+                    b = frappe.new_doc("Batch")
+                    b.item = code
+                    b.batch_id = f"AUTO-{code}-{today()}"
+                    b.insert(ignore_permissions=True)
+                    bno = b.name
+            row["batch_no"] = bno
 
         sr.append("items", row)
         diffs += 1
