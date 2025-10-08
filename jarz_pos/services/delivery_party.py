@@ -86,6 +86,7 @@ def create_delivery_party(
             if last_name:
                 emp.last_name = last_name
             emp.employee_name = display_name
+            
             # Mandatory defaults
             if emp.meta.get_field("gender"):
                 emp.gender = "Male"
@@ -94,14 +95,30 @@ def create_delivery_party(
             if emp.meta.get_field("date_of_birth"):
                 # Placeholder DOB - caller requested any placeholder
                 emp.date_of_birth = "1970-01-01"
+            
+            # Company field - often mandatory for Employee
+            if emp.meta.get_field("company"):
+                # Try to get default company or first available company
+                try:
+                    default_company = frappe.db.get_single_value("Global Defaults", "default_company")
+                    if not default_company:
+                        # Get first company if no default
+                        default_company = frappe.db.get_value("Company", {}, "name")
+                    if default_company:
+                        emp.company = default_company
+                except Exception as e:
+                    frappe.logger().warning(f"Could not set company for Employee: {e}")
+            
             if phone:
                 if emp.meta.get_field("cell_number"):
                     emp.cell_number = phone
                 elif emp.meta.get_field("mobile"):
                     emp.mobile = phone
+            
             # Provide placeholder email if field exists and mandatory
             if emp.meta.get_field("personal_email"):
                 emp.personal_email = f"{frappe.generate_hash(length=8)}@example.com"
+            
             if branch_name and emp.meta.get_field("branch"):
                 emp.branch = branch_name
             
