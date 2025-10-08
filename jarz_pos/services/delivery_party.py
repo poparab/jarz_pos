@@ -87,34 +87,35 @@ def create_delivery_party(
                 emp.last_name = last_name
             emp.employee_name = display_name
             
-            # Status field - set to Active if exists
-            if emp.meta.get_field("status"):
-                emp.status = "Active"
+            # MANDATORY FIELDS (must be set for Employee to save)
+            # Status field - set to Active (mandatory)
+            emp.status = "Active"
             
-            # Mandatory defaults
-            if emp.meta.get_field("gender"):
-                emp.gender = "Male"
-            if emp.meta.get_field("date_of_joining"):
-                emp.date_of_joining = frappe.utils.today()
-            if emp.meta.get_field("date_of_birth"):
-                # Placeholder DOB - caller requested any placeholder
-                emp.date_of_birth = "1970-01-01"
+            # Gender field - Link to Gender DocType (mandatory)
+            emp.gender = "Male"
             
-            # Company field - often mandatory for Employee
-            if emp.meta.get_field("company"):
-                # Try to get default company or first available company
-                try:
-                    default_company = frappe.db.get_single_value("Global Defaults", "default_company")
-                    if not default_company:
-                        # Get first company if no default
-                        default_company = frappe.db.get_value("Company", {}, "name")
-                    if default_company:
-                        emp.company = default_company
-                    else:
-                        frappe.logger().warning("No company found for Employee - this may cause validation error")
-                except Exception as e:
-                    frappe.logger().warning(f"Could not set company for Employee: {e}")
+            # Date of joining (mandatory)
+            emp.date_of_joining = frappe.utils.today()
             
+            # Date of birth (mandatory) - use a reasonable placeholder
+            emp.date_of_birth = "1990-01-01"
+            
+            # Company field - mandatory for Employee
+            try:
+                default_company = frappe.db.get_single_value("Global Defaults", "default_company")
+                if not default_company:
+                    # Get first company if no default
+                    default_company = frappe.db.get_value("Company", {}, "name")
+                if default_company:
+                    emp.company = default_company
+                else:
+                    frappe.logger().error("No company found - Employee creation will fail")
+                    frappe.throw("No company configured. Please ask administrator to create a Company first.")
+            except Exception as e:
+                frappe.logger().error(f"Could not set company for Employee: {e}")
+                frappe.throw("Could not determine company for Employee. Please contact administrator.")
+            
+            # Optional fields
             if phone:
                 if emp.meta.get_field("cell_number"):
                     emp.cell_number = phone
@@ -131,7 +132,7 @@ def create_delivery_party(
                 emp.branch = branch_name
             
             # Log all fields being set for debugging
-            frappe.logger().info(f"Creating Employee with fields: first_name={emp.first_name}, last_name={emp.get('last_name')}, employee_name={emp.employee_name}, company={emp.get('company')}, gender={emp.get('gender')}, date_of_joining={emp.get('date_of_joining')}")
+            frappe.logger().info(f"Creating Employee with fields: first_name={emp.first_name}, last_name={emp.get('last_name')}, employee_name={emp.employee_name}, company={emp.company}, gender={emp.gender}, status={emp.status}, date_of_joining={emp.date_of_joining}, date_of_birth={emp.date_of_birth}")
             
             try:
                 emp.save(ignore_permissions=True)
