@@ -88,8 +88,9 @@ def create_delivery_party(
             emp.employee_name = display_name
             
             # MANDATORY FIELDS (must be set for Employee to save)
-            # Note: naming_series is NOT set manually - Frappe auto-assigns based on DocType config
-            #  (Employee has autoname: naming_series: with options "HR-EMP-")
+            # Naming series - Employee DocType uses autoname: naming_series: which requires this field
+            # We must set it to "HR-EMP-" and Frappe will append the auto-incremented number
+            emp.naming_series = "HR-EMP-"
             
             # Status field - set to Active (mandatory)
             emp.status = "Active"
