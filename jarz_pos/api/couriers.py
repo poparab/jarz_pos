@@ -239,15 +239,24 @@ def create_delivery_party(
     Either provide (first_name & last_name) or a combined name.
     Returns: {party_type, party, display_name, phone}
     """
-    # Use pos_profile as branch name per requirement
-    return _create_delivery_party(
-        party_type=party_type,
-        name=name,
-        phone=phone,
-        branch=pos_profile,
-        first_name=first_name,
-        last_name=last_name,
-    )
+    try:
+        frappe.logger().info(f"create_delivery_party called with: party_type={party_type}, name={name}, first_name={first_name}, last_name={last_name}, phone={phone}, pos_profile={pos_profile}")
+        # Use pos_profile as branch name per requirement
+        result = _create_delivery_party(
+            party_type=party_type,
+            name=name,
+            phone=phone,
+            branch=pos_profile,
+            first_name=first_name,
+            last_name=last_name,
+        )
+        frappe.logger().info(f"create_delivery_party successful: {result}")
+        return result
+    except Exception as e:
+        frappe.logger().error(f"create_delivery_party failed: {str(e)}")
+        frappe.logger().error(frappe.get_traceback())
+        # Return user-friendly error instead of generic 409
+        frappe.throw(f"Failed to create courier: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
