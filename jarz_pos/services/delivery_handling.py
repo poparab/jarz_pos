@@ -1941,6 +1941,114 @@ def _get_invoice_city(invoice_name):
         return territory
 
 
+def get_courier_balances():
+    """
+    Return outstanding balances grouped by unified delivery party
+    (Employee/Supplier) with a backward-compatible shape.
+
+    Important: Avoid referencing a non-existent "Courier" DocType. We derive
+    balances solely from `Courier Transaction` rows.
+
+    Output rows include both the new unified keys and legacy keys for UI
+    compatibility:
+      {
+        "party_type": "Employee"|"Supplier"|"",
+        "party": "EMP-0001"|"SUP-0001"|"",
+        "display_name": "John Doe"|"Vendor X"|"<Unknown>",
+        "balance": 1250.0,
+        "details": [ {"invoice": ..., "city": ..., "territory": ..., "amount": ..., "shipping": ...}, ... ],
+        # Legacy (kept for older clients):
+        "courier": "<legacy courier id or party>",
+        "courier_name": "<display_name>"
+      }
+    """
+    # Determine available columns defensively – staging may have different customizations
+    try:
+        cols = set(frappe.db.get_table_columns("Courier Transaction") or [])
+    except Exception:
+        cols = set()
+
+    fields = ["name", "reference_invoice"]
+    if "amount" in cols:
+        fields.append("amount")
+    if "shipping_amount" in cols:
+        fields.append("shipping_amount")
+    if "party_type" in cols:
+        fields.append("party_type")
+    if "party" in cols:
+        fields.append("party")
+    if "courier" in cols:
+        fields.append("courier")  # legacy label column, may not exist
+
+    rows = frappe.get_all(
+        "Courier Transaction",
+        filters={"status": ["!=", "Settled"]},
+        fields=fields,
+    )
+
+    groups = {}
+
+    def _ensure_group(party_type: str, party: str, legacy_courier: str | None):
+        key = (party_type or "", party or (legacy_courier or ""))
+        if key not in groups:
+            # Resolve display label from party when possible
+            label = None
+            if key[0] == "Employee" and key[1]:
+                try:
+                    label = frappe.db.get_value("Employee", key[1], "employee_name") or key[1]
+                except Exception:
+                    label = key[1]
+            elif key[0] == "Supplier" and key[1]:
+                try:
+                    label = frappe.db.get_value("Supplier", key[1], "supplier_name") or key[1]
+                except Exception:
+                    label = key[1]
+            else:
+                label = (legacy_courier or key[1] or "<Unknown>")
+
+            groups[key] = {
+                "party_type": key[0],
+                "party": key[1],
+                "display_name": label,
+                # Legacy keys
+                "courier": legacy_courier or key[1],
+                "courier_name": label,
+                "balance": 0.0,
+                "details": [],
+            }
+        return groups[key]
+
+    for r in rows:
+        party_type = (r.get("party_type") or "").strip()
+        party = (r.get("party") or "").strip()
+        legacy_courier = (r.get("courier") or "").strip() or None
+
+        grp = _ensure_group(party_type, party, legacy_courier)
+        # Numeric fields may be absent; coerce safely
+        try:
+            amt = float(r.get("amount") or 0)
+        except Exception:
+            amt = 0.0
+        try:
+            ship = float(r.get("shipping_amount") or 0)
+        except Exception:
+            ship = 0.0
+        grp["balance"] += amt - ship
+        inv = r.get("reference_invoice")
+        loc_label = _get_invoice_city(inv)
+        grp["details"].append({
+            "invoice": inv,
+            "city": loc_label,
+            "territory": loc_label,
+            "amount": amt,
+            "shipping": ship,
+        })
+
+    data = list(groups.values())
+    data.sort(key=lambda d: d.get("balance", 0.0), reverse=True)
+    return data
+
+
 def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding):
     """Create and submit payment entry for courier outstanding."""
     pe = frappe.new_doc("Payment Entry")
