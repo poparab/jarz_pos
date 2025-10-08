@@ -88,10 +88,14 @@ def create_delivery_party(
             emp.employee_name = display_name
             
             # MANDATORY FIELDS (must be set for Employee to save)
+            # Naming series - required for auto-naming (format: HR-EMP-)
+            if emp.meta.get_field("naming_series"):
+                emp.naming_series = "HR-EMP-"
+            
             # Status field - set to Active (mandatory)
             emp.status = "Active"
             
-            # Gender field - Link to Gender DocType (mandatory)
+            # Gender field - Link to Gender DocType (mandatory) - Always Male
             emp.gender = "Male"
             
             # Date of joining (mandatory)
