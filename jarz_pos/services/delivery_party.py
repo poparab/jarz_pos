@@ -87,6 +87,10 @@ def create_delivery_party(
                 emp.last_name = last_name
             emp.employee_name = display_name
             
+            # Status field - set to Active if exists
+            if emp.meta.get_field("status"):
+                emp.status = "Active"
+            
             # Mandatory defaults
             if emp.meta.get_field("gender"):
                 emp.gender = "Male"
@@ -106,6 +110,8 @@ def create_delivery_party(
                         default_company = frappe.db.get_value("Company", {}, "name")
                     if default_company:
                         emp.company = default_company
+                    else:
+                        frappe.logger().warning("No company found for Employee - this may cause validation error")
                 except Exception as e:
                     frappe.logger().warning(f"Could not set company for Employee: {e}")
             
@@ -115,15 +121,21 @@ def create_delivery_party(
                 elif emp.meta.get_field("mobile"):
                     emp.mobile = phone
             
-            # Provide placeholder email if field exists and mandatory
+            # Provide placeholder email if field exists
             if emp.meta.get_field("personal_email"):
                 emp.personal_email = f"{frappe.generate_hash(length=8)}@example.com"
+            elif emp.meta.get_field("company_email"):
+                emp.company_email = f"{frappe.generate_hash(length=8)}@example.com"
             
             if branch_name and emp.meta.get_field("branch"):
                 emp.branch = branch_name
             
+            # Log all fields being set for debugging
+            frappe.logger().info(f"Creating Employee with fields: first_name={emp.first_name}, last_name={emp.get('last_name')}, employee_name={emp.employee_name}, company={emp.get('company')}, gender={emp.get('gender')}, date_of_joining={emp.get('date_of_joining')}")
+            
             try:
                 emp.save(ignore_permissions=True)
+                frappe.logger().info(f"Successfully created Employee: {emp.name}")
             except Exception as e:
                 error_msg = str(e)
                 frappe.logger().error(f"Failed to save Employee: {error_msg}")
@@ -133,6 +145,8 @@ def create_delivery_party(
                     frappe.throw(f"A courier with name '{display_name}' already exists. Please use a different name.")
                 elif "mandatory" in error_msg.lower():
                     frappe.throw(f"Missing required field: {error_msg}")
+                elif "company" in error_msg.lower():
+                    frappe.throw(f"Company field is required for Employee courier. Please contact administrator to set default company.")
                 else:
                     frappe.throw(f"Failed to create Employee courier: {error_msg}")
             
