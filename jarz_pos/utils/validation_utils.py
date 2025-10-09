@@ -6,6 +6,7 @@ including cart data validation, customer validation, and POS profile validation.
 """
 
 import frappe
+from frappe import _dict
 from dateutil import parser
 
 
@@ -21,13 +22,59 @@ def validate_cart_data(cart_json, logger):
     # Parse cart JSON using Frappe best practice
     try:
         cart_items = frappe.parse_json(cart_json) if isinstance(cart_json, str) else cart_json
-        logger.debug(f"Parsed cart: {len(cart_items)} items")
-        print(f"   ✅ Cart parsed: {len(cart_items)} items")
     except (ValueError, TypeError) as e:
         error_msg = f"Invalid cart JSON format: {str(e)}"
         logger.error(error_msg)
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
+
+    # Handle responses where cart_json may be nested inside a dict (e.g., {"cart": [...]})
+    if isinstance(cart_items, dict) and cart_items.get("cart"):
+        cart_items = cart_items.get("cart")
+
+    # Some clients double-encode individual items; normalize everything into a list of dicts
+    if isinstance(cart_items, (str, bytes)):
+        try:
+            cart_items = frappe.parse_json(cart_items)
+        except Exception as e:
+            error_msg = f"Cart data must be a JSON list: {str(e)}"
+            logger.error(error_msg)
+            print(f"   ❌ {error_msg}")
+            frappe.throw(error_msg)
+
+    if not isinstance(cart_items, (list, tuple)):
+        error_msg = "Cart data must be a list of items"
+        logger.error(error_msg)
+        print(f"   ❌ {error_msg}")
+        frappe.throw(error_msg)
+
+    normalized_items = []
+    for idx, raw_item in enumerate(cart_items, 1):
+        item = raw_item
+        if isinstance(item, (str, bytes)):
+            try:
+                item = frappe.parse_json(item)
+            except Exception as parse_error:
+                error_msg = f"Invalid cart line at position {idx}: {parse_error}"
+                logger.error(error_msg)
+                print(f"   ❌ {error_msg}")
+                frappe.throw(error_msg)
+        elif hasattr(item, "as_dict"):
+            item = item.as_dict()
+        elif not isinstance(item, dict):
+            try:
+                item = dict(item)
+            except Exception:
+                error_msg = f"Cart line at position {idx} is not a valid item structure"
+                logger.error(error_msg)
+                print(f"   ❌ {error_msg}")
+                frappe.throw(error_msg)
+
+        normalized_items.append(_dict(item))
+
+    cart_items = normalized_items
+    logger.debug(f"Parsed cart: {len(cart_items)} items")
+    print(f"   ✅ Cart parsed: {len(cart_items)} items")
     
     # Filter out shipping items - shipping should be handled separately, not as cart items
     original_count = len(cart_items)
