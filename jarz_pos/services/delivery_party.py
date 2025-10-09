@@ -156,7 +156,33 @@ def create_delivery_party(
                     frappe.throw(f"Failed to create Employee courier: {error_msg}")
             
             try:
-                if frappe.db.exists("DocType", "Employee Group Member"):
+                appended = False
+                group_doc = frappe.get_doc("Employee Group", group_name)
+                potential_tables = [
+                    "employee_list",
+                    "employees",
+                    "members",
+                    "employee_members",
+                    "employee_group_items",
+                    "employee_details",
+                ]
+                for field in potential_tables:
+                    rows = group_doc.get(field)
+                    if isinstance(rows, list):
+                        if any((getattr(r, "employee", None) or r.get("employee")) == emp.name for r in rows if r):
+                            appended = True
+                            break
+                        try:
+                            group_doc.append(field, {"employee": emp.name, "employee_name": emp.employee_name})
+                            group_doc.flags.ignore_permissions = True
+                            group_doc.save(ignore_permissions=True)
+                            appended = True
+                        except Exception:
+                            # fallback to next field name
+                            continue
+                        break
+
+                if not appended and frappe.db.exists("DocType", "Employee Group Member"):
                     member = frappe.new_doc("Employee Group Member")
                     member.employee_group = group_name
                     member.employee = emp.name
