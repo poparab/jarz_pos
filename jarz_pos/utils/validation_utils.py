@@ -29,8 +29,11 @@ def validate_cart_data(cart_json, logger):
         frappe.throw(error_msg)
 
     # Handle responses where cart_json may be nested inside a dict (e.g., {"cart": [...]})
-    if isinstance(cart_items, dict) and cart_items.get("cart"):
-        cart_items = cart_items.get("cart")
+    if isinstance(cart_items, dict):
+        if cart_items.get("cart"):
+            cart_items = cart_items.get("cart")
+        else:
+            cart_items = [cart_items]
 
     # Some clients double-encode individual items; normalize everything into a list of dicts
     if isinstance(cart_items, (str, bytes)):
