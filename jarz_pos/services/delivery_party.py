@@ -155,40 +155,31 @@ def create_delivery_party(
                 else:
                     frappe.throw(f"Failed to create Employee courier: {error_msg}")
             
+            # Add employee to the Delivery Employee Group
             try:
-                appended = False
                 group_doc = frappe.get_doc("Employee Group", group_name)
-                potential_tables = [
-                    "employee_list",
-                    "employees",
-                    "members",
-                    "employee_members",
-                    "employee_group_items",
-                    "employee_details",
-                ]
-                for field in potential_tables:
-                    rows = group_doc.get(field)
-                    if isinstance(rows, list):
-                        if any((getattr(r, "employee", None) or r.get("employee")) == emp.name for r in rows if r):
-                            appended = True
-                            break
-                        try:
-                            group_doc.append(field, {"employee": emp.name, "employee_name": emp.employee_name})
-                            group_doc.flags.ignore_permissions = True
-                            group_doc.save(ignore_permissions=True)
-                            appended = True
-                        except Exception:
-                            # fallback to next field name
-                            continue
+                
+                # Check if employee already exists in the group
+                existing = False
+                for row in group_doc.get("employee_list") or []:
+                    if row.get("employee") == emp.name:
+                        existing = True
+                        frappe.logger().info(f"Employee {emp.name} already exists in Employee Group {group_name}")
                         break
-
-                if not appended and frappe.db.exists("DocType", "Employee Group Member"):
-                    member = frappe.new_doc("Employee Group Member")
-                    member.employee_group = group_name
-                    member.employee = emp.name
-                    member.save(ignore_permissions=True)
+                
+                if not existing:
+                    # Append to employee_list child table with correct structure
+                    group_doc.append("employee_list", {
+                        "employee": emp.name,
+                        "employee_name": emp.employee_name,
+                    })
+                    group_doc.flags.ignore_permissions = True
+                    group_doc.save(ignore_permissions=True)
+                    frappe.logger().info(f"Successfully added Employee {emp.name} to Employee Group {group_name}")
             except Exception as e:
-                frappe.logger().warning(f"Failed to add Employee to group: {str(e)}")
+                frappe.logger().error(f"Failed to add Employee to group: {str(e)}")
+                frappe.logger().error(frappe.get_traceback())
+                # Don't fail the entire creation if group membership fails
                 pass
             party_id = emp.name
             final_display = emp.employee_name
