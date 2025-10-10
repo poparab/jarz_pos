@@ -5,7 +5,7 @@ This document summarizes the comprehensive test suite implementation for the Jar
 
 ## What Was Accomplished
 
-### Test Files Created: 23 New + 2 Enhanced = 25 Total
+### Test Files Created: 26 New + 2 Enhanced = 28 Total
 
 #### API Endpoint Tests (17 files)
 1. **test_api_user.py** - User roles and permissions
@@ -26,9 +26,12 @@ This document summarizes the comprehensive test suite implementation for the Jar
 16. **test_api_global_methods.py** - Global method wrappers (kanban)
 17. **test_api_invoices.py** - Enhanced invoice API tests
 
-#### Business Logic Tests (2 files)
+#### Business Logic Tests (5 files)
 1. **test_bundle_processing.py** - Bundle expansion, pricing, and validation
 2. **test_discount_calculation.py** - Discount calculations and distributions
+3. **test_settlement_strategies.py** ⭐ NEW - All 6 invoice settlement cases
+4. **test_kanban_state_transitions.py** ⭐ NEW - Kanban state transitions and DN creation
+5. **test_invoice_creation_cases.py** ⭐ NEW - POS invoice creation for all 6 cases
 
 #### Utility Tests (4 files)
 1. **test_utils_invoice.py** - Invoice utility functions
@@ -60,9 +63,9 @@ This document summarizes the comprehensive test suite implementation for the Jar
 
 ## Test Statistics
 
-- **Total Test Files**: 25
-- **Total Test Methods**: 122
-- **Estimated Lines of Test Code**: ~3,500+
+- **Total Test Files**: 28
+- **Total Test Methods**: 213
+- **Estimated Lines of Test Code**: ~6,000+
 
 ## Coverage Breakdown
 
@@ -71,9 +74,9 @@ This document summarizes the comprehensive test suite implementation for the Jar
 - **Uncovered**: 3 modules (kanban.py tested via global_methods, invoices_clean.py empty, test_kanban_setup.py is a test utility)
 
 ### Business Logic Services
-- **Covered**: 2 out of 7 modules (29%)
-- **Covered Modules**: bundle_processing, discount_calculation
-- **Remaining**: delivery_handling, delivery_party, invoice_creation, settlement_strategies (can be added in future iterations)
+- **Covered**: 5 out of 7 modules (71%)
+- **Covered Modules**: bundle_processing, discount_calculation, **settlement_strategies**, **invoice_creation** (via test_invoice_creation_cases.py), **kanban integration** (via test_kanban_state_transitions.py)
+- **Remaining**: delivery_party (can be added in future iterations)
 
 ### Utilities
 - **Covered**: 4 out of 4 modules (100%)
@@ -206,9 +209,10 @@ Tests run automatically via GitHub Actions on:
 
 ## Files Changed
 
-### New Files (27)
-- 23 new test files
+### New Files (30)
+- 26 new test files
 - 2 documentation files (TESTING.md, tests/README.md)
+- 1 business logic documentation (SIX_INVOICE_CASES.md)
 - 2 enhanced test files (test_kanban.py, test_api_invoices.py)
 
 ### Modified Files
@@ -244,5 +248,17 @@ This comprehensive test suite provides excellent coverage of the Jarz POS applic
 ---
 
 **Implementation Date**: 2025-10-10  
-**Version**: 1.0.0  
+**Version**: 1.1.0  
 **Maintainer**: Jarz POS Development Team
+
+## Six Invoice Cases Coverage
+
+The test suite now includes comprehensive coverage of all 6 invoice settlement cases:
+1. **Unpaid + Settle Now** - Courier collects, immediate settlement
+2. **Unpaid + Settle Later** - Courier collects, deferred settlement  
+3. **Paid + Settle Now** - Branch collected, immediate courier fee
+4. **Paid + Settle Later** - Branch collected, deferred courier fee
+5. **Sales Partner Flow** - Online payment with partner routing
+6. **Pickup Flow** - No delivery, no courier
+
+See [SIX_INVOICE_CASES.md](SIX_INVOICE_CASES.md) for detailed documentation of each case.

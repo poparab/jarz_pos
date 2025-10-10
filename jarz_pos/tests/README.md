@@ -5,10 +5,10 @@ This directory contains the comprehensive test suite for Jarz POS.
 ## Test Coverage
 
 ### Total Statistics
-- **Test Files**: 25
-- **Test Methods**: 122
+- **Test Files**: 28
+- **Test Methods**: 213
 - **API Modules Covered**: 17/20 (85%)
-- **Service Modules Covered**: 2/7 (29%)
+- **Service Modules Covered**: 5/7 (71%)
 - **Utility Modules Covered**: 4/4 (100%)
 
 ## Test Files
@@ -32,9 +32,12 @@ This directory contains the comprehensive test suite for Jarz POS.
 - `test_api_transfer.py` - Transfer operations
 - `test_api_user.py` - User roles and permissions
 
-### Business Logic Tests (2 files)
+### Business Logic Tests (5 files)
 - `test_bundle_processing.py` - Bundle expansion and pricing
 - `test_discount_calculation.py` - Discount calculations
+- `test_settlement_strategies.py` ⭐ NEW - All 6 settlement cases
+- `test_kanban_state_transitions.py` ⭐ NEW - Kanban state flows
+- `test_invoice_creation_cases.py` ⭐ NEW - POS invoice cases
 
 ### Utility Tests (4 files)
 - `test_utils_account.py` - Account utilities
@@ -95,5 +98,17 @@ When adding new functionality:
 ## Last Updated
 
 - **Date**: 2025-10-10
-- **Version**: 1.0.0
+- **Version**: 1.1.0
 - **Maintainer**: Jarz POS Team
+
+## Six Invoice Cases
+
+All 6 invoice settlement cases are fully documented and tested:
+1. Unpaid + Settle Now
+2. Unpaid + Settle Later
+3. Paid + Settle Now
+4. Paid + Settle Later
+5. Sales Partner Flow
+6. Pickup Flow
+
+See [SIX_INVOICE_CASES.md](../../SIX_INVOICE_CASES.md) for detailed business logic documentation.
