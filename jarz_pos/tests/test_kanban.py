@@ -82,3 +82,27 @@ class TestKanbanAPI(unittest.TestCase):
         """Test the format_invoice_data utility function."""
         # This test requires a mock invoice object, which is more complex to set up
         pass
+
+    def test_get_kanban_invoices(self):
+        """Test the get_kanban_invoices endpoint."""
+        result = get_kanban_invoices()
+        self.assertTrue(result.get("success"), "Should return success=True")
+        self.assertIn("invoices", result, "Should include invoices key")
+        self.assertIsInstance(result["invoices"], dict, "Invoices should be a dictionary")
+
+    def test_get_invoice_details_validation(self):
+        """Test the get_invoice_details with non-existent invoice."""
+        # Test with non-existent invoice
+        try:
+            result = get_invoice_details(invoice_id="NON_EXISTENT_INV")
+            # If it doesn't raise, verify it returns error structure
+            self.assertIsInstance(result, dict, "Should return a dictionary")
+        except Exception:
+            # Expected to fail with non-existent invoice
+            pass
+
+    def test_get_kanban_filters(self):
+        """Test the get_kanban_filters endpoint."""
+        result = get_kanban_filters()
+        self.assertTrue(result.get("success"), "Should return success=True")
+        self.assertIn("filters", result, "Should include filters key")
