@@ -187,7 +187,7 @@ def _get_current_user_pos_profiles() -> list[str]:
 
 # Backwards compatibility wrappers (kept in case referenced elsewhere in file)
 
-def _get_state_custom_field():  # noqa: ARG001 - intentionally returns None now
+def _get_state_custom_field():
     return None
 
 def _get_allowed_states() -> list[str]:  # override previous implementation
