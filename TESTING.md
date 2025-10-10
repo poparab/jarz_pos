@@ -18,11 +18,14 @@ The test suite follows Python's unittest framework (consistent with ERPNext/Frap
 ```
 jarz_pos/tests/
 ├── __init__.py
-├── test_api_*.py          # API endpoint tests (17 files)
-├── test_*_processing.py   # Business logic tests (2 files)
-├── test_utils_*.py        # Utility function tests (4 files)
-├── test_kanban.py         # Enhanced kanban tests
-└── test_api_invoices.py   # Enhanced invoice API tests
+├── test_api_*.py                      # API endpoint tests (17 files)
+├── test_*_processing.py               # Business logic tests (2 files)
+├── test_settlement_strategies.py      # Settlement cases (NEW)
+├── test_kanban_state_transitions.py   # Kanban flows (NEW)
+├── test_invoice_creation_cases.py     # Invoice cases (NEW)
+├── test_utils_*.py                    # Utility function tests (4 files)
+├── test_kanban.py                     # Enhanced kanban tests
+└── test_api_invoices.py               # Enhanced invoice API tests
 ```
 
 ### Test Categories
@@ -71,6 +74,30 @@ Test core business logic functions:
 - Discount percentage calculation
 - Bundle discount distribution
 - Rounding and verification
+
+**`test_settlement_strategies.py`** ⭐ NEW
+- Settlement strategy mapping (4 core cases)
+- Unpaid + settle now/later handlers
+- Paid + settle now/later handlers
+- Sales Partner payment routing
+- Pickup order handling
+- All 6 invoice settlement cases
+
+**`test_kanban_state_transitions.py`** ⭐ NEW
+- Kanban state transitions (Received → Completed)
+- Delivery Note creation on Out For Delivery
+- Payment Entry creation for Sales Partner invoices
+- Integration with settlement strategies
+- Stock update suppression for partners
+- Tax suppression for partners
+
+**`test_invoice_creation_cases.py`** ⭐ NEW
+- POS invoice creation for all 6 cases
+- Case 1-4: Standard customer flows
+- Case 5: Sales Partner online payment
+- Case 6: Pickup orders (no delivery)
+- Delivery slot field population
+- Bundle processing integration
 
 #### 3. Utility Tests
 
@@ -232,7 +259,8 @@ def test_discount_calculation(self):
 ### Current Coverage
 
 - ✅ All 20 API modules have test coverage
-- ✅ Core business logic (bundle processing, discounts)
+- ✅ Core business logic (bundle processing, discounts, **settlement strategies**, **kanban transitions**, **invoice creation**)
+- ✅ All 6 invoice settlement cases documented and tested
 - ✅ Utility functions (invoice, delivery, account, error handling)
 - ✅ Enhanced existing tests (kanban, invoices)
 
@@ -330,6 +358,16 @@ When adding new functionality:
 ---
 
 **Last Updated**: 2025-10-10  
-**Test Suite Version**: 1.0.0  
-**Total Test Files**: 23  
-**Test Coverage**: API (17/20), Business Logic (2/7), Utils (4/4)
+**Test Suite Version**: 1.1.0  
+**Total Test Files**: 26  
+**Test Coverage**: API (17/20), Business Logic (5/7), Utils (4/4)
+
+## Six Invoice Cases Documentation
+
+See [SIX_INVOICE_CASES.md](SIX_INVOICE_CASES.md) for comprehensive documentation of all 6 invoice settlement scenarios supported by Jarz POS:
+1. Unpaid + Settle Now
+2. Unpaid + Settle Later  
+3. Paid + Settle Now
+4. Paid + Settle Later
+5. Sales Partner Flow
+6. Pickup Flow
