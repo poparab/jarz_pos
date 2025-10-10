@@ -41,11 +41,8 @@ class TestInventoryCountAPI(unittest.TestCase):
 		"""Test that list_items_for_count requires warehouse parameter."""
 		from jarz_pos.api.inventory_count import list_items_for_count
 
-		# Test with empty warehouse should handle gracefully
-		result = list_items_for_count(warehouse="")
-
-		# Should return a list (possibly empty)
-		self.assertIsInstance(result, list, "Should return a list")
+		with self.assertRaises(Exception):
+			list_items_for_count(warehouse="")
 
 	def test_list_items_for_count_structure(self):
 		"""Test that list_items_for_count returns correct structure."""

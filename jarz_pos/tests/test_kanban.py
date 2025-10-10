@@ -85,8 +85,8 @@ class TestKanbanAPI(unittest.TestCase):
 		"""Test the get_kanban_invoices endpoint."""
 		result = get_kanban_invoices()
 		self.assertTrue(result.get("success"), "Should return success=True")
-		self.assertIn("invoices", result, "Should include invoices key")
-		self.assertIsInstance(result["invoices"], dict, "Invoices should be a dictionary")
+		self.assertIn("data", result, "Should include data key")
+		self.assertIsInstance(result["data"], dict, "Invoices data should be a dictionary")
 
 	def test_get_invoice_details_validation(self):
 		"""Test the get_invoice_details with non-existent invoice."""
@@ -103,4 +103,5 @@ class TestKanbanAPI(unittest.TestCase):
 		"""Test the get_kanban_filters endpoint."""
 		result = get_kanban_filters()
 		self.assertTrue(result.get("success"), "Should return success=True")
-		self.assertIn("filters", result, "Should include filters key")
+		self.assertIn("customers", result, "Should include customers key")
+		self.assertIn("states", result, "Should include states key")

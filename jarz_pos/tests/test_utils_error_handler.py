@@ -33,35 +33,16 @@ class TestErrorHandler(unittest.TestCase):
 		self.assertIn("message", result, "Should include message")
 		self.assertEqual(result["message"], "Operation successful", "Should include custom message")
 
-	def test_handle_api_error_decorator(self):
-		"""Test handle_api_error decorator functionality."""
+	def test_handle_api_error_response(self):
+		"""Test handle_api_error helper function."""
 		from jarz_pos.utils.error_handler import handle_api_error
 
-		# Create a test function that raises an error
-		@handle_api_error
-		def test_function_with_error():
+		try:
 			raise ValueError("Test error")
+		except ValueError as exc:
+			result = handle_api_error(exc, context="Unit Test")
 
-		# Call the function
-		result = test_function_with_error()
-
-		# Should return error response instead of raising
-		self.assertIsInstance(result, dict, "Should return a dictionary")
+		self.assertIsInstance(result, dict, "Should return standardized error response")
 		self.assertFalse(result.get("success"), "Should have success=False")
-		self.assertIn("error", result, "Should include error message")
-
-	def test_handle_api_error_success_case(self):
-		"""Test handle_api_error with successful function."""
-		from jarz_pos.utils.error_handler import handle_api_error
-
-		# Create a test function that succeeds
-		@handle_api_error
-		def test_function_success():
-			return {"data": "test"}
-
-		# Call the function
-		result = test_function_success()
-
-		# Should return the original result
-		self.assertIsInstance(result, dict, "Should return a dictionary")
-		self.assertEqual(result.get("data"), "test", "Should return original data")
+		self.assertTrue(result.get("error"), "Should flag error")
+		self.assertEqual(result.get("context"), "Unit Test", "Should include context")

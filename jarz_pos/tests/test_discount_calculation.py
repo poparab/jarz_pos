@@ -14,23 +14,19 @@ class TestDiscountCalculation(unittest.TestCase):
 		from jarz_pos.services.discount_calculation import calculate_proportional_discount
 
 		# Mock child item with rate and qty
-		child_item = {"rate": 100.0, "qty": 1}
+		child_item = {"regular_rate": 100.0, "qty": 1}
 		total_child_value = 200.0  # Two items worth 100 each
 		target_total = 150.0  # 25% discount
 
 		result = calculate_proportional_discount(child_item, total_child_value, target_total)
 
 		# Verify result structure
-		self.assertIsInstance(result, dict, "Should return a dictionary")
-		self.assertIn("discount_amount", result, "Should include discount_amount")
-		self.assertIn("discount_percentage", result, "Should include discount_percentage")
+		self.assertIsInstance(result, float, "Should return a discount amount")
 
 		# Verify discount calculations
 		# This item is 50% of total (100/200), so it should get 50% of total discount
 		# Total discount = 200 - 150 = 50, so this item discount = 25
-		self.assertAlmostEqual(
-			result["discount_amount"], 25.0, places=1, msg="Discount amount should be proportional"
-		)
+		self.assertAlmostEqual(result, 25.0, places=1, msg="Discount amount should be proportional")
 
 	def test_calculate_item_rates_with_discount_basic(self):
 		"""Test item rate calculation with discount."""
@@ -43,17 +39,16 @@ class TestDiscountCalculation(unittest.TestCase):
 		result = calculate_item_rates_with_discount(original_rate, discount_amount, qty)
 
 		# Verify result structure
-		self.assertIsInstance(result, dict, "Should return a dictionary")
-		self.assertIn("rate", result, "Should include rate")
-		self.assertIn("amount", result, "Should include amount")
+		self.assertIsInstance(result, tuple, "Should return ERPNext-compatible tuple")
+		final_rate, price_list_rate, discount_type = result
 
 		# Rate should be original - discount
 		expected_rate = original_rate - discount_amount
-		self.assertAlmostEqual(result["rate"], expected_rate, places=2, msg="Rate should be discounted")
+		self.assertAlmostEqual(final_rate, expected_rate, places=2, msg="Rate should be discounted")
 
 		# Amount should be rate * qty
-		expected_amount = expected_rate * qty
-		self.assertAlmostEqual(result["amount"], expected_amount, places=2, msg="Amount should be rate * qty")
+		self.assertAlmostEqual(price_list_rate, original_rate, places=2, msg="Price list rate should remain original")
+		self.assertIn(discount_type, {"partial", "100%"}, "Discount type should be recognised")
 
 	def test_calculate_discount_percentage_basic(self):
 		"""Test discount percentage calculation."""
@@ -87,8 +82,8 @@ class TestDiscountCalculation(unittest.TestCase):
 
 		# Mock child items data
 		child_items = [
-			{"item_code": "ITEM1", "rate": 100.0, "qty": 1},
-			{"item_code": "ITEM2", "rate": 50.0, "qty": 1},
+			{"item_code": "ITEM1", "regular_rate": 100.0, "regular_total": 100.0, "qty": 1, "uom": "Nos"},
+			{"item_code": "ITEM2", "regular_rate": 50.0, "regular_total": 50.0, "qty": 1, "uom": "Nos"},
 		]
 
 		bundle_qty = 1
@@ -96,35 +91,37 @@ class TestDiscountCalculation(unittest.TestCase):
 
 		result = calculate_bundle_discounts(child_items, bundle_qty, bundle_price)
 
-		# Verify result is a list
-		self.assertIsInstance(result, list, "Should return a list")
-		self.assertEqual(len(result), len(child_items), "Should return same number of items")
+		# Verify tuple structure (total before discount, target total after discount)
+		self.assertIsInstance(result, tuple, "Should return summary tuple")
+		self.assertEqual(result[0], 150.0, "Total child value should match input")
+		self.assertEqual(result[1], 120.0, "Target total should be bundle price * qty")
 
 	def test_verify_bundle_discount_totals_correct(self):
 		"""Test that verify_bundle_discount_totals validates correctly."""
 		from jarz_pos.services.discount_calculation import verify_bundle_discount_totals
 
 		# Mock processed items that sum to bundle price
-		processed_items = [{"amount": 80.0}, {"amount": 40.0}]
+		processed_items = [
+			{"item_code": "ITEM1", "amount": 80.0, "qty": 1, "rate": 80.0, "bundle_type": "child", "discount_amount": 0.0},
+			{"item_code": "ITEM2", "amount": 40.0, "qty": 1, "rate": 40.0, "bundle_type": "child", "discount_amount": 0.0},
+		]
 
 		bundle_qty = 1
 		bundle_price = 120.0
 
 		# Should not raise error when totals match
-		try:
-			verify_bundle_discount_totals(processed_items, bundle_qty, bundle_price)
-			verified = True
-		except Exception:
-			verified = False
-
-		self.assertTrue(verified, "Should verify when totals match")
+		verification = verify_bundle_discount_totals(processed_items, bundle_qty, bundle_price)
+		self.assertTrue(verification.get("match_within_tolerance"), "Should verify when totals match")
 
 	def test_verify_bundle_discount_totals_mismatch(self):
 		"""Test that verify_bundle_discount_totals detects mismatch."""
 		from jarz_pos.services.discount_calculation import verify_bundle_discount_totals
 
 		# Mock processed items that don't sum to bundle price
-		processed_items = [{"amount": 60.0}, {"amount": 40.0}]
+		processed_items = [
+			{"item_code": "ITEM1", "amount": 60.0, "qty": 1, "rate": 60.0, "bundle_type": "child", "discount_amount": 0.0},
+			{"item_code": "ITEM2", "amount": 40.0, "qty": 1, "rate": 40.0, "bundle_type": "child", "discount_amount": 0.0},
+		]
 
 		bundle_qty = 1
 		bundle_price = 120.0  # Expected total, but actual is 100

@@ -24,7 +24,7 @@ class TestCashTransferAPI(unittest.TestCase):
 			# If there are accounts, verify their structure
 			if result:
 				account = result[0]
-				self.assertIn("name", account, "Account should have name")
+				self.assertIn("account", account, "Account should have account key")
 				self.assertIn("balance", account, "Account should have balance")
 		except frappe.PermissionError:
 			# User doesn't have manager access, which is expected

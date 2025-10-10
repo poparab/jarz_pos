@@ -17,5 +17,6 @@ class TestHealthAPI(unittest.TestCase):
 
 		# Verify response structure
 		self.assertIsInstance(result, dict, "Should return a dictionary")
-		self.assertIn("status", result, "Should include status key")
-		self.assertEqual(result["status"], "ok", "Status should be 'ok'")
+		self.assertIn("ok", result, "Should include ok key")
+		self.assertTrue(result["ok"], "ok should be truthy")
+		self.assertEqual(result.get("message"), "pong", "Message should be pong")
