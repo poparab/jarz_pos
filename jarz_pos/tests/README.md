@@ -5,11 +5,13 @@ This directory contains the comprehensive test suite for Jarz POS.
 ## Test Coverage
 
 ### Total Statistics
-- **Test Files**: 25
-- **Test Methods**: 122
+- **Test Files**: 30
+- **Test Methods**: 217+
 - **API Modules Covered**: 17/20 (85%)
-- **Service Modules Covered**: 2/7 (29%)
+- **Service Modules Covered**: 6/7 (86%)
 - **Utility Modules Covered**: 4/4 (100%)
+
+**Latest Addition:** Complete coverage for all 6 invoice cases and settlement strategies (95 new tests).
 
 ## Test Files
 
@@ -32,9 +34,14 @@ This directory contains the comprehensive test suite for Jarz POS.
 - `test_api_transfer.py` - Transfer operations
 - `test_api_user.py` - User roles and permissions
 
-### Business Logic Tests (2 files)
+### Business Logic Tests (7 files)
 - `test_bundle_processing.py` - Bundle expansion and pricing
 - `test_discount_calculation.py` - Discount calculations
+- `test_settlement_strategies.py` - **NEW:** All 4 settlement handlers (14 tests)
+- `test_sales_partner_flow.py` - **NEW:** Sales partner fees and accounting (16 tests)
+- `test_pickup_flow.py` - **NEW:** Pickup detection and zero-shipping (20 tests)
+- `test_kanban_settlement.py` - **NEW:** Kanban and settle later operations (25 tests)
+- `test_invoice_cases_integration.py` - **NEW:** End-to-end invoice cases (20 tests)
 
 ### Utility Tests (4 files)
 - `test_utils_account.py` - Account utilities
@@ -45,6 +52,19 @@ This directory contains the comprehensive test suite for Jarz POS.
 ### Enhanced Existing Tests (2 files)
 - `test_kanban.py` - Kanban board functionality
 - `test_invoice_utils_extended.py` - Extended invoice utilities
+
+## Six Invoice Cases - Complete Coverage
+
+The test suite now includes comprehensive end-to-end testing for all six invoice scenarios:
+
+1. **Paid + Settle Now** - Customer pays upfront, courier settles immediately
+2. **Paid + Settle Later** - Customer pays upfront, courier settles at period end
+3. **Unpaid + Settle Now** - COD with immediate courier settlement
+4. **Unpaid + Settle Later** - COD with deferred courier settlement
+5. **Sales Partner** - Both cash and online payment variants with fee calculation
+6. **Pickup** - Zero shipping, works with all settlement combinations
+
+See `test_invoice_cases_integration.py` for complete integration tests and [INVOICE_CASES_TEST_COVERAGE.md](../../INVOICE_CASES_TEST_COVERAGE.md) for detailed documentation.
 
 ## Running Tests
 
