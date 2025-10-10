@@ -2,8 +2,8 @@
 
 This module tests manufacturing and work order endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestManufacturingAPI(unittest.TestCase):

@@ -2,8 +2,8 @@
 
 This module tests notification and polling API endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestNotificationAPI(unittest.TestCase):

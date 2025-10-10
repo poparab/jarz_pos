@@ -2,8 +2,8 @@
 
 This module tests manager dashboard and order management API endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestManagerAPI(unittest.TestCase):
@@ -53,9 +53,7 @@ class TestManagerAPI(unittest.TestCase):
 		result = get_manager_orders(limit=5)
 
 		# Should not exceed limit
-		self.assertLessEqual(
-			len(result["invoices"]), 5, "Should not exceed specified limit of 5"
-		)
+		self.assertLessEqual(len(result["invoices"]), 5, "Should not exceed specified limit of 5")
 
 	def test_get_manager_orders_invoice_structure(self):
 		"""Test individual invoice structure in get_manager_orders."""

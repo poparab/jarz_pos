@@ -2,8 +2,8 @@
 
 This module tests delivery slot management endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestDeliverySlotsAPI(unittest.TestCase):

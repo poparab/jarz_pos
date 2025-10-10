@@ -2,8 +2,8 @@
 
 This module tests inventory counting and reconciliation endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestInventoryCountAPI(unittest.TestCase):

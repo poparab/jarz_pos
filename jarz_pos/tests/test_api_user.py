@@ -2,6 +2,7 @@
 
 This module tests the user-related API endpoints including user roles and permissions.
 """
+
 import unittest
 import frappe
 

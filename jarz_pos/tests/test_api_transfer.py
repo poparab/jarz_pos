@@ -2,8 +2,8 @@
 
 This module tests transfer-related API endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestTransferAPI(unittest.TestCase):
@@ -12,7 +12,7 @@ class TestTransferAPI(unittest.TestCase):
 	def test_transfer_module_imports(self):
 		"""Test that transfer module can be imported."""
 		try:
-			import jarz_pos.api.transfer
+			import jarz_pos.api.transfer as transfer_module  # noqa: F401
 
 			self.assertTrue(True, "Transfer module should be importable")
 		except ImportError:
@@ -25,4 +25,6 @@ class TestTransferAPI(unittest.TestCase):
 		# Check for whitelisted functions
 		# This depends on what's actually in the module
 		# If the module is empty, this test just verifies it exists
-		self.assertTrue(hasattr(transfer_module, "__name__"), "Transfer module should have __name__ attribute")
+		self.assertTrue(
+			hasattr(transfer_module, "__name__"), "Transfer module should have __name__ attribute"
+		)

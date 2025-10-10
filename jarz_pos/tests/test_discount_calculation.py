@@ -2,8 +2,8 @@
 
 This module tests the business logic for discount calculations.
 """
+
 import unittest
-from frappe.utils import flt
 
 
 class TestDiscountCalculation(unittest.TestCase):
@@ -86,7 +86,10 @@ class TestDiscountCalculation(unittest.TestCase):
 		from jarz_pos.services.discount_calculation import calculate_bundle_discounts
 
 		# Mock child items data
-		child_items = [{"item_code": "ITEM1", "rate": 100.0, "qty": 1}, {"item_code": "ITEM2", "rate": 50.0, "qty": 1}]
+		child_items = [
+			{"item_code": "ITEM1", "rate": 100.0, "qty": 1},
+			{"item_code": "ITEM2", "rate": 50.0, "qty": 1},
+		]
 
 		bundle_qty = 1
 		bundle_price = 120.0  # 20% discount from 150
@@ -131,9 +134,6 @@ class TestDiscountCalculation(unittest.TestCase):
 		try:
 			verify_bundle_discount_totals(processed_items, bundle_qty, bundle_price)
 			# If it doesn't raise, it means there's tolerance
-			verified = True
 		except Exception:
-			verified = False
-
-		# We expect this to either fail or have tolerance
-		# The actual behavior depends on implementation
+			# Expected to fail or have tolerance
+			pass

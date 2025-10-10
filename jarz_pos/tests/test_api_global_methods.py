@@ -2,8 +2,8 @@
 
 This module tests global method endpoints (kanban wrappers).
 """
+
 import unittest
-import frappe
 
 
 class TestGlobalMethodsAPI(unittest.TestCase):

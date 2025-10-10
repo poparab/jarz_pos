@@ -2,8 +2,8 @@
 
 This module tests error handling utility functions.
 """
+
 import unittest
-import frappe
 
 
 class TestErrorHandler(unittest.TestCase):

@@ -2,8 +2,8 @@
 
 This module tests connectivity and health check endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestConnectionAPI(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 This module tests POS-related API endpoints including profiles, products, and bundles.
 """
+
 import unittest
 import frappe
 
@@ -28,9 +29,7 @@ class TestPOSAPI(unittest.TestCase):
 		# If there are profiles, verify they are all enabled
 		for profile_name in result:
 			profile_doc = frappe.get_doc("POS Profile", profile_name)
-			self.assertEqual(
-				profile_doc.disabled, 0, f"Profile {profile_name} should not be disabled"
-			)
+			self.assertEqual(profile_doc.disabled, 0, f"Profile {profile_name} should not be disabled")
 
 	def test_get_profile_products_requires_profile(self):
 		"""Test that get_profile_products requires a profile parameter."""

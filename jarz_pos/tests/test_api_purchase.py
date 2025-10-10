@@ -2,8 +2,8 @@
 
 This module tests purchase-related API endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestPurchaseAPI(unittest.TestCase):

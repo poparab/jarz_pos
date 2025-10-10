@@ -2,8 +2,8 @@
 
 This module tests invoice creation and management endpoints.
 """
+
 import unittest
-import frappe
 
 
 class TestInvoiceAPI(unittest.TestCase):
@@ -67,4 +67,4 @@ class TestInvoiceAPI(unittest.TestCase):
 			self.assertIsInstance(result, dict, "Should return a dictionary")
 		except Exception:
 			# Expected to fail with non-existent invoice
-			pass 
+			pass

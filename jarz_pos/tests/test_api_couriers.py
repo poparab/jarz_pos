@@ -2,8 +2,8 @@
 
 This module tests courier-related API endpoints including delivery handling.
 """
+
 import unittest
-import frappe
 
 
 class TestCourierAPI(unittest.TestCase):

@@ -2,10 +2,8 @@
 
 This module tests the business logic for bundle expansion and pricing.
 """
+
 import unittest
-import frappe
-from unittest.mock import Mock, patch
-from frappe.utils import flt
 
 
 class TestBundleProcessing(unittest.TestCase):
@@ -61,7 +59,9 @@ class TestBundleProcessing(unittest.TestCase):
 		expected_discount = ((total_child_price - bundle_price) / total_child_price) * 100
 		expected_discount = max(0, expected_discount)
 
-		self.assertAlmostEqual(expected_discount, 33.33, places=1, msg="Discount calculation should be correct")
+		self.assertAlmostEqual(
+			expected_discount, 33.33, places=1, msg="Discount calculation should be correct"
+		)
 
 	def test_bundle_processor_discount_cannot_be_negative(self):
 		"""Test that discount cannot be negative."""
@@ -97,7 +97,10 @@ class TestBundleProcessing(unittest.TestCase):
 		# Test with bundle that may not exist
 		try:
 			result = process_bundle_item(
-				bundle_id="TEST_BUNDLE", bundle_qty=1, bundle_price=100.0, selling_price_list="Standard Selling"
+				bundle_id="TEST_BUNDLE",
+				bundle_qty=1,
+				bundle_price=100.0,
+				selling_price_list="Standard Selling",
 			)
 			# If successful, verify structure
 			self.assertIsInstance(result, dict, "Should return a dictionary")

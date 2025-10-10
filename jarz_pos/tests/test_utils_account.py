@@ -2,8 +2,8 @@
 
 This module tests utility functions for account operations.
 """
+
 import unittest
-import frappe
 
 
 class TestAccountUtils(unittest.TestCase):
@@ -12,7 +12,7 @@ class TestAccountUtils(unittest.TestCase):
 	def test_account_utils_module_exists(self):
 		"""Test that account_utils module can be imported."""
 		try:
-			import jarz_pos.utils.account_utils
+			import jarz_pos.utils.account_utils as account_utils  # noqa: F401
 
 			self.assertTrue(True, "account_utils module should be importable")
 		except ImportError:

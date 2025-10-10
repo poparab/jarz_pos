@@ -2,8 +2,8 @@
 
 This module tests the simple health check endpoint.
 """
+
 import unittest
-import frappe
 
 
 class TestHealthAPI(unittest.TestCase):

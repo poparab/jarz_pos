@@ -2,8 +2,8 @@
 
 This module tests utility functions for invoice processing.
 """
+
 import unittest
-import frappe
 
 
 class TestInvoiceUtils(unittest.TestCase):
@@ -92,7 +92,6 @@ class TestInvoiceUtils(unittest.TestCase):
 
 	def test_format_invoice_data_basic(self):
 		"""Test format_invoice_data with basic invoice."""
-		from jarz_pos.utils.invoice_utils import format_invoice_data
 
 		# This requires a real invoice object, which is complex to mock
 		# We'll test that it can be called (may fail without proper data)
