@@ -4,6 +4,7 @@ Creates a new Employee or Supplier, adds it to the 'Delivery' group, and returns
 standardized party data used by the POS frontend.
 """
 from __future__ import annotations
+
 import frappe
 
 DELIVERY_EMP_GROUP_NAME = "Delivery"
@@ -86,24 +87,24 @@ def create_delivery_party(
             if last_name:
                 emp.last_name = last_name
             emp.employee_name = display_name
-            
+
             # MANDATORY FIELDS (must be set for Employee to save)
             # Naming series - Employee DocType uses autoname: naming_series: which requires this field
             # We must set it to "HR-EMP-" and Frappe will append the auto-incremented number
             emp.naming_series = "HR-EMP-"
-            
+
             # Status field - set to Active (mandatory)
             emp.status = "Active"
-            
+
             # Gender field - Link to Gender DocType (mandatory) - Always Male
             emp.gender = "Male"
-            
+
             # Date of joining (mandatory)
             emp.date_of_joining = frappe.utils.today()
-            
+
             # Date of birth (mandatory) - use a reasonable placeholder
             emp.date_of_birth = "1990-01-01"
-            
+
             # Company field - mandatory for Employee
             try:
                 default_company = frappe.db.get_single_value("Global Defaults", "default_company")
@@ -118,26 +119,26 @@ def create_delivery_party(
             except Exception as e:
                 frappe.logger().error(f"Could not set company for Employee: {e}")
                 frappe.throw("Could not determine company for Employee. Please contact administrator.")
-            
+
             # Optional fields
             if phone:
                 if emp.meta.get_field("cell_number"):
                     emp.cell_number = phone
                 elif emp.meta.get_field("mobile"):
                     emp.mobile = phone
-            
+
             # Provide placeholder email if field exists
             if emp.meta.get_field("personal_email"):
                 emp.personal_email = f"{frappe.generate_hash(length=8)}@example.com"
             elif emp.meta.get_field("company_email"):
                 emp.company_email = f"{frappe.generate_hash(length=8)}@example.com"
-            
+
             if branch_name and emp.meta.get_field("branch"):
                 emp.branch = branch_name
-            
+
             # Log all fields being set for debugging
             frappe.logger().info(f"Creating Employee with fields: first_name={emp.first_name}, last_name={emp.get('last_name')}, employee_name={emp.employee_name}, company={emp.company}, gender={emp.gender}, status={emp.status}, date_of_joining={emp.date_of_joining}, date_of_birth={emp.date_of_birth}")
-            
+
             try:
                 emp.save(ignore_permissions=True)
                 frappe.logger().info(f"Successfully created Employee: {emp.name}")
@@ -151,14 +152,14 @@ def create_delivery_party(
                 elif "mandatory" in error_msg.lower():
                     frappe.throw(f"Missing required field: {error_msg}")
                 elif "company" in error_msg.lower():
-                    frappe.throw(f"Company field is required for Employee courier. Please contact administrator to set default company.")
+                    frappe.throw("Company field is required for Employee courier. Please contact administrator to set default company.")
                 else:
                     frappe.throw(f"Failed to create Employee courier: {error_msg}")
-            
+
             # Add employee to the Delivery Employee Group
             try:
                 group_doc = frappe.get_doc("Employee Group", group_name)
-                
+
                 # Check if employee already exists in the group
                 existing = False
                 for row in group_doc.get("employee_list") or []:
@@ -166,7 +167,7 @@ def create_delivery_party(
                         existing = True
                         frappe.logger().info(f"Employee {emp.name} already exists in Employee Group {group_name}")
                         break
-                
+
                 if not existing:
                     # Append to employee_list child table with correct structure
                     group_doc.append("employee_list", {
@@ -177,7 +178,7 @@ def create_delivery_party(
                     group_doc.save(ignore_permissions=True)
                     frappe.logger().info(f"Successfully added Employee {emp.name} to Employee Group {group_name}")
             except Exception as e:
-                frappe.logger().error(f"Failed to add Employee to group: {str(e)}")
+                frappe.logger().error(f"Failed to add Employee to group: {e!s}")
                 frappe.logger().error(frappe.get_traceback())
                 # Don't fail the entire creation if group membership fails
                 pass
@@ -192,7 +193,7 @@ def create_delivery_party(
                 sup.mobile_no = phone
             if branch_name and sup.meta.get_field("branch"):
                 sup.branch = branch_name
-            
+
             try:
                 sup.save(ignore_permissions=True)
             except Exception as e:
@@ -206,7 +207,7 @@ def create_delivery_party(
                     frappe.throw(f"Missing required field: {error_msg}")
                 else:
                     frappe.throw(f"Failed to create Supplier courier: {error_msg}")
-            
+
             party_id = sup.name
             final_display = sup.supplier_name or display_name
 
@@ -221,6 +222,6 @@ def create_delivery_party(
         # Re-raise validation errors as-is (already have good messages)
         raise
     except Exception as e:
-        frappe.logger().error(f"Unexpected error in create_delivery_party: {str(e)}")
+        frappe.logger().error(f"Unexpected error in create_delivery_party: {e!s}")
         frappe.logger().error(frappe.get_traceback())
-        frappe.throw(f"Failed to create courier: {str(e)}")
+        frappe.throw(f"Failed to create courier: {e!s}")

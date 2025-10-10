@@ -4,6 +4,7 @@ This module tests customer-related API endpoints.
 """
 
 import unittest
+
 import frappe
 
 

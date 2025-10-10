@@ -1,7 +1,7 @@
+from typing import Any, Optional
+
 import frappe
 from frappe import _
-from typing import List, Dict, Any, Optional
-
 
 STANDARD_BUYING = "Standard Buying"
 
@@ -19,11 +19,11 @@ def _ensure_manager_access():
 
 
 @frappe.whitelist()
-def get_suppliers(search: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def get_suppliers(search: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
     _ensure_manager_access()
-    filters: Dict[str, Any] = {}
+    filters: dict[str, Any] = {}
     fields = ["name", "supplier_name", "supplier_group", "supplier_type", "disabled"]
-    or_filters: List[Any] = []
+    or_filters: list[Any] = []
     if search:
         like = f"%{search}%"
         # Use simple field names in or_filters to avoid doctype qualification issues
@@ -40,7 +40,7 @@ def get_suppliers(search: Optional[str] = None, limit: int = 20) -> List[Dict[st
 
 
 @frappe.whitelist()
-def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
+def get_recent_suppliers(limit: int = 20) -> list[dict[str, Any]]:
     """Return most recently used suppliers inferred from Purchase Invoices."""
     _ensure_manager_access()
     pi_rows = frappe.get_all(
@@ -49,7 +49,7 @@ def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
         order_by="posting_date desc, creation desc",
         limit=100,
     )
-    ordered_suppliers: List[str] = []
+    ordered_suppliers: list[str] = []
     seen = set()
     for r in pi_rows:
         s = r.get("supplier")
@@ -87,7 +87,7 @@ def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
             limit=len(ordered_suppliers),
         )
     }
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for s in ordered_suppliers:
         if s in details_map:
             result.append(details_map[s])
@@ -95,7 +95,7 @@ def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def search_items(search: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def search_items(search: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
     _ensure_manager_access()
     filters = {
         "disabled": 0,
@@ -124,7 +124,7 @@ def search_items(search: Optional[str] = None, limit: int = 20) -> List[Dict[str
     return items
 
 
-def _get_item_uoms(item_code: str) -> List[Dict[str, Any]]:
+def _get_item_uoms(item_code: str) -> list[dict[str, Any]]:
     try:
         doc = frappe.get_doc("Item", item_code)
         uoms = []
@@ -144,7 +144,7 @@ def _get_item_uoms(item_code: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _get_item_prices(item_code: str) -> List[Dict[str, Any]]:
+def _get_item_prices(item_code: str) -> list[dict[str, Any]]:
     rows = frappe.get_all(
         "Item Price",
         filters={
@@ -160,7 +160,7 @@ def _get_item_prices(item_code: str) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def get_item_details(item_code: str) -> Dict[str, Any]:
+def get_item_details(item_code: str) -> dict[str, Any]:
     _ensure_manager_access()
     item = frappe.get_doc("Item", item_code)
     return {
@@ -173,7 +173,7 @@ def get_item_details(item_code: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_item_price(item_code: str, uom: Optional[str] = None) -> Dict[str, Any]:
+def get_item_price(item_code: str, uom: str | None = None) -> dict[str, Any]:
     _ensure_manager_access()
     filters = {
         "price_list": STANDARD_BUYING,
@@ -197,13 +197,13 @@ def get_item_price(item_code: str, uom: Optional[str] = None) -> Dict[str, Any]:
 @frappe.whitelist()
 def create_purchase_invoice(
     supplier: str,
-    posting_date: Optional[str] = None,
+    posting_date: str | None = None,
     is_paid: int = 0,
-    items: Optional[List[Dict[str, Any]]] = None,
-    company: Optional[str] = None,
-    payment_option: Optional[str] = None,
-    shipping_amount: Optional[float] = None,
-) -> Dict[str, Any]:
+    items: list[dict[str, Any]] | None = None,
+    company: str | None = None,
+    payment_option: str | None = None,
+    shipping_amount: float | None = None,
+) -> dict[str, Any]:
     """
     Create and submit a Purchase Invoice with update_stock=1.
     items: list of {item_code, qty, uom, rate(optional)}. If rate missing, fetch from Standard Buying.
@@ -288,8 +288,8 @@ def create_purchase_invoice(
     # Handle direct payment on the Purchase Invoice itself (no separate Payment Entry)
     if int(is_paid or 0):
         try:
-            mop: Optional[str] = None
-            account: Optional[str] = None
+            mop: str | None = None
+            account: str | None = None
             opt_raw = (payment_option or "cash").strip()
             opt_lower = opt_raw.lower()
 
@@ -339,7 +339,7 @@ def create_purchase_invoice(
     }
 
 
-def _get_freight_and_forwarding_account(company: str) -> Optional[str]:
+def _get_freight_and_forwarding_account(company: str) -> str | None:
     """Resolve the 'Freight and Forwarding Charges' expense account for the company.
 
     Prefer exact account named "Freight and Forwarding Charges - <Company Abbr>".
@@ -366,7 +366,7 @@ def _get_freight_and_forwarding_account(company: str) -> Optional[str]:
     return None
 
 
-def _get_pos_profile_cash_account(company: str) -> Optional[str]:
+def _get_pos_profile_cash_account(company: str) -> str | None:
     """Return the Account named exactly `<POS Profile> - <Company Abbr>`.
 
     Fallback: if exact-named Account is missing, try POS Profile's Cash payment method default account.
@@ -408,7 +408,7 @@ def _get_pos_profile_cash_account(company: str) -> Optional[str]:
     return None
 
 
-def _get_exact_pos_profile_account(profile_name: str, company: str) -> Optional[str]:
+def _get_exact_pos_profile_account(profile_name: str, company: str) -> str | None:
     """Resolve the exact-named Account for the given POS Profile within the target company.
 
     Prefers "<POS Profile> - <Company Abbr>". Falls back to the profile's POS Payment Method default Cash account.
@@ -437,7 +437,7 @@ def _get_exact_pos_profile_account(profile_name: str, company: str) -> Optional[
     return None
 
 
-def _get_mop_account_account(mode_of_payment: str, company: str) -> Optional[str]:
+def _get_mop_account_account(mode_of_payment: str, company: str) -> str | None:
     try:
         rows = frappe.get_all(
             "Mode of Payment Account",
@@ -452,14 +452,14 @@ def _get_mop_account_account(mode_of_payment: str, company: str) -> Optional[str
     return None
 
 
-def _get_default_cash_account(company: str) -> Optional[str]:
+def _get_default_cash_account(company: str) -> str | None:
     try:
         return frappe.db.get_value("Company", company, "default_cash_account")
     except Exception:
         return None
 
 
-def _get_default_bank_account(company: str) -> Optional[str]:
+def _get_default_bank_account(company: str) -> str | None:
     try:
         return frappe.db.get_value("Company", company, "default_bank_account")
     except Exception:

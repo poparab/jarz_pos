@@ -1,19 +1,21 @@
 """Jarz POS - Kanban board API endpoints.
-This module provides API endpoints for the Sales Invoice Kanban board functionality. 
+This module provides API endpoints for the Sales Invoice Kanban board functionality.
 Primary state field: 'custom_sales_invoice_state' (legacy fallback: 'sales_invoice_state').
 """
 from __future__ import annotations
-import frappe
+
 import json
 import traceback
-from typing import Dict, List, Any, Optional, Union, Tuple
+from typing import Any, Optional, Union
+
+import frappe
 
 # Accounting helpers
 try:
     from jarz_pos.utils.account_utils import (
+        ensure_partner_receivable_subaccount,
         get_company_receivable_account,
         get_pos_cash_account,
-        ensure_partner_receivable_subaccount,
     )
 except Exception:
     # Fallback dummies (should not normally trigger)
@@ -26,11 +28,7 @@ except Exception:
 
 # Import utility functions with fallback if they don't exist
 try:
-    from jarz_pos.utils.invoice_utils import (
-        get_address_details,
-        format_invoice_data,
-        apply_invoice_filters
-    )
+    from jarz_pos.utils.invoice_utils import apply_invoice_filters, format_invoice_data, get_address_details
 except ImportError:
     # Fallback implementations if utils don't exist
     def get_address_details(address_name: str) -> str:
@@ -41,10 +39,10 @@ except ImportError:
             return f"{address_doc.address_line1 or ''}, {address_doc.city or ''}".strip(", ")
         except Exception:
             return ""
-    
-    def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
+
+    def format_invoice_data(invoice: frappe.Document) -> dict[str, Any]:
         address_name = invoice.get("shipping_address_name") or invoice.get("customer_address")
-        items = [{"item_code": item.item_code, "item_name": item.item_name, 
+        items = [{"item_code": item.item_code, "item_name": item.item_name,
                  "qty": float(item.qty), "rate": float(item.rate), "amount": float(item.amount)}
                 for item in invoice.items]
         state_val = invoice.get("custom_sales_invoice_state") or invoice.get("sales_invoice_state") or "Received"
@@ -68,18 +66,18 @@ except ImportError:
             "delivery_duration": getattr(invoice, "custom_delivery_duration", None),
             "items": items
         }
-    
-    def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
+
+    def apply_invoice_filters(filters: str | dict | None = None) -> dict[str, Any]:
         filter_conditions = {"docstatus": 1, "is_pos": 1}
         if not filters:
             return filter_conditions
-        
+
         if isinstance(filters, str):
             try:
                 filters = json.loads(filters)
             except json.JSONDecodeError:
                 return filter_conditions
-        
+
         if filters.get('dateFrom'):
             filter_conditions["posting_date"] = [">=", filters['dateFrom']]
         if filters.get('dateTo'):
@@ -96,7 +94,7 @@ except ImportError:
                 filter_conditions["grand_total"] = ["between", [filters['amountFrom'], filters['amountTo']]]
             else:
                 filter_conditions["grand_total"] = ["<=", filters['amountTo']]
-        
+
         return filter_conditions
 
 # ---------------------------------------------------------------------------
@@ -106,7 +104,7 @@ except ImportError:
 # REPLACED: direct Custom Field doc fetch (requires permissions) with meta-based access
 # which is available to all authenticated users and avoids 403 on restricted roles.
 
-def _get_state_field_options() -> List[str]:
+def _get_state_field_options() -> list[str]:
     """Return list of state options from Sales Invoice meta without reading Custom Field doc.
     Prefers 'custom_sales_invoice_state', falls back to legacy names.
     """
@@ -124,7 +122,7 @@ def _get_state_field_options() -> List[str]:
         frappe.logger().warning("No state field found, using default states")
         return ["Received", "In Progress", "Ready", "Out for Delivery", "Delivered", "Cancelled"]
     except Exception as e:
-        frappe.logger().error(f"Error getting state field options: {str(e)}")
+        frappe.logger().error(f"Error getting state field options: {e!s}")
         return ["Received", "In Progress", "Ready", "Out for Delivery", "Delivered", "Cancelled"]
 
 def _coerce_bool(val: Any) -> bool:
@@ -138,7 +136,7 @@ def _coerce_bool(val: Any) -> bool:
     except Exception:
         return False
 
-def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
+def _is_pickup_invoice(inv: dict[str, Any] | frappe.Document) -> bool:
     """Detect pickup flag on a Sales Invoice robustly across possible custom field names.
     Checks any of: custom_is_pickup, is_pickup, pickup, custom_pickup, or remarks contains [PICKUP].
     """
@@ -169,7 +167,7 @@ def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
         pass
     return False
 
-def _get_current_user_pos_profiles() -> List[str]:
+def _get_current_user_pos_profiles() -> list[str]:
     """Return names of POS Profiles linked to the current session user (and not disabled)."""
     try:
         user = frappe.session.user
@@ -189,10 +187,10 @@ def _get_current_user_pos_profiles() -> List[str]:
 
 # Backwards compatibility wrappers (kept in case referenced elsewhere in file)
 
-def _get_state_custom_field():  # noqa: intentionally returns None now
+def _get_state_custom_field():  # noqa: ARG001 - intentionally returns None now
     return None
 
-def _get_allowed_states() -> List[str]:  # override previous implementation
+def _get_allowed_states() -> list[str]:  # override previous implementation
     return _get_state_field_options()
 
 def _state_key(label: str) -> str:
@@ -213,14 +211,14 @@ def _failure(msg: str):
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist(allow_guest=False)
-def get_kanban_columns() -> Dict[str, Any]:
+def get_kanban_columns() -> dict[str, Any]:
     """Get all available Kanban columns based on Sales Invoice State field options.
-    
+
     Returns:
         Dict with success status and columns data
     """
     try:
-        frappe.logger().debug("KANBAN API: get_kanban_columns called by {0}".format(frappe.session.user))
+        frappe.logger().debug(f"KANBAN API: get_kanban_columns called by {frappe.session.user}")
         options = _get_state_field_options()
         if not options:
             return _failure("Field 'sales_invoice_state' not found or has no options on Sales Invoice")
@@ -243,23 +241,23 @@ def get_kanban_columns() -> Dict[str, Any]:
             })
         return _success(columns=columns)
     except Exception as e:
-        error_msg = f"Error getting kanban columns: {str(e)}"
+        error_msg = f"Error getting kanban columns: {e!s}"
         frappe.logger().error(error_msg)
-        frappe.log_error(f"Kanban Columns Error: {str(e)}", "Kanban API")
+        frappe.log_error(f"Kanban Columns Error: {e!s}", "Kanban API")
         return _failure(error_msg)
 
 @frappe.whitelist(allow_guest=False)
-def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
+def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
     """Get Sales Invoices organized by their state for Kanban display.
-    
+
     Args:
         filters: Filter conditions for invoice selection
-        
+
     Returns:
         Dict with success status and invoices organized by state
     """
     try:
-        frappe.logger().debug("KANBAN API: get_kanban_invoices called with filters: {0}".format(filters))
+        frappe.logger().debug(f"KANBAN API: get_kanban_invoices called with filters: {filters}")
 
         filter_conditions = apply_invoice_filters(filters)
         filter_conditions["docstatus"] = 1
@@ -283,7 +281,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
         # Initialize columns up-front for possible early return
         all_states = _get_state_field_options()
-        kanban_data: Dict[str, List[Dict[str, Any]]] = {}
+        kanban_data: dict[str, list[dict[str, Any]]] = {}
         for state in all_states:
             st = (state or '').strip()
             if st:
@@ -294,7 +292,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             return _success(data=kanban_data)
 
         # Optional client-provided branches list (subset of allowed profiles)
-        client_selected_branches: List[str] = []
+        client_selected_branches: list[str] = []
         try:
             raw = filters
             if isinstance(raw, str):
@@ -364,9 +362,9 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         )
 
         # Territory shipping cache
-        territory_cache: Dict[str, Dict[str, float]] = {}
+        territory_cache: dict[str, dict[str, float]] = {}
 
-        def _get_territory_shipping(territory_name: str) -> Dict[str, float]:
+        def _get_territory_shipping(territory_name: str) -> dict[str, float]:
             if not territory_name:
                 return {"income": 0.0, "expense": 0.0}
             if territory_name in territory_cache:
@@ -402,7 +400,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             return territory_cache[territory_name]
 
         # Get address information for invoices (batch compute via helper on names)
-        invoice_addresses: Dict[str, str] = {}
+        invoice_addresses: dict[str, str] = {}
         try:
             addr_name_by_inv = {}
             for inv in invoices:
@@ -414,7 +412,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             invoice_addresses = {inv.name: "" for inv in invoices}
 
         # Batch fetch items for all invoices (avoid N+1 queries)
-        invoice_items: Dict[str, List[Dict[str, Any]]] = {inv.name: [] for inv in invoices}
+        invoice_items: dict[str, list[dict[str, Any]]] = {inv.name: [] for inv in invoices}
         try:
             if invoices:
                 items_rows = frappe.get_all(
@@ -537,19 +535,19 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         # Return unified success
         return _success(data=kanban_data)
     except Exception as e:
-        error_msg = f"Error getting kanban invoices: {str(e)}"
+        error_msg = f"Error getting kanban invoices: {e!s}"
         frappe.logger().error(error_msg)
-        frappe.log_error(f"Kanban Invoices Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API")
+        frappe.log_error(f"Kanban Invoices Error: {e!s}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API")
         return _failure(error_msg)
 
 @frappe.whitelist(allow_guest=False)
-def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
+def update_invoice_state(invoice_id: str, new_state: str) -> dict[str, Any]:
     """Update the custom_sales_invoice_state of a Sales Invoice (legacy field kept for backward compatibility).
-    
+
     Args:
         invoice_id: ID of the Sales Invoice to update
         new_state: New state value to set
-        
+
     Returns:
         Dict with success status and message
     """
@@ -583,7 +581,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
             return _success(message="State unchanged (already set)", invoice_id=invoice_id, state=new_state)
 
         meta = frappe.get_meta("Sales Invoice")
-        fields_to_update: List[str] = []
+        fields_to_update: list[str] = []
         for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
             if meta.get_field(candidate):
                 fields_to_update.append(candidate)
@@ -598,9 +596,9 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         )
         print(f"Normalized Target: {normalized_target} | create_dn: {create_dn} | logic_version: {dn_logic_version}")
 
-        created_delivery_note: Optional[str] = None
-        created_cash_payment_entry: Optional[str] = None
-        created_partner_txn: Optional[str] = None
+        created_delivery_note: str | None = None
+        created_cash_payment_entry: str | None = None
+        created_partner_txn: str | None = None
 
         # ------------------------------------------------------------------
         # Helper: Ensure CASH Payment Entry for Sales Partner invoices when
@@ -615,7 +613,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         # Idempotency: if a PE already exists allocating full outstanding,
         # function returns gracefully.
         # ------------------------------------------------------------------
-        def _ensure_cash_payment_entry_for_partner(si_doc) -> Optional[str]:
+        def _ensure_cash_payment_entry_for_partner(si_doc) -> str | None:
             try:
                 if not getattr(si_doc, "sales_partner", None):
                     return None
@@ -799,7 +797,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
                     f"KANBAN API: Delivery Note creation failed for {invoice_id}: {dn_ex}\n{frappe.get_traceback()}"
                 )
                 fail_resp = _failure(
-                    f"Failed creating Delivery Note for invoice {invoice_id}: {str(dn_ex)}"
+                    f"Failed creating Delivery Note for invoice {invoice_id}: {dn_ex!s}"
                 )
                 fail_resp["dn_logic_version"] = dn_logic_version
                 return fail_resp
@@ -849,7 +847,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
                     f"KANBAN API: Sales Partner Transaction creation failed for {invoice_id}: {sp_txn_err}"
                 )
 
-        updated_fields: List[str] = []
+        updated_fields: list[str] = []
         for f in fields_to_update:
             try:
                 invoice.db_set(f, new_state, update_modified=True)
@@ -903,18 +901,18 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         )
     except Exception as e:
         print(f"GENERAL FAILURE update_invoice_state: {e}")
-        error_msg = f"Error updating invoice state: {str(e)}"
+        error_msg = f"Error updating invoice state: {e!s}"
         frappe.logger().error(error_msg)
-        frappe.log_error(f"Update Invoice State Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API")
+        frappe.log_error(f"Update Invoice State Error: {e!s}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API")
         return _failure(error_msg)
 
 @frappe.whitelist(allow_guest=False)
-def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
+def get_invoice_details(invoice_id: str) -> dict[str, Any]:
     """Get detailed information about a specific invoice.
-    
+
     Args:
         invoice_id: ID of the Sales Invoice to retrieve
-        
+
     Returns:
         Dict with success status and invoice details
     """
@@ -971,15 +969,15 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
             data["has_unsettled_courier_txn"] = False
         return _success(data=data)
     except Exception as e:
-        error_msg = f"Error getting invoice details: {str(e)}"
+        error_msg = f"Error getting invoice details: {e!s}"
         frappe.logger().error(error_msg)
-        frappe.log_error(f"Invoice Details Error: {str(e)}", "Kanban API")
+        frappe.log_error(f"Invoice Details Error: {e!s}", "Kanban API")
         return _failure(error_msg)
 
 @frappe.whitelist(allow_guest=False)
-def get_kanban_filters() -> Dict[str, Any]:
+def get_kanban_filters() -> dict[str, Any]:
     """Get available filter options for the Kanban board.
-    
+
     Returns:
         Dict with success status and filter options
     """
@@ -996,9 +994,9 @@ def get_kanban_filters() -> Dict[str, Any]:
         state_options = [{"value": s, "label": s} for s in _get_state_field_options()]
         return _success(customers=customer_options, states=state_options)
     except Exception as e:
-        error_msg = f"Error getting kanban filters: {str(e)}"
+        error_msg = f"Error getting kanban filters: {e!s}"
         frappe.logger().error(error_msg)
-        frappe.log_error(f"Kanban Filters Error: {str(e)}", "Kanban API")
+        frappe.log_error(f"Kanban Filters Error: {e!s}", "Kanban API")
         return _failure(error_msg)
 
 # ---------------------------------------------------------------------------

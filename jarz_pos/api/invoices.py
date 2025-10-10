@@ -5,13 +5,15 @@ Only handles cart items - never treats shipping as an item.
 """
 
 from __future__ import annotations
-import frappe
+
 import json
+
+import frappe
+
+from jarz_pos.services import delivery_handling as _delivery
 
 # Import from the refactored services
 from jarz_pos.services.invoice_creation import create_pos_invoice as _create_invoice
-from jarz_pos.services import delivery_handling as _delivery
-
 
 # ---------------------------------------------------------------------------
 # Public, whitelisted functions
@@ -22,14 +24,14 @@ from jarz_pos.services import delivery_handling as _delivery
 def create_pos_invoice():
     """
     Create POS Sales Invoice - Clean implementation with comprehensive debugging
-    
+
     This function reads parameters from frappe.form_dict instead of function parameters
     to avoid Frappe's parameter mapping issues.
-    
+
     Returns:
         dict: Invoice creation result
     """
-    
+
     # Get parameters from frappe.form_dict (Frappe's way)
     cart_json = frappe.form_dict.get('cart_json')
     customer_name = frappe.form_dict.get('customer_name')
@@ -52,10 +54,10 @@ def create_pos_invoice():
     delivery_date = frappe.form_dict.get('delivery_date')
     delivery_time_from = frappe.form_dict.get('delivery_time_from')
     delivery_duration = frappe.form_dict.get('delivery_duration')
-    
+
     # Frappe best practice: Use frappe.logger() for structured logging
-    logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
-    
+    frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
+
     # Always log API calls in development
     frappe.log_error(
         title="POS API Call Debug",
@@ -76,7 +78,7 @@ RAW PARAMETERS:
 - required_delivery_datetime (type: {type(required_delivery_datetime)}): {required_delivery_datetime}
         """.strip()
     )
-    
+
     # Console output for development debugging
     print("\n" + "="*100)
     print("� JARZ POS API CALL")
@@ -85,9 +87,9 @@ RAW PARAMETERS:
     print(f"� User: {frappe.session.user}")
     print(f"🌐 Site: {frappe.local.site}")
     print(f"� Method: {getattr(frappe.local.request, 'method', 'N/A')}")
-    print(f"🔗 Endpoint: /api/method/jarz_pos.api.invoices.create_pos_invoice")
-    
-    print(f"\n📋 INCOMING PARAMETERS:")
+    print("🔗 Endpoint: /api/method/jarz_pos.api.invoices.create_pos_invoice")
+
+    print("\n📋 INCOMING PARAMETERS:")
     print(f"   cart_json: {cart_json} (type: {type(cart_json)})")
     print(f"   customer_name: {customer_name} (type: {type(customer_name)})")
     print(f"   pos_profile_name: {pos_profile_name} (type: {type(pos_profile_name)})")
@@ -95,31 +97,31 @@ RAW PARAMETERS:
     print(f"   required_delivery_datetime: {required_delivery_datetime} (type: {type(required_delivery_datetime)})")
     print(f"   delivery_date: {delivery_date} | delivery_time_from: {delivery_time_from} | delivery_duration: {delivery_duration}")
     print(f"   pickup: {is_pickup}")
-    
+
     try:
         # Validate parameters before calling legacy function
         if not cart_json:
             error_msg = "cart_json parameter is required"
             print(f"❌ VALIDATION ERROR: {error_msg}")
             frappe.throw(error_msg)
-        
+
         if not customer_name:
             error_msg = "customer_name parameter is required"
             print(f"❌ VALIDATION ERROR: {error_msg}")
             frappe.throw(error_msg)
-        
+
         # Parse cart_json to validate it's proper JSON
         if isinstance(cart_json, str):
             try:
                 parsed_cart = json.loads(cart_json)
                 print(f"✅ Cart JSON parsed successfully: {len(parsed_cart)} items")
             except json.JSONDecodeError as e:
-                error_msg = f"Invalid JSON in cart_json: {str(e)}"
+                error_msg = f"Invalid JSON in cart_json: {e!s}"
                 print(f"❌ JSON PARSE ERROR: {error_msg}")
                 frappe.throw(error_msg)
-        
-        print(f"\n🔄 Calling core function...")
-        
+
+        print("\n🔄 Calling core function...")
+
         # Prefer new delivery slot fields; if provided, synthesize a delivery_datetime for service layer
         if delivery_date and delivery_time_from:
             try:
@@ -139,17 +141,17 @@ RAW PARAMETERS:
             payment_type,
             is_pickup,
         )
-        
+
         # Log successful response
-        print(f"\n✅ API CALL SUCCESSFUL!")
-        print(f"📤 RESPONSE:")
+        print("\n✅ API CALL SUCCESSFUL!")
+        print("📤 RESPONSE:")
         print(f"   Type: {type(result)}")
         if isinstance(result, dict):
             for key, value in result.items():
                 print(f"   {key}: {value}")
         else:
             print(f"   Value: {result}")
-        
+
         # Frappe best practice: Log success to error log for debugging
         frappe.log_error(
             title="POS API Success Debug",
@@ -159,17 +161,17 @@ STATUS: SUCCESS
 RESPONSE: {json.dumps(result, indent=2, default=str)}
             """.strip()
         )
-        
+
         print("="*100)
         return result
-        
+
     except Exception as e:
         # Comprehensive error logging
         error_details = f"""
 API ENDPOINT: create_pos_invoice
 STATUS: ERROR
 ERROR TYPE: {type(e).__name__}
-ERROR MESSAGE: {str(e)}
+ERROR MESSAGE: {e!s}
 PARAMETERS:
 - cart_json: {cart_json}
 - customer_name: {customer_name}
@@ -177,24 +179,24 @@ PARAMETERS:
 USER: {frappe.session.user}
 SITE: {frappe.local.site}
         """.strip()
-        
-        print(f"\n❌ API ERROR:")
+
+        print("\n❌ API ERROR:")
         print(f"   Type: {type(e).__name__}")
-        print(f"   Message: {str(e)}")
-        
+        print(f"   Message: {e!s}")
+
         # Print full traceback for debugging
         import traceback
-        print(f"   Traceback:")
+        print("   Traceback:")
         traceback.print_exc()
-        
+
         # Frappe best practice: Log error with full context
         frappe.log_error(
             title=f"POS API Error: {type(e).__name__}",
             message=error_details + f"\n\nTRACEBACK:\n{traceback.format_exc()}"
         )
-        
+
         print("="*100)
-        
+
         # Re-raise the exception (don't suppress it)
         raise
 
@@ -389,7 +391,7 @@ def pay_invoice(
             "reference_no": getattr(pe, "reference_no", None),
             "reference_date": getattr(pe, "reference_date", None),
         }
-    except Exception as e:
+    except Exception:
         frappe.log_error(
             title="Pay Invoice Error",
             message=f"Invoice: {invoice_name}\nMode: {payment_mode}\nError: {frappe.get_traceback()}"
@@ -469,7 +471,7 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
             any_ct_order = True
             break
     invoice_total = float(inv.grand_total or 0)
-    has_ct_rows = bool(cts)
+    bool(cts)
     status_l = (str(inv.get("status") or "") or "").strip().lower()
     outstanding = float(inv.outstanding_amount or 0)
     is_unpaid = (

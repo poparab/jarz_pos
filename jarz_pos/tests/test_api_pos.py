@@ -4,6 +4,7 @@ This module tests POS-related API endpoints including profiles, products, and bu
 """
 
 import unittest
+
 import frappe
 
 

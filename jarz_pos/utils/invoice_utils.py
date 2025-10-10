@@ -2,15 +2,17 @@
 This module provides common helper functions that are used across different API endpoints.
 """
 from __future__ import annotations
+
+from typing import Any, Optional, Union
+
 import frappe
-from typing import Dict, List, Any, Optional, Union
 
 
 def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
     """Set basic fields on the Sales Invoice document."""
     logger.debug("Setting invoice fields...")
-    print(f"   Setting basic invoice fields...")
-    
+    print("   Setting basic invoice fields...")
+
     # Set basic invoice fields
     invoice_doc.customer = customer_doc.name
     invoice_doc.customer_name = customer_doc.customer_name
@@ -20,7 +22,7 @@ def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime
     invoice_doc.selling_price_list = pos_profile.selling_price_list
     invoice_doc.currency = pos_profile.currency
     invoice_doc.territory = customer_doc.territory or "All Territories"
-    
+
     # Set delivery slot fields when delivery_datetime provided (new model)
     if delivery_datetime:
         try:
@@ -32,11 +34,11 @@ def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime
         except Exception:
             # Non-fatal: let hooks enforce completeness if partially provided later
             pass
-    
+
     # Set posting date and time
     invoice_doc.posting_date = frappe.utils.today()
     invoice_doc.posting_time = frappe.utils.nowtime()
-    
+
     logger.debug(f"Invoice fields set: customer={invoice_doc.customer}, company={invoice_doc.company}")
     print(f"   ✅ Basic fields set for customer: {invoice_doc.customer_name}")
 
@@ -114,9 +116,9 @@ def add_items_to_invoice(invoice_doc, processed_items, logger):
             price_list_rate = getattr(invoice_item, 'price_list_rate', 0) or 0
             discount_pct = getattr(invoice_item, 'discount_percentage', 0) or 0
             print(f"      {i}. {invoice_item.item_name} x {invoice_item.qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}% (rate will be computed by ERPNext)")
-            
+
         except Exception as e:
-            error_msg = f"Error adding item {item_data.get('item_code','Unknown')}: {str(e)}"
+            error_msg = f"Error adding item {item_data.get('item_code','Unknown')}: {e!s}"
             logger.error(error_msg)
             print(f"   ❌ {error_msg}")
             raise
@@ -125,59 +127,59 @@ def add_items_to_invoice(invoice_doc, processed_items, logger):
     if discount_items:
         print(f"   💸 Discount bearing lines: {discount_items}; Estimated total discount: {total_planned_discount}")
     else:
-        print(f"   ℹ️ No discount lines detected in added items")
+        print("   ℹ️ No discount lines detected in added items")
 
 
 def add_delivery_charges_to_invoice(invoice_doc, delivery_charges, pos_profile, logger):
     """Add delivery charges to the Sales Invoice document.
-    
+
     Note: Delivery charges are handled in the taxes section, not as items.
     This function is kept for compatibility but doesn't add delivery as items.
     """
     logger.debug(f"Processing {len(delivery_charges)} delivery charges...")
     print(f"   Processing {len(delivery_charges)} delivery charges...")
-    
+
     if delivery_charges:
         # Just log the delivery charges - they're handled elsewhere in taxes
         total_delivery = sum(float(charge["amount"]) for charge in delivery_charges)
-        
+
         logger.info(f"Delivery charges total: ${total_delivery:.2f} (handled in taxes section)")
         print(f"   📦 Delivery charges total: ${total_delivery:.2f}")
-        print(f"   💡 Delivery charges are handled in taxes section, not as items")
-        
+        print("   💡 Delivery charges are handled in taxes section, not as items")
+
         # Optionally add a note to the invoice remarks
         for i, charge in enumerate(delivery_charges, 1):
             charge_desc = charge.get("description", f"Delivery Charge - {charge.get('charge_type', 'Standard')}")
             charge_amount = float(charge["amount"])
             print(f"      {i}. {charge_desc}: ${charge_amount:.2f}")
-            
+
     else:
-        print(f"   📦 No delivery charges to process")
-    
-    print(f"   ✅ Delivery charges processing completed (handled in taxes)")
+        print("   📦 No delivery charges to process")
+
+    print("   ✅ Delivery charges processing completed (handled in taxes)")
 
 
 def verify_invoice_totals(invoice_doc, logger):
     """Verify that invoice totals are calculated correctly."""
     logger.debug("Verifying invoice totals...")
-    print(f"   Verifying invoice totals...")
-    
+    print("   Verifying invoice totals...")
+
     try:
         # Calculate expected totals
         expected_net_total = sum(item.amount for item in invoice_doc.items)
-        
+
         # Basic validation
         if abs(float(invoice_doc.net_total) - expected_net_total) > 0.01:
             error_msg = f"Net total mismatch: Expected {expected_net_total}, Got {invoice_doc.net_total}"
             logger.error(error_msg)
             print(f"   ❌ {error_msg}")
             frappe.throw(error_msg)
-        
+
         logger.debug(f"Invoice totals verified: net_total={invoice_doc.net_total}, grand_total={invoice_doc.grand_total}")
         print(f"   ✅ Totals verified: Net=${invoice_doc.net_total}, Grand=${invoice_doc.grand_total}")
-        
+
     except Exception as e:
-        error_msg = f"Error verifying invoice totals: {str(e)}"
+        error_msg = f"Error verifying invoice totals: {e!s}"
         logger.error(error_msg)
         print(f"   ❌ {error_msg}")
         raise
@@ -185,17 +187,17 @@ def verify_invoice_totals(invoice_doc, logger):
 
 def get_address_details(address_name: str) -> str:
     """Get formatted address string from an Address document.
-    
+
     Args:
         address_name: The name of the Address document
-        
+
     Returns:
         A formatted address string with comma-separated components
     """
     full_address = ""
     if not address_name:
         return full_address
-        
+
     try:
         address_doc = frappe.get_doc("Address", address_name)
         full_address = f"{address_doc.address_line1 or ''}"
@@ -205,23 +207,23 @@ def get_address_details(address_name: str) -> str:
             full_address += f", {address_doc.city}"
         return full_address.strip(", ")
     except Exception as e:
-        frappe.log_error(f"Error fetching address details: {str(e)}", "Address Utils")
+        frappe.log_error(f"Error fetching address details: {e!s}", "Address Utils")
         return ""
 
 
-def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
+def format_invoice_data(invoice: frappe.Document) -> dict[str, Any]:
     """Format a Sales Invoice document into a standardized dictionary format.
-    
+
     Args:
         invoice: The Sales Invoice document
-        
+
     Returns:
         Dictionary with standardized invoice data
     """
     # Get address information
     address_name = invoice.get("shipping_address_name") or invoice.get("customer_address")
     full_address = get_address_details(address_name)
-    
+
     # Get items
     items = []
     for item in invoice.items:
@@ -232,7 +234,7 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
             "rate": float(item.rate),
             "amount": float(item.amount)
         })
-    
+
     # Create formatted invoice data
     data = {
         "name": invoice.name,
@@ -256,12 +258,12 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     return data
 
 
-def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
+def apply_invoice_filters(filters: str | dict | None = None) -> dict[str, Any]:
     """Process and apply filters for Sales Invoice queries.
-    
+
     Args:
         filters: Filter conditions as string (JSON) or dict
-        
+
     Returns:
         Dictionary of filter conditions for frappe.get_all
     """
@@ -270,10 +272,10 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
         "docstatus": 1,  # Only submitted invoices
         "is_pos": 1      # Only POS invoices
     }
-    
+
     if not filters:
         return filter_conditions
-        
+
     # Convert JSON string to dict if needed
     if isinstance(filters, str):
         try:
@@ -282,29 +284,29 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
         except json.JSONDecodeError:
             frappe.log_error(f"Invalid JSON in filters: {filters}", "Filter Processing")
             return filter_conditions
-    
+
     # Apply date filters
     if filters.get('dateFrom'):
         filter_conditions["posting_date"] = [">=", filters['dateFrom']]
-        
+
     if filters.get('dateTo'):
         if "posting_date" in filter_conditions:
             filter_conditions["posting_date"] = ["between", [filters['dateFrom'], filters['dateTo']]]
         else:
             filter_conditions["posting_date"] = ["<=", filters['dateTo']]
-            
+
     # Apply customer filter
     if filters.get('customer'):
         filter_conditions["customer"] = filters['customer']
-        
+
     # Apply amount filters
     if filters.get('amountFrom'):
         filter_conditions["grand_total"] = [">=", filters['amountFrom']]
-        
+
     if filters.get('amountTo'):
         if "grand_total" in filter_conditions:
             filter_conditions["grand_total"] = ["between", [filters['amountFrom'], filters['amountTo']]]
         else:
             filter_conditions["grand_total"] = ["<=", filters['amountTo']]
-            
+
     return filter_conditions

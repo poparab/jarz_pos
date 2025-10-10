@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 import frappe
 from frappe import _
+
 try:
     from frappe import _dict as FrappeDict  # type: ignore
 except Exception:  # pragma: no cover
@@ -34,9 +35,9 @@ def _get_default_company() -> str:
         return ""
 
 
-def _get_mfg_defaults(company: str) -> Dict[str, str]:
+def _get_mfg_defaults(company: str) -> dict[str, str]:
     # Best-effort defaults for warehouses
-    out: Dict[str, str] = {"company": company}
+    out: dict[str, str] = {"company": company}
     try:
         ms = frappe.get_single("Manufacturing Settings")
         # Only include warehouses that belong to the given company to avoid cross-company errors
@@ -105,14 +106,14 @@ def _find_company_warehouse(company: str, warehouse_type: str | None, name_hints
 
 
 @frappe.whitelist()
-def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
+def list_default_bom_items(search: str | None = None) -> list[dict[str, Any]]:
     """List Items that have a default BOM, with basic info.
 
     Returns: [{ item_code, item_name, stock_uom, default_bom, bom_qty }]
     """
     term = (search or "").strip()
     cond = ""
-    vals: Dict[str, Any] = {}
+    vals: dict[str, Any] = {}
     if term:
         cond = "AND (i.name LIKE %(q)s OR i.item_name LIKE %(q)s)"
         vals["q"] = f"%{term}%"
@@ -137,19 +138,19 @@ def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def list_bom_items(limit: int = 100) -> List[Dict[str, Any]]:
+def list_bom_items(limit: int = 100) -> list[dict[str, Any]]:
     """Alias for list_default_bom_items for consistency with mobile app expectations"""
     return list_default_bom_items(search=None)
 
 
 @frappe.whitelist()
-def search_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
+def search_bom_items(search: str | None = None) -> list[dict[str, Any]]:
     """Search BOM items - alias for list_default_bom_items with search"""
     return list_default_bom_items(search=search)
 
 
 @frappe.whitelist()
-def get_bom_details(item_code: str) -> Dict[str, Any]:
+def get_bom_details(item_code: str) -> dict[str, Any]:
     """Return default BOM details for an Item, including components.
 
     Structure:
@@ -179,7 +180,7 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
         order_by="idx asc",
     )
     # Compute available stock per component across warehouses of the BOM's company
-    availability: Dict[str, float] = {}
+    availability: dict[str, float] = {}
     try:
         company = bom.get("company") if isinstance(bom, dict) else None
         codes = [c["item_code"] for c in comps] if comps else []
@@ -193,7 +194,7 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
                 WHERE w.company = %s AND w.is_group = 0 AND b.item_code IN ({placeholders})
                 GROUP BY b.item_code
             """
-            args = [company] + codes
+            args = [company, *codes]
             rows = frappe.db.sql(sql, args, as_dict=True)  # type: ignore
             for r in rows:
                 availability[str(r.get("item_code"))] = float(r.get("qty") or 0)
@@ -220,7 +221,7 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
     }
 
 
-def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, str]) -> str:
+def _ensure_work_order(line: dict[str, Any], company: str, defaults: dict[str, str]) -> str:
     # Create and submit a Work Order for the given line dict
     wip_wh = defaults.get("wip_warehouse")
     fg_wh = defaults.get("fg_warehouse")
@@ -320,7 +321,7 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float) -> str:
         pass
     # Try standard insert/submit, then fallback to client API path if needed
     try:
-            
+
         if is_document:
             se.flags.ignore_permissions = True
             se.set_posting_time = 1
@@ -372,7 +373,7 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float) -> str:
     return name
 
 
-def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
+def _coerce_lines(lines: Any) -> list[dict[str, Any]]:
     if isinstance(lines, str):
         try:
             lines = json.loads(lines)
@@ -380,7 +381,7 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
             frappe.throw(_("Invalid JSON payload for lines"))
     if not isinstance(lines, list):
         frappe.throw(_("lines must be a list"))
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for i, it in enumerate(lines):
         if not isinstance(it, dict):
             frappe.throw(_(f"lines[{i}] must be an object"))
@@ -392,7 +393,7 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def submit_work_orders(lines: Any) -> Dict[str, Any]:
+def submit_work_orders(lines: Any) -> dict[str, Any]:
     """Create and submit Work Orders, then create Stock Entries for:
     - Material Transfer for Manufacture
     - Manufacture (to finish with same quantity)
@@ -402,7 +403,7 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
     Returns per-line results with created names or error.
     """
     lines = _coerce_lines(lines)
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for ln in lines:
         try:
             try:
@@ -470,7 +471,7 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
     return {"results": results}
 
 @frappe.whitelist()
-def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, scheduled_at: str | None = None) -> Dict[str, Any]:
+def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, scheduled_at: str | None = None) -> dict[str, Any]:
     line = {
         "item_code": item_code,
         "bom_name": bom_name,
@@ -489,7 +490,7 @@ def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, sch
 
 
 @frappe.whitelist()
-def list_recent_work_orders(limit: int = 50) -> List[Dict[str, Any]]:
+def list_recent_work_orders(limit: int = 50) -> list[dict[str, Any]]:
     """Return recent Work Orders sorted by creation (last added first)."""
     try:
         _ensure_manager_access()
@@ -516,7 +517,7 @@ def list_recent_work_orders(limit: int = 50) -> List[Dict[str, Any]]:
         limit=limit,
     )
     # Cast/normalize types
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for r in rows:
         out.append(
             {

@@ -1,5 +1,7 @@
-import frappe
 from typing import Optional
+
+import frappe
+
 
 @frappe.whitelist(allow_guest=False)
 def get_pos_profiles():
@@ -34,7 +36,7 @@ def get_pos_profiles():
 @frappe.whitelist(allow_guest=False)
 def get_profile_bundles(profile: str):
     """Return bundles with items available to the given POS profile."""
-    
+
     # For now, just get all available bundles
     # Future: filter by POS profile permissions
     filters = {}
@@ -52,7 +54,7 @@ def get_profile_bundles(profile: str):
             fields=['item_group', 'quantity'],
             order_by='idx'
         )
-        
+
         processed_groups = []
         for group_info in bundle_item_groups:
             items_in_group = frappe.get_all(
@@ -104,7 +106,7 @@ def get_profile_bundles(profile: str):
                 'quantity': group_info['quantity'],
                 'items': items_in_group
             })
-            
+
         b['item_groups'] = processed_groups
         # Normalize flag for clients
         try:
@@ -176,11 +178,11 @@ def get_profile_products(profile: str):
             print(f"Main item {itm['name']} (ID: {itm['id']}) - Warehouse: {wh} - Stock: {qty}")
             itm['qty'] = qty
 
-    return items 
+    return items
 
 
 @frappe.whitelist(allow_guest=False)
-def get_sales_partners(search: Optional[str] = None, limit: int = 10):
+def get_sales_partners(search: str | None = None, limit: int = 10):
     """Return a short, touch-friendly list of Sales Partners.
 
     Args:
