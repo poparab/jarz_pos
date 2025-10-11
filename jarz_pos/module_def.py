@@ -3,6 +3,7 @@ Provides get_data so Module appears in Desk Module view.
 """
 from frappe import _
 
+
 def get_data():
     return [
         {

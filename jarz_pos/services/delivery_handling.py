@@ -6,12 +6,13 @@ including outstanding management, expense tracking, and settlement.
 """
 
 import frappe
+
 from jarz_pos.utils.account_utils import (
-    get_freight_expense_account,
     get_courier_outstanding_account,
+    get_creditors_account,
+    get_freight_expense_account,
     get_pos_cash_account,
     validate_account_exists,
-    get_creditors_account,
 )
 
 # ---------------------------------------------------------------------------
@@ -698,18 +699,18 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted.")
-    
+
     company = inv.company
-    
+
     # Ensure the invoice is marked Out for delivery before proceeding.
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
         inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=False)
-    
+
     # Determine expense amount based on invoice territory
     amount = _get_delivery_expense_amount(inv)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
-    
+
     # Idempotency guard – return existing submitted JE if already created
     existing_je = frappe.db.get_value(
         "Journal Entry",
@@ -722,20 +723,20 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     )
     if existing_je:
         return {"journal_entry": existing_je, "amount": amount}
-    
+
     # Resolve ledgers for cash payment
     paid_from = get_pos_cash_account(pos_profile, company)
     paid_to = get_freight_expense_account(company)
-    
+
     # Build Journal Entry (credit cash-in-hand, debit expense)
     je = _create_expense_journal_entry(inv, amount, paid_from, paid_to)
-    
+
     # Fire realtime event so other sessions update cards instantly
     frappe.publish_realtime(
         "jarz_pos_courier_expense_paid",
         {"invoice": inv.name, "journal_entry": je.name, "amount": amount},
     )
-    
+
     return {"journal_entry": je.name, "amount": amount}
 
 
@@ -767,15 +768,15 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
             party = existing_party[0].get("party")
         else:
             frappe.throw("party_type & party are required (courier must be an Employee or Supplier)")
-    
+
     # Ensure state is Out for delivery (idempotent)
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
         inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=False)
-    
+
     amount = _get_delivery_expense_amount(inv)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
-    
+
     # Idempotency – avoid duplicate CTs for same purpose
     existing_ct = frappe.db.get_value(
         "Courier Transaction",
@@ -788,7 +789,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     )
     if existing_ct:
         return {"courier_transaction": existing_ct, "amount": amount}
-    
+
     # Insert Courier Transaction recording shipping expense separately (positive)
     ct = frappe.new_doc("Courier Transaction")
     ct.party_type = party_type
@@ -800,7 +801,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     ct.shipping_amount = abs(amount)
     ct.notes = "delivery expense only (pay later)"
     ct.insert(ignore_permissions=True)
-    
+
     frappe.publish_realtime(
         "jarz_pos_courier_expense_only",
         {
@@ -809,107 +810,10 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
             "shipping_amount": abs(amount),
         },
     )
-    
+
     return {"courier_transaction": ct.name, "shipping_amount": abs(amount)}
 
 
-@frappe.whitelist()
-def get_courier_balances():
-    """
-    Return outstanding balances grouped by unified delivery party
-    (Employee/Supplier) with a backward-compatible shape.
-
-    Important: Avoid referencing a non-existent "Courier" DocType. We derive
-    balances solely from `Courier Transaction` rows.
-
-    Output rows include both the new unified keys and legacy keys for UI
-    compatibility:
-      {
-        "party_type": "Employee"|"Supplier"|"",
-        "party": "EMP-0001"|"SUP-0001"|"",
-        "display_name": "John Doe"|"Vendor X"|"<Unknown>",
-        "balance": 1250.0,
-        "details": [ {"invoice": ..., "city": ..., "amount": ..., "shipping": ...}, ... ],
-        # Legacy (kept for older clients):
-        "courier": "<legacy courer id or party>",
-        "courier_name": "<display_name>"
-      }
-    """
-    # Fetch all unsettled transactions (party-based and legacy)
-    rows = frappe.get_all(
-        "Courier Transaction",
-        filters={"status": ["!=", "Settled"]},
-        fields=[
-            "name",
-            "reference_invoice",
-            "amount",
-            "shipping_amount",
-            "party_type",
-            "party",
-            "courier",  # legacy field, may be None
-        ],
-    )
-
-    # Group by party identity; fallback to legacy courier string
-    groups: dict[tuple[str, str], dict] = {}
-
-    def ensure_group(party_type: str, party: str, legacy_courier: str | None):
-        key = (party_type or "", party or legacy_courier or "")
-        if key not in groups:
-            # Resolve display label
-            label = None
-            if key[0] == "Employee" and key[1]:
-                try:
-                    label = frappe.db.get_value("Employee", key[1], "employee_name") or key[1]
-                except Exception:
-                    label = key[1]
-            elif key[0] == "Supplier" and key[1]:
-                try:
-                    label = frappe.db.get_value("Supplier", key[1], "supplier_name") or key[1]
-                except Exception:
-                    label = key[1]
-            else:
-                # Legacy or missing party – show the raw value or a placeholder
-                label = (legacy_courier or party or "<Unknown>")
-
-            groups[key] = {
-                "party_type": key[0],
-                "party": key[1],
-                "display_name": label,
-                # Legacy keys for older clients
-                "courier": legacy_courier or key[1],
-                "courier_name": label,
-                "balance": 0.0,
-                "details": [],
-            }
-        return groups[key]
-
-    for r in rows:
-        party_type = (r.get("party_type") or "").strip()
-        party = (r.get("party") or "").strip()
-        legacy_courier = (r.get("courier") or "").strip() or None
-
-        grp = ensure_group(party_type, party, legacy_courier)
-        amt = float(r.get("amount") or 0)
-        ship = float(r.get("shipping_amount") or 0)
-        grp["balance"] += amt - ship
-        inv = r.get("reference_invoice")
-        loc_label = _get_invoice_city(inv)
-        grp["details"].append({
-            "invoice": inv,
-            "city": loc_label,       # back-compat key kept
-            "territory": loc_label,  # new explicit key
-            "amount": amt,
-            "shipping": ship,
-        })
-
-    # Render list sorted by balance desc
-    data = list(groups.values())
-    data.sort(key=lambda d: d.get("balance", 0.0), reverse=True)
-    return data
-
-
-@frappe.whitelist()
 def settle_courier(courier: str, pos_profile: str | None = None):
     """Deprecated alias retained for compatibility. Uses party-based settlement when possible.
 
@@ -976,7 +880,7 @@ def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted.")
-    
+
     # Find related courier transactions
     cts = frappe.get_all(
         "Courier Transaction",
@@ -986,17 +890,17 @@ def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None
         },
         fields=["name", "courier", "amount", "shipping_amount", "party_type", "party"],
     )
-    
+
     if not cts:
         frappe.throw(f"No unsettled courier transactions found for invoice {invoice_name}")
-    
+
     # Prefer unified party settlement if available
     first = cts[0]
     party_type = first.get("party_type")
     party = first.get("party")
     if party_type and party:
         return settle_delivery_party(party_type=party_type, party=party, pos_profile=pos_profile)
-    
+
     # Fallback to legacy label-based settlement
     courier_label = first.get("courier") or ""
     return settle_courier(courier_label, pos_profile)
@@ -1237,7 +1141,7 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
         invoice_name = (invoice_name or '').strip()
         courier = (courier or '').strip()
         pos_profile = (pos_profile or '').strip()
-        token = (idempotency_token or '').strip() or None
+        (idempotency_token or '').strip() or None
         if not invoice_name:
             frappe.throw("invoice_name required")
         if not pos_profile:
@@ -2060,7 +1964,7 @@ def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding):
     pe.paid_to = paid_to_account      # Courier Outstanding (asset/receivable)
     pe.paid_amount = outstanding
     pe.received_amount = outstanding
-    
+
     # Allocate full amount to invoice to close it
     pe.append(
         "references",
@@ -2073,13 +1977,13 @@ def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding):
             "allocated_amount": outstanding,
         },
     )
-    
+
     # Minimal bank fields placeholders
     pe.reference_no = f"COURIER-OUT-{inv.name}"
     pe.reference_date = frappe.utils.nowdate()
     pe.save(ignore_permissions=True)
     pe.submit()
-    
+
     return pe
 
 
@@ -2143,7 +2047,7 @@ def _create_courier_transaction(inv, outstanding, shipping_exp, *, party_type: s
     except Exception:
         pass
     ct.insert(ignore_permissions=True)
-    
+
     return ct
 
 
@@ -2154,7 +2058,7 @@ def _create_expense_journal_entry(inv, amount, paid_from, paid_to):
     je.posting_date = frappe.utils.nowdate()
     je.company = inv.company
     je.title = f"Courier Expense – {inv.name}"
-    
+
     je.append(
         "accounts",
         {
@@ -2163,7 +2067,7 @@ def _create_expense_journal_entry(inv, amount, paid_from, paid_to):
             "debit_in_account_currency": 0,
         },
     )
-    
+
     je.append(
         "accounts",
         {
@@ -2172,10 +2076,10 @@ def _create_expense_journal_entry(inv, amount, paid_from, paid_to):
             "credit_in_account_currency": 0,
         },
     )
-    
+
     je.save(ignore_permissions=True)
     je.submit()
-    
+
     return je
 
 
@@ -2186,7 +2090,7 @@ def _create_settlement_journal_entry(courier, net_balance, company, cash_acc, co
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Courier Settlement – {courier}"
-    
+
     if net_balance > 0:
         # Courier owes us money – we RECEIVE cash
         je.append("accounts", {
@@ -2212,8 +2116,8 @@ def _create_settlement_journal_entry(courier, net_balance, company, cash_acc, co
             "debit_in_account_currency": 0,
             "credit_in_account_currency": amt,
         })
-    
+
     je.save(ignore_permissions=True)
     je.submit()
-    
+
     return je.name

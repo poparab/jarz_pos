@@ -7,7 +7,9 @@ Endpoints:
 - update_invoice_branch: change custom_kanban_profile for a submitted Sales Invoice (reassign branch).
 """
 from __future__ import annotations
-from typing import List, Dict, Any, Optional, Union
+
+from typing import Any, Optional, Union
+
 import frappe
 
 try:
@@ -32,7 +34,7 @@ except Exception:
         return frappe.get_cached_value("Company", company, "default_cash_account") or "Cash"
 
 
-def _current_user_allowed_profiles() -> List[str]:
+def _current_user_allowed_profiles() -> list[str]:
     """Return POS Profiles the current user can manage.
 
     Rules:
@@ -55,7 +57,7 @@ def _current_user_allowed_profiles() -> List[str]:
         return []
 
 
-def _get_state_field_options() -> List[str]:
+def _get_state_field_options() -> list[str]:
     """Return list of Sales Invoice state options without reading Custom Field doc.
     Prefers 'custom_sales_invoice_state', falls back to legacy names.
     """
@@ -73,7 +75,7 @@ def _get_state_field_options() -> List[str]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, Any]:
+def get_manager_dashboard_summary(company: str | None = None) -> dict[str, Any]:
     """Return accessible branches (POS Profiles) and their cash balances.
 
     Args:
@@ -94,7 +96,7 @@ def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, An
                 company = row[0]["company"]
         except Exception:
             company = None
-    balances: List[Dict[str, Any]] = []
+    balances: list[dict[str, Any]] = []
     total = 0.0
     for p in profiles:
         try:
@@ -118,7 +120,7 @@ def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, An
 
 
 @frappe.whitelist(allow_guest=False)
-def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
+def get_manager_orders(branch: str | None = None, state: str | None = None, limit: int = 200) -> dict[str, Any]:
     """Return a recent feed of POS invoices for selected branch or for all accessible branches.
 
     Args:
@@ -152,7 +154,7 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
         "status", branch_filter_field, "custom_sales_invoice_state", "sales_invoice_state",
     ]
     # Build filters
-    filters: Dict[str, Any] = {
+    filters: dict[str, Any] = {
         branch_filter_field: ["in", profiles],
         "docstatus": 1,
         "is_pos": 1,
@@ -182,7 +184,7 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
         limit=limit,
     )
     # Normalize payload
-    invs: List[Dict[str, Any]] = []
+    invs: list[dict[str, Any]] = []
     for r in rows:
         invs.append({
             "name": r.get("name"),
@@ -199,7 +201,7 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
 
 
 @frappe.whitelist(allow_guest=False)
-def get_manager_states() -> Dict[str, Any]:
+def get_manager_states() -> dict[str, Any]:
     """Return available Sales Invoice states (same list used by Kanban columns)."""
     try:
         states = _get_state_field_options()
@@ -209,7 +211,7 @@ def get_manager_states() -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
+def update_invoice_branch(invoice_id: str, new_branch: str) -> dict[str, Any]:
     """Update the invoice's branch linkage by setting custom_kanban_profile.
 
     Rules:
@@ -240,5 +242,5 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             pass
         return {"success": True, "invoice_id": invoice_id, "new_branch": new_branch}
     except Exception as e:
-        frappe.log_error(f"Update Invoice Branch Error: {str(e)}", "Manager API")
+        frappe.log_error(f"Update Invoice Branch Error: {e!s}", "Manager API")
         return {"success": False, "error": str(e)}

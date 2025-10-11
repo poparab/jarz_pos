@@ -11,26 +11,28 @@ Sales Partner flow is handled as a separate concern via account routing helper
 and a dedicated placeholder to extend later without mixing logic paths.
 """
 from __future__ import annotations
-from typing import Optional, Dict, Any
+
+from typing import Any, Optional
+
 import frappe
 
 from jarz_pos.services.delivery_handling import (
-    _get_delivery_expense_amount,
-    ensure_delivery_note_for_invoice,
-    _get_courier_outstanding_account,
-    _get_receivable_account,
     _create_payment_entry,
+    _get_courier_outstanding_account,
+    _get_delivery_expense_amount,
+    _get_receivable_account,
+    ensure_delivery_note_for_invoice,
 )
 from jarz_pos.utils.account_utils import (
-    get_pos_cash_account,
-    get_freight_expense_account,
     get_creditors_account,
-    validate_account_exists,
+    get_freight_expense_account,
+    get_pos_cash_account,
     resolve_online_partner_paid_to,
+    validate_account_exists,
 )
 
 
-def _route_paid_to_account(company: str, payment_type: Optional[str], sales_partner: Optional[str]) -> Optional[str]:
+def _route_paid_to_account(company: str, payment_type: str | None, sales_partner: str | None) -> str | None:
     """Route paid_to account based on payment type and partner.
     Online + Sales Partner -> partner receivable subaccount (to be implemented elsewhere).
     Returns None to indicate caller should decide default (Cash/Bank/Courier Outstanding).
@@ -58,7 +60,7 @@ def _is_unpaid(inv) -> bool:
 # Handlers
 # -----------------------------
 
-def handle_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]) -> Dict[str, Any]:
+def handle_unpaid_settle_now(inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None) -> dict[str, Any]:
     company = inv.company
     outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
     already_paid = outstanding <= 0.0001
@@ -85,7 +87,7 @@ def handle_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Optional[st
     ofd = _ofd_paid(inv.name, courier_label, settlement="cash_now", pos_profile=pos_profile, party_type=party_type, party=party)
 
     # Merge and return
-    res: Dict[str, Any] = {
+    res: dict[str, Any] = {
         "success": True,
         "invoice": inv.name,
         "mode": "unpaid_settle_now",
@@ -103,7 +105,7 @@ def handle_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Optional[st
     return res
 
 
-def handle_unpaid_settle_later(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]) -> Dict[str, Any]:
+def handle_unpaid_settle_later(inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None) -> dict[str, Any]:
     from jarz_pos.services.delivery_handling import mark_courier_outstanding as _mark
     # mark_courier_outstanding now enforces Delivery Note creation and returns DN info
     res = _mark(inv.name, courier=None, party_type=party_type, party=party)
@@ -112,13 +114,13 @@ def handle_unpaid_settle_later(inv, *, pos_profile: str, payment_type: Optional[
     return res
 
 
-def handle_paid_settle_now(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]) -> Dict[str, Any]:
+def handle_paid_settle_now(inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None) -> dict[str, Any]:
     # Paid already – no PE; perform Out For Delivery transition with immediate courier cash settlement
     from jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
     courier_label = "Courier"
     ofd = _ofd_paid(inv.name, courier_label, settlement="cash_now", pos_profile=pos_profile, party_type=party_type, party=party)
     # Return OFD artifacts
-    res: Dict[str, Any] = {"success": True, "invoice": inv.name, "mode": "paid_settle_now"}
+    res: dict[str, Any] = {"success": True, "invoice": inv.name, "mode": "paid_settle_now"}
     if isinstance(ofd, dict):
         for k in ("journal_entry", "courier_transaction", "delivery_note", "delivery_note_reused", "shipping_amount"):
             if k in ofd:
@@ -126,7 +128,7 @@ def handle_paid_settle_now(inv, *, pos_profile: str, payment_type: Optional[str]
     return res
 
 
-def handle_paid_settle_later(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]) -> Dict[str, Any]:
+def handle_paid_settle_later(inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None) -> dict[str, Any]:
     # No PE; accrue shipping and create Unsettled CT via existing transition path for paid invoices
     from jarz_pos.services.delivery_handling import handle_out_for_delivery_paid as _ofd_paid
     courier_label = "Courier"
@@ -141,7 +143,7 @@ STRATEGY = {
 }
 
 
-def dispatch_settlement(inv_name: str, *, mode: str, pos_profile: Optional[str] = None, payment_type: Optional[str] = None, party_type: Optional[str] = None, party: Optional[str] = None) -> Dict[str, Any]:
+def dispatch_settlement(inv_name: str, *, mode: str, pos_profile: str | None = None, payment_type: str | None = None, party_type: str | None = None, party: str | None = None) -> dict[str, Any]:
     """Central dispatch that decides paid/unpaid at call time and invokes the proper handler.
 
     mode: "now" | "later"

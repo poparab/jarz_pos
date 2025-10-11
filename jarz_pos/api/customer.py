@@ -1,7 +1,7 @@
 # customer.py
 import frappe
-from frappe.utils import flt
 from frappe.model.document import Document
+from frappe.utils import flt
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -22,18 +22,18 @@ def _augment_customer_with_territory(cust_row: dict[str, any]):
         if frappe.db.exists("Territory", territory):
             # Get custom fields from Territory
             territory_doc = frappe.get_doc("Territory", territory)
-            
+
             # Check if custom fields exist (these should be added via fixtures)
             if hasattr(territory_doc, 'delivery_income'):
                 cust_row["delivery_income"] = flt(territory_doc.delivery_income)
             else:
                 cust_row["delivery_income"] = 0.0
-                
+
             if hasattr(territory_doc, 'delivery_expense'):
                 cust_row["delivery_expense"] = flt(territory_doc.delivery_expense)
             else:
                 cust_row["delivery_expense"] = 0.0
-                
+
             cust_row["territory_name"] = territory_doc.territory_name
         else:
             # Territory doesn't exist - set defaults
@@ -54,18 +54,17 @@ def get_customers(search=None):
         if search:
             filters["customer_name"] = ["like", f"%{search}%"]
             # Also search by mobile number
-            mobile_filter = {"mobile_no": ["like", f"%{search}%"]}
-            
+
         fields = [
             "name",
-            "customer_name", 
+            "customer_name",
             "mobile_no",
             "customer_primary_address",
             "customer_primary_contact",
             "territory",
             "customer_group"
         ]
-        
+
         if search:
             # Search by name or mobile
             customers = frappe.get_all(
@@ -79,19 +78,19 @@ def get_customers(search=None):
             )
         else:
             customers = frappe.get_all(
-                "Customer", 
+                "Customer",
                 fields=fields,
                 limit=50
             )
-            
+
         # Augment each customer with territory info
         for c in customers:
             _augment_customer_with_territory(c)
 
         return customers
-        
+
     except Exception as e:
-        frappe.log_error(f"Error fetching customers: {str(e)}")
+        frappe.log_error(f"Error fetching customers: {e!s}")
         return []
 
 @frappe.whitelist()
@@ -100,7 +99,7 @@ def get_recent_customers(limit=10):
     try:
         fields = [
             "name",
-            "customer_name", 
+            "customer_name",
             "mobile_no",
             "customer_primary_address",
             "customer_primary_contact",
@@ -108,22 +107,22 @@ def get_recent_customers(limit=10):
             "customer_group",
             "modified"
         ]
-        
+
         customers = frappe.get_all(
             "Customer",
             fields=fields,
             order_by="modified desc",
             limit=int(limit)
         )
-        
+
         # Augment with territory info
         for c in customers:
             _augment_customer_with_territory(c)
-            
+
         return customers
-        
+
     except Exception as e:
-        frappe.log_error(f"Error fetching recent customers: {str(e)}")
+        frappe.log_error(f"Error fetching recent customers: {e!s}")
         return []
 
 @frappe.whitelist()
@@ -139,16 +138,16 @@ def search_customers(name=None, phone=None):
         "`customer_primary_address`", "`customer_primary_contact`",
         "`territory`", "`customer_group`"
     ]
-    
+
     # Conditionally add the 'phone' field to avoid errors if it doesn't exist
     if frappe.db.has_column("Customer", "phone"):
         fields_to_select.append("`phone`")
 
     query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
-    
+
     conditions = []
     params = {}
-    
+
     if name:
         conditions.append("(`customer_name` LIKE %(search_term)s OR `name` LIKE %(search_term)s)")
         params['search_term'] = f"%{name}%"
@@ -167,13 +166,13 @@ def search_customers(name=None, phone=None):
 
     query += " OR ".join(conditions)
     query += " ORDER BY `customer_name` ASC LIMIT 20"
-    
+
     try:
         customers = frappe.db.sql(query, params, as_dict=1)
-        
+
         for c in customers:
             _augment_customer_with_territory(c)
-            
+
         frappe.logger().info(f"Found {len(customers)} customers via SQL")
         return customers
 
@@ -189,7 +188,7 @@ def get_territories(search=None):
         filters = {}
         if search:
             filters["territory_name"] = ["like", f"%{search}%"]
-            
+
         # Fetch from Territory doctype
         territories = frappe.get_all(
             "Territory",
@@ -198,7 +197,7 @@ def get_territories(search=None):
             order_by="territory_name ASC",
             limit=50
         )
-        
+
         # Add delivery income/expense if custom fields exist
         for territory in territories:
             try:
@@ -207,7 +206,7 @@ def get_territories(search=None):
                     territory["delivery_income"] = flt(territory_doc.delivery_income)
                 else:
                     territory["delivery_income"] = 0.0
-                    
+
                 if hasattr(territory_doc, 'delivery_expense'):
                     territory["delivery_expense"] = flt(territory_doc.delivery_expense)
                 else:
@@ -215,11 +214,11 @@ def get_territories(search=None):
             except Exception:
                 territory["delivery_income"] = 0.0
                 territory["delivery_expense"] = 0.0
-            
+
         return territories
-        
+
     except Exception as e:
-        frappe.log_error(f"Error fetching territories: {str(e)}")
+        frappe.log_error(f"Error fetching territories: {e!s}")
         return []
 
 @frappe.whitelist()
@@ -228,36 +227,36 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
     try:
         # Debug: Log the received parameters
         frappe.logger().info(f"create_customer called with: customer_name={customer_name}, mobile_no={mobile_no}, territory_id={territory_id}, address={customer_primary_address}, location_link={location_link}")
-        
+
         # Validate required parameters
         if not customer_name or not mobile_no or not customer_primary_address or not territory_id:
             frappe.throw("Missing required parameters: customer_name, mobile_no, customer_primary_address, territory_id")
-        
+
         # Check if customer already exists with this name
         existing = frappe.db.exists("Customer", {"customer_name": customer_name})
         if existing:
             frappe.throw(f"Customer with name '{customer_name}' already exists")
-        
+
         # Validate territory exists
         if not frappe.db.exists("Territory", territory_id):
             frappe.throw(f"Territory with ID '{territory_id}' does not exist")
-            
+
         territory_doc = frappe.get_doc("Territory", territory_id)
         territory_name = territory_doc.territory_name
-        
+
         # Create customer document with only essential fields
         customer_doc = frappe.get_doc({
             "doctype": "Customer",
             "customer_name": customer_name,
             "customer_type": "Individual",
-            "customer_group": "Individual", 
+            "customer_group": "Individual",
             "territory": territory_name
         })
-        
-        frappe.logger().info(f"Creating customer with basic data")
+
+        frappe.logger().info("Creating customer with basic data")
         customer_doc.insert(ignore_permissions=True)
         frappe.logger().info(f"Customer created successfully: {customer_doc.name}")
-        
+
         # Create address
         address_doc = frappe.get_doc({
             "doctype": "Address",
@@ -270,14 +269,14 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
                 "link_name": customer_doc.name
             }]
         })
-        
+
         if location_link:
             address_doc.address_line2 = f"Location: {location_link}"
-        
-        frappe.logger().info(f"Creating address")
+
+        frappe.logger().info("Creating address")
         address_doc.insert(ignore_permissions=True)
         frappe.logger().info(f"Address created successfully: {address_doc.name}")
-        
+
         # Create contact
         contact_doc = frappe.get_doc({
             "doctype": "Contact",
@@ -288,18 +287,18 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
                 "link_name": customer_doc.name
             }]
         })
-        
-        frappe.logger().info(f"Creating contact")
+
+        frappe.logger().info("Creating contact")
         contact_doc.insert(ignore_permissions=True)
         frappe.logger().info(f"Contact created successfully: {contact_doc.name}")
-        
+
         # Update customer with primary address and contact
         customer_doc.customer_primary_address = address_doc.name
         customer_doc.customer_primary_contact = contact_doc.name
         customer_doc.save(ignore_permissions=True)
-        
-        frappe.logger().info(f"Customer updated with address and contact")
-        
+
+        frappe.logger().info("Customer updated with address and contact")
+
         # Return the created customer data with territory info
         result = {
             "name": customer_doc.name,
@@ -310,14 +309,14 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
             "territory": customer_doc.territory,
             "customer_group": customer_doc.customer_group
         }
-        
+
         # Add territory delivery info
         _augment_customer_with_territory(result)
         return result
-        
+
     except Exception as e:
-        frappe.log_error(f"Error creating customer: {str(e)}")
-        frappe.throw(f"Failed to create customer: {str(e)}")
+        frappe.log_error(f"Error creating customer: {e!s}")
+        frappe.throw(f"Failed to create customer: {e!s}")
 
 
 # ---------------------------------------------------------------------------
@@ -348,11 +347,11 @@ def get_territory(territory_id: str | None = None):
         "delivery_income": 0.0,
         "delivery_expense": 0.0,
     }
-    
+
     # Add custom fields if they exist
     if hasattr(territory_doc, 'delivery_income'):
         result["delivery_income"] = flt(territory_doc.delivery_income)
     if hasattr(territory_doc, 'delivery_expense'):
         result["delivery_expense"] = flt(territory_doc.delivery_expense)
-    
+
     return result

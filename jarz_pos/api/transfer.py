@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _
@@ -14,7 +14,7 @@ def _ensure_manager_access() -> None:
 
 
 @frappe.whitelist()
-def list_pos_profiles() -> List[Dict[str, Any]]:
+def list_pos_profiles() -> list[dict[str, Any]]:
     """Return POS Profiles with their connected warehouses."""
     _ensure_manager_access()
     rows = frappe.get_all(
@@ -24,7 +24,7 @@ def list_pos_profiles() -> List[Dict[str, Any]]:
         order_by="name asc",
     )
     # Normalize field names
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for r in rows:
         out.append({
             "name": r.get("name"),
@@ -35,12 +35,12 @@ def list_pos_profiles() -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def list_item_groups(search: Optional[str] = None, only_leaf: int = 1, limit: int = 200) -> List[Dict[str, Any]]:
+def list_item_groups(search: str | None = None, only_leaf: int = 1, limit: int = 200) -> list[dict[str, Any]]:
     _ensure_manager_access()
-    filters: Dict[str, Any] = {}
+    filters: dict[str, Any] = {}
     if int(only_leaf or 0):
         filters["is_group"] = 0
-    or_filters: List[Any] = []
+    or_filters: list[Any] = []
     if search:
         like = f"%{search}%"
         or_filters = [["Item Group", "name", "like", like]]
@@ -48,7 +48,7 @@ def list_item_groups(search: Optional[str] = None, only_leaf: int = 1, limit: in
     return frappe.get_all("Item Group", filters=filters, or_filters=or_filters, fields=fields, order_by="name asc", limit=limit)
 
 
-def _sum_bin_quantities(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
+def _sum_bin_quantities(warehouse: str, item_codes: list[str]) -> dict[str, float]:
     if not item_codes:
         return {}
     placeholders = ",".join(["%s"] * len(item_codes))
@@ -58,15 +58,15 @@ def _sum_bin_quantities(warehouse: str, item_codes: List[str]) -> Dict[str, floa
         WHERE b.warehouse = %s AND b.item_code IN ({placeholders})
         GROUP BY b.item_code
     """
-    args = [warehouse] + item_codes
+    args = [warehouse, *item_codes]
     rows = frappe.db.sql(sql, args, as_dict=True)  # type: ignore
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     for r in rows:
         out[str(r.get("item_code"))] = float(r.get("qty") or 0)
     return out
 
 
-def _sum_reserved_from_sinv(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
+def _sum_reserved_from_sinv(warehouse: str, item_codes: list[str]) -> dict[str, float]:
     """Approximate 'reserved' from submitted Sales Invoices not yet delivered.
 
     We treat reserved as (qty - delivered_qty) for Sales Invoice Items where:
@@ -89,9 +89,9 @@ def _sum_reserved_from_sinv(warehouse: str, item_codes: List[str]) -> Dict[str, 
           AND COALESCE(sii.qty, 0) > COALESCE(sii.delivered_qty, 0)
         GROUP BY sii.item_code
     """
-    args = [warehouse] + item_codes
+    args = [warehouse, *item_codes]
     rows = frappe.db.sql(sql, args, as_dict=True)  # type: ignore
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     for r in rows:
         out[str(r.get("item_code"))] = float(r.get("reserved") or 0)
     return out
@@ -101,21 +101,21 @@ def _sum_reserved_from_sinv(warehouse: str, item_codes: List[str]) -> Dict[str, 
 def search_items_with_stock(
     source_warehouse: str,
     target_warehouse: str,
-    search: Optional[str] = None,
-    item_group: Optional[str] = None,
+    search: str | None = None,
+    item_group: str | None = None,
     limit: int = 200,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     _ensure_manager_access()
     if not source_warehouse or not target_warehouse:
         frappe.throw(_("Both source_warehouse and target_warehouse are required"))
     if source_warehouse == target_warehouse:
         frappe.throw(_("Source and Target warehouses must be different"))
 
-    filters: Dict[str, Any] = {
+    filters: dict[str, Any] = {
         "disabled": 0,
         "has_variants": 0,
     }
-    or_filters: List[Any] = []
+    or_filters: list[Any] = []
     if item_group:
         filters["item_group"] = item_group
     if search:
@@ -137,7 +137,7 @@ def search_items_with_stock(
     reserved_src = _sum_reserved_from_sinv(source_warehouse, [c for c in codes])
     reserved_dst = _sum_reserved_from_sinv(target_warehouse, [c for c in codes])
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for it in items:
         code = it["item_code"]
         out.append({
@@ -160,8 +160,8 @@ def submit_transfer(
     source_warehouse: str,
     target_warehouse: str,
     lines: Any,
-    posting_date: Optional[str] = None,
-) -> Dict[str, Any]:
+    posting_date: str | None = None,
+) -> dict[str, Any]:
     """Create a Stock Entry (Material Transfer) between warehouses for given items.
 
     lines: list[{item_code, qty}]

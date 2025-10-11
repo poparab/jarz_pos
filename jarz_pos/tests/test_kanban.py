@@ -3,14 +3,16 @@ This module contains tests for the kanban API endpoints.
 """
 
 import unittest
+
 import frappe
+
 from jarz_pos.api.kanban import (
-	get_kanban_columns,
-	get_kanban_invoices,
 	get_invoice_details,
+	get_kanban_columns,
 	get_kanban_filters,
+	get_kanban_invoices,
 )
-from jarz_pos.utils.invoice_utils import get_address_details, apply_invoice_filters
+from jarz_pos.utils.invoice_utils import apply_invoice_filters, get_address_details
 
 
 class TestKanbanAPI(unittest.TestCase):
@@ -47,7 +49,7 @@ class TestKanbanAPI(unittest.TestCase):
 				)
 				field.insert(ignore_permissions=True)
 		except Exception as e:
-			frappe.log_error(f"Error ensuring custom field exists: {str(e)}", "Kanban Test")
+			frappe.log_error(f"Error ensuring custom field exists: {e!s}", "Kanban Test")
 
 	def test_get_kanban_columns(self):
 		"""Test the get_kanban_columns endpoint."""

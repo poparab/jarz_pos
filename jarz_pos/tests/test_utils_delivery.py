@@ -12,7 +12,7 @@ class TestDeliveryUtils(unittest.TestCase):
 	def test_delivery_utils_module_exists(self):
 		"""Test that delivery_utils module can be imported."""
 		try:
-			import jarz_pos.utils.delivery_utils as delivery_utils  # noqa: F401
+			import jarz_pos.utils.delivery_utils as delivery_utils
 
 			self.assertTrue(True, "delivery_utils module should be importable")
 		except ImportError:

@@ -27,7 +27,7 @@ class TestCourierAPI(unittest.TestCase):
 
 	def test_get_couriers_wrapper(self):
 		"""Test that get_couriers is a wrapper for get_active_couriers."""
-		from jarz_pos.api.couriers import get_couriers, get_active_couriers
+		from jarz_pos.api.couriers import get_active_couriers, get_couriers
 
 		result_wrapper = get_couriers()
 		result_direct = get_active_couriers()

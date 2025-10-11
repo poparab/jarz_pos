@@ -6,24 +6,22 @@ All functionality has been split into focused modules for better maintainability
 """
 
 import json
-import frappe
 import traceback
+
+import frappe
+
+from jarz_pos.services.delivery_handling import (
+    courier_delivery_expense_only,
+    get_courier_balances,
+    mark_courier_outstanding,
+    pay_delivery_expense,
+    settle_courier,
+    settle_courier_for_invoice,
+)
 
 # Import from our services structure
 from jarz_pos.services.invoice_creation import create_pos_invoice
-from jarz_pos.services.delivery_handling import (
-    mark_courier_outstanding,
-    pay_delivery_expense,
-    courier_delivery_expense_only,
-    get_courier_balances,
-    settle_courier,
-    settle_courier_for_invoice
-)
-from jarz_pos.utils.account_utils import (
-    get_account_for_company,
-    get_item_price,
-    create_online_payment_entry
-)
+from jarz_pos.utils.account_utils import create_online_payment_entry, get_account_for_company, get_item_price
 
 # Debug: File loaded timestamp
 print(f"🔄 custom_pos.py loaded at {frappe.utils.now()}")

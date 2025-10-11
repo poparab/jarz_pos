@@ -4,9 +4,10 @@ All functions are designed to be import-safe and idempotent so migrations never 
 """
 from __future__ import annotations
 
-from typing import Iterable, Optional
 import json
 import os
+from collections.abc import Iterable
+from typing import Optional
 
 try:
     import frappe
@@ -48,9 +49,9 @@ def _ensure_custom_field(
     fieldname: str,
     label: str,
     fieldtype: str,
-    insert_after: Optional[str] = None,
-    options: Optional[str] = None,
-    default: Optional[str] = None,
+    insert_after: str | None = None,
+    options: str | None = None,
+    default: str | None = None,
     reqd: int = 0,
     hidden: int = 0,
 ) -> bool:
@@ -199,7 +200,7 @@ def remove_colliding_custom_fields_for_fixtures() -> None:
         fx_path = os.path.join(app_path, "fixtures", "custom_field.json")
         if not os.path.exists(fx_path):
             return
-        with open(fx_path, "r", encoding="utf-8") as f:
+        with open(fx_path, encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, list):
             return

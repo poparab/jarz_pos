@@ -12,7 +12,7 @@ class TestTransferAPI(unittest.TestCase):
 	def test_transfer_module_imports(self):
 		"""Test that transfer module can be imported."""
 		try:
-			import jarz_pos.api.transfer as transfer_module  # noqa: F401
+			import jarz_pos.api.transfer as transfer_module
 
 			self.assertTrue(True, "Transfer module should be importable")
 		except ImportError:

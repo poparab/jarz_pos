@@ -16,18 +16,4 @@ def execute():
             frappe.log_error(f"v0_0_4 remove_conflicting_territory_delivery_fields failed: {e}", "jarz_pos patches")
         except Exception:
             pass
-import frappe
 
-def execute():
-    # Remove any existing Territory custom fields that will be recreated by fixtures
-    fields = frappe.get_all(
-        "Custom Field",
-        filters={"dt": "Territory", "fieldname": ["in", ["delivery_income", "delivery_expense"]]},
-        pluck="name",
-    )
-    for name in fields:
-        try:
-            frappe.delete_doc("Custom Field", name, force=1, ignore_permissions=True)
-        except Exception:
-            frappe.db.rollback()
-    frappe.db.commit()

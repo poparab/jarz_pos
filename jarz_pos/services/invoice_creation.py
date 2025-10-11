@@ -5,26 +5,25 @@ This module handles the main POS invoice creation logic,
 including validation, document creation, and submission.
 """
 
-import frappe
 import traceback
-from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
-from jarz_pos.utils.validation_utils import (
-    validate_cart_data, 
-    validate_customer, 
-    validate_pos_profile,
-    validate_delivery_datetime
-)
-from jarz_pos.utils.invoice_utils import (
-    set_invoice_fields,
-    add_items_to_invoice,
-    verify_invoice_totals
-)
-from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
+
+import frappe
+
 from jarz_pos.utils.account_utils import (
-    get_company_receivable_account,
     ensure_partner_receivable_subaccount,
+    get_company_receivable_account,
     resolve_online_partner_paid_to,
 )
+from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
+from jarz_pos.utils.invoice_utils import add_items_to_invoice, set_invoice_fields, verify_invoice_totals
+from jarz_pos.utils.validation_utils import (
+    validate_cart_data,
+    validate_customer,
+    validate_delivery_datetime,
+    validate_pos_profile,
+)
+
+from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
 
 
 def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
@@ -59,11 +58,17 @@ def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
                 return h * 3600 + m * 60
             # Suffix-based
             if s.endswith(("hours", "hour", "hrs", "hr", "h")):
-                num = float(s.rstrip("hoursr h"))
-                return int(num * 3600)
+                # Remove the suffix
+                for suffix in ("hours", "hour", "hrs", "hr", "h"):
+                    if s.endswith(suffix):
+                        num = float(s[:-len(suffix)].strip())
+                        return int(num * 3600)
             if s.endswith(("minutes", "minute", "mins", "min", "m")):
-                num = float(s.rstrip("minutesin m"))
-                return int(num * 60)
+                # Remove the suffix
+                for suffix in ("minutes", "minute", "mins", "min", "m"):
+                    if s.endswith(suffix):
+                        num = float(s[:-len(suffix)].strip())
+                        return int(num * 60)
             # Plain number: assume minutes (legacy)
             return int(float(s) * 60)
         except Exception:
@@ -321,7 +326,7 @@ def create_pos_invoice(
                 print("   ✅ Sales Partner present → all tax rows suppressed")
             except Exception as clear_err:
                 print(f"   ⚠️ Could not clear existing taxes: {clear_err}")
-        
+
         # Determine if cart includes any free-shipping bundle to suppress shipping income insertion
         free_shipping_waived = False
         try:
@@ -457,12 +462,12 @@ def _parse_delivery_charges(delivery_charges_json, logger):
             for i, charge in enumerate(delivery_charges, 1):
                 print(f"      {i}. {charge.get('charge_type', 'Unknown')}: ${charge.get('amount', 0)}")
         except (ValueError, TypeError) as e:
-            error_msg = f"Invalid delivery charges JSON format: {str(e)}"
+            error_msg = f"Invalid delivery charges JSON format: {e!s}"
             logger.error(error_msg)
             print(f"   ❌ {error_msg}")
             frappe.throw(error_msg)
     else:
-        print(f"   📦 No delivery charges provided")
+        print("   📦 No delivery charges provided")
     return delivery_charges
 
 
@@ -470,35 +475,35 @@ def _process_cart_items(cart_items, pos_profile, logger):
     """Process all cart items including bundles."""
     logger.debug(f"Processing {len(cart_items)} cart items")
     processed_items = []  # Will contain both regular items and bundle items
-    
+
     for i, item_data in enumerate(cart_items, 1):
         print(f"   Processing item {i}: {item_data}")
-        
+
         # Extract item details with enhanced validation
         item_code = item_data.get("item_code")
         qty = item_data.get("qty", 1)
         rate = item_data.get("rate") or item_data.get("price", 0)
         is_bundle = item_data.get("is_bundle", False)
-        
+
         # Enhanced logging for debugging
-        print(f"      📋 Item Details:")
+        print("      📋 Item Details:")
         print(f"         - item_code: {item_code}")
         print(f"         - qty: {qty}")
         print(f"         - rate: {rate}")
         print(f"         - is_bundle: {is_bundle} (type: {type(is_bundle)})")
-        
+
         # Additional debug: Check if this item exists in different places
         is_erpnext_item = frappe.db.exists("Item", item_code)
         is_bundle_record = frappe.db.exists("Jarz Bundle", item_code)
-        bundle_with_erpnext_item = frappe.get_all("Jarz Bundle", 
-            filters={"erpnext_item": item_code}, 
-            fields=["name", "bundle_name"], 
+        bundle_with_erpnext_item = frappe.get_all("Jarz Bundle",
+            filters={"erpnext_item": item_code},
+            fields=["name", "bundle_name"],
             limit=1)
-        
+
         print(f"         - ERPNext Item exists: {is_erpnext_item}")
         print(f"         - Jarz Bundle record exists: {is_bundle_record}")
         print(f"         - Bundle with this ERPNext item: {bundle_with_erpnext_item}")
-        
+
         if is_bundle and not bundle_with_erpnext_item and not is_bundle_record:
             print(f"         ⚠️ WARNING: is_bundle=True but no bundle found for '{item_code}' (neither as ERPNext item nor bundle ID)")
         elif is_bundle and (bundle_with_erpnext_item or is_bundle_record):
@@ -507,23 +512,23 @@ def _process_cart_items(cart_items, pos_profile, logger):
             elif is_bundle_record:
                 bundle_doc = frappe.get_doc("Jarz Bundle", item_code)
                 print(f"         ✅ Bundle found by record ID: {item_code} ({bundle_doc.bundle_name})")
-        
+
         # Validate required fields
         if not item_code:
             logger.warning(f"Item {i} missing item_code, skipping")
-            print(f"      ❌ Missing item_code, skipping")
+            print("      ❌ Missing item_code, skipping")
             continue
-            
+
         if qty <= 0:
             logger.warning(f"Item {i} has invalid quantity {qty}, using 1")
             print(f"      ⚠️ Invalid quantity {qty}, using 1")
             qty = 1
-            
+
         if rate < 0:
             logger.warning(f"Item {i} has negative rate {rate}, using 0")
             print(f"      ⚠️ Negative rate {rate}, using 0")
             rate = 0
-        
+
         if is_bundle:
             # Process bundle item
             bundle_items = _process_bundle_item(item_code, qty, rate, pos_profile, logger)
@@ -532,13 +537,13 @@ def _process_cart_items(cart_items, pos_profile, logger):
             # Process regular item
             regular_item = _process_regular_item(item_code, qty, rate, logger)
             processed_items.append(regular_item)
-    
+
     if not processed_items:
         error_msg = "No valid items found in cart after processing"
         logger.error(error_msg)
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
-    
+
     _log_processing_summary(processed_items, logger)
     return processed_items
 
@@ -547,7 +552,7 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger):
     """Process a bundle item."""
     print(f"      🎁 BUNDLE DETECTED: {item_code}")
     print(f"      🔌 Processing bundle using ERPNext item: {item_code}")
-    
+
     try:
         # Validate bundle configuration using ERPNext item code
         is_valid, message, bundle_code = validate_bundle_configuration_by_item(item_code)
@@ -556,15 +561,15 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger):
             logger.error(error_msg)
             print(f"      ❌ {error_msg}")
             frappe.throw(error_msg)
-        
+
         print(f"      ✅ Found bundle: {bundle_code} for ERPNext item: {item_code}")
-        
+
         # Process bundle using ERPNext item code (not bundle record ID)
         bundle_items = process_bundle_for_invoice(item_code, qty)
         print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
         return bundle_items
     except Exception as bundle_error:
-        error_msg = f"Error processing bundle with ERPNext item {item_code}: {str(bundle_error)}"
+        error_msg = f"Error processing bundle with ERPNext item {item_code}: {bundle_error!s}"
         logger.error(error_msg)
         print(f"      ❌ {error_msg}")
         # Continue with other items instead of failing the entire invoice
@@ -574,20 +579,20 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger):
 def _process_regular_item(item_code, qty, rate, logger):
     """Process a regular item."""
     print(f"      📦 REGULAR ITEM: {item_code}")
-    
+
     # Validate regular item exists
     if not frappe.db.exists("Item", item_code):
         error_msg = f"Item '{item_code}' does not exist"
         logger.error(error_msg)
         print(f"         ❌ {error_msg}")
         frappe.throw(error_msg)
-    
+
     # Get item details for regular item
     try:
         item_doc = frappe.get_doc("Item", item_code)
         logger.debug(f"Item validated: {item_doc.item_name}")
         print(f"         ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
-        
+
         return {
             "item_code": item_code,
             "qty": float(qty),
@@ -596,7 +601,7 @@ def _process_regular_item(item_code, qty, rate, logger):
             "is_bundle_item": False
         }
     except Exception as e:
-        error_msg = f"Error loading item '{item_code}': {str(e)}"
+        error_msg = f"Error loading item '{item_code}': {e!s}"
         logger.error(error_msg)
         print(f"         ❌ {error_msg}")
         frappe.throw(error_msg)
@@ -605,25 +610,25 @@ def _process_regular_item(item_code, qty, rate, logger):
 def _log_processing_summary(processed_items, logger):
     """Log a detailed summary of processed items."""
     print(f"   ✅ Processing complete: {len(processed_items)} total items (including bundle items)")
-    
+
     # Log summary of processed items
     bundle_items_count = len([item for item in processed_items if item.get("is_bundle_item", False)])
     regular_items_count = len(processed_items) - bundle_items_count
     print(f"      - Regular items: {regular_items_count}")
     print(f"      - Bundle items: {bundle_items_count}")
-    
+
     # CRITICAL DEBUG: List all processed items before moving to validation
-    print(f"   🔍 ALL PROCESSED ITEMS DETAILS:")
+    print("   🔍 ALL PROCESSED ITEMS DETAILS:")
     total_main_items = 0
     total_child_items = 0
     total_regular_items = 0
-    
+
     for i, item in enumerate(processed_items, 1):
         bundle_type = item.get("bundle_type", "N/A")
         is_bundle = item.get("is_bundle_item", False)
         discount = item.get("discount_amount", 0)
         rate = item.get("rate", item.get("price_list_rate", 0))  # Fix: fallback to price_list_rate if rate missing
-        
+
         # Count items by type
         if bundle_type == "main":
             total_main_items += 1
@@ -631,23 +636,23 @@ def _log_processing_summary(processed_items, logger):
             total_child_items += 1
         elif not is_bundle:
             total_regular_items += 1
-        
+
         print(f"      Processed Item {i}: {item['item_code']} - Bundle: {is_bundle}, Type: {bundle_type}, Qty: {item['qty']}, Rate: {rate}, Discount: ${discount}")
-    
-    print(f"   📊 PROCESSING SUMMARY:")
+
+    print("   📊 PROCESSING SUMMARY:")
     print(f"      - Total processed items: {len(processed_items)}")
     print(f"      - Regular items: {total_regular_items}")
     print(f"      - Bundle main items: {total_main_items}")
     print(f"      - Bundle child items: {total_child_items}")
-    
+
     # Validation: Ensure we have the expected structure
     expected_items_in_invoice = total_regular_items + total_main_items + total_child_items
     print(f"      - Expected items in final invoice: {expected_items_in_invoice}")
-    
+
     if len(processed_items) != expected_items_in_invoice:
-        print(f"      ⚠️ WARNING: Item count mismatch!")
+        print("      ⚠️ WARNING: Item count mismatch!")
     else:
-        print(f"      ✅ Item counts match expected structure")
+        print("      ✅ Item counts match expected structure")
 
 
 def _create_invoice_document(logger):
@@ -657,10 +662,10 @@ def _create_invoice_document(logger):
         # Frappe best practice: Use frappe.new_doc()
         invoice_doc = frappe.new_doc("Sales Invoice")
         logger.debug("Sales Invoice document created")
-        print(f"   ✅ New document created")
+        print("   ✅ New document created")
         return invoice_doc
     except Exception as e:
-        error_msg = f"Error creating Sales Invoice document: {str(e)}"
+        error_msg = f"Error creating Sales Invoice document: {e!s}"
         logger.error(error_msg)
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
@@ -672,27 +677,27 @@ def _validate_and_calculate_document(invoice_doc, logger):
     """
     logger.debug("Running ERPNext document validation (native discount logic)...")
     try:
-        print(f"   📋 Pre-calculation item summary:")
+        print("   📋 Pre-calculation item summary:")
         for idx, item in enumerate(invoice_doc.items, 1):
             price_list_rate = getattr(item, 'price_list_rate', 0) or 0
             discount_pct = getattr(item, 'discount_percentage', 0) or 0
             qty = getattr(item, 'qty', 0) or 0
             print(f"      {idx}. {item.item_code} | qty={qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}")
 
-        print(f"   Running set_missing_values()...")
+        print("   Running set_missing_values()...")
         invoice_doc.set_missing_values()
 
-        print(f"   Running calculate_taxes_and_totals()...")
+        print("   Running calculate_taxes_and_totals()...")
         invoice_doc.calculate_taxes_and_totals()
 
         _log_discount_diagnostics_final(invoice_doc)
 
         logger.debug(f"Document validated - Total: {invoice_doc.grand_total}")
-        print(f"   ✅ Document validated:")
+        print("   ✅ Document validated:")
         print(f"      - Net Total: {invoice_doc.net_total}")
         print(f"      - Grand Total: {invoice_doc.grand_total}")
     except Exception as e:
-        error_msg = f"Error during document validation: {str(e)}"
+        error_msg = f"Error during document validation: {e!s}"
         logger.error(error_msg)
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
@@ -700,10 +705,10 @@ def _validate_and_calculate_document(invoice_doc, logger):
 
 def _log_discount_diagnostics_final(invoice_doc):
     """Log final discount application after ERPNext processing."""
-    print(f"   🔍 FINAL DISCOUNT DIAGNOSTICS (after ERPNext processing):")
+    print("   🔍 FINAL DISCOUNT DIAGNOSTICS (after ERPNext processing):")
     total_discount_amount = 0.0
     total_net_amount = 0.0
-    
+
     for idx, item in enumerate(invoice_doc.items, 1):
         discount_amt = float(getattr(item, 'discount_amount', 0) or 0)
         disc_pct = float(getattr(item, 'discount_percentage', 0) or 0)
@@ -711,18 +716,18 @@ def _log_discount_diagnostics_final(invoice_doc):
         rate = float(item.rate or 0)
         amount = float(item.amount or 0)
         price_list_rate = float(getattr(item, 'price_list_rate', 0) or 0)
-        
+
         # ERPNext computed values
         line_gross = price_list_rate * qty if price_list_rate > 0 else rate * qty
         line_discount_total = discount_amt * qty if discount_amt > 0 else (line_gross * disc_pct / 100.0)
-        
+
         total_discount_amount += line_discount_total
         total_net_amount += amount
-        
+
         print(f"      {idx}. {item.item_code}:")
         print(f"         qty={qty} | price_list_rate={price_list_rate} | rate={rate} | amount={amount}")
         print(f"         discount_pct={disc_pct}% | discount_amt={discount_amt} | line_discount_total={line_discount_total}")
-        
+
         # Validation: check if ERPNext computed correctly
         if disc_pct == 100:
             expected_rate = 0.0
@@ -732,18 +737,18 @@ def _log_discount_diagnostics_final(invoice_doc):
             expected_rate = price_list_rate * (1 - disc_pct/100)
             if abs(rate - expected_rate) > 0.01:
                 print(f"         ⚠️ Expected rate={expected_rate}, got rate={rate}")
-    
-    print(f"   💰 FINAL TOTALS:")
+
+    print("   💰 FINAL TOTALS:")
     print(f"      - Total discount applied: {total_discount_amount}")
     print(f"      - Net amount (sum of line amounts): {total_net_amount}")
     print(f"      - Document net_total: {invoice_doc.net_total}")
     print(f"      - Document grand_total: {invoice_doc.grand_total}")
-    
+
     # Verify net total matches sum of line amounts
     if abs(total_net_amount - float(invoice_doc.net_total)) > 0.01:
         print(f"      ⚠️ Net total mismatch! Line sum: {total_net_amount}, Doc total: {invoice_doc.net_total}")
     else:
-        print(f"      ✅ Net total verified correctly")
+        print("      ✅ Net total verified correctly")
 
 
 def _save_document(invoice_doc, delivery_datetime, logger):
@@ -758,13 +763,13 @@ def _save_document(invoice_doc, delivery_datetime, logger):
         invoice_doc.insert(ignore_permissions=True)
         logger.info(f"Invoice saved: {invoice_doc.name}")
         print(f"   ✅ Document saved: {invoice_doc.name}")
-        
+
         # Verify delivery datetime field after save
         if delivery_datetime:
             _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger)
-            
+
     except Exception as e:
-        error_msg = f"Error saving document: {str(e)}"
+        error_msg = f"Error saving document: {e!s}"
         logger.error(error_msg)
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
@@ -772,7 +777,7 @@ def _save_document(invoice_doc, delivery_datetime, logger):
 
 def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger):
     """Verify delivery slot fields were set correctly after save."""
-    print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
+    print("\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
     # Reload document to get fresh state from database
     saved_doc = frappe.get_doc("Sales Invoice", invoice_doc.name)
 
@@ -794,10 +799,10 @@ def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger):
             date_attr = getattr(saved_doc, "custom_delivery_date", None)
             time_from_attr = getattr(saved_doc, "custom_delivery_time_from", None)
             duration_attr = getattr(saved_doc, "custom_delivery_duration", None)
-            print(f"   � Re-saved with delivery slot fields")
+            print("   � Re-saved with delivery slot fields")
         except Exception as correction_error:
-            print(f"   ❌ Could not set delivery slot fields: {str(correction_error)}")
-            logger.warning(f"Delivery slot fields could not be set: {str(correction_error)}")
+            print(f"   ❌ Could not set delivery slot fields: {correction_error!s}")
+            logger.warning(f"Delivery slot fields could not be set: {correction_error!s}")
 
 
 def _submit_document(invoice_doc, logger):
@@ -807,13 +812,13 @@ def _submit_document(invoice_doc, logger):
         # Frappe best practice: Submit after successful save
         invoice_doc.submit()
         logger.info(f"Invoice submitted: {invoice_doc.name}")
-        print(f"   ✅ Document submitted successfully!")
-        
+        print("   ✅ Document submitted successfully!")
+
         # Verify discount amounts persisted after submission
         verify_invoice_totals(invoice_doc, logger)
-        
+
     except Exception as e:
-        error_msg = f"Error submitting document: {str(e)}"
+        error_msg = f"Error submitting document: {e!s}"
         logger.error(error_msg)
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
@@ -848,7 +853,7 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
     "company": invoice_doc.company,
     "partner_tax_suppressed": partner_tax_suppressed,
     }
-    
+
     # Add delivery information to response if provided
     if delivery_datetime:
         try:
@@ -858,11 +863,11 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
             # Duration is stored in seconds; include both seconds and minutes for clients
             dur_seconds = int(float(getattr(invoice_doc, "custom_delivery_duration", 3600) or 3600))
             result["delivery_duration_seconds"] = dur_seconds
-            result["delivery_duration_minutes"] = int(round(dur_seconds / 60))
+            result["delivery_duration_minutes"] = round(dur_seconds / 60)
             # Compute a human-readable label
             try:
                 end_dt = frappe.utils.add_to_date(delivery_datetime, seconds=dur_seconds)
-                mins = int(round(dur_seconds / 60))
+                mins = round(dur_seconds / 60)
                 hrs = mins // 60
                 rem = mins % 60
                 if hrs > 0 and rem == 0:
@@ -879,12 +884,12 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
             print(f"      delivery_label: {result['delivery_label']}")
         except Exception:
             pass
-    
+
     logger.info(f"Invoice creation successful: {invoice_doc.name}")
-    print(f"   ✅ Response prepared:")
+    print("   ✅ Response prepared:")
     for key, value in result.items():
         print(f"      {key}: {value}")
-    
+
     return result
 
 
@@ -996,23 +1001,23 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
 
 def _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger):
     """Handle and log invoice creation errors."""
-    error_msg = f"Error in create_pos_invoice: {str(e)}"
+    error_msg = f"Error in create_pos_invoice: {e!s}"
     logger.error(error_msg, exc_info=True)
-    print(f"\n❌ FUNCTION ERROR:")
+    print("\n❌ FUNCTION ERROR:")
     print(f"   Type: {type(e).__name__}")
-    print(f"   Message: {str(e)}")
-    
+    print(f"   Message: {e!s}")
+
     # Log full error details for debugging
     full_traceback = traceback.format_exc()
-    print(f"   Traceback:")
+    print("   Traceback:")
     print(full_traceback)
-    
+
     # Frappe best practice: Use frappe.log_error for persistent logging
     frappe.log_error(
         title=f"POS Invoice Creation Error: {type(e).__name__}",
         message=f"""
 FUNCTION: create_pos_invoice
-ERROR: {str(e)}
+ERROR: {e!s}
 PARAMETERS:
 - customer_name: {customer_name}
 - pos_profile_name: {pos_profile_name}

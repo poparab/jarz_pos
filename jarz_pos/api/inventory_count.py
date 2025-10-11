@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _
@@ -13,10 +13,10 @@ def _ensure_manager_access() -> None:
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
-def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
+def _get_uom_conversions(item_code: str) -> list[dict[str, Any]]:
     """Return available UOM conversions for an item, including stock_uom with factor 1."""
     stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or "Nos"
-    convs: List[Dict[str, Any]] = [{"uom": stock_uom, "conversion_factor": 1.0}]
+    convs: list[dict[str, Any]] = [{"uom": stock_uom, "conversion_factor": 1.0}]
     rows = frappe.get_all(
         "UOM Conversion Detail",
         filters={"parenttype": "Item", "parentfield": "uoms", "parent": item_code},
@@ -35,31 +35,31 @@ def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def list_warehouses(company: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_warehouses(company: str | None = None) -> list[dict[str, Any]]:
     _ensure_manager_access()
     if not company:
         company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-    filters: Dict[str, Any] = {"is_group": 0}
+    filters: dict[str, Any] = {"is_group": 0}
     if company:
         filters["company"] = company
     return frappe.get_all("Warehouse", filters=filters, fields=["name", "company"], order_by="name asc")
 
 
 @frappe.whitelist()
-def list_item_groups(search: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_item_groups(search: str | None = None) -> list[dict[str, Any]]:
     """List item groups for filtering inventory count"""
     _ensure_manager_access()
-    filters: Dict[str, Any] = {"is_group": 0}  # Only leaf nodes
-    or_filters: List[Any] = []
+    filters: dict[str, Any] = {"is_group": 0}  # Only leaf nodes
+    or_filters: list[Any] = []
     if search:
         like = f"%{search}%"
         or_filters = [["Item Group", "name", "like", like], ["Item Group", "item_group_name", "like", like]]
-    
+
     fields = ["name", "item_group_name"]
     return frappe.get_all("Item Group", filters=filters, or_filters=or_filters, fields=fields, order_by="name asc", limit=100)
 
 
-def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
+def _get_bin_qty_map(warehouse: str, item_codes: list[str]) -> dict[str, float]:
     if not item_codes:
         return {}
     ph = ",".join(["%s"] * len(item_codes))
@@ -69,15 +69,15 @@ def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
         WHERE b.warehouse = %s AND b.item_code IN ({ph})
         GROUP BY b.item_code
     """
-    rows = frappe.db.sql(sql, [warehouse] + item_codes, as_dict=True)  # type: ignore
-    out: Dict[str, float] = {}
+    rows = frappe.db.sql(sql, [warehouse, *item_codes], as_dict=True)  # type: ignore
+    out: dict[str, float] = {}
     for r in rows:
         out[str(r.get("item_code"))] = float(r.get("qty") or 0)
     return out
 
 
 # Public helper used by both list and submit to infer a plausible valuation rate
-def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
+def _resolve_item_valuation(item_code: str, warehouse: str) -> float | None:
     try:
         # Latest SLE in this warehouse
         rows = frappe.get_all(
@@ -131,10 +131,10 @@ def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
 @frappe.whitelist()
 def list_items_for_count(
     warehouse: str,
-    search: Optional[str] = None,
-    item_group: Optional[str] = None,
+    search: str | None = None,
+    item_group: str | None = None,
     limit: int = 500,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List items to count in a warehouse with current qty and UOM conversions.
 
     We include non-variant, enabled items, optionally filtered by group/search.
@@ -143,10 +143,10 @@ def list_items_for_count(
     if not warehouse:
         frappe.throw(_("warehouse is required"))
 
-    filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0}
+    filters: dict[str, Any] = {"disabled": 0, "has_variants": 0}
     if item_group:
         filters["item_group"] = item_group
-    or_filters: List[Any] = []
+    or_filters: list[Any] = []
     if search:
         like = f"%{search}%"
         or_filters = [["Item", "name", "like", like], ["Item", "item_name", "like", like]]
@@ -162,7 +162,7 @@ def list_items_for_count(
     codes = [it["item_code"] for it in items]
     qty_map = _get_bin_qty_map(warehouse, codes)
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for it in items:
         code = it["item_code"]
         stock_uom = it.get("stock_uom") or "Nos"
@@ -182,7 +182,7 @@ def list_items_for_count(
     return out
 
 
-def _to_stock_qty(item_code: str, qty: float, uom: Optional[str]) -> float:
+def _to_stock_qty(item_code: str, qty: float, uom: str | None) -> float:
     if qty is None:
         return 0.0
     stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or "Nos"
@@ -202,11 +202,11 @@ def _to_stock_qty(item_code: str, qty: float, uom: Optional[str]) -> float:
 @frappe.whitelist()
 def submit_reconciliation(
     warehouse: str,
-    posting_date: Optional[str],
+    posting_date: str | None,
     lines: Any,
     enforce_all: int = 1,
     debug: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a Stock Reconciliation for counted items.
 
     lines: list[{item_code, counted_qty, uom?}]
@@ -236,10 +236,10 @@ def submit_reconciliation(
             frappe.throw(_("warehouse is required"))
 
         # Build a map of counted qty in stock UOM
-        counted: Dict[str, float] = {}
-        provided_vr: Dict[str, Optional[float]] = {}
-        provided_batch: Dict[str, Optional[str]] = {}
-        provided_serials: Dict[str, Optional[str]] = {}
+        counted: dict[str, float] = {}
+        provided_vr: dict[str, float | None] = {}
+        provided_batch: dict[str, str | None] = {}
+        provided_serials: dict[str, str | None] = {}
         for ln in lines:
             if not isinstance(ln, dict):
                 frappe.throw(_("Each line must be an object"))
@@ -277,7 +277,7 @@ def submit_reconciliation(
         cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
         # Helper to fetch a sensible valuation rate when ERPNext requires one
-        def _resolve_valuation_rate(item_code: str, wh: str) -> Optional[float]:
+        def _resolve_valuation_rate(item_code: str, wh: str) -> float | None:
             # 1) Latest Stock Ledger Entry for this warehouse
             rows = frappe.get_all(
                 "Stock Ledger Entry",
@@ -391,7 +391,7 @@ def submit_reconciliation(
             if abs(counted_stock_qty - current) < 1e-9:
                 continue
             # If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
-            row: Dict[str, Any] = {
+            row: dict[str, Any] = {
                 "item_code": code,
                 "warehouse": warehouse,
                 "qty": counted_stock_qty,

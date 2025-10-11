@@ -13,7 +13,7 @@ class TestBundleProcessing(unittest.TestCase):
 		"""Test validation with non-existent item."""
 		from jarz_pos.services.bundle_processing import validate_bundle_configuration_by_item
 
-		is_valid, message, bundle_code = validate_bundle_configuration_by_item("NON_EXISTENT_ITEM")
+		is_valid, message, _bundle_code = validate_bundle_configuration_by_item("NON_EXISTENT_ITEM")
 
 		# Should return invalid for non-existent item
 		self.assertFalse(is_valid, "Should be invalid for non-existent item")
@@ -26,7 +26,7 @@ class TestBundleProcessing(unittest.TestCase):
 		# Test with an item that exists but is not a bundle
 		# This will depend on test data, so we handle both cases
 		try:
-			is_valid, message, bundle_code = validate_bundle_configuration_by_item("Test Item")
+			is_valid, message, _bundle_code = validate_bundle_configuration_by_item("Test Item")
 			# If no bundle exists, should be invalid
 			if not is_valid:
 				self.assertIsInstance(message, str, "Should return error message")

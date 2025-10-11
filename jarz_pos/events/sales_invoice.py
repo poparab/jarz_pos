@@ -31,7 +31,7 @@ def _safe_publish(event: str, message: dict[str, Any]) -> None:
 			pass
 
 
-def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
+def sync_kanban_profile(doc: Any, method: str | None = None) -> None:
 	"""Mirror POS Profile into a custom field used by Kanban, if present.
 
 	- If doc has `pos_profile` and `custom_kanban_profile`, keep them in sync.
@@ -41,13 +41,13 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 		pos_profile = getattr(doc, "pos_profile", None)
 		if pos_profile and hasattr(doc, "custom_kanban_profile"):
 			if getattr(doc, "custom_kanban_profile", None) != pos_profile:
-				setattr(doc, "custom_kanban_profile", pos_profile)
+				doc.custom_kanban_profile = pos_profile
 	except Exception:
 		if frappe:
 			frappe.log_error(frappe.get_traceback(), "sync_kanban_profile failed")
 
 
-def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
+def publish_new_invoice(doc: Any, method: str | None = None) -> None:
 	"""Notify listeners a Sales Invoice has been submitted.
 
 	Minimal payload to avoid coupling; extend as needed by UI.
@@ -55,7 +55,7 @@ def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
 	_safe_publish("jarz_pos:new_invoice", {"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)})
 
 
-def publish_state_change_if_needed(doc: Any, method: Optional[str] = None) -> None:
+def publish_state_change_if_needed(doc: Any, method: str | None = None) -> None:
 	"""Emit a generic state-change notification for already-submitted invoices.
 
 	Intentionally lightweight. Frontend can refetch details by name.
@@ -63,7 +63,7 @@ def publish_state_change_if_needed(doc: Any, method: Optional[str] = None) -> No
 	_safe_publish("jarz_pos:invoice_state", {"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)})
 
 
-def validate_invoice_before_submit(doc: Any, method: Optional[str] = None) -> None:
+def validate_invoice_before_submit(doc: Any, method: str | None = None) -> None:
 	"""Placeholder for pre-submit validations (e.g., bundle checks).
 
 	Currently a no-op to avoid interrupting flows. Add validations here later.

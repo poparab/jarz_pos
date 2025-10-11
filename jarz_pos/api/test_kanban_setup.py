@@ -2,6 +2,7 @@
 
 import frappe
 
+
 @frappe.whitelist(allow_guest=False)
 def test_kanban_setup():
     """Test function to verify kanban setup"""
@@ -14,23 +15,23 @@ def test_kanban_setup():
         "frappe_user": frappe.session.user,
         "site": frappe.local.site
     }
-    
+
     try:
         # Check if custom field exists
         custom_field = frappe.db.exists("Custom Field", {
-            "dt": "Sales Invoice", 
+            "dt": "Sales Invoice",
             "fieldname": "sales_invoice_state"
         })
         results["custom_field_exists"] = bool(custom_field)
-        
+
         if custom_field:
             # Get the field options
             field_doc = frappe.get_doc("Custom Field", custom_field)
             results["custom_field_options"] = field_doc.options
-        
+
         # Test if functions are accessible
         from jarz_pos.api import kanban
-        
+
         functions_to_test = [
             'get_kanban_columns',
             'get_kanban_invoices',
@@ -38,7 +39,7 @@ def test_kanban_setup():
             'get_invoice_details',
             'get_kanban_filters'
         ]
-        
+
         for func_name in functions_to_test:
             try:
                 func = getattr(kanban, func_name)
@@ -51,23 +52,23 @@ def test_kanban_setup():
                     "exists": False,
                     "whitelisted": False
                 }
-        
+
         # Try to call the functions
         try:
             results["test_get_columns"] = kanban.get_kanban_columns()
         except Exception as e:
-            results["test_get_columns"] = f"Error: {str(e)}"
-            
+            results["test_get_columns"] = f"Error: {e!s}"
+
         try:
             results["test_get_filters"] = kanban.get_kanban_filters()
         except Exception as e:
-            results["test_get_filters"] = f"Error: {str(e)}"
-            
+            results["test_get_filters"] = f"Error: {e!s}"
+
     except Exception as e:
         results["error"] = str(e)
         import traceback
         results["traceback"] = traceback.format_exc()
-    
+
     return results
 
 @frappe.whitelist(allow_guest=False)
@@ -77,9 +78,9 @@ def create_sales_invoice_state_field():
         # Check if field already exists
         if frappe.db.exists("Custom Field", {"dt": "Sales Invoice", "fieldname": "sales_invoice_state"}):
             return {"success": True, "message": "Field already exists", "created": False}
-        
+
         from frappe.custom.doctype.custom_field.custom_field import create_custom_field
-        
+
         # Create the custom field
         create_custom_field("Sales Invoice", {
             "fieldname": "sales_invoice_state",
@@ -91,15 +92,15 @@ def create_sales_invoice_state_field():
             "in_standard_filter": 1,
             "default": "Received"
         })
-        
+
         frappe.db.commit()
         return {"success": True, "message": "Custom field created successfully", "created": True}
-        
+
     except Exception as e:
-        frappe.log_error(f"Error creating custom field: {str(e)}", "Kanban Setup")
+        frappe.log_error(f"Error creating custom field: {e!s}", "Kanban Setup")
         return {"success": False, "error": str(e)}
 
-@frappe.whitelist(allow_guest=False) 
+@frappe.whitelist(allow_guest=False)
 def fix_existing_invoices_state():
     """Set default state for existing POS invoices that don't have a state"""
     try:
@@ -113,17 +114,17 @@ def fix_existing_invoices_state():
             },
             fields=["name"]
         )
-        
+
         count = 0
         for invoice in invoices:
             doc = frappe.get_doc("Sales Invoice", invoice.name)
             doc.sales_invoice_state = "Received"
             doc.save(ignore_permissions=True)
             count += 1
-        
+
         frappe.db.commit()
         return {"success": True, "message": f"Updated {count} invoices with default state", "count": count}
-        
+
     except Exception as e:
-        frappe.log_error(f"Error fixing invoice states: {str(e)}", "Kanban Setup")
+        frappe.log_error(f"Error fixing invoice states: {e!s}", "Kanban Setup")
         return {"success": False, "error": str(e)}

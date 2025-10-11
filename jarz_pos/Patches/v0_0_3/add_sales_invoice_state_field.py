@@ -1,5 +1,6 @@
 import frappe
 
+
 def execute():
     """Create the sales_invoice_state custom field for Sales Invoice"""
 
@@ -35,4 +36,4 @@ def execute():
     cf.insert(ignore_permissions=True)  # type: ignore[attr-defined]
     frappe.db.commit()  # type: ignore[attr-defined]
 
-    print(f"✅ Created custom field {cf.name} on {doctype}") 
+    print(f"✅ Created custom field {cf.name} on {doctype}")

@@ -6,8 +6,8 @@ to the actual top-level API modules `jarz_pos.api.<module>`.
 It is safe to keep and works in both local and production setups.
 """
 
-from importlib import import_module as _import_module
 import sys as _sys
+from importlib import import_module as _import_module
 
 # Expose the top-level API package as this package to support attribute access
 _base = _import_module("jarz_pos.api")
