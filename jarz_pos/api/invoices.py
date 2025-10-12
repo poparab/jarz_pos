@@ -230,35 +230,59 @@ def pay_invoice(
             frappe.throw("payment_mode is required")
         payment_mode = payment_mode.strip()
 
+        # Add database-level lock to prevent concurrent payment entry creation
+        try:
+            frappe.db.sql("SELECT name FROM `tabSales Invoice` WHERE name=%s FOR UPDATE", (invoice_name,))
+        except Exception:
+            pass  # Lock attempt - continue even if fails
+
         inv = frappe.get_doc("Sales Invoice", invoice_name)
         if inv.docstatus != 1:
             frappe.throw("Invoice must be submitted before registering payment")
+        
         # Always re-read the latest outstanding from the database to avoid cache/stale values
         try:
             latest_outstanding = frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount")
             outstanding = float(latest_outstanding or 0)
         except Exception:
             outstanding = float(inv.outstanding_amount or 0)
-        if outstanding <= 0.0001:
-            # Try to hint if a Payment Entry already exists
-            try:
-                ref_parents = frappe.get_all(
-                    "Payment Entry Reference",
-                    filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-                    pluck="parent",
+        
+        # Check for existing payment entries BEFORE checking outstanding (idempotency check)
+        existing_payment_entries = []
+        try:
+            ref_parents = frappe.get_all(
+                "Payment Entry Reference",
+                filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+                pluck="parent",
+            )
+            if ref_parents:
+                existing_payment_entries = frappe.get_all(
+                    "Payment Entry",
+                    filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+                    fields=["name", "posting_date", "paid_amount"],
                 )
-                pe_list = []
-                if ref_parents:
-                    pe_list = frappe.get_all(
-                        "Payment Entry",
-                        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
-                        pluck="name",
-                    )
-                if pe_list:
-                    frappe.throw(f"Invoice already paid. Existing Payment Entry: {', '.join(pe_list)}")
-            except Exception:
-                pass
+                if existing_payment_entries:
+                    # Return existing payment entry instead of throwing error (idempotency)
+                    pe = existing_payment_entries[0]
+                    return {
+                        "success": True,
+                        "payment_entry": pe.get("name"),
+                        "invoice": inv.name,
+                        "allocated_amount": float(pe.get("paid_amount", 0)),
+                        "note": "Invoice already has a payment entry (idempotent response)",
+                    }
+        except Exception as e:
+            frappe.log_error(
+                title="Pay Invoice - Existing Payment Check Error",
+                message=f"Invoice: {invoice_name}\nError: {str(e)}",
+            )
+            # Continue with payment creation if check fails
+            pass
+        
+        # Now check if there's outstanding amount
+        if outstanding <= 0.0001:
             frappe.throw("Invoice already paid (no outstanding amount)")
+        
         company = inv.company
         company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
 
@@ -348,6 +372,40 @@ def pay_invoice(
         try:
             pe.insert(ignore_permissions=True)
             pe.submit()
+        except frappe.exceptions.DuplicateEntryError as dup_err:
+            # Handle duplicate Payment Entry name - return existing entry (idempotency)
+            frappe.log_error(
+                title="Pay Invoice - Duplicate Payment Entry",
+                message=f"Invoice: {invoice_name}\nAttempted duplicate payment entry creation\n{str(dup_err)}",
+            )
+            # Try to find and return the existing payment entry
+            try:
+                ref_parents = frappe.get_all(
+                    "Payment Entry Reference",
+                    filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+                    pluck="parent",
+                )
+                if ref_parents:
+                    existing_pe = frappe.get_all(
+                        "Payment Entry",
+                        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+                        fields=["name", "paid_amount", "paid_to"],
+                        limit=1,
+                    )
+                    if existing_pe:
+                        pe_data = existing_pe[0]
+                        return {
+                            "success": True,
+                            "payment_entry": pe_data.get("name"),
+                            "invoice": inv.name,
+                            "allocated_amount": float(pe_data.get("paid_amount", 0)),
+                            "paid_to": pe_data.get("paid_to", ""),
+                            "note": "Payment entry already exists (recovered from duplicate error)",
+                        }
+            except Exception:
+                pass
+            # If we can't find existing, throw clear error
+            frappe.throw(f"Payment entry creation failed due to duplicate. Please refresh and try again.")
         except Exception as pe_err:
             # Provide a clearer message when invoice is already settled
             msg = str(pe_err)

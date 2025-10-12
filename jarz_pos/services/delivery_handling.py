@@ -43,8 +43,15 @@ def _compute_sales_partner_fees(inv, sales_partner: str, online: bool) -> dict:
             return float(default)
     try:
         sp = frappe.get_doc("Sales Partner", sales_partner)
-        commission_rate = _to_float(getattr(sp, "commission_rate", None) or getattr(sp, "commission_rate_percent", None) or 0)
-        online_rate = _to_float(getattr(sp, "online_payment_fees", None) or getattr(sp, "online_payment_fee", None) or 0)
+        # Avoid treating 0.0 as falsy; pick first non-None attribute explicitly
+        cr_raw = getattr(sp, "commission_rate", None)
+        if cr_raw is None:
+            cr_raw = getattr(sp, "commission_rate_percent", None)
+        or_raw = getattr(sp, "online_payment_fees", None)
+        if or_raw is None:
+            or_raw = getattr(sp, "online_payment_fee", None)
+        commission_rate = _to_float(cr_raw if cr_raw is not None else 0)
+        online_rate = _to_float(or_raw if or_raw is not None else 0)
     except Exception:
         commission_rate = 0.0
         online_rate = 0.0
