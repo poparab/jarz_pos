@@ -156,6 +156,16 @@ def remove_conflicting_territory_delivery_fields() -> None:
         _log(f"remove_conflicting_territory_delivery_fields error: {e}")
 
 
+def ensure_territory_delivery_fields() -> None:
+    """Compat shim kept for older hooks/patches referencing this helper.
+
+    Delegates to :func:`remove_conflicting_territory_delivery_fields`, which now
+    ensures the Territory fields exist exactly once.
+    """
+
+    remove_conflicting_territory_delivery_fields()
+
+
 def ensure_delivery_slot_fields() -> None:
     """Ensure the split delivery slot fields exist on Sales Invoice.
 
