@@ -53,8 +53,13 @@ def _ensure_custom_field(
     default: Optional[str] = None,
     reqd: int = 0,
     hidden: int = 0,
+    **overrides,
 ) -> bool:
-    """Create a Custom Field if missing; return True if created."""
+    """Create a Custom Field if missing; return True if created.
+
+    Additional Custom Field attributes can be passed via ``overrides`` and will
+    be applied to the new document before insertion.
+    """
     try:
         if not frappe:
             return False
@@ -72,6 +77,11 @@ def _ensure_custom_field(
             "reqd": reqd,
             "hidden": hidden,
         })
+        for key, value in overrides.items():
+            try:
+                doc.set(key, value)
+            except Exception:
+                setattr(doc, key, value)
         doc.insert(ignore_permissions=True)
         _log(f"Created Custom Field {dt}.{fieldname}")
         return True
@@ -83,13 +93,11 @@ def _ensure_custom_field(
 # Public API used from hooks.before_migrate
 
 def remove_conflicting_territory_delivery_fields() -> None:
-    """Remove legacy/duplicate fields that could conflict with proper field creation.
+    """Remove legacy/duplicate fields that could conflict with fixtures.
 
     - Sales Invoice: legacy delivery fields, stray state/duration
-    - Territory: any existing delivery_income, delivery_expense (will be recreated by ensure_territory_delivery_fields)
-    
+    - Territory: delivery_income, delivery_expense
     Safe no-op when fields are absent.
-    This runs before ensure_territory_delivery_fields to ensure clean field creation.
     """
     try:
         if not frappe:
@@ -104,18 +112,46 @@ def remove_conflicting_territory_delivery_fields() -> None:
         ]:
             _safe_remove_custom_field("Sales Invoice", fname)
 
-        # Territory fields (will be recreated by ensure_territory_delivery_fields)
-        # This removes any prior manual/experimental creations to ensure consistency
-        q = frappe.get_all(
-            "Custom Field",
-            filters={"dt": "Territory", "fieldname": ["in", ["delivery_income", "delivery_expense"]]},
-            pluck="name",
-        )
-        for name in q:
-            try:
-                frappe.delete_doc("Custom Field", name, ignore_permissions=True)
-            except Exception:
-                pass
+        # Territory delivery fields must exist exactly once; keep the canonical
+        # standard fields when available, otherwise fall back to Custom Fields.
+        try:
+            territory_meta = frappe.get_meta("Territory")
+        except Exception:
+            territory_meta = None
+
+        def _sync(fieldname: str, label: str, insert_after: str) -> None:
+            if not frappe:
+                return
+            field_meta = None
+            if territory_meta:
+                try:
+                    field_meta = territory_meta.get_field(fieldname)
+                except Exception:
+                    field_meta = None
+            is_standard = bool(field_meta and not field_meta.get("is_custom_field"))
+            custom_exists = bool(
+                frappe.db.exists("Custom Field", {"dt": "Territory", "fieldname": fieldname})
+            )
+
+            if is_standard:
+                # Ensure no duplicate Custom Field lingers when the core field exists
+                if custom_exists:
+                    _safe_remove_custom_field("Territory", fieldname)
+            else:
+                # Standard field absent; make sure a Custom Field is present
+                if not custom_exists:
+                    _ensure_custom_field(
+                        dt="Territory",
+                        fieldname=fieldname,
+                        label=label,
+                        fieldtype="Currency",
+                        insert_after=insert_after,
+                        allow_in_quick_entry=1,
+                        non_negative=1,
+                    )
+
+        _sync("delivery_income", "Delivery Income", "is_group")
+        _sync("delivery_expense", "Delivery Expense", "delivery_income")
     except Exception as e:
         _log(f"remove_conflicting_territory_delivery_fields error: {e}")
 
@@ -172,47 +208,6 @@ def ensure_delivery_slot_fields() -> None:
         )
     except Exception as e:
         _log(f"ensure_delivery_slot_fields error: {e}")
-
-
-def ensure_territory_delivery_fields() -> None:
-    """Ensure Territory has delivery_income and delivery_expense custom fields.
-
-    Fields:
-    - delivery_income (Currency) - Fee charged to customers for delivery
-    - delivery_expense (Currency) - Cost paid to courier for delivery
-    
-    These match the field names used throughout the codebase.
-    """
-    try:
-        if not frappe:
-            return
-        
-        # Find a suitable insert_after field
-        insert_after = "territory_name"
-        try:
-            meta = frappe.get_meta("Territory")
-            # Try to place after territory_name, fallback to parent_territory
-            if not meta.get_field("territory_name") and meta.get_field("parent_territory"):
-                insert_after = "parent_territory"
-        except Exception:
-            pass
-
-        _ensure_custom_field(
-            dt="Territory",
-            fieldname="delivery_income",
-            label="Delivery Income",
-            fieldtype="Currency",
-            insert_after=insert_after,
-        )
-        _ensure_custom_field(
-            dt="Territory",
-            fieldname="delivery_expense",
-            label="Delivery Expense",
-            fieldtype="Currency",
-            insert_after="delivery_income",
-        )
-    except Exception as e:
-        _log(f"ensure_territory_delivery_fields error: {e}")
 
 
 def remove_required_delivery_datetime_field() -> None:
