@@ -4,6 +4,9 @@ Creates a new Employee or Supplier, adds it to the 'Delivery' group, and returns
 standardized party data used by the POS frontend.
 """
 from __future__ import annotations
+
+from typing import Optional
+
 import frappe
 
 DELIVERY_EMP_GROUP_NAME = "Delivery"
@@ -45,6 +48,36 @@ def _ensure_branch(branch_name: str) -> str:
     return ""  # silently ignore if Branch DocType not installed
 
 
+def _ensure_employee_in_group(employee_name: str) -> None:
+    """Add the given employee to the Delivery group if not already present."""
+
+    group_name = _ensure_employee_group()
+    try:
+        group_doc = frappe.get_doc("Employee Group", group_name)
+    except Exception:
+        return
+    rows = group_doc.get("employee_list") or []
+    for row in rows:
+        if row.get("employee") == employee_name:
+            return
+    group_doc.append("employee_list", {
+        "employee": employee_name,
+        "employee_name": frappe.db.get_value("Employee", employee_name, "employee_name") or employee_name,
+    })
+    group_doc.flags.ignore_permissions = True
+    try:
+        group_doc.save(ignore_permissions=True)
+    except Exception:
+        # Group membership issues should not block courier creation
+        pass
+
+
+def _normalize(value: Optional[str]) -> str:
+    """Collapse whitespace and strip surrounding spaces."""
+
+    return " ".join((value or "").split())
+
+
 def create_delivery_party(
     party_type: str,
     name: str | None = None,
@@ -65,9 +98,9 @@ def create_delivery_party(
         if party_type not in {"Employee", "Supplier"}:
             frappe.throw(f"Invalid party_type '{party_type}'. Must be 'Employee' or 'Supplier'")
 
-        first_name = (first_name or "").strip()
-        last_name = (last_name or "").strip()
-        name = (name or "").strip()
+        first_name = _normalize(first_name)
+        last_name = _normalize(last_name)
+        name = _normalize(name)
         # Determine display name precedence: first + last if both, else provided name
         if first_name and last_name:
             display_name = f"{first_name} {last_name}".strip()
@@ -75,12 +108,84 @@ def create_delivery_party(
             display_name = name or first_name or last_name
         if not display_name:
             frappe.throw("Courier name is required. Please provide first name and last name.")
+        display_name = _normalize(display_name)
 
-        branch = (branch or "").strip()
+        branch = _normalize(branch)
         branch_name = _ensure_branch(branch) if branch else ""
 
+        def _reuse_existing(existing_doc: dict) -> dict:
+            """Return existing party when duplicate name detected, keeping UX idempotent."""
+
+            try:
+                doc = frappe.get_doc(party_type, existing_doc["name"])
+            except Exception:
+                doc = None
+
+            if doc:
+                updated = False
+                if phone:
+                    for fld in ("cell_number", "mobile", "mobile_no"):
+                        if doc.meta.get_field(fld) and doc.get(fld) != phone:
+                            doc.set(fld, phone)
+                            updated = True
+                            break
+                if branch_name and doc.meta.get_field("branch") and doc.get("branch") != branch_name:
+                    doc.branch = branch_name
+                    updated = True
+                if updated:
+                    try:
+                        doc.save(ignore_permissions=True)
+                    except Exception:
+                        pass
+
+            if party_type == "Employee":
+                try:
+                    _ensure_employee_in_group(existing_doc["name"])
+                except Exception:
+                    pass
+            else:
+                # ensure Supplier group exists for bookkeeping
+                try:
+                    group_name = _ensure_supplier_group()
+                    doc = doc or frappe.get_doc(party_type, existing_doc["name"])
+                    if doc and doc.meta.get_field("supplier_group") and doc.get("supplier_group") != group_name:
+                        doc.supplier_group = group_name
+                        doc.save(ignore_permissions=True)
+                except Exception:
+                    pass
+
+            return {
+                "party_type": party_type,
+                "party": existing_doc["name"],
+                "display_name": existing_doc.get("employee_name")
+                or existing_doc.get("supplier_name")
+                or display_name,
+                "phone": phone or existing_doc.get("phone"),
+                "branch": branch or existing_doc.get("branch"),
+                "existing": True,
+            }
+
         if party_type == "Employee":
-            group_name = _ensure_employee_group()
+            existing_emp = frappe.db.get_value(
+                "Employee",
+                {"employee_name": display_name},
+                ["name", "employee_name", "branch"],
+                as_dict=True,
+            )
+            if existing_emp:
+                return _reuse_existing(existing_emp)
+        else:
+            existing_sup = frappe.db.get_value(
+                "Supplier",
+                {"supplier_name": display_name},
+                ["name", "supplier_name", "branch"],
+                as_dict=True,
+            )
+            if existing_sup:
+                return _reuse_existing(existing_sup)
+
+        if party_type == "Employee":
+            _ensure_employee_group()
             emp = frappe.new_doc("Employee")
             emp.first_name = first_name or display_name.split(" ")[0]
             if last_name:
@@ -155,32 +260,8 @@ def create_delivery_party(
                 else:
                     frappe.throw(f"Failed to create Employee courier: {error_msg}")
             
-            # Add employee to the Delivery Employee Group
-            try:
-                group_doc = frappe.get_doc("Employee Group", group_name)
-                
-                # Check if employee already exists in the group
-                existing = False
-                for row in group_doc.get("employee_list") or []:
-                    if row.get("employee") == emp.name:
-                        existing = True
-                        frappe.logger().info(f"Employee {emp.name} already exists in Employee Group {group_name}")
-                        break
-                
-                if not existing:
-                    # Append to employee_list child table with correct structure
-                    group_doc.append("employee_list", {
-                        "employee": emp.name,
-                        "employee_name": emp.employee_name,
-                    })
-                    group_doc.flags.ignore_permissions = True
-                    group_doc.save(ignore_permissions=True)
-                    frappe.logger().info(f"Successfully added Employee {emp.name} to Employee Group {group_name}")
-            except Exception as e:
-                frappe.logger().error(f"Failed to add Employee to group: {str(e)}")
-                frappe.logger().error(frappe.get_traceback())
-                # Don't fail the entire creation if group membership fails
-                pass
+            # Ensure employee is assigned to Delivery group (best effort)
+            _ensure_employee_in_group(emp.name)
             party_id = emp.name
             final_display = emp.employee_name
         else:
