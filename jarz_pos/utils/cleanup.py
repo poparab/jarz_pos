@@ -152,6 +152,10 @@ def remove_conflicting_territory_delivery_fields() -> None:
 
         _sync("delivery_income", "Delivery Income", "is_group")
         _sync("delivery_expense", "Delivery Expense", "delivery_income")
+
+        # Remove legacy prefixed duplicates that should no longer exist.
+        for stale in ["custom_delivery_income", "custom_delivery_expense"]:
+            _safe_remove_custom_field("Territory", stale)
     except Exception as e:
         _log(f"remove_conflicting_territory_delivery_fields error: {e}")
 
