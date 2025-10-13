@@ -17,6 +17,8 @@ before_migrate = [
     "jarz_pos.utils.cleanup.remove_conflicting_territory_delivery_fields",
     # Remove any existing Custom Fields that collide with our fixtures by dt+fieldname
     "jarz_pos.utils.cleanup.remove_colliding_custom_fields_for_fixtures",
+    # Ensure Territory has delivery_income and delivery_expense fields
+    "jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
     # Ensure new delivery slot fields exist before fixtures import / migrations
     "jarz_pos.utils.cleanup.ensure_delivery_slot_fields",
     # Remove legacy single datetime field

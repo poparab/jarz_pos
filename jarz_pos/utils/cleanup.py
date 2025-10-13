@@ -83,11 +83,13 @@ def _ensure_custom_field(
 # Public API used from hooks.before_migrate
 
 def remove_conflicting_territory_delivery_fields() -> None:
-    """Remove legacy/duplicate fields that could conflict with fixtures.
+    """Remove legacy/duplicate fields that could conflict with proper field creation.
 
     - Sales Invoice: legacy delivery fields, stray state/duration
-    - Territory: delivery_income, delivery_expense
+    - Territory: any existing delivery_income, delivery_expense (will be recreated by ensure_territory_delivery_fields)
+    
     Safe no-op when fields are absent.
+    This runs before ensure_territory_delivery_fields to ensure clean field creation.
     """
     try:
         if not frappe:
@@ -102,7 +104,8 @@ def remove_conflicting_territory_delivery_fields() -> None:
         ]:
             _safe_remove_custom_field("Sales Invoice", fname)
 
-        # Territory conflicting fields (if any prior experiments created them)
+        # Territory fields (will be recreated by ensure_territory_delivery_fields)
+        # This removes any prior manual/experimental creations to ensure consistency
         q = frappe.get_all(
             "Custom Field",
             filters={"dt": "Territory", "fieldname": ["in", ["delivery_income", "delivery_expense"]]},
@@ -169,6 +172,47 @@ def ensure_delivery_slot_fields() -> None:
         )
     except Exception as e:
         _log(f"ensure_delivery_slot_fields error: {e}")
+
+
+def ensure_territory_delivery_fields() -> None:
+    """Ensure Territory has delivery_income and delivery_expense custom fields.
+
+    Fields:
+    - delivery_income (Currency) - Fee charged to customers for delivery
+    - delivery_expense (Currency) - Cost paid to courier for delivery
+    
+    These match the field names used throughout the codebase.
+    """
+    try:
+        if not frappe:
+            return
+        
+        # Find a suitable insert_after field
+        insert_after = "territory_name"
+        try:
+            meta = frappe.get_meta("Territory")
+            # Try to place after territory_name, fallback to parent_territory
+            if not meta.get_field("territory_name") and meta.get_field("parent_territory"):
+                insert_after = "parent_territory"
+        except Exception:
+            pass
+
+        _ensure_custom_field(
+            dt="Territory",
+            fieldname="delivery_income",
+            label="Delivery Income",
+            fieldtype="Currency",
+            insert_after=insert_after,
+        )
+        _ensure_custom_field(
+            dt="Territory",
+            fieldname="delivery_expense",
+            label="Delivery Expense",
+            fieldtype="Currency",
+            insert_after="delivery_income",
+        )
+    except Exception as e:
+        _log(f"ensure_territory_delivery_fields error: {e}")
 
 
 def remove_required_delivery_datetime_field() -> None:
