@@ -9,6 +9,12 @@ from typing import Optional
 
 import frappe
 
+try:  # frappe provides DuplicateEntryError in different modules across versions
+    from frappe.model.naming import DuplicateEntryError  # type: ignore
+except Exception:  # pragma: no cover - fallback for legacy releases
+# Re-exported in frappe.exceptions in some versions
+    from frappe import DuplicateEntryError  # type: ignore
+
 DELIVERY_EMP_GROUP_NAME = "Delivery"
 DELIVERY_SUP_GROUP_NAME = "Delivery"
 
@@ -246,12 +252,30 @@ def create_delivery_party(
             try:
                 emp.save(ignore_permissions=True)
                 frappe.logger().info(f"Successfully created Employee: {emp.name}")
+            except DuplicateEntryError:
+                existing_emp = frappe.db.get_value(
+                    "Employee",
+                    {"employee_name": display_name},
+                    ["name", "employee_name", "branch"],
+                    as_dict=True,
+                )
+                if existing_emp:
+                    return _reuse_existing(existing_emp)
+                frappe.throw(f"A courier with name '{display_name}' already exists. Please use a different name.")
             except Exception as e:
                 error_msg = str(e)
                 frappe.logger().error(f"Failed to save Employee: {error_msg}")
                 frappe.logger().error(frappe.get_traceback())
                 # Provide user-friendly error message
                 if "duplicate" in error_msg.lower():
+                    existing_emp = frappe.db.get_value(
+                        "Employee",
+                        {"employee_name": display_name},
+                        ["name", "employee_name", "branch"],
+                        as_dict=True,
+                    )
+                    if existing_emp:
+                        return _reuse_existing(existing_emp)
                     frappe.throw(f"A courier with name '{display_name}' already exists. Please use a different name.")
                 elif "mandatory" in error_msg.lower():
                     frappe.throw(f"Missing required field: {error_msg}")
@@ -276,12 +300,30 @@ def create_delivery_party(
             
             try:
                 sup.save(ignore_permissions=True)
+            except DuplicateEntryError:
+                existing_sup = frappe.db.get_value(
+                    "Supplier",
+                    {"supplier_name": display_name},
+                    ["name", "supplier_name", "branch"],
+                    as_dict=True,
+                )
+                if existing_sup:
+                    return _reuse_existing(existing_sup)
+                frappe.throw(f"A courier with name '{display_name}' already exists. Please use a different name.")
             except Exception as e:
                 error_msg = str(e)
                 frappe.logger().error(f"Failed to save Supplier: {error_msg}")
                 frappe.logger().error(frappe.get_traceback())
                 # Provide user-friendly error message
                 if "duplicate" in error_msg.lower():
+                    existing_sup = frappe.db.get_value(
+                        "Supplier",
+                        {"supplier_name": display_name},
+                        ["name", "supplier_name", "branch"],
+                        as_dict=True,
+                    )
+                    if existing_sup:
+                        return _reuse_existing(existing_sup)
                     frappe.throw(f"A courier with name '{display_name}' already exists. Please use a different name.")
                 elif "mandatory" in error_msg.lower():
                     frappe.throw(f"Missing required field: {error_msg}")
