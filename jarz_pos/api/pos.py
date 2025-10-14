@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import flt
 from typing import Optional
 
 @frappe.whitelist(allow_guest=False)
@@ -238,3 +239,72 @@ def get_sales_partners(search: Optional[str] = None, limit: int = 10):
     for p in partners:
         p["title"] = p.get("partner_name") or p.get("name")
     return partners
+
+
+@frappe.whitelist(allow_guest=False)
+def get_pos_profile_account_balance(profile: str):
+    """Return the cash account balance linked to a POS Profile.
+
+    The project convention stores one cash Drawer Account per POS profile using
+    the same name (optionally suffixed with the company abbreviation). This
+    helper resolves the account and aggregates posted GL entries to expose the
+    live drawer balance for the mobile client header.
+    """
+
+    profile_name = (profile or "").strip()
+    if not profile_name:
+        frappe.throw("POS profile is required")
+
+    profile_doc = frappe.db.get_value("POS Profile", profile_name, ["name", "company"], as_dict=True)
+    if not profile_doc:
+        frappe.throw(f"POS Profile '{profile_name}' was not found")
+
+    company = profile_doc.get("company")
+    company_abbr = frappe.db.get_value("Company", company, "abbr") if company else None
+
+    candidate_accounts = [profile_name]
+    if company_abbr and not profile_name.endswith(f" - {company_abbr}"):
+        candidate_accounts.append(f"{profile_name} - {company_abbr}")
+
+    account_doc = None
+    for candidate in candidate_accounts:
+        account_doc = frappe.db.get_value("Account", candidate, ["name", "account_currency"], as_dict=True)
+        if account_doc:
+            break
+
+    if not account_doc:
+        account_doc = frappe.db.get_value(
+            "Account",
+            {"account_name": profile_name, "company": company} if company else {"account_name": profile_name},
+            ["name", "account_currency"],
+            as_dict=True,
+        )
+
+    if not account_doc:
+        frappe.throw(f"Account matching POS profile '{profile_name}' was not found")
+
+    balance_row = frappe.db.sql(
+        """
+        select
+            coalesce(sum(debit), 0) - coalesce(sum(credit), 0) as balance
+        from `tabGL Entry`
+        where account = %s and docstatus = 1
+        """,
+        account_doc["name"],
+        as_dict=True,
+    )
+
+    balance_value = flt(balance_row[0]["balance"]) if balance_row else 0.0
+
+    currency = (
+        account_doc.get("account_currency")
+        or (company and frappe.db.get_value("Company", company, "default_currency"))
+        or frappe.defaults.get_global_default("currency")
+    )
+
+    return {
+        "profile": profile_name,
+        "account": account_doc["name"],
+        "balance": balance_value,
+        "currency": currency,
+    }
