@@ -8,7 +8,7 @@ app_license = "mit"
 # Fixtures
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
-        "Print Settings", "Sales Invoice", "Address", "Supplier", "Quotation", "Sales Order", "Customer"
+        "Print Settings", "Sales Invoice", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner"
     ]]]}
 ]
 
