@@ -2201,18 +2201,18 @@ def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding, 
     Special handling: If paid_to is 'Courier Outstanding' (internal tracking account),
     use Journal Entry instead of Payment Entry, with courier as party on Courier Outstanding side.
     """
-    # Check if target account is Courier Outstanding - use JE instead of PE
-    is_courier_outstanding = "Courier Outstanding" in paid_to_account
-    
-    if is_courier_outstanding:
-        # Use Journal Entry for Debtors → Courier Outstanding transfer
-        # This allows us to specify different parties for each account
+    account_type = frappe.db.get_value("Account", paid_to_account, "account_type") or ""
+    supports_party = account_type in {"Receivable", "Payable"}
+    use_party_je = supports_party and courier_party_type and courier_party
+
+    if use_party_je:
+        # Use Journal Entry for Debtors → Courier Outstanding transfer when destination ledger expects a party
         je = frappe.new_doc("Journal Entry")
         je.voucher_type = "Journal Entry"
         je.posting_date = frappe.utils.nowdate()
         je.company = inv.company
         je.title = f"Courier Outstanding – {inv.name}"
-        
+
         # CR Debtors (reduce receivable from customer)
         je.append("accounts", {
             "account": paid_from_account,
@@ -2223,62 +2223,49 @@ def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding, 
             "reference_type": "Sales Invoice",
             "reference_name": inv.name,
         })
-        
-        # DR Courier Outstanding (track amount courier owes us - with courier as party)
-        courier_entry = {
+
+        # DR Courier Outstanding with courier as party
+        je.append("accounts", {
             "account": paid_to_account,
+            "party_type": courier_party_type,
+            "party": courier_party,
             "debit_in_account_currency": outstanding,
             "credit_in_account_currency": 0,
-        }
-        # Add courier party only when the ledger supports party assignments
-        if courier_party_type and courier_party:
-            account_type = frappe.db.get_value("Account", paid_to_account, "account_type")
-            if account_type in {"Receivable", "Payable"}:
-                courier_entry["party_type"] = courier_party_type
-                courier_entry["party"] = courier_party
-            else:
-                frappe.logger().warning(
-                    "Skipping party assignment for %s (type: %s) during courier outstanding transfer",
-                    paid_to_account,
-                    account_type,
-                )
-        je.append("accounts", courier_entry)
-        
+        })
+
         je.user_remark = f"Transfer receivable to Courier Outstanding for {inv.name}"
         je.save(ignore_permissions=True)
         je.submit()
         return je
-    else:
-        # Normal Receive: from Customer to Cash/Bank
-        pe = frappe.new_doc("Payment Entry")
-        pe.payment_type = "Receive"
-        pe.company = inv.company
-        pe.party_type = "Customer"
-        pe.party = inv.customer
-        pe.paid_from = paid_from_account  # Debtors (party account)
-        pe.paid_to = paid_to_account      # Cash/Bank account
-        pe.paid_amount = outstanding
-        pe.received_amount = outstanding
-        
-        # Allocate full amount to invoice to close it
-        pe.append(
-            "references",
-            {
-                "reference_doctype": "Sales Invoice",
-                "reference_name": inv.name,
-                "due_date": inv.get("due_date"),
-                "total_amount": inv.grand_total,
-                "outstanding_amount": outstanding,
-                "allocated_amount": outstanding,
-            },
-        )
-        
-        # Minimal bank fields placeholders
-        pe.reference_no = f"PAY-{inv.name}"
-        pe.reference_date = frappe.utils.nowdate()
-        pe.save(ignore_permissions=True)
-        pe.submit()
-        return pe
+
+    # Default behaviour: create a Receive Payment Entry (Debtors → Courier Outstanding)
+    pe = frappe.new_doc("Payment Entry")
+    pe.payment_type = "Receive"
+    pe.company = inv.company
+    pe.party_type = "Customer"
+    pe.party = inv.customer
+    pe.paid_from = paid_from_account  # Debtors (party account)
+    pe.paid_to = paid_to_account      # Cash/Bank (courier outstanding) ledger
+    pe.paid_amount = outstanding
+    pe.received_amount = outstanding
+
+    pe.append(
+        "references",
+        {
+            "reference_doctype": "Sales Invoice",
+            "reference_name": inv.name,
+            "due_date": inv.get("due_date"),
+            "total_amount": inv.grand_total,
+            "outstanding_amount": outstanding,
+            "allocated_amount": outstanding,
+        },
+    )
+
+    pe.reference_no = f"PAY-{inv.name}"
+    pe.reference_date = frappe.utils.nowdate()
+    pe.save(ignore_permissions=True)
+    pe.submit()
+    return pe
 
 
 def _create_shipping_expense_to_creditors_je(inv, shipping_exp: float, creditors_acc: str, party_type: str, party: str) -> str:
