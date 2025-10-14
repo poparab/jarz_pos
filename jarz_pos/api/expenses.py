@@ -22,9 +22,7 @@ class PaymentSource:
 
 def _is_manager() -> bool:
     roles = set(frappe.get_roles(frappe.session.user))
-    if "JARZ Manager" in roles:
-        return True
-    privileged = {"System Manager", "Accounts Manager", "Account Manager", "Accounts User"}
+    privileged = {"JARZ Manager", "System Manager"}
     return bool(roles.intersection(privileged))
 
 
