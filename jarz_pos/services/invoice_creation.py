@@ -946,7 +946,7 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
             except Exception:
                 pass
             try:
-                _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name)
+                _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name, payment_mode="Online")
             except Exception as sp_err:
                 print(f"   ⚠️ Sales Partner paid OFD hook failed: {sp_err}")
                 try:
@@ -990,7 +990,7 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
                 except Exception:
                     pass
                 try:
-                    _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name)
+                    _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name, payment_mode="Online")
                 except Exception as sp_err:
                     print(f"   ⚠️ Sales Partner paid OFD hook (JE fallback) failed: {sp_err}")
                     try:

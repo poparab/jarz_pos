@@ -575,7 +575,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
 
 
 @frappe.whitelist()
-def sales_partner_paid_out_for_delivery(invoice_name: str):
+def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | None = None):
     """Handle Out For Delivery transition for a PAID Sales Partner invoice.
 
     Use case: Invoice already fully paid (e.g. online payment). We still need to:
@@ -594,6 +594,9 @@ def sales_partner_paid_out_for_delivery(invoice_name: str):
     sales_partner = getattr(inv, "sales_partner", None) or getattr(inv, "sales_partner_name", None)
     if not sales_partner:
         frappe.throw("Invoice has no Sales Partner; use regular flow")
+
+    explicit_mode = (payment_mode or "").strip().lower()
+    explicit_online = explicit_mode in {"online", "instapay", "wallet", "card", "bank"}
 
     # Set state
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
@@ -651,6 +654,11 @@ def sales_partner_paid_out_for_delivery(invoice_name: str):
                                 break
             except Exception:
                 # Default to cash if uncertain to avoid applying extra fees by mistake
+                is_online = False
+
+            if explicit_online:
+                is_online = True
+            elif explicit_mode == "cash":
                 is_online = False
             fees = _compute_sales_partner_fees(inv, sales_partner, online=is_online)
             spt = frappe.new_doc("Sales Partner Transactions")
