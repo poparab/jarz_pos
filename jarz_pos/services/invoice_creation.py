@@ -19,6 +19,7 @@ from jarz_pos.utils.invoice_utils import (
     add_items_to_invoice,
     verify_invoice_totals
 )
+from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 from jarz_pos.utils.account_utils import (
     get_company_receivable_account,
@@ -944,6 +945,14 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
                 logger.info(f"Online Payment Entry created: {pe.name} to {paid_to}")
             except Exception:
                 pass
+            try:
+                _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name)
+            except Exception as sp_err:
+                print(f"   ⚠️ Sales Partner paid OFD hook failed: {sp_err}")
+                try:
+                    logger.warning(f"Sales Partner paid OFD hook failed: {sp_err}")
+                except Exception:
+                    pass
             return
         except Exception as pe_err:
             # Fallback: create a Journal Entry to transfer AR -> partner subaccount and knock off invoice
@@ -980,6 +989,14 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
                     logger.info(f"JE fallback created: {je.name}")
                 except Exception:
                     pass
+                try:
+                    _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name)
+                except Exception as sp_err:
+                    print(f"   ⚠️ Sales Partner paid OFD hook (JE fallback) failed: {sp_err}")
+                    try:
+                        logger.warning(f"Sales Partner paid OFD hook (JE fallback) failed: {sp_err}")
+                    except Exception:
+                        pass
                 return
             except Exception as je_err:
                 print(f"   ❌ JE fallback failed: {je_err}")
