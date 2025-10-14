@@ -2230,10 +2230,18 @@ def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding, 
             "debit_in_account_currency": outstanding,
             "credit_in_account_currency": 0,
         }
-        # Add courier party if provided (required for receivable/payable accounts)
+        # Add courier party only when the ledger supports party assignments
         if courier_party_type and courier_party:
-            courier_entry["party_type"] = courier_party_type
-            courier_entry["party"] = courier_party
+            account_type = frappe.db.get_value("Account", paid_to_account, "account_type")
+            if account_type in {"Receivable", "Payable"}:
+                courier_entry["party_type"] = courier_party_type
+                courier_entry["party"] = courier_party
+            else:
+                frappe.logger().warning(
+                    "Skipping party assignment for %s (type: %s) during courier outstanding transfer",
+                    paid_to_account,
+                    account_type,
+                )
         je.append("accounts", courier_entry)
         
         je.user_remark = f"Transfer receivable to Courier Outstanding for {inv.name}"
