@@ -1225,6 +1225,35 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         )
         je_name = existing[0] if existing else None
 
+        if je_name and shipping_exp > 0:
+            try:
+                existing_je = frappe.get_doc("Journal Entry", je_name)
+                has_expected_freight = any(
+                    acc.account == freight_acc and float(acc.debit_in_account_currency or 0) > 0
+                    for acc in existing_je.accounts
+                )
+                if settlement == "cash_now":
+                    has_expected_cash = any(
+                        acc.account == cash_acc and float(acc.credit_in_account_currency or 0) > 0
+                        for acc in existing_je.accounts
+                    )
+                    mismatch = not (has_expected_freight and has_expected_cash)
+                else:
+                    has_expected_creditors = any(
+                        acc.account == creditors_acc and float(acc.credit_in_account_currency or 0) > 0
+                        for acc in existing_je.accounts
+                    )
+                    mismatch = not (has_expected_freight and has_expected_creditors)
+                if mismatch:
+                    frappe.logger().info(
+                        f"handle_out_for_delivery_paid correcting legacy JE {je_name} for settlement={settlement}"
+                    )
+                    existing_je.cancel()
+                    existing_je.delete(ignore_permissions=True)
+                    je_name = None
+            except Exception:
+                je_name = None
+
         if not je_name and shipping_exp > 0:
             je = frappe.new_doc("Journal Entry")
             je.voucher_type = "Journal Entry"
