@@ -260,6 +260,10 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
             party = existing_party[0].party
         else:
             frappe.throw("party_type & party are required (courier must be an Employee or Supplier)")
+    
+    # Store party info for JE creation
+    courier_party_type = party_type
+    courier_party = party
 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
@@ -335,7 +339,8 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         pe_name = None
     if not pe_name and outstanding > 0.0001:
         try:
-            pe = _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding)
+            # Pass courier party info to _create_payment_entry for JE creation
+            pe = _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding, courier_party_type, courier_party)
             pe_name = pe.name
         except Exception as pe_err:
             # Handle validation where SI is already fully paid; proceed without blocking
@@ -692,6 +697,111 @@ def sales_partner_paid_out_for_delivery(invoice_name: str):
     }
     frappe.publish_realtime("jarz_pos_sales_partner_paid_ofd", payload, user="*")
     return payload
+
+
+@frappe.whitelist()
+def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: str = "cash_now", pos_profile: str = "", party_type: str | None = None, party: str | None = None):
+    """Handle Out For Delivery transition for PAID invoices with courier settlement.
+    
+    Args:
+        invoice_name: Sales Invoice name
+        courier: Courier identifier (legacy, not used for party operations)
+        settlement: 'cash_now' (immediate settlement) or 'later' (deferred)
+        pos_profile: POS Profile for account resolution
+        party_type: 'Employee' or 'Supplier'
+        party: Party identifier (Employee ID or Supplier name)
+    
+    Returns:
+        dict with success, journal_entry (if cash_now), courier_transaction (if later), delivery_note, etc.
+    """
+    if not invoice_name:
+        frappe.throw("invoice_name is required")
+    if not (party_type and party):
+        frappe.throw("party_type and party are required for courier operations")
+    
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+    
+    company = inv.company
+    
+    # Get shipping expense
+    shipping_exp = _get_delivery_expense_amount(inv)
+    
+    # Update state to Out for Delivery
+    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
+        try:
+            inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
+        except Exception:
+            inv.set("custom_sales_invoice_state", "Out for Delivery")
+            inv.save(ignore_permissions=True)
+    
+    # Ensure Delivery Note
+    dn_result = ensure_delivery_note_for_invoice(inv.name)
+    if dn_result.get("error"):
+        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+    
+    result = {
+        "success": True,
+        "invoice": inv.name,
+        "delivery_note": dn_result.get("delivery_note"),
+        "delivery_note_reused": dn_result.get("reused"),
+        "shipping_amount": shipping_exp or 0,
+    }
+    
+    if settlement == "cash_now" and shipping_exp and shipping_exp > 0:
+        # Immediate settlement: Branch pays courier shipping expense via Journal Entry
+        creditors_acc = get_creditors_account(company)
+        je_name = _create_shipping_expense_to_creditors_je(inv, shipping_exp, creditors_acc, party_type, party)
+        result["journal_entry"] = je_name
+        
+        # Create Settled Courier Transaction for record keeping
+        ct = frappe.new_doc("Courier Transaction")
+        ct.party_type = party_type
+        ct.party = party
+        ct.date = frappe.utils.now_datetime()
+        ct.reference_invoice = inv.name
+        ct.amount = 0  # Invoice already paid
+        ct.shipping_amount = float(shipping_exp or 0)
+        ct.status = "Settled"
+        ct.payment_mode = "Cash"
+        ct.notes = f"Paid invoice courier settlement (immediate) - JE: {je_name}"
+        ct.insert(ignore_permissions=True)
+        result["courier_transaction"] = ct.name
+        
+    elif settlement == "later":
+        # Deferred settlement: Create Unsettled Courier Transaction
+        existing_ct = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": inv.name,
+                "party_type": party_type,
+                "party": party,
+                "status": ["!=", "Settled"],
+            },
+            pluck="name",
+            limit_page_length=1,
+        )
+        if existing_ct:
+            ct_name = existing_ct[0]
+        else:
+            ct = frappe.new_doc("Courier Transaction")
+            ct.party_type = party_type
+            ct.party = party
+            ct.date = frappe.utils.now_datetime()
+            ct.reference_invoice = inv.name
+            ct.amount = 0  # Invoice already paid
+            ct.shipping_amount = float(shipping_exp or 0)
+            ct.status = "Unsettled"
+            ct.payment_mode = "Deferred"
+            ct.notes = "Paid invoice courier settlement (deferred)"
+            ct.insert(ignore_permissions=True)
+            ct_name = ct.name
+        result["courier_transaction"] = ct_name
+    
+    # Publish realtime event
+    frappe.publish_realtime("jarz_pos_ofd_paid", result, user="*")
+    return result
 
 
 @frappe.whitelist()
@@ -2056,38 +2166,82 @@ def get_courier_balances():
     return data
 
 
-def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding):
-    """Create and submit payment entry for courier outstanding."""
-    pe = frappe.new_doc("Payment Entry")
-    pe.payment_type = "Receive"
-    pe.company = inv.company
-    pe.party_type = "Customer"
-    pe.party = inv.customer
-    pe.paid_from = paid_from_account  # Debtors (party account)
-    pe.paid_to = paid_to_account      # Courier Outstanding (asset/receivable)
-    pe.paid_amount = outstanding
-    pe.received_amount = outstanding
+def _create_payment_entry(inv, paid_from_account, paid_to_account, outstanding, courier_party_type=None, courier_party=None):
+    """Create and submit payment entry for courier outstanding.
     
-    # Allocate full amount to invoice to close it
-    pe.append(
-        "references",
-        {
-            "reference_doctype": "Sales Invoice",
+    Special handling: If paid_to is 'Courier Outstanding' (internal tracking account),
+    use Journal Entry instead of Payment Entry, with courier as party on Courier Outstanding side.
+    """
+    # Check if target account is Courier Outstanding - use JE instead of PE
+    is_courier_outstanding = "Courier Outstanding" in paid_to_account
+    
+    if is_courier_outstanding:
+        # Use Journal Entry for Debtors → Courier Outstanding transfer
+        # This allows us to specify different parties for each account
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.posting_date = frappe.utils.nowdate()
+        je.company = inv.company
+        je.title = f"Courier Outstanding – {inv.name}"
+        
+        # CR Debtors (reduce receivable from customer)
+        je.append("accounts", {
+            "account": paid_from_account,
+            "party_type": "Customer",
+            "party": inv.customer,
+            "credit_in_account_currency": outstanding,
+            "debit_in_account_currency": 0,
+            "reference_type": "Sales Invoice",
             "reference_name": inv.name,
-            "due_date": inv.get("due_date"),
-            "total_amount": inv.grand_total,
-            "outstanding_amount": outstanding,
-            "allocated_amount": outstanding,
-        },
-    )
-    
-    # Minimal bank fields placeholders
-    pe.reference_no = f"COURIER-OUT-{inv.name}"
-    pe.reference_date = frappe.utils.nowdate()
-    pe.save(ignore_permissions=True)
-    pe.submit()
-    
-    return pe
+        })
+        
+        # DR Courier Outstanding (track amount courier owes us - with courier as party)
+        courier_entry = {
+            "account": paid_to_account,
+            "debit_in_account_currency": outstanding,
+            "credit_in_account_currency": 0,
+        }
+        # Add courier party if provided (required for receivable/payable accounts)
+        if courier_party_type and courier_party:
+            courier_entry["party_type"] = courier_party_type
+            courier_entry["party"] = courier_party
+        je.append("accounts", courier_entry)
+        
+        je.user_remark = f"Transfer receivable to Courier Outstanding for {inv.name}"
+        je.save(ignore_permissions=True)
+        je.submit()
+        return je
+    else:
+        # Normal Receive: from Customer to Cash/Bank
+        pe = frappe.new_doc("Payment Entry")
+        pe.payment_type = "Receive"
+        pe.company = inv.company
+        pe.party_type = "Customer"
+        pe.party = inv.customer
+        pe.paid_from = paid_from_account  # Debtors (party account)
+        pe.paid_to = paid_to_account      # Cash/Bank account
+        pe.paid_amount = outstanding
+        pe.received_amount = outstanding
+        
+        # Allocate full amount to invoice to close it
+        pe.append(
+            "references",
+            {
+                "reference_doctype": "Sales Invoice",
+                "reference_name": inv.name,
+                "due_date": inv.get("due_date"),
+                "total_amount": inv.grand_total,
+                "outstanding_amount": outstanding,
+                "allocated_amount": outstanding,
+            },
+        )
+        
+        # Minimal bank fields placeholders
+        pe.reference_no = f"PAY-{inv.name}"
+        pe.reference_date = frappe.utils.nowdate()
+        pe.save(ignore_permissions=True)
+        pe.submit()
+        return pe
 
 
 def _create_shipping_expense_to_creditors_je(inv, shipping_exp: float, creditors_acc: str, party_type: str, party: str) -> str:
