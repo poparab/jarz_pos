@@ -1,0 +1,220 @@
+{
+ "doctype": "DocType",
+ "name": "Jarz Expense Request",
+ "module": "jarz pos",
+ "custom": 0,
+ "istable": 0,
+ "editable_grid": 0,
+ "track_changes": 1,
+ "track_seen": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "naming_rule": "Naming Series",
+ "autoname": "naming_series:",
+ "is_submittable": 1,
+ "allow_copy": 0,
+ "allow_rename": 0,
+ "submit_on_creation": 0,
+ "show_name_in_global_search": 1,
+ "index_web_pages_for_search": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "expense_date",
+  "amount",
+  "currency",
+  "section_break_details",
+  "reason_account",
+  "reason_label",
+  "column_break_payment",
+  "paying_account",
+  "payment_source_type",
+  "payment_source_label",
+  "pos_profile",
+  "requires_approval",
+    "status",
+  "remarks",
+  "section_break_meta",
+  "requested_by",
+  "company",
+  "expense_month",
+  "approved_by",
+  "approved_on",
+  "journal_entry"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Data",
+   "label": "Series",
+   "options": "",
+   "default": "JEXP-.#####",
+   "read_only": 1
+  },
+  {
+   "fieldname": "expense_date",
+   "fieldtype": "Date",
+   "label": "Expense Date",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Amount",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "section_break_details",
+   "fieldtype": "Section Break",
+   "label": "Details"
+  },
+  {
+   "fieldname": "reason_account",
+   "fieldtype": "Link",
+   "label": "Reason (Expense Account)",
+   "options": "Account",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "reason_label",
+   "fieldtype": "Data",
+   "label": "Reason Label",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_payment",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "paying_account",
+   "fieldtype": "Link",
+   "label": "Paying Account",
+   "options": "Account",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "payment_source_type",
+   "fieldtype": "Select",
+   "label": "Payment Source Type",
+   "options": "POS Profile\nCash\nMobile Wallet\nBank\nAccount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payment_source_label",
+   "fieldtype": "Data",
+   "label": "Payment Source",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "label": "POS Profile",
+   "options": "POS Profile"
+  },
+  {
+   "fieldname": "requires_approval",
+   "fieldtype": "Check",
+   "label": "Requires Approval",
+   "read_only": 1
+  },
+    {
+     "fieldname": "status",
+     "fieldtype": "Data",
+     "label": "Status",
+     "read_only": 1,
+     "in_list_view": 1,
+     "in_standard_filter": 1
+    },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "section_break_meta",
+   "fieldtype": "Section Break",
+   "label": "Meta"
+  },
+  {
+   "fieldname": "requested_by",
+   "fieldtype": "Link",
+   "label": "Requested By",
+   "options": "User",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "expense_month",
+   "fieldtype": "Data",
+   "label": "Expense Month",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "options": "User",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "approved_on",
+   "fieldtype": "Datetime",
+   "label": "Approved On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "journal_entry",
+   "fieldtype": "Link",
+   "label": "Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1,
+   "in_list_view": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  }
+ ],
+ "links": [],
+ "actions": [],
+ "allow_import": 0
+}
