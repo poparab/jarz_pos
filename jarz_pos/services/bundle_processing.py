@@ -189,15 +189,16 @@ class BundleProcessor:
 
             aggregated.setdefault(item_code, {"qty": 0, "rate": None})
 
-            raw_qty = entry_dict.get("quantity")
-            if raw_qty in (None, ""):
-                raw_qty = entry_dict.get("qty")
-            try:
-                qty_increment = cint(raw_qty) if raw_qty not in (None, "") else 1
-            except Exception:
-                qty_increment = 1
-            if qty_increment <= 0:
-                qty_increment = 1
+            qty_increment = 1
+            for explicit_key in ("selected_quantity", "selection_quantity", "selected_qty", "count", "quantity"):
+                if explicit_key in entry_dict and entry_dict[explicit_key] not in (None, ""):
+                    try:
+                        candidate = cint(entry_dict[explicit_key])
+                        if candidate > 0:
+                            qty_increment = candidate
+                        break
+                    except Exception:
+                        continue
 
             aggregated[item_code]["qty"] += qty_increment
 
