@@ -525,9 +525,18 @@ def _process_cart_items(cart_items, pos_profile, logger):
             print(f"      ⚠️ Negative rate {rate}, using 0")
             rate = 0
         
+        selected_items = item_data.get("selected_items") if hasattr(item_data, "get") else None
+
         if is_bundle:
             # Process bundle item
-            bundle_items = _process_bundle_item(item_code, qty, rate, pos_profile, logger)
+            bundle_items = _process_bundle_item(
+                item_code,
+                qty,
+                rate,
+                pos_profile,
+                logger,
+                selected_items=selected_items,
+            )
             processed_items.extend(bundle_items)
         else:
             # Process regular item
@@ -544,7 +553,7 @@ def _process_cart_items(cart_items, pos_profile, logger):
     return processed_items
 
 
-def _process_bundle_item(item_code, qty, rate, pos_profile, logger):
+def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_items=None):
     """Process a bundle item."""
     print(f"      🎁 BUNDLE DETECTED: {item_code}")
     print(f"      🔌 Processing bundle using ERPNext item: {item_code}")
@@ -561,7 +570,11 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger):
         print(f"      ✅ Found bundle: {bundle_code} for ERPNext item: {item_code}")
         
         # Process bundle using ERPNext item code (not bundle record ID)
-        bundle_items = process_bundle_for_invoice(item_code, qty)
+        bundle_items = process_bundle_for_invoice(
+            item_code,
+            qty,
+            selected_items=selected_items,
+        )
         print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
         return bundle_items
     except Exception as bundle_error:

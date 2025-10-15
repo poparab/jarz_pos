@@ -19,12 +19,14 @@ class BundleProcessor:
     Handles bundle expansion and pricing logic for POS invoices
     """
     
-    def __init__(self, bundle_code, quantity=1):
+    def __init__(self, bundle_code, quantity=1, selected_items=None):
         self.bundle_code = bundle_code
         self.quantity = quantity
         self.bundle_doc = None
         self.parent_item = None
         self.bundle_items = []
+        # Expected shape: { group_name: [ {id: item_code, ...}, ... ] }
+        self.selected_items = selected_items or {}
 
     def get_item_rate(self, item_code):
         """
@@ -84,28 +86,66 @@ class BundleProcessor:
                 # We need to get items from this item group
                 item_group_name = item_group_row.item_group
                 item_quantity = item_group_row.quantity
-                
-                # Get the first available item from this item group
-                items_in_group = frappe.get_all("Item",
+
+                # Fetch all candidate items within this group for UI parity and validation
+                items_in_group = frappe.get_all(
+                    "Item",
                     filters={
                         "item_group": item_group_name,
                         "disabled": 0,
-                        "has_variants": 0
+                        "has_variants": 0,
                     },
                     fields=["name", "item_name", "standard_rate", "stock_uom"],
-                    limit=1)
-                
+                )
+
                 if not items_in_group:
                     frappe.throw(f"No available items found in item group '{item_group_name}'")
-                
+
+                # Attempt to honor user-selected items for this group (if provided from client)
+                allowed_codes = {row["name"] for row in items_in_group}
+
+                aggregated_selected = self._aggregate_selected_items(
+                    item_group_name,
+                    item_quantity,
+                )
+
+                if aggregated_selected:
+                    invalid_codes = [code for code in aggregated_selected.keys() if code not in allowed_codes]
+                    if invalid_codes:
+                        frappe.throw(_(f"Bundle {self.bundle_code}: invalid selections for group '{item_group_name}': {', '.join(invalid_codes)}"))
+
+                    for item_code, data in aggregated_selected.items():
+                        try:
+                            item_doc = frappe.get_doc("Item", item_code)
+                        except Exception:
+                            frappe.throw(
+                                _(f"Selected item '{item_code}' for bundle {self.bundle_code} could not be found"))
+
+                        override_rate = data.get("rate")
+                        if override_rate is not None:
+                            rate = flt(override_rate)
+                        else:
+                            rate = self.get_item_rate(item_doc.name)
+
+                        self.bundle_items.append({
+                            'item': item_doc,
+                            'qty': data["qty"],
+                            'rate': rate,
+                            'item_group': item_group_name,
+                        })
+
+                    # Skip fallback when selections were provided
+                    continue
+
+                # No explicit selections provided — fallback to legacy behaviour (first available item)
                 selected_item = items_in_group[0]
                 item_doc = frappe.get_doc("Item", selected_item['name'])
-                
+
                 self.bundle_items.append({
                     'item': item_doc,
                     'qty': item_quantity,
                     'rate': self.get_item_rate(item_doc.name),
-                    'item_group': item_group_name
+                    'item_group': item_group_name,
                 })
                 
             frappe.log_error(f"Bundle loaded: {self.bundle_code}, ERPNext Item: {self.parent_item.name}, Child Items: {len(self.bundle_items)}", "Bundle Processing")
@@ -113,6 +153,71 @@ class BundleProcessor:
         except Exception as e:
             frappe.log_error(f"Bundle loading error: {str(e)}", "Bundle Processing")
             raise
+
+    def _aggregate_selected_items(self, item_group_name, required_quantity):
+        """Normalize and validate selected items coming from the client for a given group."""
+        if not self.selected_items:
+            return {}
+
+        matched_key = None
+        for key in self.selected_items.keys():
+            if key == item_group_name:
+                matched_key = key
+                break
+            if isinstance(key, str) and isinstance(item_group_name, str) and key.lower() == item_group_name.lower():
+                matched_key = key
+                break
+
+        if matched_key is None:
+            return {}
+
+        raw_entries = self.selected_items.get(matched_key) or []
+        if not raw_entries:
+            frappe.throw(_(f"Bundle {self.bundle_code}: no items supplied for required group '{item_group_name}'"))
+
+        aggregated = {}
+        total_selected = 0
+
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+
+            entry_dict = dict(entry)
+            item_code = entry_dict.get("id") or entry_dict.get("item_code") or entry_dict.get("name")
+            if not item_code:
+                continue
+
+            aggregated.setdefault(item_code, {"qty": 0, "rate": None})
+
+            raw_qty = entry_dict.get("quantity")
+            if raw_qty in (None, ""):
+                raw_qty = entry_dict.get("qty")
+            try:
+                qty_increment = cint(raw_qty) if raw_qty not in (None, "") else 1
+            except Exception:
+                qty_increment = 1
+            if qty_increment <= 0:
+                qty_increment = 1
+
+            aggregated[item_code]["qty"] += qty_increment
+
+            price_value = entry_dict.get("price")
+            if price_value is None:
+                price_value = entry_dict.get("rate")
+            if price_value is not None:
+                aggregated[item_code]["rate"] = flt(price_value)
+
+            total_selected += qty_increment
+
+        if not aggregated:
+            frappe.throw(_(f"Bundle {self.bundle_code}: no valid items supplied for group '{item_group_name}'"))
+
+        if required_quantity:
+            required_quantity = cint(required_quantity)
+            if required_quantity and total_selected != required_quantity:
+                frappe.throw(_(f"Bundle {self.bundle_code}: expected {required_quantity} selection(s) from '{item_group_name}', received {total_selected}"))
+
+        return aggregated
             
     def calculate_child_discount_percentage(self):
         """Return uniform discount percentage for child items ensuring bundle price match.
@@ -275,7 +380,7 @@ class BundleProcessor:
         return invoice_items
 
 
-def process_bundle_for_invoice(bundle_identifier, quantity=1):
+def process_bundle_for_invoice(bundle_identifier, quantity=1, selected_items=None):
     """
     Main function to process bundle for invoice
     
@@ -284,6 +389,7 @@ def process_bundle_for_invoice(bundle_identifier, quantity=1):
             - ERPNext Item code (from bundle.erpnext_item field) 
             - Jarz Bundle record ID
         quantity (int): Quantity of bundles
+        selected_items (dict | None): Mapping of bundle item groups to user-selected item codes
         
     Returns:
         list: List of invoice items (parent + children with discounts)
@@ -313,7 +419,7 @@ def process_bundle_for_invoice(bundle_identifier, quantity=1):
                 frappe.throw(f"No Jarz Bundle found for identifier '{bundle_identifier}'. Checked both erpnext_item field and bundle record ID.")
         
         # Process the bundle using the bundle record ID
-        processor = BundleProcessor(bundle_code, quantity)
+        processor = BundleProcessor(bundle_code, quantity, selected_items=selected_items)
         result = processor.get_invoice_items()
         
         frappe.log_error(f"✅ Bundle processing complete: {len(result)} items generated", "Bundle Processing")
