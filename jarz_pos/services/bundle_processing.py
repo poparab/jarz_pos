@@ -263,8 +263,18 @@ class BundleProcessor:
         if total_child_price <= 0:
             frappe.throw(_(f"Bundle {self.bundle_code} has zero total child price"))
 
-        if bundle_price > total_child_price + 1e-9:  # small epsilon
-            frappe.throw(_(f"Bundle price ({bundle_price}) exceeds sum of child item prices ({total_child_price}) for bundle {self.bundle_code}"))
+        # Allow bundle price to exceed child prices (negative discount = markup)
+        # This supports flexible bundle pricing where selected items may cost less than bundle price
+        if bundle_price > total_child_price + 1e-9:
+            frappe.logger("jarz_pos.bundle").warning({
+                "event": "bundle_price_exceeds_children",
+                "bundle": self.bundle_code,
+                "bundle_price": bundle_price,
+                "child_total": total_child_price,
+                "note": "Bundle price higher than selected items - will apply 0% discount and use bundle price as-is"
+            })
+            # Return 0% discount - children keep their rates, parent becomes the price adjuster
+            return 0.0, total_child_price, bundle_price
 
         # discount% = ((total_child_price - bundle_price) / total_child_price) * 100
         discount_percentage = ((total_child_price - bundle_price) / total_child_price) * 100.0
@@ -366,12 +376,14 @@ class BundleProcessor:
             })
 
         # Rounding correction: adjust last child's discount_percentage to hit exact bundle_price
+        # Only apply when uniform_pct > 0 (i.e., when bundle price < child total)
+        # When bundle price > child total (uniform_pct = 0), skip rounding and let parent absorb difference
         target_children_total = flt(bundle_price, amount_precision)
         current_children_total = flt(running_children_discounted_total, amount_precision)
         residual = flt(target_children_total - current_children_total, amount_precision)
 
         min_step = 1 / (10 ** amount_precision)
-        if child_lines and abs(residual) >= min_step:
+        if child_lines and abs(residual) >= min_step and uniform_pct > 0:
             last = child_lines[-1]
             unit_rate = last['_unit_rate']
             qty_total = last['_qty_total']
