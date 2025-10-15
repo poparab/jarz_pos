@@ -96,6 +96,7 @@ class BundleProcessor:
                         "has_variants": 0,
                     },
                     fields=["name", "item_name", "standard_rate", "stock_uom"],
+                    limit=0,
                 )
 
                 if not items_in_group:
@@ -113,6 +114,14 @@ class BundleProcessor:
                     invalid_codes = [code for code in aggregated_selected.keys() if code not in allowed_codes]
                     if invalid_codes:
                         frappe.throw(_(f"Bundle {self.bundle_code}: invalid selections for group '{item_group_name}': {', '.join(invalid_codes)}"))
+
+                    frappe.logger("jarz_pos.bundle").info({
+                        "event": "bundle_selections_applied",
+                        "bundle": self.bundle_code,
+                        "group": item_group_name,
+                        "required": item_quantity,
+                        "selections": {code: data["qty"] for code, data in aggregated_selected.items()},
+                    })
 
                     for item_code, data in aggregated_selected.items():
                         try:
@@ -190,15 +199,23 @@ class BundleProcessor:
             aggregated.setdefault(item_code, {"qty": 0, "rate": None})
 
             qty_increment = 1
-            for explicit_key in ("selected_quantity", "selection_quantity", "selected_qty", "count", "quantity"):
-                if explicit_key in entry_dict and entry_dict[explicit_key] not in (None, ""):
-                    try:
-                        candidate = cint(entry_dict[explicit_key])
-                        if candidate > 0:
-                            qty_increment = candidate
+            for explicit_key in (
+                "selected_quantity",
+                "selection_quantity",
+                "selected_qty",
+                "selected_count",
+                "count",
+            ):
+                value = entry_dict.get(explicit_key)
+                if value in (None, ""):
+                    continue
+                try:
+                    candidate = cint(value)
+                    if candidate > 0:
+                        qty_increment = candidate
                         break
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
 
             aggregated[item_code]["qty"] += qty_increment
 
@@ -216,6 +233,16 @@ class BundleProcessor:
         if required_quantity:
             required_quantity = cint(required_quantity)
             if required_quantity and total_selected != required_quantity:
+                log_map = {code: data["qty"] for code, data in aggregated.items()}
+                frappe.logger("jarz_pos.bundle").warning({
+                    "event": "bundle_selection_mismatch",
+                    "bundle": self.bundle_code,
+                    "group": item_group_name,
+                    "required": required_quantity,
+                    "received": total_selected,
+                    "entries": log_map,
+                    "raw_count": len(raw_entries),
+                })
                 frappe.throw(_(f"Bundle {self.bundle_code}: expected {required_quantity} selection(s) from '{item_group_name}', received {total_selected}"))
 
         return aggregated
