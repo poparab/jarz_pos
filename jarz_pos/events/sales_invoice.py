@@ -48,11 +48,19 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 
 
 def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
-	"""Notify listeners a Sales Invoice has been submitted.
+	"""Notify listeners a Sales Invoice has been submitted."""
+	try:
+		from jarz_pos.api import notifications as _notifications  # local import to avoid circulars
 
-	Minimal payload to avoid coupling; extend as needed by UI.
-	"""
-	_safe_publish("jarz_pos:new_invoice", {"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)})
+		_notifications.handle_invoice_submission(doc)
+	except Exception:
+		# Fall back to legacy event payload if enhanced notification fails
+		_safe_publish(
+			"jarz_pos:new_invoice",
+			{"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)},
+		)
+		if frappe:
+			frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
 
 
 def publish_state_change_if_needed(doc: Any, method: Optional[str] = None) -> None:

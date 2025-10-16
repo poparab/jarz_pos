@@ -3,11 +3,14 @@ Jarz POS - Notification and polling API endpoints
 Alternative to websocket-based notifications for mobile clients
 """
 
-import frappe
-from frappe import _
 import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+import requests  # type: ignore[import]
+
+import frappe
+from frappe import _
 
 
 @frappe.whitelist(allow_guest=False)
@@ -276,3 +279,444 @@ def get_websocket_debug_info() -> Dict[str, Any]:
             "error": str(e),
             "timestamp": frappe.utils.now()
         }
+
+
+# ---------------------------------------------------------------------------
+# Mobile push registration & alert lifecycle
+# ---------------------------------------------------------------------------
+
+FCM_ENDPOINT = "https://fcm.googleapis.com/fcm/send"
+MAX_FCM_TOKENS_PER_BATCH = 500
+
+
+@frappe.whitelist(allow_guest=False)
+def register_mobile_device(
+    token: str,
+    platform: Optional[str] = None,
+    device_name: Optional[str] = None,
+    app_version: Optional[str] = None,
+    pos_profiles: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Register or refresh an FCM token for the signed-in user."""
+
+    if not token:
+        frappe.throw("token is required")
+
+    user = frappe.session.user
+    if not user or user == "Guest":
+        frappe.throw("Authentication required to register device")
+
+    try:
+        docname = frappe.db.get_value("Jarz Mobile Device", {"token": token}, "name")
+        payload = {
+            "token": token,
+            "user": user,
+            "platform": (platform or "Android").title(),
+            "device_name": device_name,
+            "app_version": app_version,
+            "enabled": 1,
+            "pos_profiles": _normalise_pos_profile_payload(pos_profiles),
+        }
+
+        if docname:
+            doc = frappe.get_doc("Jarz Mobile Device", docname)
+            for field, value in payload.items():
+                setattr(doc, field, value)
+            doc.save(ignore_permissions=True)
+        else:
+            doc = frappe.get_doc({"doctype": "Jarz Mobile Device", **payload})
+            doc.insert(ignore_permissions=True)
+
+        return {"success": True, "device": doc.name}
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), "register_mobile_device failed")
+        frappe.throw(f"Unable to register device: {exc}")
+
+
+@frappe.whitelist(allow_guest=False)
+def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
+    """Mark an invoice alert as accepted by the current user."""
+
+    if not invoice_name:
+        frappe.throw("invoice_name is required")
+
+    user = frappe.session.user
+    doc = frappe.get_doc("Sales Invoice", invoice_name)
+
+    if doc.docstatus != 1:
+        frappe.throw("Invoice must be submitted before acknowledgement")
+
+    _ensure_user_can_accept(doc, user)
+
+    current_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
+    if current_status == "Accepted":
+        return {
+            "success": True,
+            "already": True,
+            "accepted_by": getattr(doc, "custom_accepted_by", None),
+            "accepted_on": getattr(doc, "custom_accepted_on", None),
+        }
+
+    accepted_on = frappe.utils.now_datetime()
+    frappe.db.set_value(
+        "Sales Invoice",
+        doc.name,
+        {
+            "custom_acceptance_status": "Accepted",
+            "custom_accepted_by": user,
+            "custom_accepted_on": accepted_on,
+        },
+        update_modified=True,
+    )
+
+    payload = _build_invoice_alert_payload(doc)
+    payload.update({
+        "acceptance_status": "Accepted",
+        "requires_acceptance": False,
+        "accepted_by": user,
+        "accepted_on": accepted_on.isoformat(),
+    })
+
+    recipients = _resolve_recipients_for_payload(payload)
+    _publish_invoice_accepted(payload, recipients)
+    _push_invoice_accepted(payload, recipients)
+
+    return {
+        "success": True,
+        "accepted_by": user,
+        "accepted_on": accepted_on.isoformat(),
+    }
+
+
+@frappe.whitelist(allow_guest=False)
+def get_pending_alerts() -> Dict[str, Any]:
+    """Return unaccepted invoices for the caller's authorised POS profiles."""
+
+    user = frappe.session.user
+    profiles = _get_profiles_for_user(user)
+    if not profiles:
+        return {"success": True, "alerts": []}
+
+    cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-12)
+    rows = frappe.get_all(
+        "Sales Invoice",
+        filters={
+            "docstatus": 1,
+            "pos_profile": ["in", profiles],
+            "custom_acceptance_status": ["in", [None, "", "Pending"]],
+            "creation": [">", cutoff],
+        },
+        fields=["name"],
+        order_by="creation asc",
+        limit=50,
+    )
+
+    alerts: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            inv_doc = frappe.get_doc("Sales Invoice", row.name)
+            payload = _build_invoice_alert_payload(inv_doc)
+            if payload:
+                alerts.append(payload)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"Failed building alert payload for {row.name}")
+
+    return {"success": True, "alerts": alerts}
+
+
+def handle_invoice_submission(doc: Any) -> None:
+    """Emit realtime and push notifications for a newly submitted invoice."""
+
+    try:
+        payload = _build_invoice_alert_payload(doc)
+        if not payload:
+            return
+
+        recipients = _resolve_recipients_for_payload(payload)
+        _publish_invoice_alert(payload, recipients)
+        _push_new_invoice(payload, recipients)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
+
+
+def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
+    if not doc or not getattr(doc, "name", None):
+        return {}
+
+    invoice_id = getattr(doc, "name", "")
+    pos_profile = getattr(doc, "pos_profile", None)
+    if not pos_profile:
+        return {}
+
+    _ensure_acceptance_defaults(doc)
+
+    customer = getattr(doc, "customer_name", None) or getattr(doc, "customer", "")
+    state = (
+        getattr(doc, "custom_sales_invoice_state", None)
+        or getattr(doc, "sales_invoice_state", None)
+        or getattr(doc, "status", None)
+        or "Received"
+    )
+
+    items: List[Dict[str, Any]] = []
+    try:
+        for row in getattr(doc, "items", [])[:15]:
+            items.append(
+                {
+                    "item_code": getattr(row, "item_code", None),
+                    "item_name": getattr(row, "item_name", None) or getattr(row, "item_code", None),
+                    "qty": float(getattr(row, "qty", 0) or 0),
+                }
+            )
+    except Exception:
+        pass
+
+    acceptance_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
+
+    payload: Dict[str, Any] = {
+        "invoice_id": invoice_id,
+        "name": invoice_id,
+        "customer_name": customer,
+        "grand_total": float(getattr(doc, "grand_total", 0) or 0),
+        "net_total": float(getattr(doc, "net_total", 0) or 0),
+        "outstanding": float(getattr(doc, "outstanding_amount", 0) or 0),
+        "sales_invoice_state": state,
+        "posting_date": str(getattr(doc, "posting_date", "")),
+        "posting_time": str(getattr(doc, "posting_time", "")),
+        "pos_profile": pos_profile,
+        "kanban_profile": getattr(doc, "custom_kanban_profile", None),
+        "custom_is_pickup": bool(getattr(doc, "custom_is_pickup", 0)),
+        "delivery_date": _safe_str(getattr(doc, "custom_delivery_date", None)),
+        "delivery_time_from": _safe_str(getattr(doc, "custom_delivery_time_from", None)),
+        "requires_acceptance": acceptance_status != "Accepted",
+        "acceptance_status": acceptance_status or "Pending",
+        "timestamp": frappe.utils.now_datetime().isoformat(),
+        "items": items,
+    }
+
+    payload["item_summary"] = ", ".join(
+        f"{item.get('item_name') or item.get('item_code')} × {item.get('qty', 0)}" for item in items[:5]
+    )
+
+    return payload
+
+
+def _resolve_recipients_for_payload(payload: Dict[str, Any]) -> List[str]:
+    profiles: List[str] = []
+    for key in ("pos_profile", "kanban_profile"):
+        value = payload.get(key)
+        if value and value not in profiles:
+            profiles.append(value)
+
+    return _get_users_for_pos_profiles(profiles)
+
+
+def _ensure_acceptance_defaults(doc: Any) -> None:
+    try:
+        if getattr(doc, "custom_acceptance_status", None):
+            return
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc.name,
+            {
+                "custom_acceptance_status": "Pending",
+                "custom_accepted_by": None,
+                "custom_accepted_on": None,
+            },
+            update_modified=False,
+        )
+        setattr(doc, "custom_acceptance_status", "Pending")
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Failed to set acceptance defaults for {getattr(doc, 'name', '?')}")
+
+
+def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+    try:
+        target = recipients if recipients else "*"
+        frappe.publish_realtime("jarz_pos_new_invoice", payload, user=target)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_new_invoice failed")
+
+
+def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+    try:
+        target = recipients if recipients else "*"
+        frappe.publish_realtime("jarz_pos_invoice_accepted", payload, user=target)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_invoice_accepted failed")
+
+
+def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+    tokens = _get_tokens_for_users(recipients)
+    if not tokens:
+        return
+
+    data = _prepare_invoice_data_payload("new_invoice", payload)
+    _send_fcm_notifications(tokens, data)
+
+
+def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+    tokens = _get_tokens_for_users(recipients)
+    if not tokens:
+        return
+
+    data = {
+        "type": "invoice_accepted",
+        "invoice_id": payload.get("invoice_id", ""),
+        "accepted_by": payload.get("accepted_by", ""),
+        "accepted_on": payload.get("accepted_on", ""),
+    }
+    _send_fcm_notifications(tokens, data)
+
+
+def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
+    data: Dict[str, str] = {
+        "type": event_type,
+        "invoice_id": payload.get("invoice_id", ""),
+        "customer_name": payload.get("customer_name", ""),
+        "pos_profile": payload.get("pos_profile", ""),
+        "grand_total": str(payload.get("grand_total", 0)),
+        "sales_invoice_state": payload.get("sales_invoice_state", ""),
+        "timestamp": payload.get("timestamp", frappe.utils.now_datetime().isoformat()),
+        "requires_acceptance": "1" if payload.get("requires_acceptance") else "0",
+        "item_summary": payload.get("item_summary", ""),
+    }
+
+    delivery_date = payload.get("delivery_date")
+    if delivery_date:
+        data["delivery_date"] = delivery_date
+    delivery_time = payload.get("delivery_time_from")
+    if delivery_time:
+        data["delivery_time"] = delivery_time
+
+    items_json = json.dumps(payload.get("items", []), default=str)
+    data["items"] = items_json
+    return data
+
+
+def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str]) -> None:
+    server_key = frappe.local.conf.get("jarz_fcm_server_key") or frappe.local.conf.get("fcm_server_key")
+    if not server_key:
+        frappe.log_error("Missing jarz_fcm_server_key in site_config", "FCM push skipped")
+        return
+
+    headers = {
+        "Authorization": f"key={server_key}",
+        "Content-Type": "application/json",
+    }
+
+    for chunk in _chunk(tokens, MAX_FCM_TOKENS_PER_BATCH):
+        body = {
+            "registration_ids": list(chunk),
+            "priority": "high",
+            "data": data_payload,
+            "android": {"priority": "high"},
+        }
+        try:
+            response = requests.post(FCM_ENDPOINT, headers=headers, json=body, timeout=5)
+            if response.status_code >= 400:
+                frappe.log_error(response.text, "FCM push error")
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "FCM push failed")
+
+
+def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
+    for idx in range(0, len(items), size):
+        yield items[idx : idx + size]
+
+
+def _get_tokens_for_users(users: Sequence[str]) -> List[str]:
+    if not users:
+        return []
+
+    rows = frappe.get_all(
+        "Jarz Mobile Device",
+        filters={"user": ["in", list(users)], "enabled": 1},
+        fields=["token"],
+    )
+    tokens = [row.get("token") for row in rows if row.get("token")]
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            deduped.append(token)
+    return deduped
+
+
+def _get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
+    filtered = [p for p in profiles if p]
+    if not filtered:
+        return []
+
+    try:
+        rows = frappe.get_all(
+            "POS Profile User",
+            filters={"parent": ["in", filtered], "parenttype": "POS Profile"},
+            fields=["user"],
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Failed to load POS Profile users")
+        return []
+
+    users: List[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        user = row.get("user")
+        if user and user not in seen:
+            seen.add(user)
+            users.append(user)
+    return users
+
+
+def _get_profiles_for_user(user: str) -> List[str]:
+    if not user or user == "Guest":
+        return []
+
+    rows = frappe.get_all(
+        "POS Profile User",
+        filters={"user": user, "parenttype": "POS Profile"},
+        fields=["parent"],
+    )
+
+    profiles: List[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        parent = row.get("parent")
+        if parent and parent not in seen:
+            seen.add(parent)
+            profiles.append(parent)
+    return profiles
+
+
+def _ensure_user_can_accept(doc: Any, user: str) -> None:
+    if user in {"Administrator", "System Manager"}:
+        return
+
+    authorised_users = _get_users_for_pos_profiles(
+        [getattr(doc, "pos_profile", None), getattr(doc, "custom_kanban_profile", None)]
+    )
+    if user not in authorised_users:
+        frappe.throw("You are not allowed to accept orders for this POS profile", frappe.PermissionError)
+
+
+def _normalise_pos_profile_payload(pos_profiles: Optional[str]) -> Optional[str]:
+    if not pos_profiles:
+        return None
+    try:
+        if isinstance(pos_profiles, str):
+            parsed = json.loads(pos_profiles)
+        else:
+            parsed = pos_profiles
+        if isinstance(parsed, (list, tuple)):
+            return json.dumps([str(p) for p in parsed])
+    except Exception:
+        return None
+    return None
+
+
+def _safe_str(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    return str(value)
