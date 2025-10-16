@@ -7,10 +7,17 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-import requests  # type: ignore[import]
-
 import frappe
 from frappe import _
+
+# Firebase Admin SDK for modern FCM V1 API
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+    FIREBASE_AVAILABLE = True
+except ImportError:
+    FIREBASE_AVAILABLE = False
+    frappe.log_error("firebase-admin package not installed. FCM notifications disabled.", "FCM Import Warning")
 
 
 @frappe.whitelist(allow_guest=False)
@@ -285,8 +292,43 @@ def get_websocket_debug_info() -> Dict[str, Any]:
 # Mobile push registration & alert lifecycle
 # ---------------------------------------------------------------------------
 
-FCM_ENDPOINT = "https://fcm.googleapis.com/fcm/send"
 MAX_FCM_TOKENS_PER_BATCH = 500
+
+
+def _initialize_firebase_app() -> bool:
+    """Initialize Firebase Admin SDK if not already initialized."""
+    if not FIREBASE_AVAILABLE:
+        return False
+    
+    try:
+        # Check if already initialized
+        firebase_admin.get_app()
+        return True
+    except ValueError:
+        # Not initialized, try to initialize
+        pass
+    
+    # Try to load service account from config
+    service_account_path = frappe.local.conf.get("fcm_service_account_path")
+    service_account_json = frappe.local.conf.get("fcm_service_account")
+    
+    try:
+        if service_account_path:
+            cred = credentials.Certificate(service_account_path)
+            firebase_admin.initialize_app(cred)
+            return True
+        elif service_account_json:
+            if isinstance(service_account_json, str):
+                service_account_json = json.loads(service_account_json)
+            cred = credentials.Certificate(service_account_json)
+            firebase_admin.initialize_app(cred)
+            return True
+        else:
+            frappe.log_error("No Firebase service account configured in site_config", "FCM Init Failed")
+            return False
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Firebase initialization failed")
+        return False
 
 
 @frappe.whitelist(allow_guest=False)
@@ -595,29 +637,51 @@ def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> D
 
 
 def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str]) -> None:
-    server_key = frappe.local.conf.get("jarz_fcm_server_key") or frappe.local.conf.get("fcm_server_key")
-    if not server_key:
-        frappe.log_error("Missing jarz_fcm_server_key in site_config", "FCM push skipped")
+    """Send FCM push notifications using Firebase Admin SDK (V1 API)."""
+    if not _initialize_firebase_app():
+        frappe.log_error("Firebase not initialized. Skipping FCM push.", "FCM Push Skipped")
         return
-
-    headers = {
-        "Authorization": f"key={server_key}",
-        "Content-Type": "application/json",
-    }
-
-    for chunk in _chunk(tokens, MAX_FCM_TOKENS_PER_BATCH):
-        body = {
-            "registration_ids": list(chunk),
-            "priority": "high",
-            "data": data_payload,
-            "android": {"priority": "high"},
-        }
-        try:
-            response = requests.post(FCM_ENDPOINT, headers=headers, json=body, timeout=5)
-            if response.status_code >= 400:
-                frappe.log_error(response.text, "FCM push error")
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), "FCM push failed")
+    
+    if not tokens:
+        return
+    
+    # Build the message
+    try:
+        # Extract notification content from data
+        title = data_payload.get("customer_name", "New Order")
+        body = f"Total: {data_payload.get('grand_total', 0)}"
+        if data_payload.get("item_summary"):
+            body += f" • {data_payload.get('item_summary')}"
+        
+        # Send to each token (Firebase Admin SDK doesn't support batch sends in the same way)
+        # For better performance, we can use MulticastMessage
+        messages = []
+        for token in tokens[:MAX_FCM_TOKENS_PER_BATCH]:
+            message = messaging.Message(
+                data=data_payload,
+                android=messaging.AndroidConfig(
+                    priority='high',
+                    notification=messaging.AndroidNotification(
+                        sound='default',
+                        channel_id='jarz_order_alerts'
+                    )
+                ),
+                token=token
+            )
+            messages.append(message)
+        
+        # Send all messages
+        if messages:
+            # Send individually for now (can batch with MulticastMessage if needed)
+            for message in messages:
+                try:
+                    response = messaging.send(message)
+                    frappe.logger().info(f"FCM message sent successfully: {response}")
+                except Exception as send_err:
+                    frappe.log_error(f"Failed to send FCM to token: {str(send_err)}", "FCM Send Error")
+                    
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "FCM push failed")
 
 
 def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
