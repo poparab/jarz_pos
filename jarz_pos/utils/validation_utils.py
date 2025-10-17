@@ -5,6 +5,8 @@ This module contains all validation functions for POS invoice creation,
 including cart data validation, customer validation, and POS profile validation.
 """
 
+from datetime import timedelta
+
 import frappe
 from frappe import _dict
 
@@ -203,15 +205,16 @@ def validate_delivery_datetime(required_delivery_datetime, logger):
 
             current_datetime = frappe.utils.now_datetime()
             if delivery_datetime <= current_datetime:
-                error_msg = (
-                    "Delivery datetime must be in the future. "
-                    f"Provided: {delivery_datetime}, Current: {current_datetime}"
+                adjusted = current_datetime + timedelta(minutes=5)
+                warning_msg = (
+                    "Delivery datetime adjusted forward because it was in the past. "
+                    f"Provided: {delivery_datetime}, Adjusted: {adjusted}"
                 )
-                logger.error(error_msg)
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
-
-            print(f"   ✅ Delivery datetime validated: {delivery_datetime}")
+                logger.warning(warning_msg)
+                print(f"   ⚠️ {warning_msg}")
+                delivery_datetime = adjusted
+            else:
+                print(f"   ✅ Delivery datetime validated: {delivery_datetime}")
 
         except Exception as e:
             error_msg = f"Invalid delivery datetime format: {str(e)}"
