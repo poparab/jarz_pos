@@ -5,7 +5,7 @@ Alternative to websocket-based notifications for mobile clients
 
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import frappe
 from frappe import _
@@ -483,6 +483,47 @@ def handle_invoice_submission(doc: Any) -> None:
         _push_new_invoice(payload, recipients)
     except Exception:
         frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
+
+
+def notify_invoice_reassignment(invoice: Union[str, Any], new_pos_profile: str) -> None:
+    """Re-issue invoice alert notification when a manager reassigns the branch.
+
+    Args:
+        invoice: Sales Invoice doc or name to notify for.
+        new_pos_profile: POS Profile that should receive the alert.
+    """
+
+    if not new_pos_profile:
+        return
+
+    try:
+        doc = invoice if not isinstance(invoice, str) else frappe.get_doc("Sales Invoice", invoice)
+        if not doc:
+            return
+
+        original_profile = getattr(doc, "pos_profile", None)
+        try:
+            setattr(doc, "pos_profile", new_pos_profile)
+            payload = _build_invoice_alert_payload(doc)
+        finally:
+            setattr(doc, "pos_profile", original_profile)
+
+        if not payload:
+            return
+
+        payload["pos_profile"] = new_pos_profile
+        payload["kanban_profile"] = new_pos_profile
+        payload["acceptance_status"] = "Pending"
+        payload["requires_acceptance"] = True
+
+        recipients = _get_users_for_pos_profiles([new_pos_profile])
+        _publish_invoice_alert(payload, recipients)
+        _push_new_invoice(payload, recipients)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"notify_invoice_reassignment failed for {getattr(invoice, 'name', invoice)}",
+        )
 
 
 def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:

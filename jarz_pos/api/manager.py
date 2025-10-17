@@ -31,6 +31,15 @@ except Exception:
         # last resort: company's default cash account
         return frappe.get_cached_value("Company", company, "default_cash_account") or "Cash"
 
+try:
+    from jarz_pos.api.notifications import notify_invoice_reassignment
+except Exception:
+    def notify_invoice_reassignment(*args, **kwargs):  # type: ignore
+        return None
+
+
+_ALLOWED_TRANSFER_STATES = {"received", "in progress", "ready"}
+
 
 def _current_user_allowed_profiles() -> List[str]:
     """Return POS Profiles the current user can manage.
@@ -229,16 +238,55 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         meta = frappe.get_meta("Sales Invoice")
         if not meta.get_field("custom_kanban_profile"):
             return {"success": False, "error": "custom_kanban_profile field not found on Sales Invoice"}
+
+        current_state = (
+            inv.get("custom_sales_invoice_state")
+            or inv.get("sales_invoice_state")
+            or inv.get("custom_state")
+            or inv.get("state")
+            or "Received"
+        )
+
+        if str(current_state).strip().lower() not in _ALLOWED_TRANSFER_STATES:
+            return {
+                "success": False,
+                "error": "Invoice can only be transferred when state is Received, In Progress, or Ready",
+            }
+
+        state_fields: List[str] = []
+        for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
+            if meta.get_field(candidate):
+                state_fields.append(candidate)
+
+        updates: Dict[str, Any] = {"custom_kanban_profile": new_branch}
+        for field in state_fields:
+            updates[field] = "Received"
+
+        for field, value in {
+            "custom_acceptance_status": "Pending",
+            "custom_accepted_by": None,
+            "custom_accepted_on": None,
+        }.items():
+            if meta.get_field(field):
+                updates[field] = value
+
+        frappe.db.set_value("Sales Invoice", inv.name, updates, update_modified=True)
+        inv.reload()
+
         try:
-            inv.db_set("custom_kanban_profile", new_branch, update_modified=True)
+            notify_invoice_reassignment(inv, new_branch)
         except Exception:
-            inv.set("custom_kanban_profile", new_branch)
-            inv.save(ignore_permissions=True, ignore_version=True)
+            frappe.log_error(frappe.get_traceback(), "notify_invoice_reassignment failed during transfer")
         try:
             frappe.db.commit()
         except Exception:
             pass
-        return {"success": True, "invoice_id": invoice_id, "new_branch": new_branch}
+        return {
+            "success": True,
+            "invoice_id": invoice_id,
+            "new_branch": new_branch,
+            "new_state": "Received",
+        }
     except Exception as e:
         frappe.log_error(f"Update Invoice Branch Error: {str(e)}", "Manager API")
         return {"success": False, "error": str(e)}
