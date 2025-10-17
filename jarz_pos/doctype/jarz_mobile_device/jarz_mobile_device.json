@@ -19,12 +19,11 @@
  "fields": [
   {
    "fieldname": "token",
-   "fieldtype": "Data",
+    "fieldtype": "Long Text",
    "in_list_view": 1,
    "label": "FCM Token",
-   "reqd": 1,
-   "unique": 1,
-   "length": 0
+    "reqd": 1,
+    "length": 0
   },
   {
    "fieldname": "user",

@@ -341,8 +341,12 @@ def register_mobile_device(
 ) -> Dict[str, Any]:
     """Register or refresh an FCM token for the signed-in user."""
 
+    token = (token or "").strip()
     if not token:
         frappe.throw("token is required")
+
+    if len(token) > 2048:
+        frappe.throw(_("FCM token is unexpectedly long"))
 
     user = frappe.session.user
     if not user or user == "Guest":
