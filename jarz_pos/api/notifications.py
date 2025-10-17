@@ -476,11 +476,27 @@ def handle_invoice_submission(doc: Any) -> None:
     try:
         payload = _build_invoice_alert_payload(doc)
         if not payload:
+            frappe.log_error(f"Empty payload for invoice {getattr(doc, 'name', '?')}", "Invoice Notification Skipped")
             return
 
+        # Log the payload for debugging
+        if frappe.conf.get("developer_mode"):
+            frappe.msgprint(f"Invoice alert payload: requires_acceptance={payload.get('requires_acceptance')}, acceptance_status={payload.get('acceptance_status')}")
+
         recipients = _resolve_recipients_for_payload(payload)
+        
+        # Emit realtime notification
         _publish_invoice_alert(payload, recipients)
+        
+        # Send push notification
         _push_new_invoice(payload, recipients)
+        
+        frappe.log_error(
+            f"Invoice {payload.get('invoice_id')} notification sent. "
+            f"Requires acceptance: {payload.get('requires_acceptance')}, "
+            f"Recipients: {len(recipients)}",
+            "Invoice Notification Sent"
+        )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
 
@@ -535,7 +551,14 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
     if not pos_profile:
         return {}
 
+    # Ensure acceptance fields are set BEFORE building payload
     _ensure_acceptance_defaults(doc)
+    
+    # Reload the document to get the latest acceptance status
+    try:
+        doc = frappe.get_doc("Sales Invoice", invoice_id)
+    except Exception:
+        pass  # Use the doc we have if reload fails
 
     customer = getattr(doc, "customer_name", None) or getattr(doc, "customer", "")
     state = (
@@ -599,9 +622,14 @@ def _resolve_recipients_for_payload(payload: Dict[str, Any]) -> List[str]:
 
 
 def _ensure_acceptance_defaults(doc: Any) -> None:
+    """Ensure acceptance status is set to Pending if not already set."""
     try:
-        if getattr(doc, "custom_acceptance_status", None):
+        current_status = getattr(doc, "custom_acceptance_status", None)
+        # If status is already set (Pending or Accepted), don't change it
+        if current_status in ("Pending", "Accepted"):
             return
+        
+        # Set default to Pending for new invoices
         frappe.db.set_value(
             "Sales Invoice",
             doc.name,
@@ -613,6 +641,11 @@ def _ensure_acceptance_defaults(doc: Any) -> None:
             update_modified=False,
         )
         setattr(doc, "custom_acceptance_status", "Pending")
+        setattr(doc, "custom_accepted_by", None)
+        setattr(doc, "custom_accepted_on", None)
+        
+        if frappe.conf.get("developer_mode"):
+            frappe.msgprint(f"Set acceptance status to Pending for {doc.name}")
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"Failed to set acceptance defaults for {getattr(doc, 'name', '?')}")
 
@@ -621,6 +654,12 @@ def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -
     try:
         target = recipients if recipients else "*"
         frappe.publish_realtime("jarz_pos_new_invoice", payload, user=target)
+        
+        if frappe.conf.get("developer_mode"):
+            frappe.msgprint(
+                f"Published jarz_pos_new_invoice event for {payload.get('invoice_id')} "
+                f"to {len(recipients) if recipients else 'all'} users"
+            )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_new_invoice failed")
 
