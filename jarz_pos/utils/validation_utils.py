@@ -7,7 +7,6 @@ including cart data validation, customer validation, and POS profile validation.
 
 import frappe
 from frappe import _dict
-from dateutil import parser
 
 
 def validate_cart_data(cart_json, logger):
@@ -194,25 +193,26 @@ def validate_delivery_datetime(required_delivery_datetime, logger):
     
     if required_delivery_datetime:
         try:
-            if isinstance(required_delivery_datetime, str):
-                # Parse ISO datetime string
-                delivery_datetime = parser.parse(required_delivery_datetime)
-                logger.debug(f"Parsed delivery datetime: {delivery_datetime}")
-                print(f"   🕐 Delivery datetime parsed: {delivery_datetime}")
-            else:
-                delivery_datetime = required_delivery_datetime
-                print(f"   🕐 Delivery datetime provided: {delivery_datetime}")
-            
-            # Validate that delivery datetime is in the future
+            delivery_datetime = frappe.utils.get_datetime(required_delivery_datetime)
+            logger.debug(f"Parsed delivery datetime: {delivery_datetime}")
+            print(f"   🕐 Delivery datetime parsed: {delivery_datetime}")
+
+            # Normalise naive values to the system timezone to avoid comparison errors
+            if delivery_datetime.tzinfo is None:
+                delivery_datetime = frappe.utils.get_datetime(str(delivery_datetime))
+
             current_datetime = frappe.utils.now_datetime()
             if delivery_datetime <= current_datetime:
-                error_msg = f"Delivery datetime must be in the future. Provided: {delivery_datetime}, Current: {current_datetime}"
+                error_msg = (
+                    "Delivery datetime must be in the future. "
+                    f"Provided: {delivery_datetime}, Current: {current_datetime}"
+                )
                 logger.error(error_msg)
                 print(f"   ❌ {error_msg}")
                 frappe.throw(error_msg)
-            
+
             print(f"   ✅ Delivery datetime validated: {delivery_datetime}")
-            
+
         except Exception as e:
             error_msg = f"Invalid delivery datetime format: {str(e)}"
             logger.error(error_msg)
