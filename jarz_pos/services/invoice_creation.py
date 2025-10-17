@@ -818,13 +818,17 @@ def _submit_document(invoice_doc, logger):
     """Submit the invoice document."""
     logger.debug("Submitting document")
     try:
+        # Reload document to avoid timestamp mismatch errors
+        # (in case it was re-saved during delivery slot correction)
+        fresh_doc = frappe.get_doc("Sales Invoice", invoice_doc.name)
+        
         # Frappe best practice: Submit after successful save
-        invoice_doc.submit()
-        logger.info(f"Invoice submitted: {invoice_doc.name}")
+        fresh_doc.submit()
+        logger.info(f"Invoice submitted: {fresh_doc.name}")
         print(f"   ✅ Document submitted successfully!")
         
         # Verify discount amounts persisted after submission
-        verify_invoice_totals(invoice_doc, logger)
+        verify_invoice_totals(fresh_doc, logger)
         
     except Exception as e:
         error_msg = f"Error submitting document: {str(e)}"
