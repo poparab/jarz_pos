@@ -576,17 +576,23 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
 
 @frappe.whitelist()
 def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | None = None):
-    """Handle Out For Delivery transition for a PAID Sales Partner invoice.
+    """Handle Sales Partner paid transition.
 
-    Use case: Invoice already fully paid (e.g. online payment). We still need to:
-      * Set operational state to 'Out for Delivery'.
-      * Ensure Delivery Note exists (to effect stock movement if update_stock was disabled at SI creation time).
-      * Publish realtime event for Kanban/UI patching.
-    Idempotent: Re-running will NOT create duplicate Delivery Notes.
+    Behaviour:
+      * When ``payment_mode`` explicitly represents an online payment (Online, Wallet, Card, Instapay, Bank), keep
+        the operational state in **In Progress** so the order stays in the packing column.
+      * Otherwise (manual kanban move, cash handoff, etc.) transition to **Out for Delivery** and create the Delivery
+        Note.
+      * Always ensure the Sales Partner Transaction entry exists and broadcast a realtime payload with state keys so
+        connected Kanban boards stay in sync.
+
+    The function remains idempotent: repeating the call will not duplicate records or Delivery Notes.
     """
-    invoice_name = (invoice_name or '').strip()
+
+    invoice_name = (invoice_name or "").strip()
     if not invoice_name:
         frappe.throw("invoice_name required")
+
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
@@ -598,18 +604,30 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
     explicit_mode = (payment_mode or "").strip().lower()
     explicit_online = explicit_mode in {"online", "instapay", "wallet", "card", "bank"}
 
-    # Set state
-    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
+    def _state_key(label: str | None) -> str | None:
+        if not label:
+            return None
+        cleaned = str(label).strip()
+        if not cleaned:
+            return None
+        return cleaned.lower().replace(" ", "_")
+
+    current_state = (inv.get("custom_sales_invoice_state") or "").strip()
+    target_state = "In Progress" if explicit_online else "Out for Delivery"
+
+    if current_state != target_state:
         try:
-            inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
+            inv.db_set("custom_sales_invoice_state", target_state, update_modified=True)
         except Exception:
-            inv.set("custom_sales_invoice_state", "Out for Delivery")
+            inv.set("custom_sales_invoice_state", target_state)
             inv.save(ignore_permissions=True)
 
-    # Ensure DN (handles idempotent reuse)
-    dn_result = ensure_delivery_note_for_invoice(inv.name)
-    if dn_result.get("error"):
-        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+    # Auto-create Delivery Note only when moving to Out for Delivery
+    dn_result = {"delivery_note": None, "reused": False, "logic_version": DN_LOGIC_VERSION}
+    if target_state == "Out for Delivery":
+        dn_result = ensure_delivery_note_for_invoice(inv.name)
+        if dn_result.get("error"):
+            frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
 
     # Record Sales Partner Transaction for paid invoices as well
     try:
@@ -700,8 +718,14 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
         "invoice": inv.name,
         "delivery_note": dn_result.get("delivery_note"),
         "delivery_note_reused": dn_result.get("reused"),
+        "dn_logic_version": dn_result.get("logic_version"),
         "sales_partner": sales_partner,
         "mode": "sales_partner_paid",
+        "old_state": current_state or None,
+        "old_state_key": _state_key(current_state),
+        "new_state": target_state,
+        "new_state_key": _state_key(target_state),
+        "explicit_mode": explicit_mode or None,
     }
     frappe.publish_realtime("jarz_pos_sales_partner_paid_ofd", payload, user="*")
     return payload
