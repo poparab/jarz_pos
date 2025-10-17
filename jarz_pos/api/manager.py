@@ -224,7 +224,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
     Rules:
     - Only for submitted POS invoices (docstatus=1 and is_pos=1).
     - new_branch must be in current user's allowed POS Profiles.
-    - Field custom_kanban_profile must exist; pos_profile is left unchanged on submitted docs.
+    - Field custom_kanban_profile must exist; pos_profile and kanban profile are both updated.
     """
     try:
         if not invoice_id or not new_branch:
@@ -259,6 +259,8 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
                 state_fields.append(candidate)
 
         updates: Dict[str, Any] = {"custom_kanban_profile": new_branch}
+        if meta.get_field("pos_profile"):
+            updates["pos_profile"] = new_branch
         for field in state_fields:
             updates[field] = "Received"
 
