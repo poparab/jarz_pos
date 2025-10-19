@@ -6,6 +6,7 @@ from __future__ import annotations
 import frappe
 import json
 import traceback
+import datetime
 from typing import Dict, List, Any, Optional, Union, Tuple
 
 # Accounting helpers
@@ -198,6 +199,60 @@ def _get_allowed_states() -> List[str]:  # override previous implementation
 def _state_key(label: str) -> str:
     return (label or "").strip().lower().replace(' ', '_')
 
+
+def _safe_datetime(value: Any) -> Optional[datetime.datetime]:
+    if not value:
+        return None
+    try:
+        return frappe.utils.get_datetime(value)
+    except Exception:
+        return None
+
+
+def _posting_datetime(card: Dict[str, Any]) -> Optional[datetime.datetime]:
+    posting_date = card.get("posting_date")
+    if not posting_date:
+        return None
+    posting_time = card.get("posting_time") or "00:00:00"
+    return _safe_datetime(f"{posting_date} {posting_time}")
+
+
+def _delivery_sort_key(card: Dict[str, Any]) -> datetime.datetime:
+    delivery_date = card.get("delivery_date")
+    if delivery_date:
+        delivery_time = card.get("delivery_time_from") or "00:00:00"
+        delivery_dt = _safe_datetime(f"{delivery_date} {delivery_time}")
+        if delivery_dt:
+            return delivery_dt
+    posting_dt = _posting_datetime(card)
+    if posting_dt:
+        return posting_dt
+    return frappe.utils.get_datetime("2099-12-31 23:59:59")
+
+
+def _state_transition_sort_key(card: Dict[str, Any]) -> datetime.datetime:
+    state_dt = _safe_datetime(card.get("_state_timestamp"))
+    if state_dt:
+        return state_dt
+    posting_dt = _posting_datetime(card)
+    if posting_dt:
+        return posting_dt
+    return frappe.utils.get_datetime("1970-01-01 00:00:00")
+
+
+def _sort_kanban_columns(data: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+    PRIORITY_COLUMNS = {"received", "in_progress"}
+    for state_key, cards in data.items():
+        if not cards:
+            continue
+        if state_key in PRIORITY_COLUMNS:
+            cards.sort(key=_delivery_sort_key)
+        else:
+            cards.sort(key=_state_transition_sort_key, reverse=True)
+        for card in cards:
+            card.pop("_state_timestamp", None)
+    return data
+
 # Unified success / error builders
 
 def _success(**kwargs):
@@ -336,6 +391,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             "posting_time", "grand_total", "net_total", "total_taxes_and_charges",
             "status", "custom_sales_invoice_state", "sales_invoice_state",
             "sales_partner", "pos_profile", "custom_kanban_profile",
+            "modified",
             "custom_acceptance_status", "custom_accepted_by", "custom_accepted_on",
             # New delivery slot fields (these are in our fixtures; safe to select)
             "custom_delivery_date", "custom_delivery_time_from", "custom_delivery_duration",
@@ -513,6 +569,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             acceptance_status = str(acceptance_status_raw or "").strip() or "Pending"
             acceptance_status_lower = acceptance_status.lower()
 
+            state_change_ts = getattr(inv, "modified", None)
+
             invoice_card = {
                 "name": inv.name,
                 "invoice_id_short": inv.name.split('-')[-1] if '-' in inv.name else inv.name,
@@ -542,12 +600,15 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "requires_acceptance": acceptance_status_lower != "accepted",
                 "accepted_by": inv.get("custom_accepted_by"),
                 "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
+                "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
 
             # Add to appropriate state column
             if state_key not in kanban_data:
                 kanban_data[state_key] = []
             kanban_data[state_key].append(invoice_card)
+
+        kanban_data = _sort_kanban_columns(kanban_data)
 
         # Return unified success
         return _success(data=kanban_data)
