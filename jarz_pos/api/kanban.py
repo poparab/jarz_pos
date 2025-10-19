@@ -336,6 +336,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             "posting_time", "grand_total", "net_total", "total_taxes_and_charges",
             "status", "custom_sales_invoice_state", "sales_invoice_state",
             "sales_partner", "pos_profile", "custom_kanban_profile",
+            "custom_acceptance_status", "custom_accepted_by", "custom_accepted_on",
             # New delivery slot fields (these are in our fixtures; safe to select)
             "custom_delivery_date", "custom_delivery_time_from", "custom_delivery_duration",
             "shipping_address_name", "customer_address",
@@ -502,6 +503,16 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             if doc_status_label.lower() == "overdue":
                 doc_status_label = "Unpaid"
 
+            acceptance_status_raw = (
+                inv.get("custom_acceptance_status")
+                or getattr(inv, "custom_acceptance_status", None)
+                or inv.get("acceptance_status")
+                or getattr(inv, "acceptance_status", None)
+                or "Pending"
+            )
+            acceptance_status = str(acceptance_status_raw or "").strip() or "Pending"
+            acceptance_status_lower = acceptance_status.lower()
+
             invoice_card = {
                 "name": inv.name,
                 "invoice_id_short": inv.name.split('-')[-1] if '-' in inv.name else inv.name,
@@ -527,6 +538,10 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "has_unsettled_courier_txn": bool(has_unsettled),
                 "customer_phone": customer_phone,
                 "is_pickup": bool(is_pickup),
+                "acceptance_status": acceptance_status,
+                "requires_acceptance": acceptance_status_lower != "accepted",
+                "accepted_by": inv.get("custom_accepted_by"),
+                "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
             }
 
             # Add to appropriate state column
