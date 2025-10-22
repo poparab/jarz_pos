@@ -14,3 +14,6 @@ jarz_pos.Patches.v1_1.ensure_territory_delivery_fields
 
 # Restore essential DocTypes after restructuring
 jarz_pos.patches.v1_0.restore_essential_doctypes
+
+# Add payment method field for POS
+jarz_pos.patches.add_payment_method_field

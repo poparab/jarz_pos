@@ -393,6 +393,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             "sales_partner", "pos_profile", "custom_kanban_profile",
             "modified",
             "custom_acceptance_status", "custom_accepted_by", "custom_accepted_on",
+            "custom_payment_method",
             # New delivery slot fields (these are in our fixtures; safe to select)
             "custom_delivery_date", "custom_delivery_time_from", "custom_delivery_duration",
             "shipping_address_name", "customer_address",
@@ -600,6 +601,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "requires_acceptance": acceptance_status_lower != "accepted",
                 "accepted_by": inv.get("custom_accepted_by"),
                 "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
+                "payment_method": inv.get("custom_payment_method"),
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
 

@@ -183,6 +183,7 @@ def create_pos_invoice(
     sales_partner: str | None = None,
     payment_type: str | None = None,
     pickup: bool | None = None,
+    payment_method: str | None = None,
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -193,6 +194,9 @@ def create_pos_invoice(
     - Document validation before save/submit
     - Handle delivery time slot for scheduled deliveries
     - Proper field setting in correct order
+    
+    Args:
+        payment_method: Payment method - Cash, Instapay, or Mobile Wallet
     """
 
     # Frappe best practice: Create logger for this module
@@ -219,6 +223,16 @@ def create_pos_invoice(
 
         # Parse and validate delivery datetime
         delivery_datetime = validate_delivery_datetime(required_delivery_datetime, logger)
+
+        # Validate payment method if provided
+        if payment_method:
+            allowed_methods = ["Cash", "Instapay", "Mobile Wallet"]
+            if payment_method not in allowed_methods:
+                error_msg = f"Invalid payment_method: {payment_method}. Must be one of: {', '.join(allowed_methods)}"
+                logger.error(error_msg)
+                print(f"   ❌ {error_msg}")
+                frappe.throw(error_msg)
+            print(f"   ✅ Payment method validated: {payment_method}")
 
         print("   ✅ Input validation passed")
 
@@ -296,6 +310,14 @@ def create_pos_invoice(
 
         # STEP 6.2: Initialize Kanban state to 'In Progress' when a Sales Partner is set
         _set_initial_state_for_sales_partner(invoice_doc, logger)
+
+        # STEP 6.3: Set Payment Method (Cash | Instapay | Mobile Wallet)
+        if payment_method:
+            try:
+                invoice_doc.custom_payment_method = payment_method
+                print(f"   💳 Payment Method set: {payment_method}")
+            except Exception as pm_err:
+                print(f"   ⚠️ Could not set Payment Method: {pm_err}")
 
         # STEP 7: Add Items to Document
         print("\n7️⃣ ADDING ITEMS:")

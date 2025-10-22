@@ -53,6 +53,9 @@ def create_pos_invoice():
     delivery_time_from = frappe.form_dict.get('delivery_time_from')
     delivery_duration = frappe.form_dict.get('delivery_duration')
     
+    # New: payment method (Cash | Instapay | Mobile Wallet)
+    payment_method = frappe.form_dict.get('payment_method')
+    
     # Frappe best practice: Use frappe.logger() for structured logging
     logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
     
@@ -95,6 +98,7 @@ RAW PARAMETERS:
     print(f"   required_delivery_datetime: {required_delivery_datetime} (type: {type(required_delivery_datetime)})")
     print(f"   delivery_date: {delivery_date} | delivery_time_from: {delivery_time_from} | delivery_duration: {delivery_duration}")
     print(f"   pickup: {is_pickup}")
+    print(f"   payment_method: {payment_method}")
     
     try:
         # Validate parameters before calling legacy function
@@ -138,6 +142,7 @@ RAW PARAMETERS:
             sales_partner,
             payment_type,
             is_pickup,
+            payment_method,
         )
         
         # Log successful response
