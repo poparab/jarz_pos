@@ -226,7 +226,7 @@ def create_pos_invoice(
 
         # Validate payment method if provided
         if payment_method:
-            allowed_methods = ["Cash", "Instapay", "Mobile Wallet"]
+            allowed_methods = ["Cash", "Instapay", "Mobile Wallet", "Kashier Card", "Kashier Wallet"]
             if payment_method not in allowed_methods:
                 error_msg = f"Invalid payment_method: {payment_method}. Must be one of: {', '.join(allowed_methods)}"
                 logger.error(error_msg)

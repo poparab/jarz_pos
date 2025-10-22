@@ -1581,7 +1581,7 @@
   "name": "Sales Invoice-custom_payment_method",
   "no_copy": 0,
   "non_negative": 0,
-  "options": "\nCash\nInstapay\nMobile Wallet",
+  "options": "\nCash\nInstapay\nMobile Wallet\nKashier Card\nKashier Wallet",
   "permlevel": 0,
   "placeholder": null,
   "precision": "",
