@@ -308,3 +308,68 @@ def get_pos_profile_account_balance(profile: str):
         "balance": balance_value,
         "currency": currency,
     }
+
+@frappe.whitelist(allow_guest=False)
+def is_pos_profile_open(pos_profile: str):
+    """
+    Check if the given POS Profile is currently open based on its timetable.
+    Returns True if within opening hours, False otherwise.
+    """
+    from datetime import datetime, timedelta
+    
+    # Get the POS Profile Timetable
+    timetable_doc = frappe.get_value(
+        'POS Profile Timetable',
+        {'pos_profile': pos_profile},
+        ['name'],
+        as_dict=True
+    )
+    
+    if not timetable_doc:
+        # If no timetable is configured, assume the profile is always open
+        return {'is_open': True, 'message': 'No timetable configured'}
+    
+    # Get current datetime
+    now = datetime.now()
+    current_day = now.strftime('%A')  # Monday, Tuesday, etc.
+    current_time = now.time()
+    
+    # Get the timetable entries for this POS Profile
+    day_timings = frappe.get_all(
+        'POS Profile Day Timing',
+        filters={
+            'parent': timetable_doc['name'],
+            'day': current_day
+        },
+        fields=['opening_time', 'closing_time', 'same_day']
+    )
+    
+    if not day_timings:
+        # No schedule for today, branch is closed
+        return {'is_open': False, 'message': f'Branch is closed on {current_day}'}
+    
+    # Check if current time falls within any of the day's time slots
+    for timing in day_timings:
+        opening_time = timing['opening_time']
+        closing_time = timing['closing_time']
+        same_day = timing.get('same_day', 'Same Day')
+        
+        # Convert string times to datetime.time objects if needed
+        if isinstance(opening_time, str):
+            opening_time = datetime.strptime(opening_time, '%H:%M:%S').time()
+        if isinstance(closing_time, str):
+            closing_time = datetime.strptime(closing_time, '%H:%M:%S').time()
+        
+        # Handle "Next Day" scenario (e.g., closing time is after midnight)
+        if same_day == 'Next Day':
+            # If closing time is "next day", we need to check if:
+            # 1. Current time is after opening time today, OR
+            # 2. Current time is before closing time (which represents early morning of next day)
+            if current_time >= opening_time or current_time < closing_time:
+                return {'is_open': True, 'message': 'Branch is open'}
+        else:
+            # Same day - normal case
+            if opening_time <= current_time <= closing_time:
+                return {'is_open': True, 'message': 'Branch is open'}
+    
+    return {'is_open': False, 'message': f'Branch is closed at this time'}
