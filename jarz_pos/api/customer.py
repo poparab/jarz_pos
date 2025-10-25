@@ -356,3 +356,94 @@ def get_territory(territory_id: str | None = None):
         result["delivery_expense"] = flt(territory_doc.delivery_expense)
     
     return result
+
+
+@frappe.whitelist()
+def update_default_address(customer, address, phone):
+    """Update customer's default address and phone number.
+    
+    Creates or updates the customer's primary address and contact.
+    Sets the address as the default billing and shipping address.
+    
+    Args:
+        customer: Customer ID/name
+        address: New address text
+        phone: New phone number
+        
+    Returns:
+        dict: {"success": True, "message": "Customer address updated successfully"}
+    """
+    try:
+        # Validate customer exists
+        if not frappe.db.exists("Customer", customer):
+            frappe.throw(f"Customer '{customer}' not found")
+            
+        customer_doc = frappe.get_doc("Customer", customer)
+        
+        # Update or create primary address
+        if customer_doc.customer_primary_address:
+            # Update existing address
+            address_doc = frappe.get_doc("Address", customer_doc.customer_primary_address)
+            address_doc.address_line1 = address
+            address_doc.save(ignore_permissions=True)
+            frappe.logger().info(f"Updated existing address: {address_doc.name}")
+        else:
+            # Create new address
+            address_doc = frappe.get_doc({
+                "doctype": "Address",
+                "address_title": customer_doc.customer_name,
+                "address_type": "Billing",
+                "address_line1": address,
+                "city": customer_doc.territory or "Unknown",
+                "is_primary_address": 1,
+                "is_shipping_address": 1,
+                "links": [{
+                    "link_doctype": "Customer",
+                    "link_name": customer
+                }]
+            })
+            address_doc.insert(ignore_permissions=True)
+            
+            # Update customer with new primary address
+            customer_doc.customer_primary_address = address_doc.name
+            frappe.logger().info(f"Created new address: {address_doc.name}")
+        
+        # Update or create primary contact
+        if customer_doc.customer_primary_contact:
+            # Update existing contact
+            contact_doc = frappe.get_doc("Contact", customer_doc.customer_primary_contact)
+            contact_doc.mobile_no = phone
+            contact_doc.save(ignore_permissions=True)
+            frappe.logger().info(f"Updated existing contact: {contact_doc.name}")
+        else:
+            # Create new contact
+            contact_doc = frappe.get_doc({
+                "doctype": "Contact",
+                "first_name": customer_doc.customer_name,
+                "mobile_no": phone,
+                "is_primary_contact": 1,
+                "links": [{
+                    "link_doctype": "Customer",
+                    "link_name": customer
+                }]
+            })
+            contact_doc.insert(ignore_permissions=True)
+            
+            # Update customer with new primary contact
+            customer_doc.customer_primary_contact = contact_doc.name
+            frappe.logger().info(f"Created new contact: {contact_doc.name}")
+        
+        # Save customer if we created new address or contact
+        if not customer_doc.customer_primary_address or not customer_doc.customer_primary_contact:
+            customer_doc.save(ignore_permissions=True)
+        
+        frappe.db.commit()
+        
+        return {
+            "success": True,
+            "message": "Customer address updated successfully"
+        }
+        
+    except Exception as e:
+        frappe.log_error(f"Error updating customer address: {str(e)}", frappe.get_traceback())
+        frappe.throw(f"Failed to update customer address: {str(e)}")
