@@ -254,6 +254,12 @@ override_whitelisted_methods = {
     "get_item_details": "jarz_pos.api.pos.get_item_details",
     "get_profile_bundles": "jarz_pos.api.pos.get_profile_bundles",
     "test_bundle_debug": "jarz_pos.api.pos.test_bundle_debug",
+    # User API Methods
+    "jarz_pos.api.user.get_current_user_roles": "jarz_pos.api.user.get_current_user_roles",
+    # Notification API Methods
+    "jarz_pos.api.notifications.get_pending_alerts": "jarz_pos.api.notifications.get_pending_alerts",
+    "jarz_pos.api.notifications.register_device_token": "jarz_pos.api.notifications.register_device_token",
+    "jarz_pos.api.notifications.accept_invoice": "jarz_pos.api.notifications.accept_invoice",
 }
 
 # Ensure manager endpoints are whitelisted on import
