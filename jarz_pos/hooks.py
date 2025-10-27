@@ -262,11 +262,22 @@ override_whitelisted_methods = {
     "jarz_pos.api.notifications.accept_invoice": "jarz_pos.api.notifications.accept_invoice",
 }
 
-# Ensure manager endpoints are whitelisted on import
+# Ensure API modules are imported at startup so @frappe.whitelist() decorators register
 try:
     from jarz_pos.api import manager as _mgr
     _mgr.get_manager_dashboard_summary
     _mgr.get_manager_orders
+except Exception:
+    pass
+
+try:
+    from jarz_pos.api import user as _user
+    from jarz_pos.api import notifications as _notif
+    # Touch the functions to ensure they're loaded
+    _user.get_current_user_roles
+    _notif.get_pending_alerts
+    _notif.register_device_token
+    _notif.accept_invoice
 except Exception:
     pass
 
