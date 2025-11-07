@@ -810,12 +810,12 @@ def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger):
     """Verify delivery slot fields were set correctly after save."""
     print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
     # Reload document to get fresh state from database
-    saved_doc = frappe.get_doc("Sales Invoice", invoice_doc.name)
+    invoice_doc.reload()
 
     # Fetch new fields
-    date_attr = getattr(saved_doc, "custom_delivery_date", None)
-    time_from_attr = getattr(saved_doc, "custom_delivery_time_from", None)
-    duration_attr = getattr(saved_doc, "custom_delivery_duration", None)
+    date_attr = getattr(invoice_doc, "custom_delivery_date", None)
+    time_from_attr = getattr(invoice_doc, "custom_delivery_time_from", None)
+    duration_attr = getattr(invoice_doc, "custom_delivery_duration", None)
 
     print(f"   📊 custom_delivery_date: {date_attr}")
     print(f"   📊 custom_delivery_time_from: {time_from_attr}")
@@ -824,13 +824,15 @@ def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger):
     if not (date_attr and time_from_attr and duration_attr):
         # Attempt to apply from provided delivery_datetime again
         try:
-            _apply_delivery_slot_fields(saved_doc, delivery_datetime)
-            saved_doc.save(ignore_permissions=True)
+            _apply_delivery_slot_fields(invoice_doc, delivery_datetime)
+            invoice_doc.save(ignore_permissions=True)
+            # Reload the document after save to sync timestamps
+            invoice_doc.reload()
             # Reload values
-            date_attr = getattr(saved_doc, "custom_delivery_date", None)
-            time_from_attr = getattr(saved_doc, "custom_delivery_time_from", None)
-            duration_attr = getattr(saved_doc, "custom_delivery_duration", None)
-            print(f"   � Re-saved with delivery slot fields")
+            date_attr = getattr(invoice_doc, "custom_delivery_date", None)
+            time_from_attr = getattr(invoice_doc, "custom_delivery_time_from", None)
+            duration_attr = getattr(invoice_doc, "custom_delivery_duration", None)
+            print(f"   ✅ Re-saved with delivery slot fields")
         except Exception as correction_error:
             print(f"   ❌ Could not set delivery slot fields: {str(correction_error)}")
             logger.warning(f"Delivery slot fields could not be set: {str(correction_error)}")
@@ -840,17 +842,17 @@ def _submit_document(invoice_doc, logger):
     """Submit the invoice document."""
     logger.debug("Submitting document")
     try:
-        # Reload document to avoid timestamp mismatch errors
-        # (in case it was re-saved during delivery slot correction)
-        fresh_doc = frappe.get_doc("Sales Invoice", invoice_doc.name)
+        # Reload document to get fresh state from database
+        # Use reload() instead of get_doc() to avoid timestamp mismatch
+        invoice_doc.reload()
         
         # Frappe best practice: Submit after successful save
-        fresh_doc.submit()
-        logger.info(f"Invoice submitted: {fresh_doc.name}")
+        invoice_doc.submit()
+        logger.info(f"Invoice submitted: {invoice_doc.name}")
         print(f"   ✅ Document submitted successfully!")
         
         # Verify discount amounts persisted after submission
-        verify_invoice_totals(fresh_doc, logger)
+        verify_invoice_totals(invoice_doc, logger)
         
     except Exception as e:
         error_msg = f"Error submitting document: {str(e)}"
