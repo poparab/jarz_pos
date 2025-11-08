@@ -101,6 +101,7 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
         if existing:
             frappe.logger().info(f"Receipt already exists: {existing}")
             return {
+                'success': True,
                 'receipt_name': existing,
                 'message': 'Receipt already exists'
             }
@@ -122,6 +123,7 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
         frappe.logger().info(f"Created payment receipt: {receipt.name}")
         
         return {
+            'success': True,
             'receipt_name': receipt.name,
             'message': 'Receipt created successfully'
         }
@@ -180,6 +182,7 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
         frappe.logger().info(f"Receipt image uploaded: {file_doc.file_url}")
         
         return {
+            'success': True,
             'file_url': file_doc.file_url,
             'message': 'Image uploaded successfully'
         }
@@ -205,7 +208,10 @@ def confirm_receipt(receipt_name: str):
         receipt = frappe.get_doc('POS Payment Receipt', receipt_name)
         
         if receipt.status == 'Confirmed':
-            return {'message': 'Receipt already confirmed'}
+            return {
+                'success': True,
+                'message': 'Receipt already confirmed'
+            }
         
         receipt.status = 'Confirmed'
         receipt.confirmed_by = frappe.session.user
@@ -216,7 +222,10 @@ def confirm_receipt(receipt_name: str):
         
         frappe.logger().info(f"Receipt confirmed: {receipt_name}")
         
-        return {'message': 'Receipt confirmed successfully'}
+        return {
+            'success': True,
+            'message': 'Receipt confirmed successfully'
+        }
     
     except Exception as e:
         frappe.logger().error(f"Failed to confirm receipt: {str(e)}")
@@ -228,22 +237,14 @@ def get_accessible_pos_profiles():
     """Get list of POS profiles accessible to current user.
     
     Returns:
-        dict: List of POS profiles with names and titles
+        list: List of POS profile names
     """
     try:
         from jarz_pos.api.manager import _current_user_allowed_profiles
         
         profile_names = _current_user_allowed_profiles()
         
-        profiles = []
-        for name in profile_names:
-            profile = frappe.get_doc('POS Profile', name)
-            profiles.append({
-                'name': name,
-                'title': profile.name  # You can customize this to show a better title
-            })
-        
-        return profiles
+        return profile_names
     
     except Exception as e:
         frappe.logger().error(f"Failed to get accessible profiles: {str(e)}")
