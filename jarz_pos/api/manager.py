@@ -40,7 +40,8 @@ except Exception:
 
 # Allowed states for invoice transfer (normalized: lowercase, no extra spaces)
 # These match the actual field values: "Received", "In Progress", "Ready"
-_ALLOWED_TRANSFER_STATES = {"received", "in progress", "ready", "preparing"}
+# Note: "recieved" (misspelled) included for backward compatibility with existing data
+_ALLOWED_TRANSFER_STATES = {"received", "recieved", "in progress", "ready", "preparing"}
 
 
 def _current_user_allowed_profiles() -> List[str]:

@@ -103,9 +103,9 @@ def emit_test_event(event: str = "jarz_pos_new_invoice"):
             "event": "jarz_pos_invoice_state_change",
             "invoice_id": payload["name"],
             "old_state_key": None,
-            "new_state_key": "recieved",
+            "new_state_key": "received",
             "old_state": None,
-            "new_state": "Recieved",
+            "new_state": "Received",
         }
         frappe.publish_realtime("jarz_pos_invoice_state_change", kanban_payload, user="*")
         return success_response(message="Event emitted", data=payload)
