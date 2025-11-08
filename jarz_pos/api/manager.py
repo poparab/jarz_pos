@@ -247,8 +247,12 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             or "Received"
         )
 
-        # Allow transfer from any state - no longer restrict to Received/In Progress/Ready
-        # This enables moving invoices even if they're in OFD, Courier Settlement, etc.
+        # Only allow transfer from Received, In Progress, or Ready states
+        if str(current_state).strip().lower() not in _ALLOWED_TRANSFER_STATES:
+            return {
+                "success": False,
+                "error": "Invoice can only be transferred when state is Received, In Progress, or Ready",
+            }
 
         state_fields: List[str] = []
         for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
