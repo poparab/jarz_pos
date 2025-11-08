@@ -268,9 +268,9 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             if meta.get_field(candidate):
                 state_fields.append(candidate)
 
+        # Only update custom_kanban_profile, NOT pos_profile
+        # pos_profile is read-only after invoice submission and cannot be changed
         updates: Dict[str, Any] = {"custom_kanban_profile": new_branch}
-        if meta.get_field("pos_profile"):
-            updates["pos_profile"] = new_branch
         
         # Reset to Received state when transferring
         for field in state_fields:
