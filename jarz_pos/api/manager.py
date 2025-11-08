@@ -325,7 +325,22 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             except Exception as e:
                 frappe.log_error(f"Error updating delivery time during transfer: {str(e)}", "Invoice Transfer")
 
-        frappe.db.set_value("Sales Invoice", inv.name, updates, update_modified=True)
+        # Use flags to bypass validation and permission checks for submitted invoices
+        frappe.flags.ignore_permissions = True
+        frappe.flags.ignore_validate = True
+        
+        try:
+            for field, value in updates.items():
+                frappe.db.set_value("Sales Invoice", inv.name, field, value, update_modified=False)
+            frappe.db.commit()
+        except Exception as e:
+            frappe.log_error(f"Error setting values during transfer: {str(e)}\nUpdates: {updates}", "Invoice Transfer")
+            frappe.db.rollback()
+            return {"success": False, "error": f"Failed to update invoice fields: {str(e)}"}
+        finally:
+            frappe.flags.ignore_permissions = False
+            frappe.flags.ignore_validate = False
+
         inv.reload()
 
         try:
