@@ -596,7 +596,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "accepted_by": inv.get("custom_accepted_by"),
                 "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
                 "payment_method": inv.get("custom_payment_method"),
-                "pos_profile": inv.get("custom_kanban_profile") or inv.get("pos_profile"),
+                "pos_profile": inv.get("custom_kanban_profile"),
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
 
