@@ -242,6 +242,13 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
 @frappe.whitelist()
 def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None):
     """Allocate outstanding to Courier Outstanding and create Courier Transaction atomically (relying on Frappe's request transaction)."""
+    
+    # PICKUP ORDER VALIDATION: Reject courier assignment for pickup orders
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    is_pickup = bool(getattr(inv, "custom_is_pickup", 0))
+    if is_pickup:
+        frappe.throw("Cannot assign courier to pickup orders. Pickup orders do not require courier delivery.")
+    
     # Derive party if omitted
     if not (party_type and party):
         existing_party = frappe.get_all(
@@ -265,7 +272,6 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     courier_party_type = party_type
     courier_party = party
 
-    inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted before marking as courier outstanding.")
     # Re-check latest outstanding directly from DB to avoid stale cache
@@ -1409,6 +1415,7 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
         to the POS Profile's cash account; then update state & ensure Delivery Note.
       - Courier info (party_type/party) is optional and ignored in this simplified flow.
       - A realtime "collect cash" prompt is published for unpaid invoices.
+      - PICKUP ORDERS: Do not require courier assignment and should not have courier info.
     """
     try:
         # ---- Normalize inputs ----
@@ -1424,6 +1431,20 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
         inv = frappe.get_doc("Sales Invoice", invoice_name)
         if inv.docstatus != 1:
             frappe.throw("Invoice must be submitted")
+
+        # PICKUP ORDER VALIDATION: Check if this is a pickup order
+        is_pickup = bool(getattr(inv, "custom_is_pickup", 0))
+        if is_pickup and (party_type or party or courier):
+            frappe.log_error(
+                f"Attempted courier assignment to pickup order {invoice_name}. "
+                f"Courier={courier}, party_type={party_type}, party={party}",
+                "Pickup Order Courier Assignment Rejected"
+            )
+            # Don't throw - just log warning and continue without courier info
+            # This allows the order to proceed to Out For Delivery status
+            party_type = None
+            party = None
+            courier = None
 
         # Determine outstanding (fresh from DB)
         try:

@@ -260,22 +260,9 @@ def create_pos_invoice(
         is_pickup = bool(pickup)
         if is_pickup:
             try:
-                # Try common custom fields if they exist; don't fail if missing
-                for fld in [
-                    "custom_is_pickup",
-                    "is_pickup",
-                    "pickup",
-                ]:
-                    try:
-                        if frappe.get_meta("Sales Invoice").get_field(fld):
-                            try:
-                                invoice_doc.set(fld, 1)
-                            except Exception:
-                                setattr(invoice_doc, fld, 1)
-                            break
-                    except Exception:
-                        continue
-                # Add a remark marker for downstream helpers to detect
+                # Set the standardized custom_is_pickup field
+                invoice_doc.custom_is_pickup = 1
+                # Add a remark marker for backward compatibility and visibility
                 try:
                     existing = (getattr(invoice_doc, "remarks", "") or "").strip()
                     marker = "[PICKUP]"

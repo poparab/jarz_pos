@@ -140,26 +140,20 @@ def _coerce_bool(val: Any) -> bool:
         return False
 
 def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
-    """Detect pickup flag on a Sales Invoice robustly across possible custom field names.
-    Checks any of: custom_is_pickup, is_pickup, pickup, custom_pickup, or remarks contains [PICKUP].
+    """Detect pickup flag on a Sales Invoice using the standardized custom_is_pickup field.
+    Also checks remarks for [PICKUP] marker as fallback for legacy orders.
     """
     try:
         getter = inv.get if isinstance(inv, dict) else getattr
-        # Direct fields (several candidates)
-        field_candidates = [
-            "custom_is_pickup",
-            "is_pickup",
-            "pickup",
-            "custom_pickup",
-        ]
-        for f in field_candidates:
-            try:
-                val = getter(inv, f) if getter is getattr else getter(f)
-            except Exception:
-                val = None
+        # Primary field: custom_is_pickup
+        try:
+            val = getter(inv, "custom_is_pickup") if getter is getattr else getter("custom_is_pickup")
             if _coerce_bool(val):
                 return True
-        # Remarks marker
+        except Exception:
+            pass
+        
+        # Fallback: Check remarks marker for legacy orders
         try:
             remarks = getter(inv, "remarks") if getter is getattr else getter("remarks")
             if isinstance(remarks, str) and "[pickup]" in remarks.lower():
