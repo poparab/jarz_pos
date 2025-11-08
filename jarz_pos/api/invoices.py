@@ -666,3 +666,45 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     "ofd_creation": ofd_creation,
     "message": msg,
     }
+
+
+@frappe.whitelist()
+def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_time_from: str, delivery_duration: int):
+    """Update delivery slot for a submitted Sales Invoice.
+    
+    Args:
+        invoice_id: Sales Invoice name
+        delivery_date: Delivery date in YYYY-MM-DD format
+        delivery_time_from: Delivery time in HH:MM:SS format
+        delivery_duration: Duration in seconds
+    
+    Returns:
+        dict: Success status and message
+    """
+    try:
+        frappe.logger().info(f"Updating delivery slot for invoice {invoice_id}")
+        frappe.logger().info(f"New slot: {delivery_date} {delivery_time_from}, duration: {delivery_duration}s")
+        
+        # Get the invoice
+        inv = frappe.get_doc("Sales Invoice", invoice_id)
+        
+        # Check permissions
+        if not frappe.has_permission("Sales Invoice", "write", inv):
+            frappe.throw("Insufficient permissions to update this invoice")
+        
+        # Update delivery slot fields
+        inv.db_set("custom_delivery_date", delivery_date, update_modified=False)
+        inv.db_set("custom_delivery_time_from", delivery_time_from, update_modified=False)
+        inv.db_set("custom_delivery_duration_seconds", delivery_duration, update_modified=False)
+        
+        frappe.db.commit()
+        
+        frappe.logger().info(f"Successfully updated delivery slot for {invoice_id}")
+        
+        return {
+            "success": True,
+            "message": "Delivery slot updated successfully"
+        }
+    except Exception as e:
+        frappe.logger().error(f"Failed to update delivery slot for {invoice_id}: {str(e)}")
+        frappe.throw(f"Failed to update delivery slot: {str(e)}")
