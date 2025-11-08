@@ -69,10 +69,7 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
         
         frappe.logger().info(f"Retrieved {len(receipts)} payment receipts")
         
-        return {
-            'success': True,
-            'receipts': receipts
-        }
+        return receipts
     
     except Exception as e:
         frappe.logger().error(f"Failed to list payment receipts: {str(e)}")
@@ -104,7 +101,6 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
         if existing:
             frappe.logger().info(f"Receipt already exists: {existing}")
             return {
-                'success': True,
                 'receipt_name': existing,
                 'message': 'Receipt already exists'
             }
@@ -126,7 +122,6 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
         frappe.logger().info(f"Created payment receipt: {receipt.name}")
         
         return {
-            'success': True,
             'receipt_name': receipt.name,
             'message': 'Receipt created successfully'
         }
@@ -185,7 +180,6 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
         frappe.logger().info(f"Receipt image uploaded: {file_doc.file_url}")
         
         return {
-            'success': True,
             'file_url': file_doc.file_url,
             'message': 'Image uploaded successfully'
         }
@@ -211,10 +205,7 @@ def confirm_receipt(receipt_name: str):
         receipt = frappe.get_doc('POS Payment Receipt', receipt_name)
         
         if receipt.status == 'Confirmed':
-            return {
-                'success': True,
-                'message': 'Receipt already confirmed'
-            }
+            return {'message': 'Receipt already confirmed'}
         
         receipt.status = 'Confirmed'
         receipt.confirmed_by = frappe.session.user
@@ -225,10 +216,7 @@ def confirm_receipt(receipt_name: str):
         
         frappe.logger().info(f"Receipt confirmed: {receipt_name}")
         
-        return {
-            'success': True,
-            'message': 'Receipt confirmed successfully'
-        }
+        return {'message': 'Receipt confirmed successfully'}
     
     except Exception as e:
         frappe.logger().error(f"Failed to confirm receipt: {str(e)}")
@@ -255,10 +243,7 @@ def get_accessible_pos_profiles():
                 'title': profile.name  # You can customize this to show a better title
             })
         
-        return {
-            'success': True,
-            'profiles': profiles
-        }
+        return profiles
     
     except Exception as e:
         frappe.logger().error(f"Failed to get accessible profiles: {str(e)}")
