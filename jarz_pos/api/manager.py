@@ -229,12 +229,17 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
     - Field custom_kanban_profile must exist; pos_profile and kanban profile are both updated.
     """
     try:
+        frappe.logger().info(f"Transfer invoice request: {invoice_id} -> {new_branch}")
+        
         if not invoice_id or not new_branch:
             return {"success": False, "error": "Missing invoice_id or new_branch"}
         allowed = _current_user_allowed_profiles()
         if new_branch not in allowed:
             return {"success": False, "error": "Not allowed to assign to this branch"}
         inv = frappe.get_doc("Sales Invoice", invoice_id)
+        
+        frappe.logger().info(f"Invoice docstatus: {inv.get('docstatus')}, is_pos: {inv.get('is_pos')}")
+        
         if int(inv.get("docstatus") or 0) != 1 or int(inv.get("is_pos") or 0) != 1:
             return {"success": False, "error": "Only submitted POS invoices can be reassigned"}
         meta = frappe.get_meta("Sales Invoice")
@@ -249,8 +254,12 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             or "Received"
         )
 
+        frappe.logger().info(f"Current state: '{current_state}'")
+        
         # Normalize the state for comparison (strip and lowercase)
         normalized_state = str(current_state).strip().lower()
+        
+        frappe.logger().info(f"Normalized state: '{normalized_state}', Allowed: {_ALLOWED_TRANSFER_STATES}")
         
         # Only allow transfer from Received, In Progress, or Ready states
         if normalized_state not in _ALLOWED_TRANSFER_STATES:
@@ -358,5 +367,6 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             "new_state": "Received",
         }
     except Exception as e:
-        frappe.log_error(f"Update Invoice Branch Error: {str(e)}", "Manager API")
+        frappe.logger().error(f"Update Invoice Branch Error: {str(e)}")
+        frappe.log_error(frappe.get_traceback(), "Manager API - Update Invoice Branch")
         return {"success": False, "error": str(e)}
