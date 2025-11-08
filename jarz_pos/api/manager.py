@@ -38,7 +38,9 @@ except Exception:
         return None
 
 
-_ALLOWED_TRANSFER_STATES = {"received", "in progress", "ready"}
+# Allowed states for invoice transfer (normalized: lowercase, no extra spaces)
+# These match the actual field values: "Received", "In Progress", "Ready"
+_ALLOWED_TRANSFER_STATES = {"received", "in progress", "ready", "preparing"}
 
 
 def _current_user_allowed_profiles() -> List[str]:
@@ -247,11 +249,18 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             or "Received"
         )
 
+        # Normalize the state for comparison (strip and lowercase)
+        normalized_state = str(current_state).strip().lower()
+        
         # Only allow transfer from Received, In Progress, or Ready states
-        if str(current_state).strip().lower() not in _ALLOWED_TRANSFER_STATES:
+        if normalized_state not in _ALLOWED_TRANSFER_STATES:
+            frappe.log_error(
+                f"Invoice {invoice_id} transfer blocked. State: '{current_state}' (normalized: '{normalized_state}'). Allowed: {_ALLOWED_TRANSFER_STATES}",
+                "Invoice Transfer State Check"
+            )
             return {
                 "success": False,
-                "error": "Invoice can only be transferred when state is Received, In Progress, or Ready",
+                "error": f"Invoice can only be transferred when state is Received, In Progress, or Ready. Current state: {current_state}",
             }
 
         state_fields: List[str] = []
