@@ -1,265 +1,152 @@
-# Copilot Instructions for Jarz POS
-
-This document provides guidance for GitHub Copilot when working on the Jarz POS project.
+# Jarz POS Project - Copilot Instructions
 
 ## Project Overview
+This workspace contains a complete POS system with two main components:
+1. **Backend/API**: ERPNext custom app at `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos`
+2. **Frontend**: Flutter mobile app at `C:\ERPNext\jarz_pos_mobile\jarz_pos`
 
-Jarz POS is a comprehensive, touch-optimized Point of Sale (POS) system built for ERPNext/Frappe Framework. It features:
+## Backend (ERPNext Custom App) Structure
 
-- Advanced bundle management with multi-item configurations
-- Real-time inventory tracking with visual indicators
-- Intelligent delivery management with city-based pricing
-- Enhanced cart functionality with editing capabilities
-- Customer management with recent customer quick access
-- Full-screen POS interface optimized for tablets and touch screens
+### API Endpoints Location
+**Primary API directory**: `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos\api\`
 
-**Tech Stack:**
-- Backend: Python 3.10+ with Frappe Framework
-- Frontend: JavaScript (ES2022), HTML, CSS
-- Database: MariaDB (via Frappe ORM)
-- Framework: ERPNext v13/v14/v15
+API modules:
+- `pos.py` - POS profiles, bundles, and configuration
+- `invoices.py` - Sales invoice creation and payment processing
+- `couriers.py` - Courier management and outstanding balances
+- `customer.py` - Customer-related operations
 
-## Code Style and Formatting
-
-### Python
-- Follow PEP 8 guidelines with modifications defined in `pyproject.toml`
-- Use **tabs** for indentation (not spaces)
-- Maximum line length: 110 characters
-- Use type hints where beneficial
-- Use ruff for linting and formatting
-- Docstrings: Use comprehensive docstrings for modules, classes, and functions
-- Variable naming: Use descriptive names, snake_case for functions and variables
-
-**Example:**
-```python
-def create_pos_invoice(customer: str, items: list[dict], pos_profile: str) -> dict:
-	"""Create a POS invoice with proper validation.
-	
-	Args:
-		customer: Customer ID or name
-		items: List of item dictionaries with item_code, qty, rate
-		pos_profile: POS Profile name
-		
-	Returns:
-		dict: Created invoice document
-	"""
-	# Implementation
-	pass
+### Backend File Organization
+```
+jarz_pos/
+├── api/           # REST API endpoints (ADD NEW APIS HERE)
+├── jarz_pos/      # Main app logic and DocTypes
+│   └── doctype/   # CRITICAL: Custom DocTypes (database models)
+├── page/          # Legacy page controllers
+├── hooks.py       # App configuration and event hooks
+├── fixtures/      # Data fixtures
+├── templates/     # Email/print templates
+└── www/           # Web assets (if any)
 ```
 
-### JavaScript
-- Use **tabs** for indentation (4 spaces equivalent)
-- ES2022+ syntax is preferred
-- Global frappe objects are available (frappe, __, cur_frm, etc.)
-- Use jQuery ($) for DOM manipulation when working with Frappe
-- Semicolons are optional but be consistent
-- Use camelCase for variables and functions
+### Custom DocTypes (Database Models) - CRITICAL
+**DocTypes Location**: `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos\jarz_pos\doctype\`
 
-**Example:**
-```javascript
-function loadRecentCustomers() {
-	frappe.call({
-		method: "jarz_pos.api.pos.get_recent_customers",
-		callback: function(r) {
-			if (r.message) {
-				displayCustomers(r.message);
-			}
-		}
-	});
-}
+**Available Custom DocTypes**:
+- `courier/` - Courier management and information
+- `courier_transaction/` - Courier transaction records
+- `custom_settings/` - Application-specific settings
+- `jarz_bundle/` - Product bundle definitions
+- `jarz_bundle_item_group/` - Bundle item group configurations
+- `city/` - City/location management
+- `pos_profile_day_timing/` - POS profile timing settings
+- `pos_profile_timetable/` - POS profile schedule management
+
+Each DocType contains:
+- `{doctype}.json` - Field definitions and metadata
+- `{doctype}.py` - Python controller with business logic
+- `{doctype}.js` - Client-side JavaScript (if needed)
+
+### API Development Patterns
+- All API methods use `@frappe.whitelist(allow_guest=False)`
+- API endpoints follow pattern: `/api/method/jarz_pos.api.{module}.{function}` for modules under `jarz_pos/api/`
+- Service endpoints under `jarz_pos/services/` are accessed as `/api/method/jarz_pos.jarz_pos.services.{module}.{function}`
+- Use `frappe.get_all()`, `frappe.get_doc()` for database operations
+- Return plain Python objects (dicts/lists) - Frappe handles JSON serialization
+- Raise errors with `frappe.throw("Error message")`
+
+### When to Add Backend Code
+- **New API endpoints**: Add to appropriate file in `api/` directory
+- **Business logic**: Add to `jarz_pos/` directory as DocType methods
+- **Database schema**: Use Frappe DocTypes in `jarz_pos/doctype/` directory
+- **Custom DocType modifications**: Edit `.py` files in `jarz_pos/doctype/{doctype_name}/`
+- **Database field changes**: Modify `.json` files in DocType directories
+- **Client-side DocType behavior**: Add/edit `.js` files in DocType directories
+- **Background jobs**: Add to hooks.py scheduler events
+- **Custom fields**: Use fixtures or migrations
+
+## Frontend (Flutter App) Structure
+
+### Main Application Structure
+```
+lib/
+├── main.dart           # App entry point
+└── src/
+    ├── core/           # Core app infrastructure
+    │   ├── app.dart    # Main app widget
+    │   ├── router.dart # Navigation routing
+    │   ├── network/    # HTTP client and API services
+    │   └── session/    # Authentication and session management
+    └── features/       # Feature-based organization
+        ├── auth/       # Authentication screens and logic
+        └── pos/        # POS functionality
 ```
 
-### JSON
-- Use **spaces** for indentation (2 spaces)
-- No trailing commas
-- No final newline
-- Used primarily for Frappe DocType schemas
+### Flutter Development Patterns
+- Use **Riverpod** for state management
+- Environment variables in `.env` file
+- Landscape-only orientation (configured in main.dart)
+- Feature-based architecture in `lib/src/features/`
+- Network layer in `lib/src/core/network/`
 
-## Architecture and Patterns
+### When to Add Frontend Code
+- **New screens**: Add to appropriate feature directory under `features/`
+- **API integration**: Add service classes in `core/network/`
+- **State management**: Add providers in relevant feature directories
+- **Navigation**: Update `router.dart`
+- **Authentication**: Modify `core/session/`
 
-### Frappe Framework Conventions
-- Use `@frappe.whitelist()` decorator for API endpoints
-- Always validate permissions in whitelisted methods
-- Use `frappe.throw()` for user-facing errors
-- Use `frappe.db.get_value()`, `frappe.get_doc()` for database operations
-- Prefer Frappe ORM over raw SQL when possible
-- Use `frappe.call()` for client-server communication
+## Cross-Project Integration
 
-### Module Organization
-- API endpoints: `jarz_pos/api/*.py`
-- DocTypes: `jarz_pos/doctype/<doctype_name>/`
-- Pages: `jarz_pos/page/<page_name>/`
-- Services/Business logic: `jarz_pos/services/*.py`
-- Utilities: `jarz_pos/utils/*.py`
+### API Communication
+- Flutter app communicates with ERPNext via REST API
+- Base URL configured in Flutter `.env` file
+- Authentication handled through ERPNext session cookies
+- API modules: `/api/method/jarz_pos.api.*`
+- Service modules (Python under services/): `/api/method/jarz_pos.jarz_pos.services.*`
 
-### Modular Design
-The codebase follows a modular pattern to avoid monolithic files:
-- Separate concerns into focused modules (see `jarz_pos/page/custom_pos/REFACTORING_README.md`)
-- Each module has a single, well-defined responsibility
-- Use utility modules for shared functionality
-- Maintain backward compatibility when refactoring
+### Development Workflow
+1. **Backend First**: Implement API endpoints in `jarz_pos/api/`
+2. **Test API**: Use Frappe's built-in API explorer or Postman
+3. **Frontend Integration**: Create service classes in Flutter `core/network/`
+4. **UI Implementation**: Add screens and state management in `features/`
 
-## Development Workflow
+## File Editing Guidelines
 
-### Before Making Changes
-1. Understand the Frappe DocType system if modifying schemas
-2. Check for existing utility functions before creating new ones
-3. Review `REFACTORING_README.md` for module responsibilities
-4. Test with actual ERPNext installation when possible
+### For Backend Changes
+- **API modifications**: Edit files in `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos\api\`
+- **DocType changes**: Edit files in `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos\jarz_pos\doctype\{doctype_name}\`
+- **Configuration**: Edit `hooks.py` for app-level configuration
+- **Database model changes**: Modify DocType `.json` files for field definitions
+- **Business logic**: Add methods to DocType `.py` controllers
 
-### Code Quality
-- Run pre-commit hooks before committing (configured in `.pre-commit-config.yaml`)
-- Linters: ruff (Python), eslint (JavaScript), prettier (JavaScript/CSS)
-- Format Python code with `ruff format`
-- Follow existing patterns in similar files
+### For Frontend Changes
+- **UI/Screens**: Edit files in `C:\ERPNext\jarz_pos_mobile\jarz_pos\lib\src\features\`
+- **API services**: Edit files in `C:\ERPNext\jarz_pos_mobile\jarz_pos\lib\src\core\network\`
+- **App configuration**: Edit `pubspec.yaml` for dependencies, `.env` for environment variables
 
-### Testing
-- Test API endpoints with actual Frappe site: `bench --site <site> console`
-- Validate DocType changes: `bench --site <site> migrate`
-- Manual testing in POS interface at `/app/custom-pos`
-- Consider offline scenarios and error handling
+### Common Operations
+- **Adding new API endpoint**: Create function in appropriate `api/*.py` file
+- **Adding new screen**: Create widget in appropriate `features/*/` directory
+- **Database changes**: Add/modify DocTypes in backend `jarz_pos/doctype/` directory
+- **New DocType creation**: Use `bench make-doctype` command in backend
+- **DocType field modifications**: Edit `.json` files in respective DocType directories
+- **Authentication changes**: Modify both backend session handling and frontend `core/session/`
 
-## Key Features and Patterns
+## Environment Setup
+- **Backend**: Runs in Frappe Docker container with bench commands
+- **Frontend**: Standard Flutter development environment
+- **Testing**: Backend uses Frappe test framework, Flutter uses Flutter test
+- **Flutter Device**: Always run Flutter app on Android device ID `192.168.1.14:5555`
+  - Use command: `flutter run -d 192.168.1.14:5555 --dart-define=ENV=staging` to make it run on the staging environment
 
-### Bundle System
-- Bundles are complex multi-item configurations
-- Each bundle must have an `erpnext_item` field linking to ERPNext Item
-- Bundle editing allows modification after adding to cart
-- Use `modules/bundle_processing.py` for bundle-related logic
+## Key Dependencies
+- **Backend**: Frappe Framework, ERPNext
+- **Frontend**: Flutter, Riverpod, flutter_dotenv, http package
 
-### Delivery Management
-- City-based delivery charges (income) and expenses
-- Delivery income added as tax charges
-- Delivery expense added as invoice discount
-- Edit delivery expenses during checkout
-- Use `services/delivery_handling.py` for delivery logic
+Remember: Always implement backend API first, then integrate with Flutter frontend. The backend serves as the single source of truth for business logic and data.
 
-### Customer Management
-- Recent customer display (last 5 customers)
-- Smart search with mobile/name pre-filling
-- Customer creation with delivery address
-- Use `api/pos.py` for customer-related endpoints
+when you want to restart the backend, use: bench restart
+when you want to restart the frontend, use: R in the terminal to restart the Flutter app
 
-### Cart Operations
-- Remove items and bundles with confirmation
-- Edit bundles in cart with validation
-- Real-time total updates
-- Inventory validation before adding items
-
-## Common Patterns
-
-### Error Handling
-```python
-try:
-	# Operation
-	result = frappe.get_doc("DocType", name)
-except frappe.DoesNotExistError:
-	frappe.throw(_("Record not found"), frappe.DoesNotExistError)
-except Exception as e:
-	frappe.log_error(f"Error in operation: {str(e)}")
-	frappe.throw(_("An error occurred"))
-```
-
-### API Responses
-```python
-@frappe.whitelist()
-def my_api_endpoint(param1: str, param2: Optional[int] = None):
-	"""API endpoint description."""
-	# Validate permissions
-	if not frappe.has_permission("DocType", "read"):
-		frappe.throw(_("Not permitted"), frappe.PermissionError)
-	
-	# Business logic
-	result = perform_operation(param1, param2)
-	
-	# Return structured response
-	return {
-		"success": True,
-		"data": result,
-		"message": _("Operation completed")
-	}
-```
-
-### Client-Side API Calls
-```javascript
-frappe.call({
-	method: "jarz_pos.api.module.function_name",
-	args: {
-		param1: value1,
-		param2: value2
-	},
-	callback: function(r) {
-		if (r.message) {
-			// Handle success
-			console.log(r.message);
-		}
-	},
-	error: function(r) {
-		// Handle error
-		frappe.msgprint(__("Error occurred"));
-	}
-});
-```
-
-## Important Files and Directories
-
-- `jarz_pos/hooks.py` - App configuration, whitelisted methods, workspace setup
-- `jarz_pos/page/custom_pos/custom_pos.js` - Main POS interface logic
-- `jarz_pos/api/pos.py` - Core POS API endpoints
-- `jarz_pos/api/couriers.py` - Delivery and courier management
-- `jarz_pos/services/` - Business logic layer
-- `jarz_pos/utils/` - Shared utility functions
-- `Prompts.txt` - Mobile app development prompts (React Native)
-- `REFACTORING_README.md` - Module organization guide
-
-## Permissions and Security
-
-- Always check user permissions before operations
-- Use `frappe.has_permission(doctype, ptype, doc)` for permission checks
-- Manager-only functions should use role-based checks
-- Validate all user inputs server-side
-- Never trust client-side data
-
-## Documentation
-
-- Update README.md for user-facing changes
-- Update USAGE.md for operational changes
-- Document new API endpoints in docstrings
-- Add comments for complex business logic
-- Keep Prompts.txt updated for mobile app features
-
-## Special Considerations
-
-### Frappe-Specific
-- Frappe uses server-side rendering with Jinja2
-- DocType schemas are JSON files
-- Custom fields can be added via code or UI
-- Hooks system controls app lifecycle events
-
-### POS-Specific
-- POS Profile controls warehouse, price list, and user access
-- Inventory checks must be real-time
-- Touch-friendly UI with large buttons
-- Support full-screen mode (ESC key toggle)
-- Offline capability considerations for future
-
-### Delivery System
-- City doctype links to Customer Address
-- Delivery income ≠ delivery expense (profit tracking)
-- Account resolution: "Freight and Forwarding Charges" or fallback
-- Dual accounting: income as tax, expense as discount
-
-## Migration and Upgrades
-
-- Custom fields added via patches in `jarz_pos/patches/`
-- Database migrations run with `bench migrate`
-- Preserve backward compatibility in API changes
-- Use `before_uninstall` and `after_uninstall` hooks for cleanup
-
-## Getting Help
-
-- Check Frappe documentation: https://frappeframework.com/docs
-- ERPNext documentation: https://docs.erpnext.com
-- Review existing code patterns in similar features
-- Console debugging: `bench --site <site> console`
-- Server logs: `bench --site <site> logs`
+don't create multiple test files for the same purpose, consolidate them into one. only create specific test files for significantly different functionalities.

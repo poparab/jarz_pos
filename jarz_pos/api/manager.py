@@ -247,11 +247,8 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             or "Received"
         )
 
-        if str(current_state).strip().lower() not in _ALLOWED_TRANSFER_STATES:
-            return {
-                "success": False,
-                "error": "Invoice can only be transferred when state is Received, In Progress, or Ready",
-            }
+        # Allow transfer from any state - no longer restrict to Received/In Progress/Ready
+        # This enables moving invoices even if they're in OFD, Courier Settlement, etc.
 
         state_fields: List[str] = []
         for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
@@ -261,9 +258,12 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         updates: Dict[str, Any] = {"custom_kanban_profile": new_branch}
         if meta.get_field("pos_profile"):
             updates["pos_profile"] = new_branch
+        
+        # Reset to Received state when transferring
         for field in state_fields:
             updates[field] = "Received"
 
+        # Reset acceptance status
         for field, value in {
             "custom_acceptance_status": "Pending",
             "custom_accepted_by": None,
@@ -271,6 +271,46 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         }.items():
             if meta.get_field(field):
                 updates[field] = value
+
+        # Handle delivery time: try to find closest matching period in new POS profile
+        current_time_from = inv.get("custom_delivery_time_from")
+        current_time_to = inv.get("custom_delivery_time_to") 
+        current_delivery_date = inv.get("custom_delivery_date")
+        
+        if current_time_from and meta.get_field("custom_delivery_time_from"):
+            try:
+                # Get delivery periods from new POS profile
+                new_profile_doc = frappe.get_doc("POS Profile", new_branch)
+                delivery_periods = new_profile_doc.get("custom_delivery_periods") or []
+                
+                if delivery_periods:
+                    # Find closest matching period based on time_from
+                    from datetime import datetime, time
+                    current_time = datetime.strptime(str(current_time_from), "%H:%M:%S").time() if isinstance(current_time_from, str) else current_time_from
+                    
+                    closest_period = None
+                    min_diff = float('inf')
+                    
+                    for period in delivery_periods:
+                        period_from = period.get("time_from")
+                        if period_from:
+                            period_time = datetime.strptime(str(period_from), "%H:%M:%S").time() if isinstance(period_from, str) else period_from
+                            # Calculate time difference in minutes
+                            diff = abs((datetime.combine(datetime.today(), current_time) - 
+                                      datetime.combine(datetime.today(), period_time)).total_seconds() / 60)
+                            if diff < min_diff:
+                                min_diff = diff
+                                closest_period = period
+                    
+                    if closest_period:
+                        updates["custom_delivery_time_from"] = closest_period.get("time_from")
+                        updates["custom_delivery_time_to"] = closest_period.get("time_to")
+                        if meta.get_field("custom_delivery_duration"):
+                            updates["custom_delivery_duration"] = closest_period.get("duration")
+                        if meta.get_field("custom_delivery_slot_label"):
+                            updates["custom_delivery_slot_label"] = closest_period.get("label") or f"{closest_period.get('time_from')} - {closest_period.get('time_to')}"
+            except Exception as e:
+                frappe.log_error(f"Error updating delivery time during transfer: {str(e)}", "Invoice Transfer")
 
         frappe.db.set_value("Sales Invoice", inv.name, updates, update_modified=True)
         inv.reload()
