@@ -45,7 +45,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Payment Method",
-   "options": "Instapay\nMobile Wallet",
+   "options": "InstaPay\nWallet",
    "reqd": 1
   },
   {
