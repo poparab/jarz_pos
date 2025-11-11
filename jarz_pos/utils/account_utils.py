@@ -48,7 +48,18 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
     """Return Cash In Hand ledger for the given POS profile."""
     frappe.logger().info(f"DEBUG _get_cash_account: pos_profile='{pos_profile}', company='{company}'")
     
-    # Try exact child under Cash In Hand first: "{pos_profile} - <ABBR>"
+    # First, check if pos_profile itself is already a valid Cash/Bank account
+    if frappe.db.exists("Account", pos_profile):
+        account_type = frappe.db.get_value("Account", pos_profile, "account_type")
+        frappe.logger().info(f"DEBUG _get_cash_account: pos_profile exists as account with type='{account_type}'")
+        if account_type in ["Cash", "Bank"]:
+            frappe.logger().info(f"DEBUG _get_cash_account: RETURNING pos_profile itself '{pos_profile}' (is Cash/Bank)")
+            return pos_profile
+        else:
+            frappe.logger().warning(f"DEBUG _get_cash_account: pos_profile '{pos_profile}' is an account but NOT Cash/Bank type (type='{account_type}')")
+            # Don't return it - it's the wrong type (probably Receivable)
+    
+    # Try exact child under Cash In Hand: "{pos_profile} - <ABBR>"
     acc = frappe.db.get_value(
         "Account",
         {
@@ -77,6 +88,14 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
         frappe.logger().info(f"DEBUG _get_cash_account: partial match result='{acc}'")
     
     if acc:
+        # Final validation: ensure it's actually a Cash/Bank account
+        account_type = frappe.db.get_value("Account", acc, "account_type")
+        frappe.logger().info(f"DEBUG _get_cash_account: found account '{acc}' with type='{account_type}'")
+        if account_type not in ["Cash", "Bank"]:
+            frappe.logger().error(f"DEBUG _get_cash_account: ERROR - Found account '{acc}' but it's NOT Cash/Bank (type='{account_type}')")
+            frappe.throw(
+                f"Account '{acc}' found for POS profile '{pos_profile}' is not a Cash or Bank account (type: {account_type})"
+            )
         frappe.logger().info(f"DEBUG _get_cash_account: RETURNING '{acc}'")
         return acc
     

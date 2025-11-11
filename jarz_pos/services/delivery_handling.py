@@ -1621,9 +1621,13 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     if shipping_exp <= 0:
         frappe.throw("No shipping expense configured for this invoice's territory")
 
+    frappe.logger().info(f"DEBUG settle_single_invoice_paid: BEFORE get_pos_cash_account - pos_profile='{pos_profile}', company='{company}'")
     cash_acc = get_pos_cash_account(pos_profile, company)
+    frappe.logger().info(f"DEBUG settle_single_invoice_paid: AFTER get_pos_cash_account - cash_acc='{cash_acc}'")
     creditors_acc = get_creditors_account(company)
+    frappe.logger().info(f"DEBUG settle_single_invoice_paid: creditors_acc='{creditors_acc}'")
     courier_outstanding_acc = _get_courier_outstanding_account(company)
+    frappe.logger().info(f"DEBUG settle_single_invoice_paid: courier_outstanding_acc='{courier_outstanding_acc}'")
     for acc in (cash_acc, creditors_acc, courier_outstanding_acc):
         validate_account_exists(acc)
 
