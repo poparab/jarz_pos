@@ -1573,6 +1573,8 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     pos_profile = (pos_profile or '').strip()
     party_type = (party_type or '').strip()
     party = (party or '').strip()
+    
+    frappe.logger().info(f"DEBUG settle_single_invoice_paid: invoice={invoice_name}, pos_profile='{pos_profile}', party_type={party_type}, party={party}")
 
     if not invoice_name:
         frappe.throw("invoice_name required")
@@ -1646,6 +1648,8 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     )
     has_outstanding_mode = bool(outstanding_ct)
     order_amount = float(outstanding_ct[0].amount) if outstanding_ct else 0.0
+    
+    frappe.logger().info(f"DEBUG settle_single_invoice_paid: has_outstanding_mode={has_outstanding_mode}, order_amount={order_amount}, shipping_exp={shipping_exp}")
 
     # Helper to find existing JE (idempotency)
     def _existing_je(title: str):
@@ -1659,6 +1663,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
 
     if has_outstanding_mode:
         # Unpaid + settle later final settlement (cases based on order_amount vs shipping_exp)
+        frappe.logger().info(f"DEBUG settle_single_invoice_paid: OUTSTANDING MODE - Creating settlement JE")
         title = f"Courier Outstanding Settlement – {inv.name}"
         je_name = _existing_je(title)
         if not je_name:
@@ -1668,6 +1673,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             je.company = company
             je.title = title
             if order_amount >= shipping_exp:
+                frappe.logger().info(f"DEBUG settle_single_invoice_paid: Case 1 - order_amount({order_amount}) >= shipping_exp({shipping_exp})")
                 # Common case
                 net_branch = order_amount - shipping_exp
                 if net_branch > 0.0001:

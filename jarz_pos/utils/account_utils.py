@@ -46,6 +46,8 @@ def get_item_price(item_code, price_list):
 
 def _get_cash_account(pos_profile: str, company: str) -> str:
     """Return Cash In Hand ledger for the given POS profile."""
+    frappe.logger().info(f"DEBUG _get_cash_account: pos_profile='{pos_profile}', company='{company}'")
+    
     # Try exact child under Cash In Hand first: "{pos_profile} - <ABBR>"
     acc = frappe.db.get_value(
         "Account",
@@ -57,6 +59,8 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
         },
         "name",
     )
+    
+    frappe.logger().info(f"DEBUG _get_cash_account: exact match result='{acc}'")
     
     # Fallback: partial match
     if not acc:
@@ -70,10 +74,13 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
             },
             "name",
         )
+        frappe.logger().info(f"DEBUG _get_cash_account: partial match result='{acc}'")
     
     if acc:
+        frappe.logger().info(f"DEBUG _get_cash_account: RETURNING '{acc}'")
         return acc
     
+    frappe.logger().error(f"DEBUG _get_cash_account: NO ACCOUNT FOUND! pos_profile='{pos_profile}', company='{company}'")
     frappe.throw(
         f"No Cash In Hand account found for POS profile '{pos_profile}' in company {company}."
     )
