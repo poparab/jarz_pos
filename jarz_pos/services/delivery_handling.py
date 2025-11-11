@@ -1453,72 +1453,19 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
             outstanding = float(inv.outstanding_amount or 0)
 
         company = inv.company
+
+        # If UNPAID: Route to mark_courier_outstanding for proper "settle later" accounting
+        if outstanding > 0.0001:
+            frappe.logger().info(f"OFD transition for UNPAID invoice {invoice_name} - routing to mark_courier_outstanding")
+            # Use mark_courier_outstanding which creates:
+            # 1. Payment Entry: DR Receivable / CR Courier Outstanding
+            # 2. Courier Transaction with order amount
+            # 3. JE: DR Freight / CR Creditors (for shipping)
+            return mark_courier_outstanding(invoice_name, courier, party_type, party)
+
+        # PAID invoice flow: just update state and create DN (no payment needed)
         cash_acc = get_pos_cash_account(pos_profile, company)
         validate_account_exists(cash_acc)
-
-        # If UNPAID: publish prompt and create Payment Entry to POS cash account
-        payment_entry_name = None
-        if outstanding > 0.0001:
-            try:
-                # Publish a realtime prompt first so UI can show "Collect Cash"
-                try:
-                    frappe.publish_realtime(
-                        "jarz_pos_collect_cash",
-                        {
-                            "invoice": inv.name,
-                            "amount": float(inv.grand_total or 0),
-                            "outstanding": float(outstanding or 0),
-                            "mode": "collect_cash",
-                        },
-                        user="*",
-                    )
-                except Exception:
-                    pass
-
-                # Reuse existing cash PE if already allocated
-                ref_parents = frappe.get_all(
-                    "Payment Entry Reference",
-                    filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-                    pluck="parent",
-                )
-                if ref_parents:
-                    rows = frappe.get_all(
-                        "Payment Entry",
-                        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive", "paid_to": cash_acc},
-                        fields=["name", "paid_amount"],
-                    )
-                    if rows:
-                        payment_entry_name = rows[0]["name"]
-                if not payment_entry_name:
-                    # Resolve receivable
-                    receivable_acc = getattr(inv, "debit_to", None) or frappe.db.get_value("Company", company, "default_receivable_account")
-                    if not receivable_acc:
-                        frappe.throw("Could not resolve receivable account for invoice")
-                    pe = frappe.new_doc("Payment Entry")
-                    pe.payment_type = "Receive"
-                    pe.company = company
-                    pe.posting_date = frappe.utils.nowdate()
-                    pe.mode_of_payment = "Cash"
-                    pe.party_type = "Customer"
-                    pe.party = inv.customer
-                    pe.paid_from = receivable_acc
-                    pe.paid_to = cash_acc
-                    pe.paid_amount = outstanding
-                    pe.received_amount = outstanding
-                    pe.append("references", {
-                        "reference_doctype": "Sales Invoice",
-                        "reference_name": inv.name,
-                        "allocated_amount": outstanding,
-                    })
-                    pe.flags.ignore_permissions = True
-                    pe.insert(ignore_permissions=True)
-                    pe.submit()
-                    payment_entry_name = pe.name
-            except Exception as pe_err:
-                # If invoice is already fully paid due to race, continue gracefully
-                msg = str(pe_err)
-                if "already been fully paid" not in msg and "already paid" not in msg.lower():
-                    raise
 
         # Update operational state idempotently
         if inv.get("custom_sales_invoice_state") != "Out for Delivery":
@@ -1533,59 +1480,15 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
         if dn_result.get("error"):
             frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
 
-        # Create Courier Transaction for unpaid invoices (courier collects the cash)
-        ct_name = None
-        if outstanding > 0.0001 and payment_entry_name and (party_type and party):
-            shipping_exp = _get_delivery_expense_amount(inv) or 0.0
-            # Check if CT already exists (idempotency)
-            existing_ct = frappe.get_all(
-                "Courier Transaction",
-                filters={
-                    "reference_invoice": inv.name,
-                    "party_type": party_type,
-                    "party": party,
-                },
-                pluck="name",
-                limit=1,
-            )
-            if existing_ct:
-                ct_name = existing_ct[0]
-                # Update amount and shipping if needed
-                frappe.db.set_value(
-                    "Courier Transaction",
-                    ct_name,
-                    {
-                        "amount": float(inv.grand_total or 0),
-                        "shipping_amount": shipping_exp,
-                        "status": "Unsettled",
-                        "payment_mode": "Cash",
-                    },
-                    update_modified=False,
-                )
-            else:
-                # Create new Courier Transaction
-                ct = frappe.new_doc("Courier Transaction")
-                ct.party_type = party_type
-                ct.party = party
-                ct.date = frappe.utils.now_datetime()
-                ct.reference_invoice = inv.name
-                ct.amount = float(inv.grand_total or 0)  # Courier collected this amount
-                ct.shipping_amount = shipping_exp
-                ct.status = "Unsettled"  # Will be settled later
-                ct.payment_mode = "Cash"
-                ct.notes = "OFD transition - courier to collect cash from customer"
-                ct.insert(ignore_permissions=True)
-                ct_name = ct.name
-
-        # Emit unified realtime event for Kanban patching
+        # Emit unified realtime event for Kanban patching (PAID invoice - no payment/CT needed)
         payload = {
             "invoice": inv.name,
             "courier": courier or "",
-            "mode": "collect_cash" if outstanding > 0.0001 else "paid_noops",
-            "payment_entry": payment_entry_name,
-            "courier_transaction": ct_name,
+            "mode": "paid_noops",
+            "payment_entry": None,
+            "courier_transaction": None,
             "amount": float(inv.grand_total or 0),
-            "outstanding_before": float(outstanding or 0),
+            "outstanding_before": 0.0,
             "delivery_note": dn_result.get("delivery_note"),
             "delivery_note_reused": dn_result.get("reused"),
             "dn_logic_version": DN_LOGIC_VERSION,
