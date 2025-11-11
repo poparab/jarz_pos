@@ -177,12 +177,14 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
+@frappe.whitelist(allow_guest=False)
 def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: str, party: str):
     """Settle a paid invoice's courier shipping fee individually (one-by-one settlement).
 
     Creates JE (DR Creditors [party] / CR Cash) and settles or creates Courier Transaction.
     Returns: { success, invoice, journal_entry, shipping_amount, party_type, party, courier_transactions }
     """
+    frappe.logger().info(f"API settle_single_invoice_paid CALLED: invoice={invoice_name}, pos_profile={pos_profile}, party_type={party_type}, party={party}")
     return _settle_single_invoice_paid(invoice_name, pos_profile, party_type, party)
 
 @frappe.whitelist(allow_guest=False)
@@ -192,6 +194,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
     This function processes the collected payment for the courier.
     Returns: { success, invoice, payment_details }
     """
+    frappe.logger().info(f"API settle_courier_collected_payment CALLED: invoice={invoice_name}, pos_profile={pos_profile}, party_type={party_type}, party={party}")
     return _settle_courier_collected_payment(invoice_name, pos_profile, party_type, party)
 
 
