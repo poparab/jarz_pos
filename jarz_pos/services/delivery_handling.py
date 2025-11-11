@@ -1533,12 +1533,57 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
         if dn_result.get("error"):
             frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
 
+        # Create Courier Transaction for unpaid invoices (courier collects the cash)
+        ct_name = None
+        if outstanding > 0.0001 and payment_entry_name and (party_type and party):
+            shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+            # Check if CT already exists (idempotency)
+            existing_ct = frappe.get_all(
+                "Courier Transaction",
+                filters={
+                    "reference_invoice": inv.name,
+                    "party_type": party_type,
+                    "party": party,
+                },
+                pluck="name",
+                limit=1,
+            )
+            if existing_ct:
+                ct_name = existing_ct[0]
+                # Update amount and shipping if needed
+                frappe.db.set_value(
+                    "Courier Transaction",
+                    ct_name,
+                    {
+                        "amount": float(inv.grand_total or 0),
+                        "shipping_amount": shipping_exp,
+                        "status": "Unsettled",
+                        "payment_mode": "Cash",
+                    },
+                    update_modified=False,
+                )
+            else:
+                # Create new Courier Transaction
+                ct = frappe.new_doc("Courier Transaction")
+                ct.party_type = party_type
+                ct.party = party
+                ct.date = frappe.utils.now_datetime()
+                ct.reference_invoice = inv.name
+                ct.amount = float(inv.grand_total or 0)  # Courier collected this amount
+                ct.shipping_amount = shipping_exp
+                ct.status = "Unsettled"  # Will be settled later
+                ct.payment_mode = "Cash"
+                ct.notes = "OFD transition - courier to collect cash from customer"
+                ct.insert(ignore_permissions=True)
+                ct_name = ct.name
+
         # Emit unified realtime event for Kanban patching
         payload = {
             "invoice": inv.name,
             "courier": courier or "",
             "mode": "collect_cash" if outstanding > 0.0001 else "paid_noops",
             "payment_entry": payment_entry_name,
+            "courier_transaction": ct_name,
             "amount": float(inv.grand_total or 0),
             "outstanding_before": float(outstanding or 0),
             "delivery_note": dn_result.get("delivery_note"),
