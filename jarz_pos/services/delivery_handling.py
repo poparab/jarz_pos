@@ -288,7 +288,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     order_amount = float(inv.grand_total or (outstanding or 0))
 
     # Compute shipping first for CT and later JE
-    shipping_exp = _get_delivery_expense_amount(inv)
+    shipping_exp = _get_delivery_expense_amount(inv) or 0.0
 
     # Create Courier Transaction BEFORE creating Payment Entry so preview treats this as unpaid-effective
     # Idempotency: avoid duplicate CTs for same purpose
@@ -764,7 +764,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
     company = inv.company
     
     # Get shipping expense
-    shipping_exp = _get_delivery_expense_amount(inv)
+    shipping_exp = _get_delivery_expense_amount(inv) or 0.0
     
     # Update state to Out for Delivery
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
@@ -1566,8 +1566,6 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
 
     company = inv.company
     shipping_exp = _get_delivery_expense_amount(inv) or 0.0
-    if shipping_exp <= 0:
-        frappe.throw("No shipping expense configured for this invoice's territory")
 
     frappe.logger().info(f"DEBUG settle_single_invoice_paid: BEFORE get_pos_cash_account - pos_profile='{pos_profile}', company='{company}'")
     cash_acc = get_pos_cash_account(pos_profile, company)
@@ -1600,7 +1598,38 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     )
     has_outstanding_mode = bool(outstanding_ct)
     order_amount = float(outstanding_ct[0].amount) if outstanding_ct else 0.0
-    
+    ct_shipping = float(outstanding_ct[0].shipping_amount or 0) if outstanding_ct else 0.0
+
+    if ct_shipping > 0.0001 and abs(ct_shipping - shipping_exp) > 0.0001:
+        frappe.logger().info(
+            f"DEBUG settle_single_invoice_paid: using courier transaction shipping {ct_shipping} instead of territory-derived {shipping_exp}"
+        )
+    if ct_shipping > 0.0001:
+        shipping_exp = ct_shipping
+    elif shipping_exp <= 0:
+        other_ct = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": inv.name,
+                "party_type": party_type,
+                "party": party,
+                "status": ["!=", "Settled"],
+            },
+            fields=["name", "shipping_amount"],
+            order_by="creation desc",
+            limit=1,
+        )
+        if other_ct:
+            alt_shipping = float(other_ct[0].get("shipping_amount") or 0)
+            if alt_shipping > 0.0001:
+                frappe.logger().info(
+                    f"DEBUG settle_single_invoice_paid: fallback courier transaction shipping {alt_shipping}"
+                )
+                shipping_exp = alt_shipping
+
+    if shipping_exp <= 0:
+        frappe.throw("No shipping expense configured for this invoice's territory")
+
     frappe.logger().info(f"DEBUG settle_single_invoice_paid: has_outstanding_mode={has_outstanding_mode}, order_amount={order_amount}, shipping_exp={shipping_exp}")
 
     # Helper to find existing JE (idempotency)
@@ -1804,6 +1833,28 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
     company = inv.company
     order_amount = float(inv.grand_total or 0)
     shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+
+    pending_ct = frappe.get_all(
+        "Courier Transaction",
+        filters={
+            "reference_invoice": inv.name,
+            "party_type": party_type,
+            "party": party,
+            "status": ["!=", "Settled"],
+        },
+        fields=["name", "shipping_amount"],
+        order_by="creation desc",
+        limit=1,
+    )
+    if pending_ct:
+        ct_shipping = float(pending_ct[0].get("shipping_amount") or 0)
+        if ct_shipping > 0.0001 and abs(ct_shipping - shipping_exp) > 0.0001:
+            frappe.logger().info(
+                f"DEBUG settle_courier_collected_payment: using courier transaction shipping {ct_shipping} instead of territory-derived {shipping_exp}"
+            )
+        if ct_shipping > 0.0001:
+            shipping_exp = ct_shipping
+
     if shipping_exp <= 0:
         frappe.throw("No shipping expense configured")
 
