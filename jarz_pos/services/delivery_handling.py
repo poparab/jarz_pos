@@ -991,23 +991,47 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
     cts = frappe.get_all(
         "Courier Transaction",
         filters=filters,
-        fields=["name", "amount", "shipping_amount"],
+        fields=["name", "amount", "shipping_amount", "party_type", "party"],
     )
     if not cts:
         frappe.throw("No unsettled courier transactions found for the selected party.")
 
-    net_balance = 0.0
-    for r in cts:
-        net_balance += float(r.amount or 0) - float(r.shipping_amount or 0)
+    if not (party_type and party):
+        for row in cts:
+            row_party_type = (row.get("party_type") or "").strip()
+            row_party = (row.get("party") or "").strip()
+            if row_party_type and row_party:
+                party_type = row_party_type
+                party = row_party
+                break
+
+    totals = _summarize_courier_transactions(cts)
+    total_amount = totals["order_amount"]
+    total_shipping = totals["shipping_amount"]
+    net_balance = totals["net_to_branch"]
 
     company = frappe.defaults.get_global_default("company") or frappe.db.get_single_value("Global Defaults", "default_company")
     courier_outstanding_acc = _get_courier_outstanding_account(company)
     cash_acc = get_pos_cash_account(pos_profile, company)
+    creditors_acc = get_creditors_account(company)
+
+    for acc in (courier_outstanding_acc, cash_acc, creditors_acc):
+        validate_account_exists(acc)
 
     label = party or "<Legacy Courier>"
     je_name = None
-    if abs(net_balance) > 0.005:
-        je_name = _create_settlement_journal_entry(label, net_balance, company, cash_acc, courier_outstanding_acc)
+    if _requires_settlement_entry(total_amount, total_shipping):
+        je_name = _create_settlement_journal_entry(
+            courier=label,
+            company=company,
+            cash_acc=cash_acc,
+            courier_outstanding_acc=courier_outstanding_acc,
+            creditors_acc=creditors_acc,
+            total_order_amount=total_amount,
+            total_shipping_amount=total_shipping,
+            party_type=party_type,
+            party=party,
+        )
 
     for r in cts:
         frappe.db.set_value("Courier Transaction", r.name, "status", "Settled")
@@ -1015,9 +1039,20 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
 
     frappe.publish_realtime(
         "jarz_pos_courier_settled",
-        {"courier": label, "journal_entry": je_name, "net_balance": net_balance},
+        {
+            "courier": label,
+            "journal_entry": je_name,
+            "net_balance": net_balance,
+            "order_amount": total_amount,
+            "shipping_amount": total_shipping,
+        },
     )
-    return {"journal_entry": je_name, "net_balance": net_balance}
+    return {
+        "journal_entry": je_name,
+        "net_balance": net_balance,
+        "order_amount": total_amount,
+        "shipping_amount": total_shipping,
+    }
 
 
 @frappe.whitelist()
@@ -2321,41 +2356,120 @@ def _create_expense_journal_entry(inv, amount, paid_from, paid_to):
     return je
 
 
-def _create_settlement_journal_entry(courier, net_balance, company, cash_acc, courier_outstanding_acc):
-    """Create journal entry for courier settlement."""
+def _requires_settlement_entry(order_amount: float, shipping_amount: float) -> bool:
+    """Determine if a settlement JE is required based on totals."""
+    tolerance = 0.005
+    return (abs(order_amount) > tolerance) or (abs(shipping_amount) > tolerance)
+
+
+def _summarize_courier_transactions(rows: list[dict]) -> dict:
+    """Aggregate order/shipping totals from courier transactions."""
+    order_total = 0.0
+    shipping_total = 0.0
+    for row in rows:
+        order_total += float(row.get("amount") or 0)
+        shipping_total += float(row.get("shipping_amount") or 0)
+
+    return {
+        "order_amount": round(order_total, 2),
+        "shipping_amount": round(shipping_total, 2),
+        "net_to_branch": round(order_total - shipping_total, 2),
+    }
+
+
+def _create_settlement_journal_entry(
+    *,
+    courier: str,
+    company: str,
+    cash_acc: str,
+    courier_outstanding_acc: str,
+    creditors_acc: str,
+    total_order_amount: float,
+    total_shipping_amount: float,
+    party_type: str | None,
+    party: str | None,
+):
+    """Create a balanced settlement Journal Entry that splits cash and shipping lines."""
+
+    order_amt = round(float(total_order_amount or 0), 2)
+    shipping_amt = round(float(total_shipping_amount or 0), 2)
+    net_branch = round(order_amt - shipping_amt, 2)
+
+    if order_amt <= 0 and shipping_amt <= 0:
+        frappe.throw("Courier settlement totals resolve to zero – nothing to settle.")
+
     je = frappe.new_doc("Journal Entry")
     je.voucher_type = "Journal Entry"
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Courier Settlement – {courier}"
-    
-    if net_balance > 0:
-        # Courier owes us money – we RECEIVE cash
-        je.append("accounts", {
-            "account": cash_acc,
-            "debit_in_account_currency": net_balance,
-            "credit_in_account_currency": 0,
-        })
-        je.append("accounts", {
-            "account": courier_outstanding_acc,
+    je.user_remark = (
+        f"Order: {order_amt}, Shipping: {shipping_amt}, Net to branch: {net_branch}"
+    )
+
+    tolerance = 0.005
+
+    # Debit branch cash for the order net of freight (credit when net negative)
+    if abs(net_branch) > tolerance:
+        if net_branch > 0:
+            je.append(
+                "accounts",
+                {
+                    "account": cash_acc,
+                    "debit_in_account_currency": net_branch,
+                    "credit_in_account_currency": 0,
+                },
+            )
+        else:
+            je.append(
+                "accounts",
+                {
+                    "account": cash_acc,
+                    "debit_in_account_currency": 0,
+                    "credit_in_account_currency": abs(net_branch),
+                },
+            )
+
+    # Debit courier supplier for freight (credit if shipping negative)
+    if abs(shipping_amt) > tolerance:
+        shipping_line = {
+            "account": creditors_acc,
             "debit_in_account_currency": 0,
-            "credit_in_account_currency": net_balance,
-        })
-    else:
-        amt = abs(net_balance)
-        # We owe courier – PAY cash
-        je.append("accounts", {
-            "account": courier_outstanding_acc,
-            "debit_in_account_currency": amt,
             "credit_in_account_currency": 0,
-        })
-        je.append("accounts", {
-            "account": cash_acc,
-            "debit_in_account_currency": 0,
-            "credit_in_account_currency": amt,
-        })
-    
+        }
+        if party_type and party:
+            shipping_line["party_type"] = party_type
+            shipping_line["party"] = party
+        if shipping_amt > 0:
+            shipping_line["debit_in_account_currency"] = shipping_amt
+        else:
+            shipping_line["credit_in_account_currency"] = abs(shipping_amt)
+        je.append("accounts", shipping_line)
+
+    # Credit courier outstanding with the full order amount (debit if negative)
+    if abs(order_amt) > tolerance:
+        je.append(
+            "accounts",
+            {
+                "account": courier_outstanding_acc,
+                "debit_in_account_currency": abs(order_amt) if order_amt < 0 else 0,
+                "credit_in_account_currency": order_amt if order_amt > 0 else 0,
+            },
+        )
+
+    total_debit = sum(frappe.utils.flt(acc.debit_in_account_currency or 0, 2) for acc in je.accounts)
+    total_credit = sum(frappe.utils.flt(acc.credit_in_account_currency or 0, 2) for acc in je.accounts)
+
+    if abs(total_debit - total_credit) > tolerance:
+        frappe.throw(
+            "Courier settlement entry out of balance. "
+            f"Debits={total_debit} Credits={total_credit}"
+        )
+
+    if not je.accounts:
+        frappe.throw("Courier settlement produced no journal lines")
+
     je.save(ignore_permissions=True)
     je.submit()
-    
+
     return je.name
