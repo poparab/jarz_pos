@@ -9,8 +9,6 @@ import traceback
 import datetime
 from typing import Dict, List, Any, Optional, Union, Tuple
 
-from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_sales_return
-
 # Accounting helpers
 try:
     from jarz_pos.utils.account_utils import (
@@ -1048,6 +1046,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             return _failure("Invoice has partial payments; settle or refund before cancelling")
 
         credit_note_name: Optional[str] = None
+        cancelled_payment_entries: List[str] = []
         cancelled_docstatus = 1
         savepoint = "kanban_cancel_invoice"
         try:
@@ -1056,38 +1055,35 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             savepoint = None
 
         try:
+            invoice.flags.ignore_permissions = True
+
             if is_unpaid:
                 invoice.cancel()
                 cancelled_docstatus = 2
             else:
-                existing_returns = frappe.get_all(
-                    "Sales Invoice",
+                payment_entries = frappe.get_all(
+                    "Payment Entry Reference",
                     filters={
-                        "return_against": invoice.name,
+                        "reference_doctype": "Sales Invoice",
+                        "reference_name": invoice.name,
                         "docstatus": 1,
+                        "parenttype": "Payment Entry",
                     },
-                    pluck="name",
-                    limit=1,
+                    pluck="parent",
                 )
-                if existing_returns:
-                    credit_note_name = existing_returns[0]
-                else:
-                    return_doc = make_sales_return(invoice.name)
-                    return_doc.posting_date = frappe.utils.nowdate()
-                    return_doc.posting_time = frappe.utils.nowtime()
-                    remarks_lines = [
-                        f"Auto-generated credit note for cancellation of {invoice.name}",
-                        f"Reason: {reason}",
-                    ]
-                    if notes:
-                        remarks_lines.append(f"Notes: {notes}")
-                    return_doc.remarks = "\n".join(remarks_lines)
-                    return_doc.flags.ignore_permissions = True
-                    return_doc.insert(ignore_permissions=True)
-                    return_doc.submit()
-                    credit_note_name = return_doc.name
 
-                cancelled_docstatus = 1
+                for pe_name in sorted({pe for pe in payment_entries if pe}):
+                    if not pe_name:
+                        continue
+                    pe_doc = frappe.get_doc("Payment Entry", pe_name)
+                    if int(getattr(pe_doc, "docstatus", 0) or 0) != 1:
+                        continue
+                    pe_doc.flags.ignore_permissions = True
+                    pe_doc.cancel()
+                    cancelled_payment_entries.append(pe_doc.name)
+
+                invoice.cancel()
+                cancelled_docstatus = 2
 
             meta = frappe.get_meta("Sales Invoice")
             updated_fields: List[str] = []
@@ -1129,6 +1125,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 "timestamp": frappe.utils.now(),
                 "docstatus": cancelled_docstatus,
                 "paid_path": is_paid,
+                "cancelled_payment_entries": cancelled_payment_entries or None,
             }
 
             frappe.publish_realtime("jarz_pos_invoice_state_change", payload, user="*")
@@ -1155,6 +1152,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 notes=notes,
                 paid_path=is_paid,
                 updated_fields=updated_fields,
+                cancelled_payment_entries=cancelled_payment_entries,
             )
         except Exception as exc:
             if savepoint:
