@@ -542,6 +542,67 @@ def notify_invoice_reassignment(invoice: Union[str, Any], new_pos_profile: str) 
         )
 
 
+def notify_invoice_cancellation(
+    invoice: Union[str, Any],
+    reason: str,
+    *,
+    notes: Optional[str] = None,
+    credit_note: Optional[str] = None,
+) -> None:
+    """Notify relevant users that an invoice has been cancelled from the Kanban board."""
+
+    try:
+        if isinstance(invoice, str):
+            doc = frappe.get_doc("Sales Invoice", invoice)
+        else:
+            doc = invoice
+
+        payload = _build_invoice_alert_payload(doc) or {}
+        payload.update(
+            {
+                "invoice_id": getattr(doc, "name", ""),
+                "event": "invoice_cancelled",
+                "reason": reason,
+                "notes": notes or "",
+                "credit_note": credit_note,
+                "timestamp": frappe.utils.now_datetime().isoformat(),
+                "sales_invoice_state": "Cancelled",
+                "cancelled_by": frappe.session.user,
+            }
+        )
+
+        if not payload.get("pos_profile"):
+            payload["pos_profile"] = getattr(doc, "pos_profile", None)
+        if not payload.get("kanban_profile"):
+            payload["kanban_profile"] = getattr(doc, "custom_kanban_profile", None)
+
+        recipients = _resolve_recipients_for_payload(payload)
+        target = recipients if recipients else "*"
+        frappe.publish_realtime("jarz_pos_invoice_cancelled", payload, user=target)
+
+        data_payload: Dict[str, str] = {
+            "type": "invoice_cancelled",
+            "invoice_id": payload.get("invoice_id", ""),
+            "reason": reason,
+            "pos_profile": payload.get("pos_profile", "") or "",
+            "timestamp": payload.get("timestamp", frappe.utils.now_datetime().isoformat()),
+            "sales_invoice_state": payload.get("sales_invoice_state", "Cancelled"),
+        }
+        if notes:
+            data_payload["notes"] = notes
+        if credit_note:
+            data_payload["credit_note"] = credit_note
+
+        tokens = _get_tokens_for_users(recipients)
+        if tokens:
+            _send_fcm_notifications(tokens, data_payload)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"notify_invoice_cancellation failed for {getattr(invoice, 'name', invoice)}",
+        )
+
+
 def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
     if not doc or not getattr(doc, "name", None):
         return {}

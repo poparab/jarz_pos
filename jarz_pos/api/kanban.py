@@ -9,6 +9,8 @@ import traceback
 import datetime
 from typing import Dict, List, Any, Optional, Union, Tuple
 
+from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_sales_return
+
 # Accounting helpers
 try:
     from jarz_pos.utils.account_utils import (
@@ -99,6 +101,13 @@ except ImportError:
                 filter_conditions["grand_total"] = ["<=", filters['amountTo']]
         
         return filter_conditions
+
+# Optional notification helper import (fail-safe)
+try:
+    from jarz_pos.api.notifications import notify_invoice_cancellation  # type: ignore
+except Exception:
+    def notify_invoice_cancellation(*args, **kwargs):  # type: ignore
+        return None
 
 # ---------------------------------------------------------------------------
 # Internal Helpers
@@ -385,7 +394,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             "posting_time", "grand_total", "net_total", "total_taxes_and_charges",
             "status", "custom_sales_invoice_state", "sales_invoice_state",
             "sales_partner", "pos_profile", "custom_kanban_profile",
-            "modified",
+            "modified", "outstanding_amount", "docstatus", "is_return",
             "custom_acceptance_status", "custom_accepted_by", "custom_accepted_on",
             "custom_payment_method",
             # New delivery slot fields (these are in our fixtures; safe to select)
@@ -597,6 +606,9 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
                 "payment_method": inv.get("custom_payment_method"),
                 "pos_profile": inv.get("custom_kanban_profile"),
+                "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
+                "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
+                "is_return": int(getattr(inv, "is_return", 0) or 0),
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
 
@@ -982,6 +994,191 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         return _failure(error_msg)
 
 @frappe.whitelist(allow_guest=False)
+def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) -> Dict[str, Any]:
+    """Cancel a Sales Invoice prior to dispatch with audit trail and notifications."""
+    try:
+        invoice_id = (invoice_id or "").strip()
+        reason = (reason or "").strip()
+        notes = (notes or "").strip() or None
+
+        if not invoice_id:
+            return _failure("invoice_id is required")
+        if not reason:
+            return _failure("Cancellation reason is required")
+
+        roles = set(frappe.get_roles(frappe.session.user))
+        allowed_roles = {"Administrator", "JARZ Line Manager"}
+        if roles.isdisjoint(allowed_roles):
+            return _failure("You are not permitted to cancel orders")
+
+        invoice = frappe.get_doc("Sales Invoice", invoice_id)
+        if int(getattr(invoice, "docstatus", 0) or 0) != 1:
+            return _failure("Only submitted invoices can be cancelled")
+        if int(getattr(invoice, "is_return", 0) or 0):
+            return _failure("Return invoices cannot be cancelled")
+
+        current_state = (
+            invoice.get("custom_sales_invoice_state")
+            or invoice.get("sales_invoice_state")
+            or invoice.get("custom_state")
+            or invoice.get("state")
+            or ""
+        )
+        normalized_state = _state_key(current_state)
+        blocked_states = {"out_for_delivery", "out-for-delivery", "delivered", "completed", "cancelled"}
+        if normalized_state in blocked_states:
+            return _failure("Invoice already dispatched; cancellation blocked")
+
+        dn_exists = frappe.get_all(
+            "Delivery Note Item",
+            filters={"against_sales_invoice": invoice.name, "docstatus": 1},
+            limit=1,
+        )
+        if dn_exists:
+            return _failure("Delivery Note already exists; use the return workflow")
+
+        outstanding = float(invoice.outstanding_amount or 0.0)
+        grand_total = float(invoice.grand_total or 0.0)
+        precision = invoice.precision("grand_total") if hasattr(invoice, "precision") else 2
+        tolerance = 1 / (10 ** (precision or 2))
+
+        is_unpaid = outstanding >= grand_total - tolerance
+        is_paid = outstanding <= tolerance
+        if not (is_unpaid or is_paid):
+            return _failure("Invoice has partial payments; settle or refund before cancelling")
+
+        credit_note_name: Optional[str] = None
+        cancelled_docstatus = 1
+        savepoint = "kanban_cancel_invoice"
+        try:
+            frappe.db.savepoint(savepoint)
+        except Exception:
+            savepoint = None
+
+        try:
+            if is_unpaid:
+                invoice.cancel()
+                cancelled_docstatus = 2
+            else:
+                existing_returns = frappe.get_all(
+                    "Sales Invoice",
+                    filters={
+                        "return_against": invoice.name,
+                        "docstatus": 1,
+                    },
+                    pluck="name",
+                    limit=1,
+                )
+                if existing_returns:
+                    credit_note_name = existing_returns[0]
+                else:
+                    return_doc = make_sales_return(invoice.name)
+                    return_doc.posting_date = frappe.utils.nowdate()
+                    return_doc.posting_time = frappe.utils.nowtime()
+                    remarks_lines = [
+                        f"Auto-generated credit note for cancellation of {invoice.name}",
+                        f"Reason: {reason}",
+                    ]
+                    if notes:
+                        remarks_lines.append(f"Notes: {notes}")
+                    return_doc.remarks = "\n".join(remarks_lines)
+                    return_doc.flags.ignore_permissions = True
+                    return_doc.insert(ignore_permissions=True)
+                    return_doc.submit()
+                    credit_note_name = return_doc.name
+
+                cancelled_docstatus = 1
+
+            meta = frappe.get_meta("Sales Invoice")
+            updated_fields: List[str] = []
+            for candidate in [
+                "custom_sales_invoice_state",
+                "sales_invoice_state",
+                "custom_state",
+                "state",
+            ]:
+                if meta.get_field(candidate):
+                    try:
+                        frappe.db.set_value("Sales Invoice", invoice.name, candidate, "Cancelled", update_modified=True)
+                        updated_fields.append(candidate)
+                    except Exception:
+                        pass
+
+            comment_lines = [
+                f"Order cancelled by {frappe.session.user}",
+                f"Reason: {reason}",
+            ]
+            if notes:
+                comment_lines.append(f"Notes: {notes}")
+            try:
+                refreshed = frappe.get_doc("Sales Invoice", invoice.name)
+                refreshed.add_comment("Comment", "\n".join(comment_lines))
+            except Exception:
+                frappe.logger().warning(f"KANBAN API: Unable to add cancellation comment for {invoice.name}")
+
+            payload = {
+                "invoice_id": invoice.name,
+                "old_state": current_state,
+                "new_state": "Cancelled",
+                "old_state_key": _state_key(current_state) if current_state else None,
+                "new_state_key": _state_key("Cancelled"),
+                "cancelled_by": frappe.session.user,
+                "reason": reason,
+                "notes": notes,
+                "credit_note": credit_note_name,
+                "timestamp": frappe.utils.now(),
+                "docstatus": cancelled_docstatus,
+                "paid_path": is_paid,
+            }
+
+            frappe.publish_realtime("jarz_pos_invoice_state_change", payload, user="*")
+            frappe.publish_realtime("kanban_update", payload, user="*")
+
+            try:
+                notify_invoice_cancellation(invoice.name, reason, notes=notes, credit_note=credit_note_name)
+            except Exception:
+                frappe.logger().warning(
+                    f"KANBAN API: notify_invoice_cancellation failed for {invoice.name}"
+                )
+
+            try:
+                frappe.db.commit()
+            except Exception:
+                frappe.logger().warning("KANBAN API: explicit commit failed after cancellation")
+
+            return _success(
+                invoice_id=invoice.name,
+                cancelled_docstatus=cancelled_docstatus,
+                credit_note=credit_note_name,
+                state="Cancelled",
+                reason=reason,
+                notes=notes,
+                paid_path=is_paid,
+                updated_fields=updated_fields,
+            )
+        except Exception as exc:
+            if savepoint:
+                try:
+                    frappe.db.rollback(savepoint=savepoint)
+                except Exception:
+                    pass
+            error_msg = f"Error cancelling invoice: {exc}"
+            frappe.logger().error(error_msg)
+            frappe.log_error(
+                f"Cancel Invoice Error: {exc}\n\nTraceback:\n{traceback.format_exc()}",
+                "Kanban API",
+            )
+            return _failure(error_msg)
+    except Exception as outer:
+        error_msg = f"Unexpected cancellation error: {outer}"
+        frappe.logger().error(error_msg)
+        frappe.log_error(
+            f"Cancel Invoice Error: {outer}\n\nTraceback:\n{traceback.format_exc()}",
+            "Kanban API",
+        )
+        return _failure(error_msg)
+
+@frappe.whitelist(allow_guest=False)
 def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
     """Get detailed information about a specific invoice.
     
@@ -1082,6 +1279,7 @@ try:
         get_kanban_columns,
         get_kanban_invoices,
         update_invoice_state,
+        cancel_invoice,
         get_invoice_details,
         get_kanban_filters,
     ]
