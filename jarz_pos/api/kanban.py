@@ -1037,13 +1037,18 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
 
         outstanding = float(invoice.outstanding_amount or 0.0)
         grand_total = float(invoice.grand_total or 0.0)
-        precision = invoice.precision("grand_total") if hasattr(invoice, "precision") else 2
-        tolerance = 1 / (10 ** (precision or 2))
+        
+        # Use a more generous tolerance for floating-point comparisons (0.50 EGP)
+        tolerance = 0.50
 
-        is_unpaid = outstanding >= grand_total - tolerance
+        is_unpaid = outstanding >= (grand_total - tolerance)
         is_paid = outstanding <= tolerance
+        
+        # Log for debugging
+        frappe.logger().info(f"KANBAN CANCEL: Invoice={invoice.name} Outstanding={outstanding} GrandTotal={grand_total} IsUnpaid={is_unpaid} IsPaid={is_paid}")
+        
         if not (is_unpaid or is_paid):
-            return _failure("Invoice has partial payments; settle or refund before cancelling")
+            return _failure(f"Invoice has partial payments ({outstanding:.2f} remaining of {grand_total:.2f}); settle or refund before cancelling")
 
         credit_note_name: Optional[str] = None
         cancelled_payment_entries: List[str] = []
