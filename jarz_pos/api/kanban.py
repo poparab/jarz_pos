@@ -318,7 +318,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         frappe.logger().debug("KANBAN API: get_kanban_invoices called with filters: {0}".format(filters))
 
         filter_conditions = apply_invoice_filters(filters)
-        filter_conditions["docstatus"] = 1
+        # Include both submitted (1) and cancelled (2) invoices to show cancelled orders in the Cancelled column
+        filter_conditions["docstatus"] = ["in", [1, 2]]
 
         # Performance guardrails:
         # - Default to POS invoices and a recent date window when client doesn't specify
