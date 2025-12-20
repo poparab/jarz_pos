@@ -326,9 +326,9 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         # - Allow overriding via explicit filters
         try:
             if isinstance(filter_conditions, dict):
-                # If no explicit posting_date filter, restrict to last 14 days
+                # If no explicit posting_date filter, restrict to last 60 days
                 if "posting_date" not in filter_conditions:
-                    filter_conditions["posting_date"] = [">=", frappe.utils.add_days(frappe.utils.today(), -14)]
+                    filter_conditions["posting_date"] = [">=", frappe.utils.add_days(frappe.utils.today(), -60)]
                 # Default to POS only unless caller provided is_pos explicitly (True/False)
                 if "is_pos" not in filter_conditions:
                     filter_conditions["is_pos"] = 1
