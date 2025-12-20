@@ -333,26 +333,26 @@ def _initialize_firebase_app() -> bool:
 
 def _disable_token(token: str) -> None:
     """Disable a Jarz Mobile Device token when FCM reports it as invalid."""
-    device = frappe.get_all(
+    devices = frappe.get_all(
         "Jarz Mobile Device",
         filters={"token": token},
         fields=["name", "enabled"],
-        limit=1,
     )
-    if not device:
+    if not devices:
         return
 
-    docname = device[0].get("name")
-    if not docname:
-        return
+    for row in devices:
+        docname = row.get("name")
+        if not docname:
+            continue
 
-    doc = frappe.get_doc("Jarz Mobile Device", docname)
-    if not doc.enabled:
-        return
+        doc = frappe.get_doc("Jarz Mobile Device", docname)
+        if not doc.enabled:
+            continue
 
-    doc.enabled = 0
-    doc.save(ignore_permissions=True)
-    frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
+        doc.enabled = 0
+        doc.save(ignore_permissions=True)
+        frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
 
 @frappe.whitelist(allow_guest=False)
 def register_mobile_device(
