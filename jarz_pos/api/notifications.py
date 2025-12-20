@@ -331,6 +331,29 @@ def _initialize_firebase_app() -> bool:
         return False
 
 
+def _disable_token(token: str) -> None:
+    """Disable a Jarz Mobile Device token when FCM reports it as invalid."""
+    device = frappe.get_all(
+        "Jarz Mobile Device",
+        filters={"token": token},
+        fields=["name", "enabled"],
+        limit=1,
+    )
+    if not device:
+        return
+
+    docname = device[0].get("name")
+    if not docname:
+        return
+
+    doc = frappe.get_doc("Jarz Mobile Device", docname)
+    if not doc.enabled:
+        return
+
+    doc.enabled = 0
+    doc.save(ignore_permissions=True)
+    frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
+
 @frappe.whitelist(allow_guest=False)
 def register_mobile_device(
     token: str,
@@ -474,6 +497,9 @@ def handle_invoice_submission(doc: Any) -> None:
     """Emit realtime and push notifications for a newly submitted invoice."""
 
     try:
+        frappe.logger().info(
+            f"Invoice submit hook triggered for {getattr(doc, 'name', '?')} pos_profile={getattr(doc, 'pos_profile', None)}"
+        )
         payload = _build_invoice_alert_payload(doc)
         if not payload:
             frappe.log_error(f"Empty payload for invoice {getattr(doc, 'name', '?')}", "Invoice Notification Skipped")
@@ -484,6 +510,9 @@ def handle_invoice_submission(doc: Any) -> None:
             frappe.msgprint(f"Invoice alert payload: requires_acceptance={payload.get('requires_acceptance')}, acceptance_status={payload.get('acceptance_status')}")
 
         recipients = _resolve_recipients_for_payload(payload)
+        frappe.logger().info(
+            f"Invoice notification payload ready invoice={payload.get('invoice_id')} recipients={len(recipients)} requires_acceptance={payload.get('requires_acceptance')}"
+        )
         
         # Emit realtime notification
         _publish_invoice_alert(payload, recipients)
@@ -736,9 +765,21 @@ def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]
 def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
     tokens = _get_tokens_for_users(recipients)
     if not tokens:
+        try:
+            frappe.logger().info(
+                f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}"
+            )
+        except Exception:
+            pass
         return
 
     data = _prepare_invoice_data_payload("new_invoice", payload)
+    try:
+        msg = f"FCM send: new_invoice; recipients={len(recipients)}; tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
+        frappe.logger().info(msg)
+        frappe.log_error(msg, "FCM Send Debug")
+    except Exception:
+        pass
     _send_fcm_notifications(tokens, data)
 
 
@@ -753,6 +794,12 @@ def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -
         "accepted_by": payload.get("accepted_by", ""),
         "accepted_on": payload.get("accepted_on", ""),
     }
+    try:
+        frappe.logger().info(
+            f"FCM send: invoice_accepted; recipients={len(recipients)}; tokens={len(tokens)}"
+        )
+    except Exception:
+        pass
     _send_fcm_notifications(tokens, data)
 
 
@@ -760,6 +807,7 @@ def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> D
     data: Dict[str, str] = {
         "type": event_type,
         "invoice_id": payload.get("invoice_id", ""),
+        "notification_id": payload.get("invoice_id", ""),
         "customer_name": payload.get("customer_name", ""),
         "pos_profile": payload.get("pos_profile", ""),
         "grand_total": str(payload.get("grand_total", 0)),
@@ -798,17 +846,22 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
         if data_payload.get("item_summary"):
             body += f" • {data_payload.get('item_summary')}"
         
+        # Build a Notification payload so the client gets a dismissible system notification
+        notification = messaging.Notification(title=title, body=body)
+
         # Send to each token (Firebase Admin SDK doesn't support batch sends in the same way)
         # For better performance, we can use MulticastMessage
         messages = []
         for token in tokens[:MAX_FCM_TOKENS_PER_BATCH]:
             message = messaging.Message(
                 data=data_payload,
+                notification=notification,
                 android=messaging.AndroidConfig(
                     priority='high',
                     notification=messaging.AndroidNotification(
                         sound='default',
-                        channel_id='jarz_order_alerts'
+                        channel_id='jarz_order_alerts',
+                        tag=data_payload.get("invoice_id", "")
                     )
                 ),
                 token=token
@@ -823,7 +876,14 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
                     response = messaging.send(message)
                     frappe.logger().info(f"FCM message sent successfully: {response}")
                 except Exception as send_err:
-                    frappe.log_error(f"Failed to send FCM to token: {str(send_err)}", "FCM Send Error")
+                    err_text = str(send_err)
+                    frappe.log_error(f"Failed to send FCM to token: {err_text}", "FCM Send Error")
+                    # Auto-disable tokens that are no longer valid
+                    if any(code in err_text for code in ("NotRegistered", "registration-token-not-registered")):
+                        try:
+                            _disable_token(message.token)
+                        except Exception:
+                            frappe.log_error(frappe.get_traceback(), "FCM Token Disable Failed")
                     
     except Exception:
         frappe.log_error(frappe.get_traceback(), "FCM push failed")
