@@ -350,8 +350,14 @@ def _disable_token(token: str) -> None:
         if not doc.enabled:
             continue
 
-        doc.enabled = 0
-        doc.save(ignore_permissions=True)
+        # Bypass duplicate-token validation by updating directly in DB
+        frappe.db.set_value(
+            "Jarz Mobile Device",
+            docname,
+            "enabled",
+            0,
+            update_modified=False,
+        )
         frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
 
 @frappe.whitelist(allow_guest=False)
