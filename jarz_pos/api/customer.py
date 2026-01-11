@@ -233,10 +233,12 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         if not customer_name or not mobile_no or not customer_primary_address or not territory_id:
             frappe.throw("Missing required parameters: customer_name, mobile_no, customer_primary_address, territory_id")
         
-        # Check if customer already exists with this name
-        existing = frappe.db.exists("Customer", {"customer_name": customer_name})
-        if existing:
-            frappe.throw(f"Customer with name '{customer_name}' already exists")
+        # Allow duplicate names but block duplicate phone numbers to avoid merges/confusion
+        if frappe.db.exists("Customer", {"mobile_no": mobile_no}):
+            frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
+        # Also guard against existing contacts with the same mobile
+        if frappe.db.exists("Contact", {"mobile_no": mobile_no}):
+            frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
         
         # Validate territory exists
         if not frappe.db.exists("Territory", territory_id):
