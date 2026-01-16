@@ -274,6 +274,8 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
             "address_type": "Billing",
             "address_line1": customer_primary_address,
             "city": territory_name,  # Use territory name as city
+            "is_primary_address": 1,
+            "is_shipping_address": 1,
             "links": [{
                 "link_doctype": "Customer",
                 "link_name": customer_doc.name
@@ -411,6 +413,8 @@ def update_default_address(customer, address, phone):
             # Update existing address
             address_doc = frappe.get_doc("Address", customer_doc.customer_primary_address)
             address_doc.address_line1 = address
+            address_doc.is_primary_address = 1
+            address_doc.is_shipping_address = 1
             # Update phone on address if field exists
             if frappe.db.has_column("Address", "phone"):
                 address_doc.phone = phone
