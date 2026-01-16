@@ -248,13 +248,20 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         territory_name = territory_doc.territory_name
         
         # Create customer document with only essential fields
-        customer_doc = frappe.get_doc({
+        customer_payload = {
             "doctype": "Customer",
             "customer_name": customer_name,
             "customer_type": "Individual",
-            "customer_group": "Individual", 
-            "territory": territory_name
-        })
+            "customer_group": "Individual",
+            "territory": territory_name,
+        }
+        # Store phone on the Customer itself when the field exists
+        if frappe.db.has_column("Customer", "mobile_no"):
+            customer_payload["mobile_no"] = mobile_no
+        if frappe.db.has_column("Customer", "phone"):
+            customer_payload["phone"] = mobile_no
+
+        customer_doc = frappe.get_doc(customer_payload)
         
         frappe.logger().info(f"Creating customer with basic data")
         customer_doc.insert(ignore_permissions=True)
@@ -285,6 +292,7 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
             "doctype": "Contact",
             "first_name": customer_name,
             "mobile_no": mobile_no,
+            "is_primary_contact": 1,
             "links": [{
                 "link_doctype": "Customer",
                 "link_name": customer_doc.name
@@ -295,9 +303,13 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         contact_doc.insert(ignore_permissions=True)
         frappe.logger().info(f"Contact created successfully: {contact_doc.name}")
         
-        # Update customer with primary address and contact
+        # Update customer with primary address, contact, and phone
         customer_doc.customer_primary_address = address_doc.name
         customer_doc.customer_primary_contact = contact_doc.name
+        if frappe.db.has_column("Customer", "mobile_no"):
+            customer_doc.mobile_no = mobile_no
+        if frappe.db.has_column("Customer", "phone"):
+            customer_doc.phone = mobile_no
         customer_doc.save(ignore_permissions=True)
         
         frappe.logger().info(f"Customer updated with address and contact")
