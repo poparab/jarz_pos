@@ -268,7 +268,7 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         frappe.logger().info(f"Customer created successfully: {customer_doc.name}")
         
         # Create address
-        address_doc = frappe.get_doc({
+        address_payload = {
             "doctype": "Address",
             "address_title": customer_name,
             "address_type": "Billing",
@@ -278,7 +278,19 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
                 "link_doctype": "Customer",
                 "link_name": customer_doc.name
             }]
-        })
+        }
+
+        # Store phone on Address if the field exists
+        if frappe.db.has_column("Address", "phone"):
+            address_payload["phone"] = mobile_no
+        if frappe.db.has_column("Address", "phone_number"):
+            address_payload["phone_number"] = mobile_no
+        if frappe.db.has_column("Address", "phone_no"):
+            address_payload["phone_no"] = mobile_no
+        if frappe.db.has_column("Address", "mobile_no"):
+            address_payload["mobile_no"] = mobile_no
+
+        address_doc = frappe.get_doc(address_payload)
         
         if location_link:
             address_doc.address_line2 = f"Location: {location_link}"
@@ -399,11 +411,20 @@ def update_default_address(customer, address, phone):
             # Update existing address
             address_doc = frappe.get_doc("Address", customer_doc.customer_primary_address)
             address_doc.address_line1 = address
+            # Update phone on address if field exists
+            if frappe.db.has_column("Address", "phone"):
+                address_doc.phone = phone
+            if frappe.db.has_column("Address", "phone_number"):
+                address_doc.phone_number = phone
+            if frappe.db.has_column("Address", "phone_no"):
+                address_doc.phone_no = phone
+            if frappe.db.has_column("Address", "mobile_no"):
+                address_doc.mobile_no = phone
             address_doc.save(ignore_permissions=True)
             frappe.logger().info(f"Updated existing address: {address_doc.name}")
         else:
             # Create new address
-            address_doc = frappe.get_doc({
+            address_payload = {
                 "doctype": "Address",
                 "address_title": customer_doc.customer_name,
                 "address_type": "Billing",
@@ -415,7 +436,17 @@ def update_default_address(customer, address, phone):
                     "link_doctype": "Customer",
                     "link_name": customer
                 }]
-            })
+            }
+            if frappe.db.has_column("Address", "phone"):
+                address_payload["phone"] = phone
+            if frappe.db.has_column("Address", "phone_number"):
+                address_payload["phone_number"] = phone
+            if frappe.db.has_column("Address", "phone_no"):
+                address_payload["phone_no"] = phone
+            if frappe.db.has_column("Address", "mobile_no"):
+                address_payload["mobile_no"] = phone
+
+            address_doc = frappe.get_doc(address_payload)
             address_doc.insert(ignore_permissions=True)
             
             # Update customer with new primary address
