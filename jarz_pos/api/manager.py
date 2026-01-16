@@ -283,8 +283,18 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         updates: Dict[str, Any] = {"custom_kanban_profile": new_branch}
         
         # Reset to Received state when transferring
+        target_received = "Received"
+        try:
+            options = _get_state_field_options() or []
+            # Prefer exact option match (case-insensitive) for Received / Recieved
+            for opt in options:
+                if opt.strip().lower() in {"received", "recieved"}:
+                    target_received = opt.strip()
+                    break
+        except Exception:
+            pass
         for field in state_fields:
-            updates[field] = "Received"
+            updates[field] = target_received
 
         # Reset acceptance status
         for field, value in {
@@ -365,7 +375,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             "success": True,
             "invoice_id": invoice_id,
             "new_branch": new_branch,
-            "new_state": "Received",
+            "new_state": target_received,
         }
     except Exception as e:
         frappe.logger().error(f"Update Invoice Branch Error: {str(e)}")
