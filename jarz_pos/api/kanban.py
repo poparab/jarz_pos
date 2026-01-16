@@ -189,6 +189,78 @@ def _get_current_user_pos_profiles() -> List[str]:
         frappe.logger().warning(f"KANBAN API: Failed to resolve user POS profiles: {e}")
         return []
 
+def _resolve_customer_phone(customer: str) -> str:
+    """Resolve customer phone from Customer -> primary Contact -> primary Address -> any Contact."""
+    if not customer:
+        return ""
+    try:
+        cache = getattr(frappe.local, "cache", None)
+        if isinstance(cache, dict):
+            cache_key = f"cust_phone::{customer}"
+            if cache_key in cache:
+                return cache[cache_key]
+        else:
+            cache = None
+
+        phone = ""
+
+        # 1) Customer fields
+        for field in ("mobile_no", "phone"):
+            try:
+                if frappe.db.has_column("Customer", field):
+                    val = frappe.db.get_value("Customer", customer, field)
+                    if val:
+                        phone = str(val)
+                        break
+            except Exception:
+                continue
+
+        # 2) Primary Contact
+        if not phone:
+            try:
+                primary_contact = frappe.db.get_value("Customer", customer, "customer_primary_contact")
+                if primary_contact:
+                    val = frappe.db.get_value("Contact", primary_contact, "mobile_no") or frappe.db.get_value("Contact", primary_contact, "phone")
+                    if val:
+                        phone = str(val)
+            except Exception:
+                pass
+
+        # 3) Primary Address
+        if not phone:
+            try:
+                primary_address = frappe.db.get_value("Customer", customer, "customer_primary_address")
+                if primary_address:
+                    for field in ("phone", "phone_number", "phone_no", "mobile_no"):
+                        if frappe.db.has_column("Address", field):
+                            val = frappe.db.get_value("Address", primary_address, field)
+                            if val:
+                                phone = str(val)
+                                break
+            except Exception:
+                pass
+
+        # 4) Any linked Contact (fallback)
+        if not phone:
+            try:
+                contact_name = frappe.db.get_value(
+                    "Dynamic Link",
+                    {"link_doctype": "Customer", "link_name": customer, "parenttype": "Contact"},
+                    "parent",
+                )
+                if contact_name:
+                    val = frappe.db.get_value("Contact", contact_name, "mobile_no") or frappe.db.get_value("Contact", contact_name, "phone")
+                    if val:
+                        phone = str(val)
+            except Exception:
+                pass
+
+        if isinstance(cache, dict):
+            cache[cache_key] = phone
+        return phone
+    except Exception:
+        return ""
+
 # Backwards compatibility wrappers (kept in case referenced elsewhere in file)
 
 def _get_state_custom_field():  # noqa: intentionally returns None now
@@ -517,32 +589,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             if is_pickup:
                 terr_ship = {"income": 0.0, "expense": 0.0}
 
-            # Resolve customer phone/mobile via primary Contact if possible (cached per customer)
-            customer_phone = ""
-            try:
-                cust = inv.get("customer")
-                if cust:
-                    if "__customer_contact_cache" not in frappe.local.cache:  # type: ignore
-                        frappe.local.cache["__customer_contact_cache"] = {}  # type: ignore
-                    cache_key = f"cust_phone::{cust}"
-                    ccache = frappe.local.cache["__customer_contact_cache"]  # type: ignore
-                    if cache_key in ccache:
-                        customer_phone = ccache[cache_key]
-                    else:
-                        # Try to find primary contact
-                        contact_name = frappe.db.get_value(
-                            "Dynamic Link",
-                            {"link_doctype": "Customer", "link_name": cust, "parenttype": "Contact"},
-                            "parent",
-                        )
-                        if contact_name:
-                            contact_doc = frappe.get_doc("Contact", contact_name)
-                            raw_mobile = getattr(contact_doc, "mobile_no", None) or getattr(contact_doc, "phone", None)
-                            if raw_mobile:
-                                customer_phone = str(raw_mobile)
-                        ccache[cache_key] = customer_phone
-            except Exception:
-                customer_phone = ""
+            # Resolve customer phone (Customer -> primary Contact -> primary Address -> any Contact)
+            customer_phone = _resolve_customer_phone(inv.get("customer") or "")
 
             # Determine if there exists any UNSETTLED courier transaction for this invoice
             has_unsettled = False
@@ -1205,33 +1253,12 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
                 data["shipping_expense"] = 0.0
         except Exception:
             pass
-        # Enrich with customer_phone (reuse logic from get_kanban_invoices for consistency)
+        # Enrich with customer_phone
         try:
-            customer_phone = ""
-            cust = invoice.get("customer")
-            if cust:
-                if "__customer_contact_cache" not in frappe.local.cache:  # type: ignore
-                    frappe.local.cache["__customer_contact_cache"] = {}  # type: ignore
-                cache_key = f"cust_phone::{cust}"
-                ccache = frappe.local.cache["__customer_contact_cache"]  # type: ignore
-                if cache_key in ccache:
-                    customer_phone = ccache[cache_key]
-                else:
-                    contact_name = frappe.db.get_value(
-                        "Dynamic Link",
-                        {"link_doctype": "Customer", "link_name": cust, "parenttype": "Contact"},
-                        "parent",
-                    )
-                    if contact_name:
-                        contact_doc = frappe.get_doc("Contact", contact_name)
-                        raw_mobile = getattr(contact_doc, "mobile_no", None) or getattr(contact_doc, "phone", None)
-                        if raw_mobile:
-                            customer_phone = str(raw_mobile)
-                    ccache[cache_key] = customer_phone
+            customer_phone = _resolve_customer_phone(invoice.get("customer") or "")
             if customer_phone:
                 data["customer_phone"] = customer_phone
         except Exception:
-            # Silently ignore phone enrichment failure
             pass
         # Augment with unsettled courier txn flag
         try:
