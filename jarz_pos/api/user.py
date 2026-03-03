@@ -17,9 +17,25 @@ def get_current_user_roles():
     user = frappe.session.user
     roles = frappe.get_roles(user)
     full_name = frappe.db.get_value("User", user, "full_name") if user else None
+
+    employee = frappe.db.get_value(
+        "Employee",
+        {"user_id": user},
+        ["name", "employee_name", "branch", "custom_require_pos_shift"],
+        as_dict=True,
+    )
+
+    require_pos_shift = False
+    if employee:
+        require_pos_shift = bool(int(employee.get("custom_require_pos_shift") or 0))
+
     return {
         "user": user,
         "full_name": full_name,
         "roles": roles,
         "is_jarz_manager": "JARZ Manager" in roles,
+        "employee": employee.get("name") if employee else None,
+        "employee_name": employee.get("employee_name") if employee else None,
+        "branch": employee.get("branch") if employee else None,
+        "require_pos_shift": require_pos_shift,
     }

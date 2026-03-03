@@ -256,6 +256,12 @@ override_whitelisted_methods = {
     "test_bundle_debug": "jarz_pos.api.pos.test_bundle_debug",
     # User API Methods
     "jarz_pos.api.user.get_current_user_roles": "jarz_pos.api.user.get_current_user_roles",
+    # Shift API Methods
+    "jarz_pos.api.shift.get_active_shift": "jarz_pos.api.shift.get_active_shift",
+    "jarz_pos.api.shift.get_shift_payment_methods": "jarz_pos.api.shift.get_shift_payment_methods",
+    "jarz_pos.api.shift.start_shift": "jarz_pos.api.shift.start_shift",
+    "jarz_pos.api.shift.get_shift_summary": "jarz_pos.api.shift.get_shift_summary",
+    "jarz_pos.api.shift.end_shift": "jarz_pos.api.shift.end_shift",
     # Notification API Methods
     "jarz_pos.api.notifications.get_pending_alerts": "jarz_pos.api.notifications.get_pending_alerts",
     "jarz_pos.api.notifications.register_device_token": "jarz_pos.api.notifications.register_device_token",
@@ -273,11 +279,28 @@ except Exception:
 try:
     from jarz_pos.api import user as _user
     from jarz_pos.api import notifications as _notif
+    from jarz_pos.api import shift as _shift
     # Touch the functions to ensure they're loaded
     _user.get_current_user_roles
     _notif.get_pending_alerts
     _notif.register_device_token
     _notif.accept_invoice
+    _shift.get_active_shift
+    _shift.get_shift_payment_methods
+    _shift.start_shift
+    _shift.get_shift_summary
+    _shift.end_shift
+    # Defensive registration: ensure methods are marked as whitelisted
+    _shift.get_active_shift.whitelisted = True
+    _shift.get_shift_payment_methods.whitelisted = True
+    _shift.start_shift.whitelisted = True
+    _shift.get_shift_summary.whitelisted = True
+    _shift.end_shift.whitelisted = True
+    _shift.get_active_shift.allow_guest = False
+    _shift.get_shift_payment_methods.allow_guest = False
+    _shift.start_shift.allow_guest = False
+    _shift.get_shift_summary.allow_guest = False
+    _shift.end_shift.allow_guest = False
 except Exception:
     pass
 
