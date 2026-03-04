@@ -4,7 +4,7 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import flt, nowdate, now_datetime
+from frappe.utils import flt, nowdate, now_datetime, get_datetime
 
 
 from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
@@ -363,48 +363,57 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
     }
 
 
-def _get_shift_sales_invoices(user: str, pos_profile: str, start_date, company: str) -> list[dict[str, Any]]:
-    """Return Sales Invoices created by user with this POS profile during the shift window."""
-    filters = {
-        "owner": user,
-        "pos_profile": pos_profile,
-        "docstatus": 1,
-        "creation": [">=", start_date],
-        "company": company,
-    }
+def _get_shift_account_movements(account: str, company: str, start_date, end_date) -> list[dict[str, Any]]:
+    """Return all GL movements affecting the shift cash account within the shift window."""
+    if not account:
+        return []
 
-    base_fields = [
-        "name", "customer", "customer_name", "grand_total", "net_total",
-        "status", "posting_date", "creation",
-    ]
+    start_dt = get_datetime(start_date)
+    end_dt = get_datetime(end_date)
 
-    # Only include custom fields if they exist on the doctype
-    si_meta = frappe.get_meta("Sales Invoice")
-    has_delivery_status = si_meta.has_field("custom_delivery_status")
-    if has_delivery_status:
-        base_fields.append("custom_delivery_status")
-
-    invoices = frappe.get_all(
-        "Sales Invoice",
-        filters=filters,
-        fields=base_fields,
+    entries = frappe.get_all(
+        "GL Entry",
+        filters={
+            "account": account,
+            "company": company,
+            "is_cancelled": 0,
+            "creation": ["between", [start_dt, end_dt]],
+        },
+        fields=[
+            "name",
+            "creation",
+            "posting_date",
+            "voucher_type",
+            "voucher_no",
+            "debit",
+            "credit",
+            "against",
+            "remarks",
+        ],
         order_by="creation asc",
-        limit=500,
+        limit=1000,
     )
-    result = []
-    for inv in invoices:
-        result.append({
-            "name": inv.name,
-            "customer": inv.customer,
-            "customer_name": inv.customer_name,
-            "grand_total": flt(inv.grand_total),
-            "net_total": flt(inv.net_total),
-            "status": inv.status,
-            "posting_date": str(inv.posting_date) if inv.posting_date else None,
-            "creation": str(inv.creation) if inv.creation else None,
-            "delivery_status": inv.get("custom_delivery_status") if has_delivery_status else None,
-        })
-    return result
+
+    movements: list[dict[str, Any]] = []
+    for entry in entries:
+        debit = flt(entry.debit)
+        credit = flt(entry.credit)
+        movements.append(
+            {
+                "name": entry.name,
+                "creation": str(entry.creation) if entry.creation else None,
+                "posting_date": str(entry.posting_date) if entry.posting_date else None,
+                "voucher_type": entry.voucher_type,
+                "voucher_no": entry.voucher_no,
+                "debit": debit,
+                "credit": credit,
+                "amount": flt(debit - credit),
+                "against": entry.against,
+                "remarks": entry.remarks,
+            }
+        )
+
+    return movements
 
 
 @frappe.whitelist(allow_guest=False)
@@ -418,22 +427,28 @@ def get_shift_summary(pos_opening_entry: str):
 
     closing_draft = make_closing_entry_from_opening(opening)
 
-    # Fetch Sales Invoices created during shift
-    sales_invoices = _get_shift_sales_invoices(
-        user=opening.user,
-        pos_profile=opening.pos_profile,
-        start_date=opening.period_start_date,
-        company=opening.company,
-    )
-
     # Current account balance for the branch account
     account = _resolve_pos_profile_account(
         opening.company, opening.pos_profile, None, None
     )
     account_balance = _get_account_balance(account, opening.company)
 
-    # Accumulated cash from invoices
-    total_sales = sum(flt(inv.get("grand_total")) for inv in sales_invoices)
+    account_movements = _get_shift_account_movements(
+        account=account,
+        company=opening.company,
+        start_date=opening.period_start_date,
+        end_date=now_datetime(),
+    )
+
+    total_inflows = sum(flt(row.get("debit")) for row in account_movements)
+    total_outflows = sum(flt(row.get("credit")) for row in account_movements)
+    net_movement = flt(total_inflows - total_outflows)
+
+    sales_vouchers = {
+        row.get("voucher_no")
+        for row in account_movements
+        if row.get("voucher_type") in ("Sales Invoice", "POS Invoice") and row.get("voucher_no")
+    }
 
     return {
         "opening_entry": opening.name,
@@ -443,14 +458,17 @@ def get_shift_summary(pos_opening_entry: str):
         "pos_profile": opening.pos_profile,
         "period_start_date": opening.period_start_date,
         "period_end_date": opening.period_end_date,
-        "invoice_count": len(sales_invoices),
-        "grand_total": flt(total_sales),
+        "invoice_count": len(sales_vouchers),
+        "grand_total": flt(total_inflows),
         "net_total": flt(closing_draft.net_total),
         "total_quantity": flt(closing_draft.total_quantity),
         "account": account,
         "account_balance": flt(account_balance),
-        "total_sales": flt(total_sales),
-        "sales_invoices": sales_invoices,
+        "total_sales": flt(total_inflows),
+        "total_outflows": flt(total_outflows),
+        "net_movement": net_movement,
+        "account_movements": account_movements,
+        "sales_invoices": [],
         "payment_reconciliation": [
             {
                 "mode_of_payment": row.mode_of_payment,
@@ -618,13 +636,19 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
     # Fetch final account balance after closing
     account_balance = _get_account_balance(account, opening.company) if account else 0
 
-    # Sales invoices for the shift period
-    sales_invoices = _get_shift_sales_invoices(
-        user=opening.user,
-        pos_profile=opening.pos_profile,
-        start_date=opening.period_start_date,
+    account_movements = _get_shift_account_movements(
+        account=account,
         company=opening.company,
+        start_date=opening.period_start_date,
+        end_date=now_datetime(),
     )
+    total_inflows = sum(flt(row.get("debit")) for row in account_movements)
+    total_outflows = sum(flt(row.get("credit")) for row in account_movements)
+    sales_vouchers = {
+        row.get("voucher_no")
+        for row in account_movements
+        if row.get("voucher_type") in ("Sales Invoice", "POS Invoice") and row.get("voucher_no")
+    }
 
     return {
         "closing_entry": closing.name,
@@ -643,9 +667,13 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
             }
             for row in (closing.payment_reconciliation or [])
         ],
-        "invoice_count": len(sales_invoices),
-        "grand_total": flt(sum(flt(inv.get("grand_total")) for inv in sales_invoices)),
+        "invoice_count": len(sales_vouchers),
+        "grand_total": flt(total_inflows),
         "net_total": flt(closing.net_total),
         "total_quantity": flt(closing.total_quantity),
-        "sales_invoices": sales_invoices,
+        "total_sales": flt(total_inflows),
+        "total_outflows": flt(total_outflows),
+        "net_movement": flt(total_inflows - total_outflows),
+        "account_movements": account_movements,
+        "sales_invoices": [],
     }
