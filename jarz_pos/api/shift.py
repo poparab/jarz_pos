@@ -4,7 +4,7 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import flt, nowdate
+from frappe.utils import flt, nowdate, now_datetime
 
 
 from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
@@ -248,6 +248,8 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
     opening_doc.user = user
     opening_doc.company = company
     opening_doc.pos_profile = pos_profile
+    opening_doc.period_start_date = now_datetime()
+    opening_doc.posting_date = nowdate()
 
     rows = opening_balances or []
     if not rows:
