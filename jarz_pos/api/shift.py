@@ -4,12 +4,47 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import flt
+from frappe.utils import flt, nowdate
 
 
 from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
     make_closing_entry_from_opening,
 )
+from erpnext.accounts.utils import get_balance_on
+
+
+def _get_mode_of_payment_account(mode_of_payment: str, company: str) -> str | None:
+    if not mode_of_payment or not company:
+        return None
+
+    account = frappe.db.get_value(
+        "Mode of Payment Account",
+        {
+            "parent": mode_of_payment,
+            "company": company,
+        },
+        "default_account",
+    )
+    if account:
+        return account
+
+    account = frappe.db.get_value(
+        "Mode of Payment Account",
+        {
+            "parent": mode_of_payment,
+        },
+        "default_account",
+    )
+    return account
+
+
+def _get_account_balance(account: str | None, company: str) -> float:
+    if not account:
+        return 0.0
+    try:
+        return flt(get_balance_on(account=account, company=company, date=nowdate()) or 0)
+    except Exception:
+        return 0.0
 
 
 def _get_employee_for_user(user: str) -> dict[str, Any] | None:
@@ -80,15 +115,24 @@ def get_shift_payment_methods(pos_profile: str):
         frappe.throw(_("POS Profile is required"))
 
     profile = frappe.get_doc("POS Profile", pos_profile)
+    company = profile.company
+    branch = getattr(profile, "branch", None)
     methods = []
     for row in (profile.get("payments") or []):
         mode = row.get("mode_of_payment")
         if not mode:
             continue
+        account = _get_mode_of_payment_account(mode, company)
+        current_balance = _get_account_balance(account, company)
         methods.append(
             {
                 "mode_of_payment": mode,
                 "default_amount": flt(row.get("default_amount") or 0),
+                "account": account,
+                "company": company,
+                "branch": branch,
+                "current_balance": current_balance,
+                "suggested_opening_amount": current_balance,
             }
         )
 
@@ -124,20 +168,42 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
             rows.append(
                 {
                     "mode_of_payment": method["mode_of_payment"],
-                    "opening_amount": flt(method.get("default_amount") or 0),
+                    "opening_amount": flt(method.get("suggested_opening_amount") or 0),
+                    "system_balance": flt(method.get("current_balance") or 0),
+                    "account": method.get("account"),
                 }
             )
 
+    opening_differences: list[dict[str, Any]] = []
     for row in rows:
         mode = (row or {}).get("mode_of_payment")
         if not mode:
             continue
+
+        confirmed_opening = flt(
+            (row or {}).get("opening_amount")
+            if (row or {}).get("opening_amount") is not None
+            else (row or {}).get("confirmed_amount")
+        )
+        system_balance = flt((row or {}).get("system_balance") or 0)
+        difference = flt((row or {}).get("difference") or (confirmed_opening - system_balance))
+
         opening_doc.append(
             "balance_details",
             {
                 "mode_of_payment": mode,
-                "opening_amount": flt((row or {}).get("opening_amount") or 0),
+                "opening_amount": confirmed_opening,
             },
+        )
+
+        opening_differences.append(
+            {
+                "mode_of_payment": mode,
+                "account": (row or {}).get("account"),
+                "system_balance": system_balance,
+                "confirmed_opening_amount": confirmed_opening,
+                "difference": difference,
+            }
         )
 
     if not opening_doc.balance_details:
@@ -146,10 +212,27 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
     opening_doc.insert(ignore_permissions=True)
     opening_doc.submit()
 
+    if opening_differences:
+        lines = [
+            _("Opening confirmation differences:")
+        ]
+        for diff in opening_differences:
+            lines.append(
+                _("{0} | Account: {1} | System: {2} | Confirmed: {3} | Difference: {4}").format(
+                    diff["mode_of_payment"],
+                    diff.get("account") or "-",
+                    flt(diff.get("system_balance") or 0),
+                    flt(diff.get("confirmed_opening_amount") or 0),
+                    flt(diff.get("difference") or 0),
+                )
+            )
+        opening_doc.add_comment("Comment", "\n".join(lines))
+
     employee = _get_employee_for_user(user)
     return {
         "opening_entry": opening_doc.name,
         "employee": employee,
+        "opening_differences": opening_differences,
     }
 
 
