@@ -83,15 +83,17 @@ def _ensure_mode_of_payment_account(mode_of_payment: str, company: str, default_
             )
         return
 
-    mop = frappe.get_doc("Mode of Payment", mode_of_payment)
-    mop.append(
-        "accounts",
+    row = frappe.get_doc(
         {
+            "doctype": "Mode of Payment Account",
+            "parent": mode_of_payment,
+            "parenttype": "Mode of Payment",
+            "parentfield": "accounts",
             "company": company,
             "default_account": default_account,
-        },
+        }
     )
-    mop.save(ignore_permissions=True)
+    row.insert(ignore_permissions=True)
 
 
 def _get_profile_primary_mode_of_payment(profile) -> str | None:
@@ -200,7 +202,13 @@ def get_shift_payment_methods(pos_profile: str):
             _("No account named as POS Profile {0} was found in company {1}.").format(pos_profile, company)
         )
 
-    _ensure_mode_of_payment_account(mode, company, account)
+    try:
+        _ensure_mode_of_payment_account(mode, company, account)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            "jarz_pos.shift.ensure_mode_of_payment_account",
+        )
 
     current_balance = _get_account_balance(account, company)
     return [
@@ -264,7 +272,13 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
 
         row_account = (row or {}).get("account")
         if row_account:
-            _ensure_mode_of_payment_account(mode, company, row_account)
+            try:
+                _ensure_mode_of_payment_account(mode, company, row_account)
+            except Exception:
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    "jarz_pos.shift.ensure_mode_of_payment_account.start_shift",
+                )
 
         confirmed_opening = flt(
             (row or {}).get("opening_amount")
