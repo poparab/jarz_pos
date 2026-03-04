@@ -16,13 +16,16 @@ def _get_employee_for_user(user: str) -> dict[str, Any] | None:
     employee = frappe.db.get_value(
         "Employee",
         {"user_id": user},
-        ["name", "employee_name", "branch", "custom_require_pos_shift"],
+        ["name", "employee_name", "branch"],
         as_dict=True,
     )
     if not employee:
         return None
 
-    employee["require_pos_shift"] = bool(int(employee.get("custom_require_pos_shift") or 0))
+    # Read shift requirement from User doctype, not Employee
+    employee["require_pos_shift"] = bool(
+        int(frappe.db.get_value("User", user, "custom_require_pos_shift") or 0)
+    )
     return employee
 
 

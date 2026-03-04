@@ -2,10 +2,10 @@ import frappe
 
 
 def execute():
-    """Ensure User has custom_require_pos_shift custom field."""
+    """Migrate custom_require_pos_shift from Employee to User doctype."""
     fieldname = "custom_require_pos_shift"
 
-    # Remove the old Employee-based field if it exists (migrated to User)
+    # Remove the old Employee-based field if it exists
     old_cf = f"Employee-{fieldname}"
     if frappe.db.exists("Custom Field", old_cf):
         frappe.delete_doc("Custom Field", old_cf, force=True)
@@ -14,8 +14,9 @@ def execute():
         except Exception:
             pass
 
-    custom_field_name = f"User-{fieldname}"
-    if frappe.db.exists("Custom Field", custom_field_name):
+    # Create on User if not already there
+    new_cf = f"User-{fieldname}"
+    if frappe.db.exists("Custom Field", new_cf):
         return
 
     doc = frappe.get_doc(

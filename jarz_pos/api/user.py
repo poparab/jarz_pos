@@ -21,13 +21,14 @@ def get_current_user_roles():
     employee = frappe.db.get_value(
         "Employee",
         {"user_id": user},
-        ["name", "employee_name", "branch", "custom_require_pos_shift"],
+        ["name", "employee_name", "branch"],
         as_dict=True,
     )
 
-    require_pos_shift = False
-    if employee:
-        require_pos_shift = bool(int(employee.get("custom_require_pos_shift") or 0))
+    # Read shift requirement from User doctype
+    require_pos_shift = bool(
+        int(frappe.db.get_value("User", user, "custom_require_pos_shift") or 0)
+    )
 
     return {
         "user": user,
