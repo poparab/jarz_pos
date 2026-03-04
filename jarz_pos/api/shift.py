@@ -13,6 +13,18 @@ from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
 from erpnext.accounts.utils import get_balance_on
 
 
+def _assert_user_has_profile_access(user: str, pos_profile: str):
+    has_access = frappe.db.exists(
+        "POS Profile User",
+        {
+            "parent": pos_profile,
+            "user": user,
+        },
+    )
+    if not has_access:
+        frappe.throw(_("You are not allowed to use POS Profile {0}").format(pos_profile), frappe.PermissionError)
+
+
 def _get_mode_of_payment_account(mode_of_payment: str, company: str) -> str | None:
     if not mode_of_payment or not company:
         return None
@@ -45,6 +57,39 @@ def _get_account_balance(account: str | None, company: str) -> float:
         return flt(get_balance_on(account=account, company=company, date=nowdate()) or 0)
     except Exception:
         return 0.0
+
+
+def _get_profile_primary_mode_of_payment(profile) -> str | None:
+    payments = profile.get("payments") or []
+    if not payments:
+        return None
+
+    for row in payments:
+        if row.get("default") and row.get("mode_of_payment"):
+            return row.get("mode_of_payment")
+
+    return (payments[0] or {}).get("mode_of_payment")
+
+
+def _resolve_pos_profile_account(company: str, pos_profile: str, branch: str | None, mode_of_payment: str | None) -> str | None:
+    if mode_of_payment:
+        account = _get_mode_of_payment_account(mode_of_payment, company)
+        if account:
+            return account
+
+    if frappe.db.exists("Account", {"company": company, "is_group": 0, "account_name": pos_profile}):
+        return frappe.db.get_value("Account", {"company": company, "is_group": 0, "account_name": pos_profile}, "name")
+
+    if frappe.db.exists("Account", {"company": company, "is_group": 0, "name": pos_profile}):
+        return pos_profile
+
+    if branch:
+        if frappe.db.exists("Account", {"company": company, "is_group": 0, "account_name": branch}):
+            return frappe.db.get_value("Account", {"company": company, "is_group": 0, "account_name": branch}, "name")
+        if frappe.db.exists("Account", {"company": company, "is_group": 0, "name": branch}):
+            return branch
+
+    return None
 
 
 def _get_employee_for_user(user: str) -> dict[str, Any] | None:
@@ -114,29 +159,34 @@ def get_shift_payment_methods(pos_profile: str):
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
 
+    user = frappe.session.user
+    _assert_user_has_profile_access(user, pos_profile)
+
     profile = frappe.get_doc("POS Profile", pos_profile)
     company = profile.company
     branch = getattr(profile, "branch", None)
-    methods = []
-    for row in (profile.get("payments") or []):
-        mode = row.get("mode_of_payment")
-        if not mode:
-            continue
-        account = _get_mode_of_payment_account(mode, company)
-        current_balance = _get_account_balance(account, company)
-        methods.append(
-            {
-                "mode_of_payment": mode,
-                "default_amount": flt(row.get("default_amount") or 0),
-                "account": account,
-                "company": company,
-                "branch": branch,
-                "current_balance": current_balance,
-                "suggested_opening_amount": current_balance,
-            }
+    mode = _get_profile_primary_mode_of_payment(profile)
+    if not mode:
+        frappe.throw(_("POS Profile {0} has no payment methods configured").format(pos_profile))
+
+    account = _resolve_pos_profile_account(company, pos_profile, branch, mode)
+    if not account:
+        frappe.throw(
+            _("No account could be resolved for POS Profile {0}. Configure Mode of Payment default account or matching profile/branch account.").format(pos_profile)
         )
 
-    return methods
+    current_balance = _get_account_balance(account, company)
+    return [
+        {
+            "mode_of_payment": mode,
+            "default_amount": current_balance,
+            "account": account,
+            "company": company,
+            "branch": branch,
+            "current_balance": current_balance,
+            "suggested_opening_amount": current_balance,
+        }
+    ]
 
 
 @frappe.whitelist(allow_guest=False)
@@ -145,6 +195,8 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
 
     if not pos_profile:
         frappe.throw(_("POS Profile is required"))
+
+    _assert_user_has_profile_access(user, pos_profile)
 
     existing_open = _get_latest_opening_entry(user=user)
     if existing_open:
@@ -175,7 +227,10 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
             )
 
     opening_differences: list[dict[str, Any]] = []
+    captured_one = False
     for row in rows:
+        if captured_one:
+            break
         mode = (row or {}).get("mode_of_payment")
         if not mode:
             continue
@@ -205,6 +260,7 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
                 "difference": difference,
             }
         )
+        captured_one = True
 
     if not opening_doc.balance_details:
         frappe.throw(_("At least one opening balance row is required"))
