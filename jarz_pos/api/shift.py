@@ -72,22 +72,12 @@ def _get_profile_primary_mode_of_payment(profile) -> str | None:
 
 
 def _resolve_pos_profile_account(company: str, pos_profile: str, branch: str | None, mode_of_payment: str | None) -> str | None:
-    if mode_of_payment:
-        account = _get_mode_of_payment_account(mode_of_payment, company)
-        if account:
-            return account
-
+    # Required by business flow: use the account named after the POS Profile.
     if frappe.db.exists("Account", {"company": company, "is_group": 0, "account_name": pos_profile}):
         return frappe.db.get_value("Account", {"company": company, "is_group": 0, "account_name": pos_profile}, "name")
 
     if frappe.db.exists("Account", {"company": company, "is_group": 0, "name": pos_profile}):
         return pos_profile
-
-    if branch:
-        if frappe.db.exists("Account", {"company": company, "is_group": 0, "account_name": branch}):
-            return frappe.db.get_value("Account", {"company": company, "is_group": 0, "account_name": branch}, "name")
-        if frappe.db.exists("Account", {"company": company, "is_group": 0, "name": branch}):
-            return branch
 
     return None
 
@@ -172,7 +162,7 @@ def get_shift_payment_methods(pos_profile: str):
     account = _resolve_pos_profile_account(company, pos_profile, branch, mode)
     if not account:
         frappe.throw(
-            _("No account could be resolved for POS Profile {0}. Configure Mode of Payment default account or matching profile/branch account.").format(pos_profile)
+            _("No account named as POS Profile {0} was found in company {1}.").format(pos_profile, company)
         )
 
     current_balance = _get_account_balance(account, company)
