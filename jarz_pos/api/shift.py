@@ -244,6 +244,14 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
     if not company:
         frappe.throw(_("POS Profile {0} was not found").format(pos_profile))
 
+    profile_account = _resolve_pos_profile_account(company, pos_profile, None, None)
+    if not profile_account:
+        frappe.throw(
+            _("No account named as POS Profile {0} was found in company {1}.").format(pos_profile, company)
+        )
+
+    live_system_balance = _get_account_balance(profile_account, company)
+
     opening_doc = frappe.new_doc("POS Opening Entry")
     opening_doc.user = user
     opening_doc.company = company
@@ -257,9 +265,9 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
             rows.append(
                 {
                     "mode_of_payment": method["mode_of_payment"],
-                    "opening_amount": flt(method.get("suggested_opening_amount") or 0),
-                    "system_balance": flt(method.get("current_balance") or 0),
-                    "account": method.get("account"),
+                    "opening_amount": flt(live_system_balance),
+                    "system_balance": flt(live_system_balance),
+                    "account": profile_account,
                 }
             )
 
@@ -272,7 +280,7 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
         if not mode:
             continue
 
-        row_account = (row or {}).get("account")
+        row_account = (row or {}).get("account") or profile_account
         if row_account:
             try:
                 _ensure_mode_of_payment_account(mode, company, row_account)
@@ -282,12 +290,9 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
                     "jarz_pos.shift.ensure_mode_of_payment_account.start_shift",
                 )
 
-        confirmed_opening = flt(
-            (row or {}).get("opening_amount")
-            if (row or {}).get("opening_amount") is not None
-            else (row or {}).get("confirmed_amount")
-        )
-        system_balance = flt((row or {}).get("system_balance") or 0)
+        # Always trust system value for opening, never stale/manual input.
+        system_balance = flt(_get_account_balance(row_account, company))
+        confirmed_opening = system_balance
         difference = flt((row or {}).get("difference") or (confirmed_opening - system_balance))
 
         opening_doc.append(
@@ -433,6 +438,8 @@ def get_shift_summary(pos_opening_entry: str):
     )
     account_balance = _get_account_balance(account, opening.company)
 
+    system_expected = flt(account_balance)
+
     account_movements = _get_shift_account_movements(
         account=account,
         company=opening.company,
@@ -473,9 +480,11 @@ def get_shift_summary(pos_opening_entry: str):
             {
                 "mode_of_payment": row.mode_of_payment,
                 "opening_amount": flt(row.opening_amount),
-                "expected_amount": flt(row.expected_amount),
+                "expected_amount": system_expected,
                 "closing_amount": flt(getattr(row, "closing_amount", 0) or 0),
-                "difference": flt(getattr(row, "difference", 0) or 0),
+                "difference": flt(
+                    flt(getattr(row, "closing_amount", 0) or 0) - system_expected
+                ),
             }
             for row in (closing_draft.payment_reconciliation or [])
         ],
@@ -595,6 +604,11 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
 
     closing = make_closing_entry_from_opening(opening)
 
+    account = _resolve_pos_profile_account(
+        opening.company, opening.pos_profile, None, None
+    )
+    system_expected = flt(_get_account_balance(account, opening.company)) if account else 0
+
     closing_map: dict[str, float] = {}
     for row in (closing_balances or []):
         mode = (row or {}).get("mode_of_payment")
@@ -603,16 +617,14 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         closing_map[mode] = flt((row or {}).get("closing_amount") or 0)
 
     for row in (closing.payment_reconciliation or []):
-        row.closing_amount = flt(closing_map.get(row.mode_of_payment, row.expected_amount or 0))
+        row.expected_amount = system_expected
+        row.closing_amount = flt(closing_map.get(row.mode_of_payment, system_expected))
 
     closing.insert(ignore_permissions=True)
     closing.submit()
 
     # --- Create discrepancy journal entry if closing differs from expected ---
     journal_entry = None
-    account = _resolve_pos_profile_account(
-        opening.company, opening.pos_profile, None, None
-    )
     if account:
         for row in (closing.payment_reconciliation or []):
             diff = flt(row.closing_amount - row.expected_amount, 2)
