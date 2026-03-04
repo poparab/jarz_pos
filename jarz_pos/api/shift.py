@@ -59,6 +59,41 @@ def _get_account_balance(account: str | None, company: str) -> float:
         return 0.0
 
 
+def _ensure_mode_of_payment_account(mode_of_payment: str, company: str, default_account: str | None):
+    if not mode_of_payment or not company or not default_account:
+        return
+
+    existing = frappe.db.get_value(
+        "Mode of Payment Account",
+        {
+            "parent": mode_of_payment,
+            "company": company,
+        },
+        ["name", "default_account"],
+        as_dict=True,
+    )
+
+    if existing:
+        if existing.default_account != default_account:
+            frappe.db.set_value(
+                "Mode of Payment Account",
+                existing.name,
+                "default_account",
+                default_account,
+            )
+        return
+
+    mop = frappe.get_doc("Mode of Payment", mode_of_payment)
+    mop.append(
+        "accounts",
+        {
+            "company": company,
+            "default_account": default_account,
+        },
+    )
+    mop.save(ignore_permissions=True)
+
+
 def _get_profile_primary_mode_of_payment(profile) -> str | None:
     payments = profile.get("payments") or []
     if not payments:
@@ -165,6 +200,8 @@ def get_shift_payment_methods(pos_profile: str):
             _("No account named as POS Profile {0} was found in company {1}.").format(pos_profile, company)
         )
 
+    _ensure_mode_of_payment_account(mode, company, account)
+
     current_balance = _get_account_balance(account, company)
     return [
         {
@@ -224,6 +261,10 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
         mode = (row or {}).get("mode_of_payment")
         if not mode:
             continue
+
+        row_account = (row or {}).get("account")
+        if row_account:
+            _ensure_mode_of_payment_account(mode, company, row_account)
 
         confirmed_opening = flt(
             (row or {}).get("opening_amount")
