@@ -354,11 +354,21 @@ def is_pos_profile_open(pos_profile: str):
         closing_time = timing['closing_time']
         same_day = timing.get('same_day', 'Same Day')
         
-        # Convert string times to datetime.time objects if needed
+        # Convert to datetime.time objects if needed
         if isinstance(opening_time, str):
             opening_time = datetime.strptime(opening_time, '%H:%M:%S').time()
+        elif isinstance(opening_time, timedelta):
+            total_secs = int(opening_time.total_seconds())
+            hours, remainder = divmod(total_secs, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            opening_time = datetime.strptime(f'{hours:02d}:{minutes:02d}:{seconds:02d}', '%H:%M:%S').time()
         if isinstance(closing_time, str):
             closing_time = datetime.strptime(closing_time, '%H:%M:%S').time()
+        elif isinstance(closing_time, timedelta):
+            total_secs = int(closing_time.total_seconds())
+            hours, remainder = divmod(total_secs, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            closing_time = datetime.strptime(f'{hours:02d}:{minutes:02d}:{seconds:02d}', '%H:%M:%S').time()
         
         # Handle "Next Day" scenario (e.g., closing time is after midnight)
         if same_day == 'Next Day':

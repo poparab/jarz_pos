@@ -315,6 +315,8 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
     opening_doc.insert(ignore_permissions=True)
     opening_doc.submit()
 
+    # --- Create a Journal Entry if there is a discrepancy at opening ---
+    opening_journal_entry = None
     if opening_differences:
         lines = [
             _("Opening confirmation differences:")
@@ -331,11 +333,33 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
             )
         opening_doc.add_comment("Comment", "\n".join(lines))
 
+        # Create JE for the discrepancy (surplus or shortage at opening)
+        for diff in opening_differences:
+            diff_amount = flt(diff.get("difference") or 0, 2)
+            diff_account = diff.get("account")
+            if diff_amount != 0 and diff_account:
+                try:
+                    opening_journal_entry = _create_discrepancy_journal_entry(
+                        company=company,
+                        cash_account=diff_account,
+                        closing_amount=flt(diff.get("confirmed_opening_amount") or 0),
+                        expected_amount=flt(diff.get("system_balance") or 0),
+                        opening_entry=opening_doc.name,
+                        closing_entry="Opening",
+                    )
+                except Exception:
+                    frappe.log_error(
+                        frappe.get_traceback(),
+                        "jarz_pos.shift.discrepancy_journal_entry.start_shift",
+                    )
+                break  # single-account flow
+
     employee = _get_employee_for_user(user)
     return {
         "opening_entry": opening_doc.name,
         "employee": employee,
         "opening_differences": opening_differences,
+        "journal_entry": opening_journal_entry,
     }
 
 
@@ -348,14 +372,22 @@ def _get_shift_sales_invoices(user: str, pos_profile: str, start_date, company: 
         "creation": [">=", start_date],
         "company": company,
     }
+
+    base_fields = [
+        "name", "customer", "customer_name", "grand_total", "net_total",
+        "status", "posting_date", "creation",
+    ]
+
+    # Only include custom fields if they exist on the doctype
+    si_meta = frappe.get_meta("Sales Invoice")
+    has_delivery_status = si_meta.has_field("custom_delivery_status")
+    if has_delivery_status:
+        base_fields.append("custom_delivery_status")
+
     invoices = frappe.get_all(
         "Sales Invoice",
         filters=filters,
-        fields=[
-            "name", "customer", "customer_name", "grand_total", "net_total",
-            "status", "posting_date", "creation",
-            "custom_delivery_status", "custom_kanban_profile",
-        ],
+        fields=base_fields,
         order_by="creation asc",
         limit=500,
     )
@@ -370,7 +402,7 @@ def _get_shift_sales_invoices(user: str, pos_profile: str, start_date, company: 
             "status": inv.status,
             "posting_date": str(inv.posting_date) if inv.posting_date else None,
             "creation": str(inv.creation) if inv.creation else None,
-            "delivery_status": inv.custom_delivery_status,
+            "delivery_status": inv.get("custom_delivery_status") if has_delivery_status else None,
         })
     return result
 
