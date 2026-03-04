@@ -339,6 +339,42 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
     }
 
 
+def _get_shift_sales_invoices(user: str, pos_profile: str, start_date, company: str) -> list[dict[str, Any]]:
+    """Return Sales Invoices created by user with this POS profile during the shift window."""
+    filters = {
+        "owner": user,
+        "pos_profile": pos_profile,
+        "docstatus": 1,
+        "creation": [">=", start_date],
+        "company": company,
+    }
+    invoices = frappe.get_all(
+        "Sales Invoice",
+        filters=filters,
+        fields=[
+            "name", "customer", "customer_name", "grand_total", "net_total",
+            "status", "posting_date", "creation",
+            "custom_delivery_status", "custom_kanban_profile",
+        ],
+        order_by="creation asc",
+        limit=500,
+    )
+    result = []
+    for inv in invoices:
+        result.append({
+            "name": inv.name,
+            "customer": inv.customer,
+            "customer_name": inv.customer_name,
+            "grand_total": flt(inv.grand_total),
+            "net_total": flt(inv.net_total),
+            "status": inv.status,
+            "posting_date": str(inv.posting_date) if inv.posting_date else None,
+            "creation": str(inv.creation) if inv.creation else None,
+            "delivery_status": inv.custom_delivery_status,
+        })
+    return result
+
+
 @frappe.whitelist(allow_guest=False)
 def get_shift_summary(pos_opening_entry: str):
     if not pos_opening_entry:
@@ -350,6 +386,23 @@ def get_shift_summary(pos_opening_entry: str):
 
     closing_draft = make_closing_entry_from_opening(opening)
 
+    # Fetch Sales Invoices created during shift
+    sales_invoices = _get_shift_sales_invoices(
+        user=opening.user,
+        pos_profile=opening.pos_profile,
+        start_date=opening.period_start_date,
+        company=opening.company,
+    )
+
+    # Current account balance for the branch account
+    account = _resolve_pos_profile_account(
+        opening.company, opening.pos_profile, None, None
+    )
+    account_balance = _get_account_balance(account, opening.company)
+
+    # Accumulated cash from invoices
+    total_sales = sum(flt(inv.get("grand_total")) for inv in sales_invoices)
+
     return {
         "opening_entry": opening.name,
         "status": opening.status,
@@ -358,10 +411,14 @@ def get_shift_summary(pos_opening_entry: str):
         "pos_profile": opening.pos_profile,
         "period_start_date": opening.period_start_date,
         "period_end_date": opening.period_end_date,
-        "invoice_count": len(closing_draft.pos_transactions or []),
-        "grand_total": flt(closing_draft.grand_total),
+        "invoice_count": len(sales_invoices),
+        "grand_total": flt(total_sales),
         "net_total": flt(closing_draft.net_total),
         "total_quantity": flt(closing_draft.total_quantity),
+        "account": account,
+        "account_balance": flt(account_balance),
+        "total_sales": flt(total_sales),
+        "sales_invoices": sales_invoices,
         "payment_reconciliation": [
             {
                 "mode_of_payment": row.mode_of_payment,
@@ -373,6 +430,104 @@ def get_shift_summary(pos_opening_entry: str):
             for row in (closing_draft.payment_reconciliation or [])
         ],
     }
+
+
+def _get_or_create_cash_over_short_account(company: str) -> str:
+    """Return (or create) a 'Cash Over/Short' expense account for shift discrepancies."""
+    account_name = "Cash Over Short"
+    existing = frappe.db.get_value(
+        "Account",
+        {"company": company, "account_name": account_name, "is_group": 0},
+        "name",
+    )
+    if existing:
+        return existing
+
+    # Find a suitable parent – Indirect Expenses or Expenses
+    parent = frappe.db.get_value(
+        "Account",
+        {"company": company, "is_group": 1, "root_type": "Expense", "account_name": "Indirect Expenses"},
+        "name",
+    )
+    if not parent:
+        parent = frappe.db.get_value(
+            "Account",
+            {"company": company, "is_group": 1, "root_type": "Expense"},
+            "name",
+        )
+    if not parent:
+        frappe.throw(_("Cannot find an Expense parent account in company {0}").format(company))
+
+    acc = frappe.get_doc({
+        "doctype": "Account",
+        "account_name": account_name,
+        "parent_account": parent,
+        "company": company,
+        "account_type": "Expense Account",
+        "root_type": "Expense",
+        "is_group": 0,
+    })
+    acc.insert(ignore_permissions=True)
+    return acc.name
+
+
+def _create_discrepancy_journal_entry(
+    company: str,
+    cash_account: str,
+    closing_amount: float,
+    expected_amount: float,
+    opening_entry: str,
+    closing_entry: str,
+):
+    """Create a Journal Entry for the difference between confirmed closing and expected amount.
+
+    - If closing > expected: surplus – debit cash, credit over/short (income side)
+    - If closing < expected: shortage – debit over/short (expense), credit cash
+    """
+    diff = flt(closing_amount - expected_amount, 2)
+    if diff == 0:
+        return None
+
+    over_short_account = _get_or_create_cash_over_short_account(company)
+
+    remark = _(
+        "Shift cash discrepancy for {0} → {1}. Expected {2}, confirmed {3}, difference {4}"
+    ).format(opening_entry, closing_entry, expected_amount, closing_amount, diff)
+
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Journal Entry"
+    je.company = company
+    je.posting_date = nowdate()
+    je.user_remark = remark
+
+    if diff > 0:
+        # Surplus: cash account has more than expected
+        je.append("accounts", {
+            "account": cash_account,
+            "debit_in_account_currency": abs(diff),
+            "credit_in_account_currency": 0,
+        })
+        je.append("accounts", {
+            "account": over_short_account,
+            "debit_in_account_currency": 0,
+            "credit_in_account_currency": abs(diff),
+        })
+    else:
+        # Shortage: cash account has less than expected
+        je.append("accounts", {
+            "account": over_short_account,
+            "debit_in_account_currency": abs(diff),
+            "credit_in_account_currency": 0,
+        })
+        je.append("accounts", {
+            "account": cash_account,
+            "debit_in_account_currency": 0,
+            "credit_in_account_currency": abs(diff),
+        })
+
+    je.insert(ignore_permissions=True)
+    je.submit()
+    return je.name
 
 
 @frappe.whitelist(allow_guest=False)
@@ -403,10 +558,49 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
     closing.insert(ignore_permissions=True)
     closing.submit()
 
+    # --- Create discrepancy journal entry if closing differs from expected ---
+    journal_entry = None
+    account = _resolve_pos_profile_account(
+        opening.company, opening.pos_profile, None, None
+    )
+    if account:
+        for row in (closing.payment_reconciliation or []):
+            diff = flt(row.closing_amount - row.expected_amount, 2)
+            if diff != 0:
+                try:
+                    journal_entry = _create_discrepancy_journal_entry(
+                        company=opening.company,
+                        cash_account=account,
+                        closing_amount=flt(row.closing_amount),
+                        expected_amount=flt(row.expected_amount),
+                        opening_entry=opening.name,
+                        closing_entry=closing.name,
+                    )
+                except Exception:
+                    frappe.log_error(
+                        frappe.get_traceback(),
+                        "jarz_pos.shift.discrepancy_journal_entry",
+                    )
+                break  # single-account flow
+
+    # Fetch final account balance after closing
+    account_balance = _get_account_balance(account, opening.company) if account else 0
+
+    # Sales invoices for the shift period
+    sales_invoices = _get_shift_sales_invoices(
+        user=opening.user,
+        pos_profile=opening.pos_profile,
+        start_date=opening.period_start_date,
+        company=opening.company,
+    )
+
     return {
         "closing_entry": closing.name,
         "opening_entry": opening.name,
         "status": closing.status,
+        "journal_entry": journal_entry,
+        "account": account,
+        "account_balance": flt(account_balance),
         "payment_reconciliation": [
             {
                 "mode_of_payment": row.mode_of_payment,
@@ -417,8 +611,9 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
             }
             for row in (closing.payment_reconciliation or [])
         ],
-        "invoice_count": len(closing.pos_transactions or []),
-        "grand_total": flt(closing.grand_total),
+        "invoice_count": len(sales_invoices),
+        "grand_total": flt(sum(flt(inv.get("grand_total")) for inv in sales_invoices)),
         "net_total": flt(closing.net_total),
         "total_quantity": flt(closing.total_quantity),
+        "sales_invoices": sales_invoices,
     }
