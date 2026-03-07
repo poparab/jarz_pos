@@ -8,6 +8,7 @@ import json
 import traceback
 import datetime
 from typing import Dict, List, Any, Optional, Union, Tuple
+from jarz_pos.constants import PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
 
 # Accounting helpers
 try:
@@ -492,7 +493,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             filters=filter_conditions,
             fields=fields,
             order_by="posting_date desc, posting_time desc",
-            limit=250,
+            limit=QUERY_LIMITS.TERRITORIES,
         )
 
         # Territory shipping cache
@@ -553,7 +554,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                     "Sales Invoice Item",
                     filters={"parent": ["in", [inv.name for inv in invoices]]},
                     fields=["parent", "item_code", "item_name", "qty", "rate", "amount"],
-                    limit=5000,
+                    limit=QUERY_LIMITS.KANBAN_INVOICES,
                 )
                 for row in items_rows:
                     parent = row.get("parent")
@@ -608,7 +609,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             # Normalize ERPNext doc status for board (treat Overdue as Unpaid)
             doc_status_label = str(inv.status or "").strip()
             if doc_status_label.lower() == "overdue":
-                doc_status_label = "Unpaid"
+                doc_status_label = STATUS.UNPAID
 
             acceptance_status_raw = (
                 inv.get("custom_acceptance_status")
@@ -784,7 +785,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
                 pe.company = company
                 pe.posting_date = frappe.utils.getdate()
                 pe.posting_time = frappe.utils.nowtime()
-                pe.mode_of_payment = "Cash"
+                pe.mode_of_payment = PAYMENT_MODES.CASH
                 pe.party_type = "Customer"
                 pe.party = si_doc.customer
                 pe.paid_from = receivable
@@ -964,7 +965,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
                         txn.amount = float(getattr(invoice, 'grand_total', 0) or 0)
                         # partner_fees left blank for now; user will update later
                         # Determine payment mode: cash if cash PE created, else Online
-                        payment_mode_val = 'Cash' if created_cash_payment_entry else 'Online'
+                        payment_mode_val = PAYMENT_MODES.CASH if created_cash_payment_entry else PAYMENT_MODES.ONLINE
                         txn.payment_mode = payment_mode_val
                         txn.idempotency_token = idem_token
                         txn.insert(ignore_permissions=True)
@@ -1020,8 +1021,8 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
             "cash_payment_entry": created_cash_payment_entry,
             "sales_partner_transaction": created_partner_txn,
         }
-        frappe.publish_realtime("jarz_pos_invoice_state_change", payload, user="*")
-        frappe.publish_realtime("kanban_update", payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
         return _success(
             message=f"Invoice {invoice_id} state updated",
             invoice_id=invoice_id,
@@ -1054,7 +1055,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             return _failure("Cancellation reason is required")
 
         roles = {str(r or "").strip().lower() for r in frappe.get_roles(frappe.session.user)}
-        allowed_roles = {"administrator", "jarz line manager"}
+        allowed_roles = {ROLES.ADMINISTRATOR.lower(), ROLES.JARZ_LINE_MANAGER}
         if roles.isdisjoint(allowed_roles):
             return _failure("You are not permitted to cancel orders")
 
@@ -1149,7 +1150,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             ]:
                 if meta.get_field(candidate):
                     try:
-                        frappe.db.set_value("Sales Invoice", invoice.name, candidate, "Cancelled", update_modified=True)
+                        frappe.db.set_value("Sales Invoice", invoice.name, candidate, STATUS.CANCELLED, update_modified=True)
                         updated_fields.append(candidate)
                     except Exception:
                         pass
@@ -1169,9 +1170,9 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             payload = {
                 "invoice_id": invoice.name,
                 "old_state": current_state,
-                "new_state": "Cancelled",
+                "new_state": STATUS.CANCELLED,
                 "old_state_key": _state_key(current_state) if current_state else None,
-                "new_state_key": _state_key("Cancelled"),
+                "new_state_key": _state_key(STATUS.CANCELLED),
                 "cancelled_by": frappe.session.user,
                 "reason": reason,
                 "notes": notes,
@@ -1182,8 +1183,8 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 "cancelled_payment_entries": cancelled_payment_entries or None,
             }
 
-            frappe.publish_realtime("jarz_pos_invoice_state_change", payload, user="*")
-            frappe.publish_realtime("kanban_update", payload, user="*")
+            frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload, user="*")
+            frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
 
             try:
                 notify_invoice_cancellation(invoice.name, reason, notes=notes, credit_note=credit_note_name)
@@ -1201,7 +1202,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 invoice_id=invoice.name,
                 cancelled_docstatus=cancelled_docstatus,
                 credit_note=credit_note_name,
-                state="Cancelled",
+                state=STATUS.CANCELLED,
                 reason=reason,
                 notes=notes,
                 paid_path=is_paid,

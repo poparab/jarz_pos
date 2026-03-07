@@ -4,11 +4,12 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
+from jarz_pos.constants import DEFAULT_UOM, ROLES
 
 
 def _ensure_manager_access() -> None:
     roles = set(frappe.get_roles())
-    allowed = {"System Manager", "Stock Manager", "Manufacturing Manager", "Purchase Manager", "Accounts Manager"}
+    allowed = ROLES.MANAGER
     if not roles.intersection(allowed):
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
@@ -144,7 +145,7 @@ def search_items_with_stock(
             "item_code": code,
             "item_name": it.get("item_name") or code,
             "item_group": it.get("item_group"),
-            "stock_uom": it.get("stock_uom") or "Nos",
+            "stock_uom": it.get("stock_uom") or DEFAULT_UOM,
             "qty_source": float(src_qty.get(code, 0)),
             "qty_target": float(dst_qty.get(code, 0)),
             "reserved_source": float(reserved_src.get(code, 0)),
@@ -194,7 +195,7 @@ def submit_transfer(
         qty = float(ln.get("qty") or 0)
         if not item_code or qty <= 0:
             frappe.throw(_("Invalid item or qty in lines"))
-        stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or "Nos"
+        stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
         se.append("items", {
             "item_code": item_code,
             "uom": stock_uom,

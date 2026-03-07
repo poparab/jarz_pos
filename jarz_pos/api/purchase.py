@@ -2,18 +2,14 @@ import frappe
 from frappe import _
 from typing import List, Dict, Any, Optional
 
+from jarz_pos.constants import ACCOUNTS, PAYMENT_MODES, PRICE_LISTS, ROLES
 
-STANDARD_BUYING = "Standard Buying"
+STANDARD_BUYING = PRICE_LISTS.STANDARD_BUYING
 
 
 def _ensure_manager_access():
     roles = set(frappe.get_roles())
-    allowed_roles = {
-        "System Manager",
-        "Purchase Manager",
-        "Accounts Manager",
-        "Stock Manager",
-    }
+    allowed_roles = ROLES.PURCHASE
     if not roles.intersection(allowed_roles):
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
@@ -295,13 +291,13 @@ def create_purchase_invoice(
 
             # If payment_option matches a POS Profile name, use that profile's exact-named account
             if opt_raw and frappe.db.exists("POS Profile", opt_raw):
-                mop = "Cash"
+                mop = PAYMENT_MODES.CASH
                 account = _get_exact_pos_profile_account(opt_raw, resolved_company) or _get_default_cash_account(resolved_company)
             elif opt_lower == "instapay":
                 mop = "InstaPay"
                 account = _get_mop_account_account(mop, resolved_company) or _get_default_bank_account(resolved_company)
             elif opt_lower in ("cash", "pos_profile"):
-                mop = "Cash"
+                mop = PAYMENT_MODES.CASH
                 # If explicitly 'pos_profile', fall back to any session user's profile mapping; else default cash
                 if opt_lower == "pos_profile":
                     account = _get_pos_profile_cash_account(resolved_company) or _get_default_cash_account(resolved_company)
@@ -309,7 +305,7 @@ def create_purchase_invoice(
                     account = _get_mop_account_account(mop, resolved_company) or _get_default_cash_account(resolved_company)
             else:
                 # Unknown option: try as POS Profile, else default to Cash
-                mop = "Cash"
+                mop = PAYMENT_MODES.CASH
                 account = _get_exact_pos_profile_account(opt_raw, resolved_company) or _get_default_cash_account(resolved_company)
 
             if not account:
@@ -348,14 +344,14 @@ def _get_freight_and_forwarding_account(company: str) -> Optional[str]:
     try:
         abbr = frappe.db.get_value("Company", company, "abbr") or ""
         if abbr:
-            exact = f"Freight and Forwarding Charges - {abbr}"
+            exact = f"{ACCOUNTS.FREIGHT_AND_FORWARDING} - {abbr}"
             if frappe.db.exists("Account", exact):
                 acc = frappe.get_doc("Account", exact)
                 if acc.company == company and int(acc.is_group or 0) == 0:
                     return exact
         rows = frappe.get_all(
             "Account",
-            filters={"company": company, "is_group": 0, "account_name": "Freight and Forwarding Charges"},
+            filters={"company": company, "is_group": 0, "account_name": ACCOUNTS.FREIGHT_AND_FORWARDING},
             fields=["name"],
             limit=1,
         )
@@ -397,7 +393,7 @@ def _get_pos_profile_cash_account(company: str) -> Optional[str]:
         # Fallback to POS Payment Method default Cash account
         rows = frappe.get_all(
             "POS Payment Method",
-            filters={"parent": profile, "mode_of_payment": "Cash"},
+            filters={"parent": profile, "mode_of_payment": PAYMENT_MODES.CASH},
             fields=["default_account"],
             limit=1,
         )
@@ -426,7 +422,7 @@ def _get_exact_pos_profile_account(profile_name: str, company: str) -> Optional[
         # Fallback to profile's Cash method default account
         row = frappe.get_all(
             "POS Payment Method",
-            filters={"parent": profile_name, "mode_of_payment": "Cash"},
+            filters={"parent": profile_name, "mode_of_payment": PAYMENT_MODES.CASH},
             fields=["default_account"],
             limit=1,
         )

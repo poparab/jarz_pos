@@ -4,6 +4,7 @@ This is a workaround for when CLI access is not available.
 Call via: POST /api/method/jarz_pos.api.maintenance.fix_employee_series
 """
 import frappe
+from jarz_pos.constants import ROLES
 
 @frappe.whitelist(allow_guest=False)
 def fix_employee_series():
@@ -13,8 +14,8 @@ def fix_employee_series():
         dict: Status message with the updated series information
     """
     # Only allow System Manager or HR Manager to run this
-    if not (frappe.session.user == "Administrator" or 
-            "System Manager" in frappe.get_roles() or 
+    if not (frappe.session.user == ROLES.ADMINISTRATOR or 
+            ROLES.SYSTEM_MANAGER in frappe.get_roles() or 
             "HR Manager" in frappe.get_roles()):
         frappe.throw("Only System Manager or HR Manager can fix naming series")
     

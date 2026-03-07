@@ -9,6 +9,7 @@ from frappe import _
 from frappe.utils import flt, formatdate, getdate, now_datetime
 
 from jarz_pos.api.pos import get_pos_profiles
+from jarz_pos.constants import ACCOUNTS, ROLES, STATUS
 
 
 @dataclass
@@ -22,7 +23,7 @@ class PaymentSource:
 
 def _is_manager() -> bool:
     roles = set(frappe.get_roles(frappe.session.user))
-    return "JARZ Manager" in roles
+    return ROLES.JARZ_MANAGER in roles
 
 
 def _default_company() -> str:
@@ -89,8 +90,8 @@ def _indirect_expense_accounts(company: str) -> List[Dict[str, Any]]:
         "Account",
         filters={"company": company, "is_group": 1},
         or_filters=[
-            ["Account", "account_name", "in", ["Indirect Expenses", "Indirect Expense"]],
-            ["Account", "name", "like", "%Indirect Expenses%"],
+            ["Account", "account_name", "in", [ACCOUNTS.INDIRECT_EXPENSES, "Indirect Expense"]],
+            ["Account", "name", "like", f"%{ACCOUNTS.INDIRECT_EXPENSES}%"],
         ],
         fields=["name", "lft", "rgt"],
         order_by="lft asc",
@@ -227,9 +228,9 @@ def _load_months() -> List[str]:
 
 def _serialize_expense(doc: Dict[str, Any]) -> Dict[str, Any]:
     status_map = {
-        0: "Pending Approval" if doc.get("requires_approval") else "Draft",
+        0: "Pending Approval" if doc.get("requires_approval") else STATUS.DRAFT,
         1: "Approved",
-        2: "Cancelled",
+        2: STATUS.CANCELLED,
     }
     timeline: List[Dict[str, Any]] = []
     timeline.append(
@@ -268,7 +269,7 @@ def _serialize_expense(doc: Dict[str, Any]) -> Dict[str, Any]:
         "pos_profile": doc.get("pos_profile"),
         "requires_approval": bool(doc.get("requires_approval")),
         "docstatus": doc.get("docstatus"),
-        "status": doc.get("status") or status_map.get(doc.get("docstatus"), "Draft"),
+        "status": doc.get("status") or status_map.get(doc.get("docstatus"), STATUS.DRAFT),
         "requested_by": doc.get("requested_by"),
         "approved_by": doc.get("approved_by"),
         "approved_on": doc.get("approved_on"),

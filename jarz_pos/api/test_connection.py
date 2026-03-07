@@ -2,6 +2,7 @@
 
 import frappe
 from frappe import _
+from jarz_pos.constants import WS_EVENTS
 from jarz_pos.utils.error_handler import handle_api_error, success_response
 
 
@@ -90,7 +91,7 @@ def get_backend_info():
     }
 
 @frappe.whitelist(allow_guest=True)
-def emit_test_event(event: str = "jarz_pos_new_invoice"):
+def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
     """Emit a realtime test event to verify Socket.IO delivery to clients.
     Default event is 'jarz_pos_new_invoice'. Requires auth.
     """
@@ -100,14 +101,14 @@ def emit_test_event(event: str = "jarz_pos_new_invoice"):
         frappe.publish_realtime(event, payload, user="*")
         # Also emit a kanban-style state-change with no old_state to trigger a refresh
         kanban_payload = {
-            "event": "jarz_pos_invoice_state_change",
+            "event": WS_EVENTS.INVOICE_STATE_CHANGE,
             "invoice_id": payload["name"],
             "old_state_key": None,
             "new_state_key": "received",
             "old_state": None,
             "new_state": "Received",
         }
-        frappe.publish_realtime("jarz_pos_invoice_state_change", kanban_payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, kanban_payload, user="*")
         return success_response(message="Event emitted", data=payload)
     except Exception as e:
         return handle_api_error(e, "Emit Test Event")

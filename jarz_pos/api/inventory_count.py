@@ -4,18 +4,19 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
+from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 
 
 def _ensure_manager_access() -> None:
     roles = set(frappe.get_roles())
-    allowed = {"System Manager", "Stock Manager", "Manufacturing Manager", "Accounts Manager"}
+    allowed = ROLES.STOCK
     if not roles.intersection(allowed):
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
 def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
     """Return available UOM conversions for an item, including stock_uom with factor 1."""
-    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or "Nos"
+    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
     convs: List[Dict[str, Any]] = [{"uom": stock_uom, "conversion_factor": 1.0}]
     rows = frappe.get_all(
         "UOM Conversion Detail",
@@ -56,7 +57,7 @@ def list_item_groups(search: Optional[str] = None) -> List[Dict[str, Any]]:
         or_filters = [["Item Group", "name", "like", like], ["Item Group", "item_group_name", "like", like]]
     
     fields = ["name", "item_group_name"]
-    return frappe.get_all("Item Group", filters=filters, or_filters=or_filters, fields=fields, order_by="name asc", limit=100)
+    return frappe.get_all("Item Group", filters=filters, or_filters=or_filters, fields=fields, order_by="name asc", limit=QUERY_LIMITS.DEFAULT_LIST)
 
 
 def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
@@ -165,7 +166,7 @@ def list_items_for_count(
     out: List[Dict[str, Any]] = []
     for it in items:
         code = it["item_code"]
-        stock_uom = it.get("stock_uom") or "Nos"
+        stock_uom = it.get("stock_uom") or DEFAULT_UOM
         # Attempt to provide valuation info for the UI (optional)
         val = _resolve_item_valuation(code, warehouse)  # may be None
         out.append({
@@ -185,7 +186,7 @@ def list_items_for_count(
 def _to_stock_qty(item_code: str, qty: float, uom: Optional[str]) -> float:
     if qty is None:
         return 0.0
-    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or "Nos"
+    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
     if not uom or uom == stock_uom:
         return float(qty)
     # find factor

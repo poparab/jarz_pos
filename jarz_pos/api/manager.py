@@ -9,6 +9,7 @@ Endpoints:
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Union
 import frappe
+from jarz_pos.constants import ACCOUNTS, ROLES
 
 try:
     # ERPNext helper to get account balance as of today
@@ -23,7 +24,7 @@ except Exception:
         # Fallback: try to resolve a Cash account roughly matching the profile name
         acc = frappe.db.get_value(
             "Account",
-            {"company": company, "parent_account": ["like", "%Cash In Hand%"], "account_name": ["like", f"%{pos_profile}%"], "is_group": 0},
+            {"company": company, "parent_account": ["like", f"%{ACCOUNTS.CASH_IN_HAND}%"], "account_name": ["like", f"%{pos_profile}%"], "is_group": 0},
             "name",
         )
         if acc:
@@ -54,7 +55,7 @@ def _current_user_allowed_profiles() -> List[str]:
     user = frappe.session.user
     roles = set([r.get("role") for r in frappe.get_all("Has Role", filters={"parent": user}, fields=["role"])])
     try:
-        if {"System Manager", "POS Manager"} & roles:
+        if ROLES.ADMIN & roles:
             return frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or []
     except Exception:
         pass

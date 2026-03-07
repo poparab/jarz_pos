@@ -6,6 +6,7 @@ including outstanding management, expense tracking, and settlement.
 """
 
 import frappe
+from jarz_pos.constants import ACCOUNTS, WS_EVENTS
 from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
     get_courier_outstanding_account,
@@ -338,7 +339,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
                 fields=["name", "paid_to"],
             )
             for r in rows:
-                if (r.get("paid_to") or "").startswith("Courier Outstanding"):
+                if (r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING):
                     pe_name = r["name"]
                     break
     except Exception:
@@ -376,7 +377,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
 
     payload = {
-        "event": "jarz_pos_courier_outstanding",
+        "event": WS_EVENTS.COURIER_OUTSTANDING,
         "invoice": inv.name,
         "courier": courier,
         "party_type": party_type,
@@ -392,7 +393,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         "delivery_note_reused": dn_result.get("reused"),
         "dn_logic_version": DN_LOGIC_VERSION,
     }
-    frappe.publish_realtime("jarz_pos_courier_outstanding", payload)
+    frappe.publish_realtime(WS_EVENTS.COURIER_OUTSTANDING, payload)
     return payload
 
 
@@ -452,7 +453,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
     # Step 0: Proactively prompt UI to collect cash BEFORE creating Payment Entry (two-step UX)
     try:
         frappe.publish_realtime(
-            "jarz_pos_sales_partner_collect_prompt",
+            WS_EVENTS.SALES_PARTNER_COLLECT_PROMPT,
             {
                 "invoice": inv.name,
                 "sales_partner": sales_partner,
@@ -576,7 +577,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
         "sales_partner": sales_partner,
         "mode": "sales_partner_unpaid_cash",
     }
-    frappe.publish_realtime("jarz_pos_sales_partner_unpaid_ofd", payload, user="*")
+    frappe.publish_realtime(WS_EVENTS.SALES_PARTNER_UNPAID_OFD, payload, user="*")
     return payload
 
 
@@ -733,7 +734,7 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
         "new_state_key": _state_key(target_state),
         "explicit_mode": explicit_mode or None,
     }
-    frappe.publish_realtime("jarz_pos_sales_partner_paid_ofd", payload, user="*")
+    frappe.publish_realtime(WS_EVENTS.SALES_PARTNER_PAID_OFD, payload, user="*")
     return payload
 
 
@@ -782,7 +783,7 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     
     # Fire realtime event so other sessions update cards instantly
     frappe.publish_realtime(
-        "jarz_pos_courier_expense_paid",
+        WS_EVENTS.COURIER_EXPENSE_PAID,
         {"invoice": inv.name, "journal_entry": je.name, "amount": amount},
     )
     
@@ -852,7 +853,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     ct.insert(ignore_permissions=True)
     
     frappe.publish_realtime(
-        "jarz_pos_courier_expense_only",
+        WS_EVENTS.COURIER_EXPENSE_ONLY,
         {
             "invoice": inv.name,
             "courier_transaction": ct.name,
@@ -1038,7 +1039,7 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
     frappe.db.commit()
 
     frappe.publish_realtime(
-        "jarz_pos_courier_settled",
+        WS_EVENTS.COURIER_SETTLED,
         {
             "courier": label,
             "journal_entry": je_name,
@@ -1329,7 +1330,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         "delivery_note_reused": dn_result.get("reused"),
         "dn_logic_version": DN_LOGIC_VERSION,
     }
-    frappe.publish_realtime("jarz_pos_out_for_delivery_transition", payload, user="*")
+    frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload, user="*")
     return {"success": True, **payload}
 
 
@@ -1423,7 +1424,7 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
             "delivery_note_reused": dn_result.get("reused"),
             "dn_logic_version": DN_LOGIC_VERSION,
         }
-        frappe.publish_realtime("jarz_pos_out_for_delivery_transition", payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload, user="*")
         return {"success": True, **payload}
 
     except Exception as err:
@@ -1659,7 +1660,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             "party": party,
             "courier_transactions": cts,
         }
-        frappe.publish_realtime("jarz_pos_single_courier_settlement", payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.SINGLE_COURIER_SETTLEMENT, payload, user="*")
         return {"success": True, **payload}
     else:
         # Paid + settle later shipping-only scenario (previous behavior)
@@ -1727,7 +1728,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             "party": party,
             "courier_transactions": cts,
         }
-        frappe.publish_realtime("jarz_pos_single_courier_settlement", payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.SINGLE_COURIER_SETTLEMENT, payload, user="*")
         return {"success": True, **payload}
 
 
@@ -1850,7 +1851,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         "party_type": party_type,
         "party": party,
     }
-    frappe.publish_realtime("jarz_pos_courier_collected_settlement", payload, user="*")
+    frappe.publish_realtime(WS_EVENTS.COURIER_COLLECTED_SETTLEMENT, payload, user="*")
     return {"success": True, **payload}
 
 

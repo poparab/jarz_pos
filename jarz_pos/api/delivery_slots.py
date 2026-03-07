@@ -8,6 +8,7 @@ import frappe
 import json
 from datetime import datetime, timedelta, time
 from typing import List, Dict, Any, Union
+from jarz_pos.constants import TIMING_MODES
 
 
 @frappe.whitelist()
@@ -114,7 +115,7 @@ POS_PROFILE: {pos_profile_name}
             )
             # Add default same_day value
             for timing in day_timings:
-                timing['same_day'] = 'Same Day'  # Default value
+                timing['same_day'] = TIMING_MODES.SAME_DAY  # Default value
         
         print(f"📊 Day timings found: {len(day_timings)} records")
         print(f"📋 Day timings details: {day_timings}")
@@ -137,7 +138,7 @@ POS_PROFILE: {pos_profile_name}
         day_config = {}
         for timing in day_timings:
             # Handle same_day field with fallback
-            same_day = timing.get('same_day', 'Same Day')  # Default to 'Same Day' if not present
+            same_day = timing.get('same_day', TIMING_MODES.SAME_DAY)  # Default to 'Same Day' if not present
             day_config[timing.day] = {
                 'opening_time': timing.opening_time,
                 'closing_time': timing.closing_time,
@@ -287,7 +288,7 @@ def _generate_day_slots(
     current_slot_time = datetime.combine(target_date, opening_time)
     
     # Handle same_day vs next_day closing times
-    if same_day == "Next Day":
+    if same_day == TIMING_MODES.NEXT_DAY:
         # Closing time is on the next day
         end_time = datetime.combine(target_date + timedelta(days=1), closing_time)
         print(f"🌙 Next day closing: {end_time}")

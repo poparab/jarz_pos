@@ -4,11 +4,12 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
+from jarz_pos.constants import ROLES
 
 
 def _ensure_manager_access() -> None:
     roles = set(frappe.get_roles())
-    allowed = {"System Manager", "Accounts Manager", "Stock Manager", "Manufacturing Manager", "Purchase Manager"}
+    allowed = ROLES.MANAGER
     if not roles.intersection(allowed):
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 

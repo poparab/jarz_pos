@@ -31,6 +31,7 @@ from jarz_pos.utils.account_utils import (
     validate_account_exists,
 )
 from frappe.utils import now_datetime, get_datetime
+from jarz_pos.constants import DELIVERY_GROUPS
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +103,20 @@ def get_active_couriers():
             return bool(frappe.db.has_column(doctype, column))
         except Exception:
             return False
-    # Employees in Employee Group 'Delivery'
-    emp_group = frappe.db.get_value("Employee Group", {"employee_group_name": "Delivery"}, "name")
+    # Resolve group names: prefer Jarz POS Settings, fallback to constants
+    _emp_grp_name = DELIVERY_GROUPS.EMPLOYEE_GROUP
+    _sup_grp_name = DELIVERY_GROUPS.SUPPLIER_GROUP
+    try:
+        from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
+        s = get_jarz_settings()
+        if s and s.delivery_employee_group:
+            _emp_grp_name = s.delivery_employee_group
+        if s and s.delivery_supplier_group:
+            _sup_grp_name = s.delivery_supplier_group
+    except Exception:
+        pass
+    # Employees in Employee Group
+    emp_group = frappe.db.get_value("Employee Group", {"employee_group_name": _emp_grp_name}, "name")
     if emp_group:
         try:
             eg_doc = frappe.get_doc("Employee Group", emp_group)
@@ -150,8 +163,8 @@ def get_active_couriers():
                 } for e in emps)
         except Exception as err:
             frappe.log_error(f"Failed to read Employee Group members: {err}", "Jarz POS get_active_couriers")
-    # Suppliers in Supplier Group 'Delivery'
-    sup_group = frappe.db.get_value("Supplier Group", {"supplier_group_name": "Delivery"}, "name")
+    # Suppliers in Supplier Group
+    sup_group = frappe.db.get_value("Supplier Group", {"supplier_group_name": _sup_grp_name}, "name")
     if sup_group:
         sup_fields = ["name", "supplier_name"] + (["branch"] if _has_column("Supplier", "branch") else [])
         sups = frappe.get_all("Supplier", fields=sup_fields, filters={"supplier_group": sup_group})

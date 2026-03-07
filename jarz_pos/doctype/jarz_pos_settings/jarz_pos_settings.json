@@ -1,0 +1,214 @@
+{
+ "actions": [],
+ "creation": "2025-07-10 12:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "accounts_section",
+  "cash_over_short_account",
+  "indirect_expenses_parent",
+  "freight_charges_account",
+  "courier_outstanding_account",
+  "column_break_accounts",
+  "default_bank_parent_account",
+  "mobile_wallet_account",
+  "default_receivable_account",
+  "default_payable_account",
+  "general_section",
+  "default_stock_uom",
+  "standard_buying_price_list",
+  "column_break_general",
+  "delivery_employee_group",
+  "delivery_supplier_group",
+  "receipt_section",
+  "receipt_header_text",
+  "receipt_footer_text",
+  "column_break_receipt",
+  "receipt_phone",
+  "receipt_website",
+  "receipt_logo"
+ ],
+ "fields": [
+  {
+   "fieldname": "accounts_section",
+   "fieldtype": "Section Break",
+   "label": "Account Defaults"
+  },
+  {
+   "default": "Cash Over Short",
+   "description": "Expense ledger used to record shift cash discrepancies.",
+   "fieldname": "cash_over_short_account",
+   "fieldtype": "Link",
+   "label": "Cash Over/Short Account",
+   "options": "Account"
+  },
+  {
+   "default": "Indirect Expenses",
+   "description": "Parent account group for ad-hoc expenses.",
+   "fieldname": "indirect_expenses_parent",
+   "fieldtype": "Link",
+   "label": "Indirect Expenses Parent",
+   "options": "Account"
+  },
+  {
+   "default": "Freight and Forwarding Charges",
+   "description": "Expense account for freight / delivery charges.",
+   "fieldname": "freight_charges_account",
+   "fieldtype": "Link",
+   "label": "Freight Charges Account",
+   "options": "Account"
+  },
+  {
+   "default": "Courier Outstanding",
+   "description": "Receivable account tracking courier balances.",
+   "fieldname": "courier_outstanding_account",
+   "fieldtype": "Link",
+   "label": "Courier Outstanding Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "column_break_accounts",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Bank Accounts",
+   "description": "Parent group for online-payment bank accounts.",
+   "fieldname": "default_bank_parent_account",
+   "fieldtype": "Link",
+   "label": "Bank Accounts Parent",
+   "options": "Account"
+  },
+  {
+   "default": "Mobile Wallet",
+   "description": "Account for Mobile Wallet payments.",
+   "fieldname": "mobile_wallet_account",
+   "fieldtype": "Link",
+   "label": "Mobile Wallet Account",
+   "options": "Account"
+  },
+  {
+   "description": "Override the company default receivable account.",
+   "fieldname": "default_receivable_account",
+   "fieldtype": "Link",
+   "label": "Default Receivable Account",
+   "options": "Account"
+  },
+  {
+   "description": "Override the company default payable (Creditors) account.",
+   "fieldname": "default_payable_account",
+   "fieldtype": "Link",
+   "label": "Default Payable Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "general_section",
+   "fieldtype": "Section Break",
+   "label": "General"
+  },
+  {
+   "default": "Nos",
+   "description": "Fallback UOM when an item has no stock_uom.",
+   "fieldname": "default_stock_uom",
+   "fieldtype": "Link",
+   "label": "Default Stock UOM",
+   "options": "UOM"
+  },
+  {
+   "default": "Standard Buying",
+   "description": "Price list for purchase operations.",
+   "fieldname": "standard_buying_price_list",
+   "fieldtype": "Link",
+   "label": "Buying Price List",
+   "options": "Price List"
+  },
+  {
+   "fieldname": "column_break_general",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Delivery",
+   "description": "Employee Group that holds courier employees.",
+   "fieldname": "delivery_employee_group",
+   "fieldtype": "Data",
+   "label": "Delivery Employee Group"
+  },
+  {
+   "default": "Delivery",
+   "description": "Supplier Group for courier suppliers.",
+   "fieldname": "delivery_supplier_group",
+   "fieldtype": "Data",
+   "label": "Delivery Supplier Group"
+  },
+  {
+   "fieldname": "receipt_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Receipt"
+  },
+  {
+   "description": "Text shown at top of printed receipts.",
+   "fieldname": "receipt_header_text",
+   "fieldtype": "Small Text",
+   "label": "Receipt Header"
+  },
+  {
+   "description": "Text shown at bottom of printed receipts.",
+   "fieldname": "receipt_footer_text",
+   "fieldtype": "Small Text",
+   "label": "Receipt Footer"
+  },
+  {
+   "fieldname": "column_break_receipt",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Phone number displayed on receipts.",
+   "fieldname": "receipt_phone",
+   "fieldtype": "Data",
+   "label": "Receipt Phone",
+   "options": "Phone"
+  },
+  {
+   "description": "Website URL displayed on receipts.",
+   "fieldname": "receipt_website",
+   "fieldtype": "Data",
+   "label": "Receipt Website",
+   "options": "URL"
+  },
+  {
+   "description": "Logo image shown on receipts.",
+   "fieldname": "receipt_logo",
+   "fieldtype": "Attach Image",
+   "label": "Receipt Logo"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2025-07-10 12:00:00",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz POS Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "POS User"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

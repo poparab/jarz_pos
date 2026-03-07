@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import frappe
 from frappe import _
+from jarz_pos.constants import QUERY_LIMITS, STATUS, WS_EVENTS, ROLES
 
 # Firebase Admin SDK for modern FCM V1 API
 try:
@@ -49,7 +50,7 @@ def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
                 "sales_invoice_state", "status", "creation", "modified"
             ],
             order_by="creation desc",
-            limit=50
+            limit=QUERY_LIMITS.NOTIFICATIONS
         )
         
         # Get recently modified invoices (state changes, etc.)
@@ -66,7 +67,7 @@ def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
                 "sales_invoice_state", "status", "creation", "modified"
             ],
             order_by="modified desc",
-            limit=50
+            limit=QUERY_LIMITS.NOTIFICATIONS
         )
         
         # Format response
@@ -210,11 +211,11 @@ def test_websocket_emission() -> Dict[str, Any]:
             "test_event": True
         }
         
-        frappe.publish_realtime("jarz_pos_new_invoice", new_invoice_payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.NEW_INVOICE, new_invoice_payload, user="*")
         
         # Emit state change event (triggers kanban refresh)
         state_change_payload = {
-            "event": "jarz_pos_invoice_state_change",
+            "event": WS_EVENTS.INVOICE_STATE_CHANGE,
             "invoice_id": test_invoice_id,
             "old_state_key": None,  # Null old_state triggers refresh
             "new_state_key": "received",
@@ -224,20 +225,20 @@ def test_websocket_emission() -> Dict[str, Any]:
             "test_event": True
         }
         
-        frappe.publish_realtime("jarz_pos_invoice_state_change", state_change_payload, user="*")
-        frappe.publish_realtime("kanban_update", state_change_payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, state_change_payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, state_change_payload, user="*")
         
         # Also emit a generic test event
-        frappe.publish_realtime("test_event", {"message": "Test websocket emission", "timestamp": timestamp}, user="*")
+        frappe.publish_realtime(WS_EVENTS.TEST_EVENT, {"message": "Test websocket emission", "timestamp": timestamp}, user="*")
         
         return {
             "success": True,
             "message": "Test websocket events emitted successfully",
             "events_sent": [
-                "jarz_pos_new_invoice",
-                "jarz_pos_invoice_state_change", 
-                "kanban_update",
-                "test_event"
+                WS_EVENTS.NEW_INVOICE,
+                WS_EVENTS.INVOICE_STATE_CHANGE,
+                WS_EVENTS.KANBAN_UPDATE,
+                WS_EVENTS.TEST_EVENT,
             ],
             "test_invoice_id": test_invoice_id,
             "timestamp": timestamp
@@ -272,11 +273,11 @@ def get_websocket_debug_info() -> Dict[str, Any]:
             "user": frappe.session.user,
             "timestamp": frappe.utils.now(),
             "available_events": [
-                "jarz_pos_new_invoice",
-                "jarz_pos_invoice_state_change",
-                "kanban_update", 
-                "jarz_pos_out_for_delivery_transition",
-                "jarz_pos_courier_outstanding"
+                WS_EVENTS.NEW_INVOICE,
+                WS_EVENTS.INVOICE_STATE_CHANGE,
+                WS_EVENTS.KANBAN_UPDATE,
+                WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION,
+                WS_EVENTS.COURIER_OUTSTANDING,
             ]
         }
         
@@ -483,7 +484,7 @@ def get_pending_alerts() -> Dict[str, Any]:
         },
         fields=["name"],
         order_by="creation asc",
-        limit=50,
+        limit=QUERY_LIMITS.NOTIFICATIONS,
     )
 
     alerts: List[Dict[str, Any]] = []
@@ -601,7 +602,7 @@ def notify_invoice_cancellation(
                 "notes": notes or "",
                 "credit_note": credit_note,
                 "timestamp": frappe.utils.now_datetime().isoformat(),
-                "sales_invoice_state": "Cancelled",
+                "sales_invoice_state": STATUS.CANCELLED,
                 "cancelled_by": frappe.session.user,
             }
         )
@@ -613,7 +614,7 @@ def notify_invoice_cancellation(
 
         recipients = _resolve_recipients_for_payload(payload)
         target = recipients if recipients else "*"
-        frappe.publish_realtime("jarz_pos_invoice_cancelled", payload, user=target)
+        frappe.publish_realtime(WS_EVENTS.INVOICE_CANCELLED, payload, user=target)
 
         data_payload: Dict[str, str] = {
             "type": "invoice_cancelled",
@@ -621,7 +622,7 @@ def notify_invoice_cancellation(
             "reason": reason,
             "pos_profile": payload.get("pos_profile", "") or "",
             "timestamp": payload.get("timestamp", frappe.utils.now_datetime().isoformat()),
-            "sales_invoice_state": payload.get("sales_invoice_state", "Cancelled"),
+            "sales_invoice_state": payload.get("sales_invoice_state", STATUS.CANCELLED),
         }
         if notes:
             data_payload["notes"] = notes
@@ -749,7 +750,7 @@ def _ensure_acceptance_defaults(doc: Any) -> None:
 def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
     try:
         target = recipients if recipients else "*"
-        frappe.publish_realtime("jarz_pos_new_invoice", payload, user=target)
+        frappe.publish_realtime(WS_EVENTS.NEW_INVOICE, payload, user=target)
         
         if frappe.conf.get("developer_mode"):
             frappe.msgprint(
@@ -763,7 +764,7 @@ def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -
 def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
     try:
         target = recipients if recipients else "*"
-        frappe.publish_realtime("jarz_pos_invoice_accepted", payload, user=target)
+        frappe.publish_realtime(WS_EVENTS.INVOICE_ACCEPTED, payload, user=target)
     except Exception:
         frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_invoice_accepted failed")
 
@@ -966,7 +967,7 @@ def _get_profiles_for_user(user: str) -> List[str]:
 
 
 def _ensure_user_can_accept(doc: Any, user: str) -> None:
-    if user in {"Administrator", "System Manager"}:
+    if user in {ROLES.ADMINISTRATOR, ROLES.SYSTEM_MANAGER}:
         return
 
     authorised_users = _get_users_for_pos_profiles(

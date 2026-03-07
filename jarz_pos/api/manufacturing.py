@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import frappe
 from frappe import _
+from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 try:
     from frappe import _dict as FrappeDict  # type: ignore
 except Exception:  # pragma: no cover
@@ -58,7 +59,7 @@ def _get_mfg_defaults(company: str) -> Dict[str, str]:
 def _ensure_manager_access() -> None:
     try:
         roles = set(frappe.get_roles())
-        allowed = {"System Manager", "Manufacturing Manager", "Stock Manager", "Purchase Manager"}
+        allowed = ROLES.MANUFACTURING
         if not roles.intersection(allowed):
             frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
     except Exception:
@@ -130,7 +131,7 @@ def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
           AND b.docstatus = 1
           {cond}
         ORDER BY i.modified DESC
-        LIMIT 100
+        LIMIT {QUERY_LIMITS.DEFAULT_LIST}
     """
     rows = frappe.db.sql(sql, vals, as_dict=True)  # type: ignore
     return [dict(r) for r in rows]
@@ -204,14 +205,14 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
     return {
         "item_code": item_code,
         "item_name": item.get("item_name") if item else item_code,
-        "stock_uom": item.get("stock_uom") if item else "Nos",
+        "stock_uom": item.get("stock_uom") if item else DEFAULT_UOM,
         "default_bom": bom["name"],
         "bom_qty": float(bom.get("quantity") or 1),
         "components": [
             {
                 "item_code": c["item_code"],
                 "item_name": c.get("item_name") or c["item_code"],
-                "uom": c.get("uom") or "Nos",
+                "uom": c.get("uom") or DEFAULT_UOM,
                 "qty_per_bom": float(c.get("qty") or 0),
                 "available_qty": float(availability.get(c["item_code"], 0)),
             }

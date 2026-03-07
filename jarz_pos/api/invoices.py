@@ -11,6 +11,7 @@ import json
 # Import from the refactored services
 from jarz_pos.services.invoice_creation import create_pos_invoice as _create_invoice
 from jarz_pos.services import delivery_handling as _delivery
+from jarz_pos.constants import ACCOUNTS
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +295,7 @@ def pay_invoice(
         # Map payment mode to destination account base name
         mode_lower = payment_mode.lower()
         if mode_lower == "wallet":
-            account_base = "Mobile Wallet"
+            account_base = ACCOUNTS.MOBILE_WALLET
             # Wallet payments require reference metadata – auto-generate if absent
             if not reference_no:
                 reference_no = f"WAL-{frappe.generate_hash(length=8)}"

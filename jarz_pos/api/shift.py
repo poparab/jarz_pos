@@ -11,6 +11,7 @@ from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
     make_closing_entry_from_opening,
 )
 from erpnext.accounts.utils import get_balance_on
+from jarz_pos.constants import ACCOUNTS, QUERY_LIMITS
 
 
 def _assert_user_has_profile_access(user: str, pos_profile: str):
@@ -396,7 +397,7 @@ def _get_shift_account_movements(account: str, company: str, start_date, end_dat
             "remarks",
         ],
         order_by="creation asc",
-        limit=1000,
+        limit=QUERY_LIMITS.GL_ENTRIES,
     )
 
     movements: list[dict[str, Any]] = []
@@ -492,8 +493,20 @@ def get_shift_summary(pos_opening_entry: str):
 
 
 def _get_or_create_cash_over_short_account(company: str) -> str:
-    """Return (or create) a 'Cash Over/Short' expense account for shift discrepancies."""
-    account_name = "Cash Over Short"
+    """Return (or create) a 'Cash Over/Short' expense account for shift discrepancies.
+
+    Prefers the account set in Jarz POS Settings if available.
+    """
+    # Try Jarz POS Settings first
+    try:
+        from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
+        s = get_jarz_settings()
+        if s and s.cash_over_short_account:
+            return s.cash_over_short_account
+    except Exception:
+        pass
+
+    account_name = ACCOUNTS.CASH_OVER_SHORT
     existing = frappe.db.get_value(
         "Account",
         {"company": company, "account_name": account_name, "is_group": 0},
@@ -505,7 +518,7 @@ def _get_or_create_cash_over_short_account(company: str) -> str:
     # Find a suitable parent – Indirect Expenses or Expenses
     parent = frappe.db.get_value(
         "Account",
-        {"company": company, "is_group": 1, "root_type": "Expense", "account_name": "Indirect Expenses"},
+        {"company": company, "is_group": 1, "root_type": "Expense", "account_name": ACCOUNTS.INDIRECT_EXPENSES},
         "name",
     )
     if not parent:

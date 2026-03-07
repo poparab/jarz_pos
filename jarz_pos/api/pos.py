@@ -383,3 +383,28 @@ def is_pos_profile_open(pos_profile: str):
                 return {'is_open': True, 'message': 'Branch is open'}
     
     return {'is_open': False, 'message': f'Branch is closed at this time'}
+
+
+# ---------------------------------------------------------------------------
+# Receipt configuration
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist(allow_guest=False)
+def get_receipt_config():
+    """Return receipt branding/config from Jarz POS Settings.
+
+    Mobile app calls this once on startup (or after profile change) to
+    populate receipt templates without hard-coding text in the APK.
+    """
+    try:
+        from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
+        s = get_jarz_settings()
+        return {
+            "header": s.receipt_header_text or "",
+            "footer": s.receipt_footer_text or "",
+            "phone": s.receipt_phone or "",
+            "website": s.receipt_website or "",
+            "logo": s.receipt_logo or "",
+        }
+    except Exception:
+        return {"header": "", "footer": "", "phone": "", "website": "", "logo": ""}

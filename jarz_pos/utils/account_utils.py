@@ -6,6 +6,16 @@ including account lookup, payment processing, and cash handling.
 """
 
 import frappe
+from jarz_pos.constants import ACCOUNTS
+
+
+def _settings():
+    """Return the Jarz POS Settings doc (cached), or None before migration."""
+    try:
+        from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
+        return get_jarz_settings()
+    except Exception:
+        return None
 
 
 def get_account_for_company(account_name, company):
@@ -79,7 +89,7 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
             "Account",
             {
                 "company": company,
-                "parent_account": ["like", "%Cash In Hand%"],
+                "parent_account": ["like", f"%{ACCOUNTS.CASH_IN_HAND}%"],
                 "account_name": ["like", f"%{pos_profile}%"],
                 "is_group": 0,
             },
@@ -108,20 +118,33 @@ def _get_cash_account(pos_profile: str, company: str) -> str:
 # ------------------ NEW HELPER FUNCTIONS (centralized resolution) ------------------
 
 def get_freight_expense_account(company: str) -> str:
-    """Return Freight & Forwarding Charges account for company (validated)."""
-    acc = get_account_for_company("Freight and Forwarding Charges", company)
+    """Return Freight & Forwarding Charges account for company (validated).
+
+    Prefers Jarz POS Settings → freight_charges_account, then falls back
+    to ``get_account_for_company(ACCOUNTS.FREIGHT_AND_FORWARDING, ...)``.
+    """
+    s = _settings()
+    if s and s.freight_charges_account:
+        return s.freight_charges_account
+    acc = get_account_for_company(ACCOUNTS.FREIGHT_AND_FORWARDING, company)
     if not acc:
-        frappe.throw(f"Freight and Forwarding Charges account missing for {company}")
+        frappe.throw(f"{ACCOUNTS.FREIGHT_AND_FORWARDING} account missing for {company}")
     return acc
 
 
 def get_courier_outstanding_account(company: str) -> str:
-    """Return Courier Outstanding account (non-group) for company."""
+    """Return Courier Outstanding account (non-group) for company.
+
+    Prefers Jarz POS Settings → courier_outstanding_account.
+    """
+    s = _settings()
+    if s and s.courier_outstanding_account:
+        return s.courier_outstanding_account
     acc = frappe.db.get_value(
         "Account",
         {
             "company": company,
-            "account_name": ["like", "Courier Outstanding%"],
+            "account_name": ["like", f"{ACCOUNTS.COURIER_OUTSTANDING}%"],
             "is_group": 0,
         },
         "name",
@@ -129,7 +152,7 @@ def get_courier_outstanding_account(company: str) -> str:
     if acc:
         return acc
     frappe.throw(
-        f"No 'Courier Outstanding' account found for company {company}. Create a ledger under Accounts Receivable."
+        f"No '{ACCOUNTS.COURIER_OUTSTANDING}' account found for company {company}. Create a ledger under Accounts Receivable."
     )
 
 
@@ -157,8 +180,8 @@ def get_creditors_account(company: str) -> str:
         return acc
 
     abbr = frappe.get_value("Company", company, "abbr")
-    if abbr and frappe.db.exists("Account", f"Creditors - {abbr}"):
-        return f"Creditors - {abbr}"
+    if abbr and frappe.db.exists("Account", f"{ACCOUNTS.CREDITORS} - {abbr}"):
+        return f"{ACCOUNTS.CREDITORS} - {abbr}"
 
     acc = frappe.db.get_value(
         "Account",
@@ -173,7 +196,7 @@ def get_creditors_account(company: str) -> str:
         return acc
 
     # Last resort: try by name + company via helper
-    return get_account_for_company("Creditors", company)
+    return get_account_for_company(ACCOUNTS.CREDITORS, company)
 
 
 # ------------------ Sales Partner AR routing helpers ------------------
@@ -297,26 +320,26 @@ def create_online_payment_entry(
 
 def _get_payment_account(payment_mode, company):
     """Get the appropriate payment account based on payment mode."""
-    if payment_mode in ["Instapay", "Payment Gateway"]:
+    if payment_mode in [ACCOUNTS.INSTAPAY, ACCOUNTS.PAYMENT_GATEWAY]:
         # For online payments, find a suitable bank account
         paid_to_account = frappe.db.get_value(
             "Account",
             {
                 "company": company,
-                "parent_account": ["like", "%Bank Accounts%"],
+                "parent_account": ["like", f"%{ACCOUNTS.BANK_ACCOUNTS}%"],
                 "is_group": 0,
             },
             "name",
         )
         if not paid_to_account:
             frappe.throw("No suitable bank account found for the payment.")
-    elif payment_mode == "Mobile Wallet":
+    elif payment_mode == ACCOUNTS.MOBILE_WALLET:
         # For mobile wallet payments, find a suitable mobile wallet account
         paid_to_account = frappe.db.get_value(
             "Account",
             {
                 "company": company,
-                "account_name": ["like", "Mobile Wallet%"],
+                "account_name": ["like", f"{ACCOUNTS.MOBILE_WALLET}%"],
                 "is_group": 0,
             },
             "name",
