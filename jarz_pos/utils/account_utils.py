@@ -125,7 +125,15 @@ def get_freight_expense_account(company: str) -> str:
     """
     s = _settings()
     if s and s.freight_charges_account:
-        return s.freight_charges_account
+        # Validate the configured account actually exists in the database
+        if frappe.db.exists("Account", s.freight_charges_account):
+            return s.freight_charges_account
+        # Settings value may be missing company abbreviation — try appending it
+        company_abbr = frappe.db.get_value("Company", company, "abbr")
+        if company_abbr:
+            with_abbr = f"{s.freight_charges_account} - {company_abbr}"
+            if frappe.db.exists("Account", with_abbr):
+                return with_abbr
     acc = get_account_for_company(ACCOUNTS.FREIGHT_AND_FORWARDING, company)
     if not acc:
         frappe.throw(f"{ACCOUNTS.FREIGHT_AND_FORWARDING} account missing for {company}")
@@ -139,7 +147,14 @@ def get_courier_outstanding_account(company: str) -> str:
     """
     s = _settings()
     if s and s.courier_outstanding_account:
-        return s.courier_outstanding_account
+        if frappe.db.exists("Account", s.courier_outstanding_account):
+            return s.courier_outstanding_account
+        # Try appending company abbreviation
+        company_abbr = frappe.db.get_value("Company", company, "abbr")
+        if company_abbr:
+            with_abbr = f"{s.courier_outstanding_account} - {company_abbr}"
+            if frappe.db.exists("Account", with_abbr):
+                return with_abbr
     acc = frappe.db.get_value(
         "Account",
         {
