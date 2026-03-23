@@ -16,3 +16,4 @@ jarz_pos.Patches.v1_1.ensure_territory_delivery_fields
 jarz_pos.patches.v1_0.restore_essential_doctypes
 jarz_pos.Patches.v1_1.ensure_employee_shift_field
 jarz_pos.Patches.v1_2.migrate_shift_field_to_user
+jarz_pos.Patches.v1_3.set_default_receipt_config

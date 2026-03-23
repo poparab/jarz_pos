@@ -145,12 +145,14 @@
    "label": "Payment Receipt"
   },
   {
+    "default": "ORDER RECEIPT",
    "description": "Text shown at top of printed receipts.",
    "fieldname": "receipt_header_text",
    "fieldtype": "Small Text",
    "label": "Receipt Header"
   },
   {
+    "default": "Thank you for Your Order",
    "description": "Text shown at bottom of printed receipts.",
    "fieldname": "receipt_footer_text",
    "fieldtype": "Small Text",
@@ -161,6 +163,7 @@
    "fieldtype": "Column Break"
   },
   {
+    "default": "01061332266",
    "description": "Phone number displayed on receipts.",
    "fieldname": "receipt_phone",
    "fieldtype": "Data",
@@ -168,6 +171,7 @@
    "options": "Phone"
   },
   {
+    "default": "www.orderjarz.com",
    "description": "Website URL displayed on receipts.",
    "fieldname": "receipt_website",
    "fieldtype": "Data",
