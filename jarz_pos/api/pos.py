@@ -396,15 +396,22 @@ def get_receipt_config():
     Mobile app calls this once on startup (or after profile change) to
     populate receipt templates without hard-coding text in the APK.
     """
+    defaults = {
+        "header": "ORDER RECEIPT",
+        "footer": "Thank you for Your Order",
+        "phone": "01061332266",
+        "website": "www.orderjarz.com",
+        "logo": "",
+    }
     try:
         from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
         s = get_jarz_settings()
         return {
-            "header": s.receipt_header_text or "",
-            "footer": s.receipt_footer_text or "",
-            "phone": s.receipt_phone or "",
-            "website": s.receipt_website or "",
-            "logo": s.receipt_logo or "",
+            "header": (s.receipt_header_text or "").strip() or defaults["header"],
+            "footer": (s.receipt_footer_text or "").strip() or defaults["footer"],
+            "phone": (s.receipt_phone or "").strip() or defaults["phone"],
+            "website": (s.receipt_website or "").strip() or defaults["website"],
+            "logo": (s.receipt_logo or "").strip() or defaults["logo"],
         }
     except Exception:
-        return {"header": "", "footer": "", "phone": "", "website": "", "logo": ""}
+        return defaults
