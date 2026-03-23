@@ -35,7 +35,7 @@
    "label": "Account Defaults"
   },
   {
-   "default": "Cash Over Short",
+    "default": "Cash Over Short - J",
    "description": "Expense ledger used to record shift cash discrepancies.",
    "fieldname": "cash_over_short_account",
    "fieldtype": "Link",
@@ -43,7 +43,7 @@
    "options": "Account"
   },
   {
-   "default": "Indirect Expenses",
+    "default": "Indirect Expenses - J",
    "description": "Parent account group for ad-hoc expenses.",
    "fieldname": "indirect_expenses_parent",
    "fieldtype": "Link",
@@ -51,7 +51,7 @@
    "options": "Account"
   },
   {
-   "default": "Freight and Forwarding Charges",
+    "default": "Freight and Forwarding Charges - J",
    "description": "Expense account for freight / delivery charges.",
    "fieldname": "freight_charges_account",
    "fieldtype": "Link",
@@ -59,7 +59,7 @@
    "options": "Account"
   },
   {
-   "default": "Courier Outstanding",
+    "default": "Courier Outstanding - J",
    "description": "Receivable account tracking courier balances.",
    "fieldname": "courier_outstanding_account",
    "fieldtype": "Link",
@@ -71,7 +71,7 @@
    "fieldtype": "Column Break"
   },
   {
-   "default": "Bank Accounts",
+    "default": "Bank Accounts - J",
    "description": "Parent group for online-payment bank accounts.",
    "fieldname": "default_bank_parent_account",
    "fieldtype": "Link",
@@ -79,7 +79,7 @@
    "options": "Account"
   },
   {
-   "default": "Mobile Wallet",
+    "default": "Mobile Wallet - J",
    "description": "Account for Mobile Wallet payments.",
    "fieldname": "mobile_wallet_account",
    "fieldtype": "Link",
@@ -87,6 +87,7 @@
    "options": "Account"
   },
   {
+    "default": "Debtors - J",
    "description": "Override the company default receivable account.",
    "fieldname": "default_receivable_account",
    "fieldtype": "Link",
@@ -94,6 +95,7 @@
    "options": "Account"
   },
   {
+    "default": "Creditors - J",
    "description": "Override the company default payable (Creditors) account.",
    "fieldname": "default_payable_account",
    "fieldtype": "Link",

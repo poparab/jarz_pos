@@ -1,0 +1,23 @@
+[
+  {
+    "doctype": "Jarz POS Settings",
+    "name": "Jarz POS Settings",
+    "cash_over_short_account": "Cash Over Short - J",
+    "indirect_expenses_parent": "Indirect Expenses - J",
+    "freight_charges_account": "Freight and Forwarding Charges - J",
+    "courier_outstanding_account": "Courier Outstanding - J",
+    "default_bank_parent_account": "Bank Accounts - J",
+    "mobile_wallet_account": "Mobile Wallet - J",
+    "default_receivable_account": "Debtors - J",
+    "default_payable_account": "Creditors - J",
+    "default_stock_uom": "Nos",
+    "standard_buying_price_list": "Standard Buying",
+    "delivery_employee_group": "Delivery",
+    "delivery_supplier_group": "Delivery",
+    "receipt_header_text": "ORDER RECEIPT",
+    "receipt_footer_text": "Thank you for Your Order",
+    "receipt_phone": "01061332266",
+    "receipt_website": "www.orderjarz.com",
+    "receipt_logo": null
+  }
+]

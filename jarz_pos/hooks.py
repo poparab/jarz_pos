@@ -9,7 +9,8 @@ app_license = "mit"
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
         "Print Settings", "Sales Invoice", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User"
-    ]]]}
+    ]]]},
+    {"dt": "Jarz POS Settings"}
 ]
 
 # Ensure conflicting Custom Fields are removed before fixtures import
