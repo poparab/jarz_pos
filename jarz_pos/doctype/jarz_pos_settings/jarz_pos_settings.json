@@ -173,7 +173,7 @@
    "options": "Phone"
   },
   {
-    "default": "www.orderjarz.com",
+    "default": "https://www.orderjarz.com",
    "description": "Website URL displayed on receipts.",
    "fieldname": "receipt_website",
    "fieldtype": "Data",
