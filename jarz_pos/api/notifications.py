@@ -478,8 +478,10 @@ def get_pending_alerts() -> Dict[str, Any]:
         "Sales Invoice",
         filters={
             "docstatus": 1,
+            "status": ["!=", "Cancelled"],
             "pos_profile": ["in", profiles],
             "custom_acceptance_status": ["in", [None, "", "Pending"]],
+            "custom_sales_invoice_state": ["!=", "Cancelled"],
             "creation": [">", cutoff],
         },
         fields=["name"],
