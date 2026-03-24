@@ -92,7 +92,15 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
 
     for inv_name in invoice_names:
         inv = frappe.get_doc("Sales Invoice", inv_name)
-        shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+        # Prefer persisted SI value, fall back to territory computation
+        shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+        if shipping_exp <= 0:
+            shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+            if shipping_exp > 0:
+                try:
+                    inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
+                except Exception:
+                    pass
         trip.append("invoices", {
             "invoice": inv_name,
             "customer_name": inv.customer_name,
@@ -194,7 +202,15 @@ def send_trip_for_delivery(trip_name: str):
             continue
 
         # Compute shipping expense (with double shipping multiplier)
-        shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+        # Prefer persisted SI value, fall back to territory computation
+        shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+        if shipping_exp <= 0:
+            shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+            if shipping_exp > 0:
+                try:
+                    inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
+                except Exception:
+                    pass
         if trip.is_double_shipping:
             shipping_exp = shipping_exp * 2
 

@@ -300,6 +300,13 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     else:
         shipping_exp = _get_delivery_expense_amount(inv) or 0.0
 
+    # Persist resolved shipping expense on the Sales Invoice for direct reads
+    if shipping_exp > 0:
+        try:
+            inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
+        except Exception:
+            pass
+
     # Create Courier Transaction BEFORE creating Payment Entry so preview treats this as unpaid-effective
     # Idempotency: avoid duplicate CTs for same purpose
     existing_ct = frappe.get_all(
@@ -771,7 +778,13 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     amount = _get_delivery_expense_amount(inv)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
-    
+
+    # Persist resolved shipping expense on the Sales Invoice
+    try:
+        inv.db_set("custom_shipping_expense", abs(amount), update_modified=False)
+    except Exception:
+        pass
+
     # Idempotency guard – return existing submitted JE if already created
     existing_je = frappe.db.get_value(
         "Journal Entry",
@@ -837,7 +850,13 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     amount = _get_delivery_expense_amount(inv)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
-    
+
+    # Persist resolved shipping expense on the Sales Invoice for direct reads
+    try:
+        inv.db_set("custom_shipping_expense", abs(amount), update_modified=False)
+    except Exception:
+        pass
+
     # Idempotency – avoid duplicate CTs for same purpose
     existing_ct = frappe.db.get_value(
         "Courier Transaction",
@@ -1169,6 +1188,13 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
 
     company = inv.company
     shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+
+    # Persist resolved shipping expense on the Sales Invoice
+    if shipping_exp > 0:
+        try:
+            inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
+        except Exception:
+            pass
 
     # Ensure / create Delivery Note (abort if failure per business requirement)
     dn_result = ensure_delivery_note_for_invoice(inv.name)

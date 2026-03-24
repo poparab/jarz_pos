@@ -472,6 +472,9 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             # New delivery slot fields (these are in our fixtures; safe to select)
             "custom_delivery_date", "custom_delivery_time_from", "custom_delivery_duration",
             "shipping_address_name", "customer_address",
+            # Shipping / sub-territory / trip fields
+            "custom_shipping_expense", "custom_sub_territory", "custom_delivery_trip",
+            "custom_shipping_override", "custom_shipping_override_status",
             # Always-safe system field
             "remarks",
         ]
@@ -586,6 +589,10 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
             state_key = state.lower().replace(' ', '_')
             terr_ship = _get_territory_shipping(inv.get("territory") or "")
+            # Prefer the persisted value on the Sales Invoice (primary source)
+            si_shipping_expense = float(inv.get("custom_shipping_expense") or 0)
+            if si_shipping_expense > 0:
+                terr_ship["expense"] = si_shipping_expense
             # Detect pickup and zero shipping amounts accordingly
             is_pickup = _is_pickup_invoice(inv)
             if is_pickup:

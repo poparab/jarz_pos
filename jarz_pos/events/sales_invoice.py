@@ -35,6 +35,8 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 	"""Mirror POS Profile into a custom field used by Kanban, if present.
 
 	- If doc has `pos_profile` and `custom_kanban_profile`, keep them in sync.
+	- Resolve territory-based shipping expense into `custom_shipping_expense`
+	  so every consumer reads the same persisted value.
 	- Safe no-op if fields are missing.
 	"""
 	try:
@@ -45,6 +47,19 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 	except Exception:
 		if frappe:
 			frappe.log_error(frappe.get_traceback(), "sync_kanban_profile failed")
+
+	# Stamp territory-based shipping expense when not already set
+	try:
+		if hasattr(doc, "custom_shipping_expense"):
+			current = float(getattr(doc, "custom_shipping_expense", 0) or 0)
+			if current <= 0 and getattr(doc, "territory", None):
+				from jarz_pos.services.delivery_handling import _get_delivery_expense_amount
+				expense = _get_delivery_expense_amount(doc) or 0.0
+				if expense > 0:
+					doc.custom_shipping_expense = expense
+	except Exception:
+		if frappe:
+			frappe.log_error(frappe.get_traceback(), "sync_shipping_expense failed")
 
 
 def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
