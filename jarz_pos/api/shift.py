@@ -137,12 +137,36 @@ def _get_employee_for_user(user: str) -> dict[str, Any] | None:
     return employee
 
 
-def _get_latest_opening_entry(user: str, pos_profile: str | None = None) -> dict[str, Any] | None:
+def _serialize_opening_entry(opening) -> dict[str, Any]:
+    user_fullname = frappe.db.get_value("User", opening.user, "full_name") or ""
+    employee_name = frappe.db.get_value("Employee", {"user_id": opening.user}, "employee_name") or ""
+    return {
+        "name": opening.name,
+        "status": opening.status,
+        "user": opening.user,
+        "user_full_name": user_fullname,
+        "employee_name": employee_name,
+        "company": opening.company,
+        "pos_profile": opening.pos_profile,
+        "period_start_date": opening.period_start_date,
+        "period_end_date": opening.period_end_date,
+        "balance_details": [
+            {
+                "mode_of_payment": row.mode_of_payment,
+                "opening_amount": flt(row.opening_amount),
+            }
+            for row in (opening.balance_details or [])
+        ],
+    }
+
+
+def _get_latest_opening_entry(user: str | None = None, pos_profile: str | None = None) -> dict[str, Any] | None:
     filters: dict[str, Any] = {
-        "user": user,
         "status": "Open",
         "docstatus": 1,
     }
+    if user:
+        filters["user"] = user
     if pos_profile:
         filters["pos_profile"] = pos_profile
 
@@ -158,28 +182,25 @@ def _get_latest_opening_entry(user: str, pos_profile: str | None = None) -> dict
         return None
 
     opening = frappe.get_doc("POS Opening Entry", entries[0]["name"])
-    return {
-        "name": opening.name,
-        "status": opening.status,
-        "user": opening.user,
-        "company": opening.company,
-        "pos_profile": opening.pos_profile,
-        "period_start_date": opening.period_start_date,
-        "period_end_date": opening.period_end_date,
-        "balance_details": [
-            {
-                "mode_of_payment": row.mode_of_payment,
-                "opening_amount": flt(row.opening_amount),
-            }
-            for row in (opening.balance_details or [])
-        ],
-    }
+    return _serialize_opening_entry(opening)
 
 
 @frappe.whitelist(allow_guest=False)
 def get_active_shift(pos_profile: str | None = None):
     user = frappe.session.user
-    return _get_latest_opening_entry(user=user, pos_profile=pos_profile)
+    own_shift = _get_latest_opening_entry(user=user, pos_profile=pos_profile)
+    if own_shift:
+        own_shift["is_current_user"] = 1
+        return own_shift
+
+    # If profile is specified and no own shift exists, return profile-level open shift (if any)
+    if pos_profile:
+        profile_shift = _get_latest_opening_entry(user=None, pos_profile=pos_profile)
+        if profile_shift:
+            profile_shift["is_current_user"] = int(profile_shift.get("user") == user)
+            return profile_shift
+
+    return None
 
 
 @frappe.whitelist(allow_guest=False)
