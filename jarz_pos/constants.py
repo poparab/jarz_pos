@@ -63,6 +63,12 @@ class WS_EVENTS:
     COURIER_EXPENSE_ONLY = "jarz_pos_courier_expense_only"
     SINGLE_COURIER_SETTLEMENT = "jarz_pos_single_courier_settlement"
     COURIER_COLLECTED_SETTLEMENT = "jarz_pos_courier_collected_settlement"
+    TRIP_CREATED = "jarz_pos_trip_created"
+    TRIP_OFD = "jarz_pos_trip_ofd"
+    TRIP_COMPLETED = "jarz_pos_trip_completed"
+    CUSTOM_SHIPPING_REQUESTED = "jarz_pos_custom_shipping_requested"
+    CUSTOM_SHIPPING_APPROVED = "jarz_pos_custom_shipping_approved"
+    CUSTOM_SHIPPING_REJECTED = "jarz_pos_custom_shipping_rejected"
     TEST_EVENT = "test_event"
 
 

@@ -241,8 +241,13 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
 
 
 @frappe.whitelist()
-def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None):
-    """Allocate outstanding to Courier Outstanding and create Courier Transaction atomically (relying on Frappe's request transaction)."""
+def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None, delivery_trip: str | None = None, shipping_override: float | None = None):
+    """Allocate outstanding to Courier Outstanding and create Courier Transaction atomically (relying on Frappe's request transaction).
+
+    Args:
+        delivery_trip: Optional Delivery Trip name to link on Courier Transaction.
+        shipping_override: Optional shipping amount override (e.g. doubled for double-shipping trips).
+    """
     
     # PICKUP ORDER VALIDATION: Reject courier assignment for pickup orders
     inv = frappe.get_doc("Sales Invoice", invoice_name)
@@ -289,7 +294,11 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     order_amount = float(inv.grand_total or (outstanding or 0))
 
     # Compute shipping first for CT and later JE
-    shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+    # Use shipping_override (e.g. double-shipping) if provided, else compute from territory
+    if shipping_override is not None and shipping_override > 0:
+        shipping_exp = float(shipping_override)
+    else:
+        shipping_exp = _get_delivery_expense_amount(inv) or 0.0
 
     # Create Courier Transaction BEFORE creating Payment Entry so preview treats this as unpaid-effective
     # Idempotency: avoid duplicate CTs for same purpose
@@ -318,6 +327,8 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         ct.status = "Unsettled"
         ct.payment_mode = "Deferred"
         ct.notes = "Courier Outstanding (collect order amount from courier)"
+        if delivery_trip:
+            ct.delivery_trip = delivery_trip
         ct.insert(ignore_permissions=True)
         ct_name = ct.name
 
@@ -1971,6 +1982,36 @@ def _get_delivery_expense_amount(inv):
     except Exception:
         # If detection fails, fall back to territory logic
         pass
+    # 1b) Custom shipping override short-circuit
+    try:
+        override_status = (
+            getattr(inv, "custom_shipping_override_status", None)
+            or frappe.db.get_value("Sales Invoice", inv.name, "custom_shipping_override_status")
+            or ""
+        )
+        if str(override_status).strip() == "Approved":
+            override_amt = float(
+                getattr(inv, "custom_shipping_override", 0)
+                or frappe.db.get_value("Sales Invoice", inv.name, "custom_shipping_override")
+                or 0
+            )
+            if override_amt > 0:
+                return override_amt
+    except Exception:
+        pass
+
+    # 1c) Sub-territory override: use sub-territory expense if set
+    sub_territory = None
+    try:
+        sub_territory = (
+            getattr(inv, "custom_sub_territory", None)
+            or frappe.db.get_value("Sales Invoice", inv.name, "custom_sub_territory")
+            or ""
+        )
+        sub_territory = str(sub_territory).strip()
+    except Exception:
+        sub_territory = ""
+
     # 2) Resolve territory from invoice, then customer as fallback
     territory = (inv.get("territory") or "").strip()
     if not territory:
@@ -1981,6 +2022,9 @@ def _get_delivery_expense_amount(inv):
     if not territory:
         # Nothing to resolve from
         return 0.0
+
+    # If sub-territory is set, start the expense lookup from there instead
+    start_territory = sub_territory if sub_territory and frappe.db.exists("Territory", sub_territory) else territory
 
     # Discover real columns on Territory to avoid unknown-column failures
     try:
@@ -2015,7 +2059,7 @@ def _get_delivery_expense_amount(inv):
         return 0.0
 
     # Walk up the territory tree until we find a configured amount
-    current = territory
+    current = start_territory
     visited = set()
     while current and current not in visited:
         visited.add(current)

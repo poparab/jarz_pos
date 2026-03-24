@@ -1,0 +1,81 @@
+{
+ "actions": [],
+ "creation": "2026-03-24 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "invoice",
+  "customer_name",
+  "territory",
+  "sub_territory",
+  "grand_total",
+  "shipping_expense",
+  "invoice_status"
+ ],
+ "fields": [
+  {
+   "fieldname": "invoice",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Invoice",
+   "options": "Sales Invoice",
+   "reqd": 1
+  },
+  {
+   "fetch_from": "invoice.customer_name",
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Customer Name",
+   "read_only": 1
+  },
+  {
+   "fetch_from": "invoice.territory",
+   "fieldname": "territory",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Territory",
+   "read_only": 1
+  },
+  {
+   "fetch_from": "invoice.custom_sub_territory",
+   "fieldname": "sub_territory",
+   "fieldtype": "Data",
+   "label": "Sub Territory",
+   "read_only": 1
+  },
+  {
+   "fetch_from": "invoice.grand_total",
+   "fieldname": "grand_total",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Grand Total",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shipping_expense",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Shipping Expense",
+   "read_only": 1
+  },
+  {
+   "fieldname": "invoice_status",
+   "fieldtype": "Data",
+   "label": "Invoice Status",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-03-24 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Delivery Trip Invoice",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

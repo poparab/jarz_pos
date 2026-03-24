@@ -498,6 +498,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
         # Territory shipping cache
         territory_cache: Dict[str, Dict[str, float]] = {}
+        _sub_territory_cache: Dict[str, bool] = {}
 
         def _get_territory_shipping(territory_name: str) -> Dict[str, float]:
             if not territory_name:
@@ -659,6 +660,26 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "is_return": int(getattr(inv, "is_return", 0) or 0),
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
+
+            # ── Sub-territory, trip & shipping override fields ──────────
+            inv_territory = inv.territory or ""
+            sub_terr = getattr(inv, "custom_sub_territory", None) or inv.get("custom_sub_territory") or ""
+            invoice_card["sub_territory"] = sub_terr
+            # Cache territory→has_children lookup
+            if inv_territory and inv_territory not in _sub_territory_cache:
+                _sub_territory_cache[inv_territory] = bool(
+                    frappe.db.exists("Territory", {"parent_territory": inv_territory})
+                )
+            invoice_card["has_sub_territories"] = _sub_territory_cache.get(inv_territory, False)
+            invoice_card["delivery_trip"] = getattr(inv, "custom_delivery_trip", None) or inv.get("custom_delivery_trip") or ""
+            invoice_card["shipping_override"] = float(
+                getattr(inv, "custom_shipping_override", 0) or inv.get("custom_shipping_override") or 0
+            )
+            invoice_card["shipping_override_status"] = (
+                getattr(inv, "custom_shipping_override_status", None)
+                or inv.get("custom_shipping_override_status")
+                or ""
+            )
 
             # Add to appropriate state column
             if state_key not in kanban_data:
@@ -919,6 +940,36 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
             return dn.name
 
         if create_dn:
+            # ── OFD gates: sub-territory & custom shipping ──────────────
+            try:
+                from jarz_pos.api.territories import territory_has_children
+                inv_territory = (invoice.get("territory") or "").strip()
+                inv_sub_territory = (
+                    getattr(invoice, "custom_sub_territory", None)
+                    or invoice.get("custom_sub_territory")
+                    or ""
+                )
+                if inv_territory and territory_has_children(inv_territory) and not inv_sub_territory:
+                    return _failure(
+                        "Please select a sub-territory before sending out for delivery"
+                    )
+            except ImportError:
+                pass
+
+            try:
+                override_status = (
+                    getattr(invoice, "custom_shipping_override_status", None)
+                    or invoice.get("custom_shipping_override_status")
+                    or ""
+                )
+                if str(override_status).strip() == "Pending":
+                    return _failure(
+                        "Custom shipping request is pending manager approval. "
+                        "Cannot proceed to Out for Delivery."
+                    )
+            except Exception:
+                pass
+
             try:
                 print(f"Attempting Delivery Note creation for invoice {invoice_id}")
                 created_delivery_note = _create_delivery_note_from_invoice(invoice)
@@ -1004,6 +1055,13 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         except Exception as commit_ex:
             frappe.logger().warning(f"Explicit DB commit after state update failed: {commit_ex}")
             print(f"DB commit FAILED: {commit_ex}")
+
+        # ── Trip status sync: recompute trip status when invoice changes ──
+        try:
+            from jarz_pos.api.trips import sync_trip_status
+            sync_trip_status(invoice_id)
+        except Exception as trip_sync_ex:
+            frappe.logger().warning(f"KANBAN API: Trip sync failed for {invoice_id}: {trip_sync_ex}")
 
         frappe.logger().info(
             f"KANBAN API: Invoice {invoice_id} state change {old_state} -> {new_state}; fields updated: {updated_fields}; delivery_note={created_delivery_note}; logic_version={dn_logic_version}"

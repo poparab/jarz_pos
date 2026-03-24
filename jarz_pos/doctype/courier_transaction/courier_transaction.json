@@ -10,6 +10,7 @@
   "status",
   "date",
   "reference_invoice",
+  "delivery_trip",
   "amount",
   "shipping_amount",
   "payment_mode",
@@ -36,6 +37,13 @@
    "fieldtype": "Link",
    "label": "Reference Invoice",
    "options": "Sales Invoice"
+  },
+  {
+   "fieldname": "delivery_trip",
+   "fieldtype": "Link",
+   "label": "Delivery Trip",
+   "options": "Delivery Trip",
+   "read_only": 1
   },
   {
    "fieldname": "amount",

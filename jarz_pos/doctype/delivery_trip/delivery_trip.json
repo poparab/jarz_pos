@@ -1,0 +1,165 @@
+{
+ "actions": [],
+ "autoname": "TRIP-.#####",
+ "creation": "2026-03-24 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "trip_date",
+  "courier_party_type",
+  "courier_party",
+  "courier_display_name",
+  "column_break_1",
+  "status",
+  "is_double_shipping",
+  "double_shipping_territory",
+  "section_break_totals",
+  "total_orders",
+  "total_amount",
+  "total_shipping_expense",
+  "section_break_invoices",
+  "invoices",
+  "section_break_notes",
+  "notes"
+ ],
+ "fields": [
+  {
+   "default": "Today",
+   "fieldname": "trip_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Trip Date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "courier_party_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Courier Party Type",
+   "options": "\nEmployee\nSupplier",
+   "reqd": 1
+  },
+  {
+   "fieldname": "courier_party",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Courier Party",
+   "options": "courier_party_type",
+   "reqd": 1
+  },
+  {
+   "fieldname": "courier_display_name",
+   "fieldtype": "Data",
+   "label": "Courier Display Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Created",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Created\nOut for Delivery\nCompleted",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_double_shipping",
+   "fieldtype": "Check",
+   "label": "Double Shipping",
+   "read_only": 1
+  },
+  {
+   "fieldname": "double_shipping_territory",
+   "fieldtype": "Link",
+   "label": "Double Shipping Territory",
+   "options": "Territory",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_totals",
+   "fieldtype": "Section Break",
+   "label": "Totals"
+  },
+  {
+   "fieldname": "total_orders",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Total Orders",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "label": "Total Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_shipping_expense",
+   "fieldtype": "Currency",
+   "label": "Total Shipping Expense",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_invoices",
+   "fieldtype": "Section Break",
+   "label": "Invoices"
+  },
+  {
+   "fieldname": "invoices",
+   "fieldtype": "Table",
+   "label": "Invoices",
+   "options": "Delivery Trip Invoice",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_notes",
+   "fieldtype": "Section Break",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-03-24 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Delivery Trip",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Sales User",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
