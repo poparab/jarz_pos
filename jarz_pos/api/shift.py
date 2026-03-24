@@ -193,10 +193,12 @@ def get_active_shift(pos_profile: str | None = None):
     profiles are irrelevant and never returned.  When *pos_profile* is not
     supplied the function returns ``None``.
 
-    The returned dict includes:
-    * ``is_current_user`` – ``1`` if the calling user owns the shift, else ``0``.
-    * ``is_other_profile`` – ``1`` if the user owns an open shift on a
-      *different* profile (returned only when no shift exists on *pos_profile*).
+    A user may have open shifts on multiple profiles simultaneously; only
+    the shift matching *pos_profile* is considered.
+
+    The returned dict includes an ``is_current_user`` flag:
+    * ``1`` – the calling user owns the shift.
+    * ``0`` – another user owns the shift.
     """
     if not pos_profile:
         return None
@@ -205,21 +207,11 @@ def get_active_shift(pos_profile: str | None = None):
 
     # Find any open shift on this profile, regardless of owner.
     profile_shift = _get_latest_opening_entry(pos_profile=pos_profile)
-    if profile_shift:
-        profile_shift["is_current_user"] = int(profile_shift.get("user") == user)
-        profile_shift["is_other_profile"] = 0
-        return profile_shift
+    if not profile_shift:
+        return None
 
-    # No shift on the selected profile.  Check whether the *current user*
-    # already has an open shift on any other profile (ERPNext allows only one
-    # open POS Opening Entry per user globally).
-    user_shift = _get_latest_opening_entry(user=user)
-    if user_shift:
-        user_shift["is_current_user"] = 1
-        user_shift["is_other_profile"] = 1
-        return user_shift
-
-    return None
+    profile_shift["is_current_user"] = int(profile_shift.get("user") == user)
+    return profile_shift
 
 
 @frappe.whitelist(allow_guest=False)
@@ -274,7 +266,8 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
 
     _assert_user_has_profile_access(user, pos_profile)
 
-    # Check THIS profile for an existing open shift.
+    # Only check THIS profile for an existing open shift.
+    # Users may have open shifts on other profiles – that is allowed.
     profile_open = _get_latest_opening_entry(pos_profile=pos_profile)
     if profile_open:
         if profile_open.get("user") == user:
@@ -293,17 +286,6 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
                   "That shift must be closed first.").format(pos_profile, opener),
                 title=_("Shift Blocked"),
             )
-
-    # Check whether the user already has an open shift on ANY other profile
-    # (ERPNext only allows one open POS Opening Entry per user globally).
-    user_open = _get_latest_opening_entry(user=user)
-    if user_open:
-        other_profile = user_open.get("pos_profile", "")
-        frappe.throw(
-            _("You already have an open shift ({0}) on profile {1}. "
-              "Close it before starting a new one.").format(user_open["name"], other_profile),
-            title=_("Shift Already Open"),
-        )
 
     company = frappe.db.get_value("POS Profile", pos_profile, "company")
     if not company:
