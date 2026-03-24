@@ -187,20 +187,28 @@ def _get_latest_opening_entry(user: str | None = None, pos_profile: str | None =
 
 @frappe.whitelist(allow_guest=False)
 def get_active_shift(pos_profile: str | None = None):
+    """Return the active (Open) shift for the given POS Profile.
+
+    Shift logic is scoped entirely to the POS Profile – shifts on other
+    profiles are irrelevant and never returned.  When *pos_profile* is not
+    supplied the function returns ``None``.
+
+    The returned dict includes an ``is_current_user`` flag:
+    * ``1`` – the calling user owns the shift.
+    * ``0`` – another user owns the shift.
+    """
+    if not pos_profile:
+        return None
+
     user = frappe.session.user
-    own_shift = _get_latest_opening_entry(user=user, pos_profile=pos_profile)
-    if own_shift:
-        own_shift["is_current_user"] = 1
-        return own_shift
 
-    # If profile is specified and no own shift exists, return profile-level open shift (if any)
-    if pos_profile:
-        profile_shift = _get_latest_opening_entry(user=None, pos_profile=pos_profile)
-        if profile_shift:
-            profile_shift["is_current_user"] = int(profile_shift.get("user") == user)
-            return profile_shift
+    # Find any open shift on this profile, regardless of owner.
+    profile_shift = _get_latest_opening_entry(pos_profile=pos_profile)
+    if not profile_shift:
+        return None
 
-    return None
+    profile_shift["is_current_user"] = int(profile_shift.get("user") == user)
+    return profile_shift
 
 
 @frappe.whitelist(allow_guest=False)
@@ -255,12 +263,25 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
 
     _assert_user_has_profile_access(user, pos_profile)
 
-    existing_open = _get_latest_opening_entry(user=user)
-    if existing_open:
-        frappe.throw(
-            _("You already have an open shift: {0}").format(existing_open["name"]),
-            title=_("Shift Already Open"),
-        )
+    # Scope the existing-shift check to THIS profile only.
+    profile_open = _get_latest_opening_entry(pos_profile=pos_profile)
+    if profile_open:
+        if profile_open.get("user") == user:
+            frappe.throw(
+                _("You already have an open shift on this profile: {0}").format(profile_open["name"]),
+                title=_("Shift Already Open"),
+            )
+        else:
+            opener = (
+                profile_open.get("employee_name")
+                or profile_open.get("user_full_name")
+                or profile_open.get("user", "Unknown")
+            )
+            frappe.throw(
+                _("POS Profile {0} already has an open shift started by {1}. "
+                  "That shift must be closed first.").format(pos_profile, opener),
+                title=_("Shift Blocked"),
+            )
 
     company = frappe.db.get_value("POS Profile", pos_profile, "company")
     if not company:
