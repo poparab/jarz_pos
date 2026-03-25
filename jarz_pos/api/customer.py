@@ -387,16 +387,19 @@ def get_territory(territory_id: str | None = None):
 
 
 @frappe.whitelist()
-def update_default_address(customer, address, phone):
+def update_default_address(customer, address, phone, invoice=None):
     """Update customer's default address and phone number.
     
     Creates or updates the customer's primary address and contact.
     Sets the address as the default billing and shipping address.
+    When an invoice is provided, also updates that Sales Invoice's linked
+    address so the kanban board reflects the change immediately.
     
     Args:
         customer: Customer ID/name
         address: New address text
         phone: New phone number
+        invoice: (optional) Sales Invoice name to update directly
         
     Returns:
         dict: {"success": True, "message": "Customer address updated successfully"}
@@ -407,23 +410,27 @@ def update_default_address(customer, address, phone):
             frappe.throw(f"Customer '{customer}' not found")
             
         customer_doc = frappe.get_doc("Customer", customer)
-        
-        # Update or create primary address
-        if customer_doc.customer_primary_address:
+
+        # ── Determine which Address doc to update ──────────────────────
+        # Priority: SI-linked address > Customer primary address > create new
+        si_addr_name = None
+        if invoice and frappe.db.exists("Sales Invoice", invoice):
+            si_addr_name = (
+                frappe.db.get_value("Sales Invoice", invoice, "shipping_address_name")
+                or frappe.db.get_value("Sales Invoice", invoice, "customer_address")
+            )
+
+        target_addr_name = si_addr_name or customer_doc.customer_primary_address
+
+        if target_addr_name and frappe.db.exists("Address", target_addr_name):
             # Update existing address
-            address_doc = frappe.get_doc("Address", customer_doc.customer_primary_address)
+            address_doc = frappe.get_doc("Address", target_addr_name)
             address_doc.address_line1 = address
             address_doc.is_primary_address = 1
             address_doc.is_shipping_address = 1
-            # Update phone on address if field exists
-            if frappe.db.has_column("Address", "phone"):
-                address_doc.phone = phone
-            if frappe.db.has_column("Address", "phone_number"):
-                address_doc.phone_number = phone
-            if frappe.db.has_column("Address", "phone_no"):
-                address_doc.phone_no = phone
-            if frappe.db.has_column("Address", "mobile_no"):
-                address_doc.mobile_no = phone
+            for fld in ("phone", "phone_number", "phone_no", "mobile_no"):
+                if frappe.db.has_column("Address", fld):
+                    address_doc.set(fld, phone)
             address_doc.save(ignore_permissions=True)
             frappe.logger().info(f"Updated existing address: {address_doc.name}")
         else:
@@ -441,14 +448,9 @@ def update_default_address(customer, address, phone):
                     "link_name": customer
                 }]
             }
-            if frappe.db.has_column("Address", "phone"):
-                address_payload["phone"] = phone
-            if frappe.db.has_column("Address", "phone_number"):
-                address_payload["phone_number"] = phone
-            if frappe.db.has_column("Address", "phone_no"):
-                address_payload["phone_no"] = phone
-            if frappe.db.has_column("Address", "mobile_no"):
-                address_payload["mobile_no"] = phone
+            for fld in ("phone", "phone_number", "phone_no", "mobile_no"):
+                if frappe.db.has_column("Address", fld):
+                    address_payload[fld] = phone
 
             address_doc = frappe.get_doc(address_payload)
             address_doc.insert(ignore_permissions=True)
@@ -456,6 +458,21 @@ def update_default_address(customer, address, phone):
             # Update customer with new primary address
             customer_doc.customer_primary_address = address_doc.name
             frappe.logger().info(f"Created new address: {address_doc.name}")
+
+        # ── Link the address to the Sales Invoice if needed ───────────
+        if invoice and frappe.db.exists("Sales Invoice", invoice):
+            si = frappe.get_doc("Sales Invoice", invoice)
+            changed = False
+            if si.shipping_address_name != address_doc.name:
+                si.shipping_address_name = address_doc.name
+                changed = True
+            if si.customer_address != address_doc.name:
+                si.customer_address = address_doc.name
+                changed = True
+            if changed:
+                si.flags.ignore_validate_update_after_submit = True
+                si.save(ignore_permissions=True)
+                frappe.logger().info(f"Linked address {address_doc.name} to SI {invoice}")
         
         # Update or create primary contact
         if customer_doc.customer_primary_contact:
