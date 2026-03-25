@@ -150,6 +150,7 @@ def get_active_couriers():
                         break
             if employee_names:
                 emp_fields = ["name", "employee_name"] + (["branch"] if _has_column("Employee", "branch") else [])
+                emp_fields = ["name", "employee_name"] + (["branch"] if _has_column("Employee", "branch") else []) + (["custom_delivery_partner"] if _has_column("Employee", "custom_delivery_partner") else [])
                 emps = frappe.get_all(
                     "Employee",
                     fields=emp_fields,
@@ -160,19 +161,21 @@ def get_active_couriers():
                     "party": e.name,
                     "display_name": (e.employee_name or e.name),
                     "branch": getattr(e, "branch", None) if hasattr(e, "branch") else (e.get("branch") if isinstance(e, dict) else None),
+                    "delivery_partner": (e.get("custom_delivery_partner") if isinstance(e, dict) else getattr(e, "custom_delivery_partner", None)) or None,
                 } for e in emps)
         except Exception as err:
             frappe.log_error(f"Failed to read Employee Group members: {err}", "Jarz POS get_active_couriers")
     # Suppliers in Supplier Group
     sup_group = frappe.db.get_value("Supplier Group", {"supplier_group_name": _sup_grp_name}, "name")
     if sup_group:
-        sup_fields = ["name", "supplier_name"] + (["branch"] if _has_column("Supplier", "branch") else [])
+        sup_fields = ["name", "supplier_name"] + (["branch"] if _has_column("Supplier", "branch") else []) + (["custom_delivery_partner"] if _has_column("Supplier", "custom_delivery_partner") else [])
         sups = frappe.get_all("Supplier", fields=sup_fields, filters={"supplier_group": sup_group})
         out.extend({
             "party_type": "Supplier",
             "party": s.name,
             "display_name": (s.supplier_name or s.name),
             "branch": getattr(s, "branch", None) if hasattr(s, "branch") else (s.get("branch") if isinstance(s, dict) else None),
+            "delivery_partner": (s.get("custom_delivery_partner") if isinstance(s, dict) else getattr(s, "custom_delivery_partner", None)) or None,
         } for s in sups)
     return out
 
@@ -348,7 +351,22 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
     is_unpaid_effective = (outstanding > 0.009) or unpaid_status or (last_pe_seconds is not None and last_pe_seconds <= int(recent_payment_seconds))
 
     order_amount = float(inv.grand_total or 0) if is_unpaid_effective else 0.0
-    net_amount = order_amount - shipping
+
+    # Detect delivery partner mode
+    _dp = None
+    if party_type and party:
+        _dp_field = "custom_delivery_partner"
+        try:
+            _dp = frappe.db.get_value(party_type, party, _dp_field)
+        except Exception:
+            pass
+    is_partner_order = bool(_dp)
+
+    # Partner orders: net_amount = full order amount (no shipping deduction)
+    if is_partner_order:
+        net_amount = order_amount
+    else:
+        net_amount = order_amount - shipping
 
     # include resolved party if not provided – from any existing CT linked to invoice
     if not (party_type and party):
@@ -381,6 +399,8 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
             "net_amount": net_amount,
             "is_unpaid_effective": is_unpaid_effective,
             "last_payment_seconds": last_pe_seconds,
+            "is_partner_order": is_partner_order,
+            "delivery_partner": _dp,
         },
     )
     # expire after 3 minutes
@@ -398,6 +418,8 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
         "last_payment_seconds": last_pe_seconds,
         "preview_token": token,
         "expires_in": 180,
+        "is_partner_order": is_partner_order,
+        "delivery_partner": _dp,
     }
 
 
@@ -470,6 +492,8 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
             "is_unpaid_effective": data.get("is_unpaid_effective"),
             "party_type": party_type,
             "party": party,
+            "is_partner_order": data.get("is_partner_order", False),
+            "delivery_partner": data.get("delivery_partner"),
         }
         base.update({k: v for k, v in (res or {}).items() if k not in base})
         return base

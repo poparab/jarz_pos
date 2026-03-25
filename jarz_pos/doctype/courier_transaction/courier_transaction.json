@@ -16,6 +16,9 @@
   "payment_mode",
   "journal_entry",
   "idempotency_token",
+  "delivery_partner",
+  "is_partner_order",
+  "partner_invoice_ref",
   "notes"
  ],
  "fields": [
@@ -88,6 +91,26 @@
    "fieldtype": "Data",
    "label": "Idempotency Token",
    "read_only": 1
+  },
+  {
+   "fieldname": "delivery_partner",
+   "fieldtype": "Link",
+   "label": "Delivery Partner",
+   "options": "Delivery Partner",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_partner_order",
+   "fieldtype": "Check",
+   "label": "Is Partner Order",
+   "read_only": 1
+  },
+  {
+   "fieldname": "partner_invoice_ref",
+   "fieldtype": "Data",
+   "label": "Partner Invoice Ref",
+   "description": "Reference number from delivery partner's invoice for reconciliation"
   },
   {
    "fieldname": "notes",
