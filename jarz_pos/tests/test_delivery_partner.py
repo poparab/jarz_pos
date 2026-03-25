@@ -51,7 +51,7 @@ class TestPartnerDispatch(unittest.TestCase):
 
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_dispatch_routes_to_partner_when_linked(self, mock_frappe):
-		from jarz_pos.services.settlement_strategies import dispatch_settlement
+		from jarz_pos.services.settlement_strategies import dispatch_settlement, PARTNER_STRATEGY
 
 		mock_inv = MagicMock()
 		mock_inv.name = "INV-P001"
@@ -64,8 +64,10 @@ class TestPartnerDispatch(unittest.TestCase):
 			("Sales Invoice", "INV-P001", "outstanding_amount"): 100.0,
 		}.get(a[:3], None)
 
-		with patch("jarz_pos.services.settlement_strategies.handle_partner_unpaid_settle_now") as mock_handler:
-			mock_handler.return_value = {"success": True, "mode": "partner_unpaid_settle_now"}
+		mock_handler = MagicMock(return_value={"success": True, "mode": "partner_unpaid_settle_now"})
+		original = PARTNER_STRATEGY[("unpaid", "now")]
+		PARTNER_STRATEGY[("unpaid", "now")] = mock_handler
+		try:
 			result = dispatch_settlement(
 				"INV-P001",
 				mode="now",
@@ -76,6 +78,8 @@ class TestPartnerDispatch(unittest.TestCase):
 			mock_handler.assert_called_once()
 			self.assertTrue(result["success"])
 			self.assertEqual(result["mode"], "partner_unpaid_settle_now")
+		finally:
+			PARTNER_STRATEGY[("unpaid", "now")] = original
 
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_dispatch_routes_to_normal_when_no_partner(self, mock_frappe):
