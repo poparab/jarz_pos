@@ -353,10 +353,63 @@ def get_trip_details(trip_name: str):
 
     invoices = []
     for row in trip.invoices:
-        # Get fresh state from Sales Invoice
-        inv_state = frappe.db.get_value(
-            "Sales Invoice", row.invoice, "custom_sales_invoice_state"
-        ) or row.invoice_status
+        # Get fresh data from Sales Invoice for rich detail display
+        si_fields = [
+            "custom_sales_invoice_state", "customer", "customer_name",
+            "territory", "outstanding_amount", "status",
+            "shipping_address_name", "customer_address",
+            "custom_payment_method", "custom_delivery_date",
+            "custom_delivery_time_from", "custom_delivery_duration",
+            "custom_delivery_slot_label",
+        ]
+        si_data = frappe.db.get_value(
+            "Sales Invoice", row.invoice, si_fields, as_dict=True
+        ) or {}
+
+        inv_state = si_data.get("custom_sales_invoice_state") or row.invoice_status
+
+        # Resolve address
+        address = ""
+        addr_name = si_data.get("shipping_address_name") or si_data.get("customer_address")
+        if addr_name:
+            try:
+                addr_doc = frappe.get_doc("Address", addr_name)
+                address = f"{addr_doc.address_line1 or ''}, {addr_doc.city or ''}".strip(", ")
+            except Exception:
+                pass
+
+        # Resolve customer phone
+        customer_phone = ""
+        customer = si_data.get("customer") or ""
+        if customer:
+            try:
+                from jarz_pos.api.kanban import _resolve_customer_phone
+                customer_phone = _resolve_customer_phone(customer)
+            except Exception:
+                pass
+
+        # Fetch items
+        items = []
+        try:
+            items_rows = frappe.get_all(
+                "Sales Invoice Item",
+                filters={"parent": row.invoice},
+                fields=["item_code", "item_name", "qty", "rate", "amount"],
+                order_by="idx asc",
+            )
+            items = [
+                {
+                    "item_code": r.get("item_code"),
+                    "item_name": r.get("item_name"),
+                    "qty": float(r.get("qty") or 0),
+                    "rate": float(r.get("rate") or 0),
+                    "amount": float(r.get("amount") or 0),
+                }
+                for r in items_rows
+            ]
+        except Exception:
+            pass
+
         invoices.append({
             "invoice": row.invoice,
             "customer_name": row.customer_name,
@@ -365,6 +418,16 @@ def get_trip_details(trip_name: str):
             "grand_total": float(row.grand_total or 0),
             "shipping_expense": float(row.shipping_expense or 0),
             "invoice_status": inv_state,
+            "outstanding_amount": float(si_data.get("outstanding_amount") or 0),
+            "payment_status": str(si_data.get("status") or ""),
+            "payment_method": si_data.get("custom_payment_method") or "",
+            "address": address,
+            "customer_phone": customer_phone,
+            "items": items,
+            "delivery_date": str(si_data.get("custom_delivery_date") or ""),
+            "delivery_time_from": str(si_data.get("custom_delivery_time_from") or ""),
+            "delivery_duration": si_data.get("custom_delivery_duration"),
+            "delivery_slot_label": str(si_data.get("custom_delivery_slot_label") or ""),
         })
 
     return {
