@@ -699,6 +699,15 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
         kanban_data = _sort_kanban_columns(kanban_data)
 
+        # Trim "Delivered" column: keep only last 2 days + today, max 30 cards
+        delivered_key = "delivered"
+        if delivered_key in kanban_data and kanban_data[delivered_key]:
+            cutoff = str(frappe.utils.add_days(frappe.utils.today(), -2))
+            kanban_data[delivered_key] = [
+                c for c in kanban_data[delivered_key]
+                if (c.get("posting_date") or "") >= cutoff
+            ][:30]
+
         # Return unified success
         return _success(data=kanban_data)
     except Exception as e:
