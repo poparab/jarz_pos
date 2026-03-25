@@ -19,18 +19,21 @@ class CustomShippingRequest(Document):
             {
                 "custom_shipping_override": self.requested_amount,
                 "custom_shipping_override_status": "Approved",
+                "custom_shipping_expense": self.requested_amount,
             },
             update_modified=True,
         )
 
     def on_cancel(self):
         self.status = "Rejected"
-        # Revert override on linked invoice
+        # Revert override on linked invoice – restore territory-based expense
+        original = float(self.original_amount or 0)
         frappe.db.set_value(
             "Sales Invoice", self.invoice,
             {
                 "custom_shipping_override": 0,
                 "custom_shipping_override_status": "Rejected",
+                "custom_shipping_expense": original,
             },
             update_modified=True,
         )

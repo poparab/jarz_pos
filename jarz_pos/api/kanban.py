@@ -589,9 +589,13 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
             state_key = state.lower().replace(' ', '_')
             terr_ship = _get_territory_shipping(inv.get("territory") or "")
-            # Prefer the persisted value on the Sales Invoice (primary source)
+            # Prefer approved override > persisted SI value > territory
+            override_status = inv.get("custom_shipping_override_status") or ""
+            override_amount = float(inv.get("custom_shipping_override") or 0)
             si_shipping_expense = float(inv.get("custom_shipping_expense") or 0)
-            if si_shipping_expense > 0:
+            if override_status == "Approved" and override_amount > 0:
+                terr_ship["expense"] = override_amount
+            elif si_shipping_expense > 0:
                 terr_ship["expense"] = si_shipping_expense
             # Detect pickup and zero shipping amounts accordingly
             is_pickup = _is_pickup_invoice(inv)
