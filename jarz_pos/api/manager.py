@@ -342,7 +342,19 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
                         if meta.get_field("custom_delivery_duration"):
                             updates["custom_delivery_duration"] = closest_period.get("duration")
                         if meta.get_field("custom_delivery_slot_label"):
-                            updates["custom_delivery_slot_label"] = closest_period.get("label") or f"{closest_period.get('time_from')} - {closest_period.get('time_to')}"
+                            raw_label = closest_period.get("label") or ""
+                            if raw_label:
+                                updates["custom_delivery_slot_label"] = raw_label
+                            else:
+                                tf = closest_period.get("time_from") or ""
+                                tt = closest_period.get("time_to") or ""
+                                try:
+                                    from datetime import datetime as _dt
+                                    tf_ampm = _dt.strptime(tf.split(".")[0], "%H:%M:%S").strftime("%I:%M %p") if tf else tf
+                                    tt_ampm = _dt.strptime(tt.split(".")[0], "%H:%M:%S").strftime("%I:%M %p") if tt else tt
+                                    updates["custom_delivery_slot_label"] = f"{tf_ampm} - {tt_ampm}"
+                                except Exception:
+                                    updates["custom_delivery_slot_label"] = f"{tf} - {tt}"
             except Exception as e:
                 frappe.log_error(f"Error updating delivery time during transfer: {str(e)}", "Invoice Transfer")
 

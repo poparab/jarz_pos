@@ -900,7 +900,7 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
                     dur_label = f"{hrs}h {rem}m"
                 else:
                     dur_label = f"{mins}m"
-                result["delivery_slot_label"] = f"{delivery_datetime.strftime('%H:%M')} - {end_dt.strftime('%H:%M')} ({dur_label})"
+                result["delivery_slot_label"] = f"{delivery_datetime.strftime('%I:%M %p')} - {end_dt.strftime('%I:%M %p')} ({dur_label})"
             except Exception:
                 pass
             result["delivery_label"] = delivery_datetime.strftime('%A, %B %d, %Y at %I:%M %p')
