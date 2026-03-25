@@ -22,11 +22,14 @@ class CourierTransaction(Document):
 		if shipping <= 0:
 			return
 		try:
-			frappe.db.set_value(
-				"Sales Invoice", inv_name,
-				"custom_shipping_expense", shipping,
-				update_modified=False,
-			)
+			# Only persist if SI doesn't already have a value (avoid overwriting custom amounts)
+			current = float(frappe.db.get_value("Sales Invoice", inv_name, "custom_shipping_expense") or 0)
+			if current <= 0:
+				frappe.db.set_value(
+					"Sales Invoice", inv_name,
+					"custom_shipping_expense", shipping,
+					update_modified=False,
+				)
 		except Exception:
 			frappe.log_error(
 				title="CT→SI shipping sync failed",

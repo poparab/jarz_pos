@@ -85,6 +85,16 @@ def set_invoice_sub_territory(invoice_name: str, sub_territory: str):
     expense = float(frappe.db.get_value("Territory", sub_territory, "delivery_expense") or 0)
     income = float(frappe.db.get_value("Territory", sub_territory, "delivery_income") or 0)
 
+    # Update custom_shipping_expense on the SI so all downstream reads use it,
+    # unless there is an approved custom shipping override in place.
+    override_status = (
+        frappe.db.get_value("Sales Invoice", invoice_name, "custom_shipping_override_status") or ""
+    )
+    if override_status != "Approved" and expense > 0:
+        frappe.db.set_value(
+            "Sales Invoice", invoice_name, "custom_shipping_expense", expense, update_modified=False
+        )
+
     frappe.db.commit()
 
     return {

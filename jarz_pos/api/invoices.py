@@ -507,7 +507,9 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
             party_type = existing_party[0].get("party_type")
             party = existing_party[0].get("party")
 
-    shipping = _delivery._get_delivery_expense_amount(inv) or 0.0  # protected helper reused
+    # Read shipping from the stored SI value first, fallback to territory calculation
+    _stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    shipping = _stored_ship if _stored_ship > 0 else (_delivery._get_delivery_expense_amount(inv) or 0.0)
 
     # Fetch unsettled CTs; when party not provided, do NOT filter by party to avoid excluding valid rows
     ct_filters = {

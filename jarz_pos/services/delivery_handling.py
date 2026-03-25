@@ -294,16 +294,22 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     order_amount = float(inv.grand_total or (outstanding or 0))
 
     # Compute shipping first for CT and later JE
-    # Use shipping_override (e.g. double-shipping) if provided, else compute from territory
+    # Priority: explicit override > stored SI value > territory calculation
     if shipping_override is not None and shipping_override > 0:
         shipping_exp = float(shipping_override)
     else:
-        shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+        stored = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+        if stored > 0:
+            shipping_exp = stored
+        else:
+            shipping_exp = _get_delivery_expense_amount(inv) or 0.0
 
-    # Persist resolved shipping expense on the Sales Invoice for direct reads
+    # Only persist if the field was previously empty (avoid overwriting custom values)
     if shipping_exp > 0:
         try:
-            inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
+            current = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+            if current <= 0:
+                inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
         except Exception:
             pass
 
@@ -774,16 +780,18 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
         inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=False)
     
-    # Determine expense amount based on invoice territory
-    amount = _get_delivery_expense_amount(inv)
+    # Read shipping from the stored SI value first, fallback to territory calculation
+    stored = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    amount = stored if stored > 0 else (_get_delivery_expense_amount(inv) or 0.0)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
 
-    # Persist resolved shipping expense on the Sales Invoice
-    try:
-        inv.db_set("custom_shipping_expense", abs(amount), update_modified=False)
-    except Exception:
-        pass
+    # Only persist if the field was previously empty
+    if stored <= 0:
+        try:
+            inv.db_set("custom_shipping_expense", abs(amount), update_modified=False)
+        except Exception:
+            pass
 
     # Idempotency guard – return existing submitted JE if already created
     existing_je = frappe.db.get_value(
@@ -847,15 +855,18 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     if inv.get("custom_sales_invoice_state") != "Out for Delivery":
         inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=False)
     
-    amount = _get_delivery_expense_amount(inv)
+    # Read shipping from the stored SI value first, fallback to territory calculation
+    stored_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    amount = stored_exp if stored_exp > 0 else (_get_delivery_expense_amount(inv) or 0.0)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
 
-    # Persist resolved shipping expense on the Sales Invoice for direct reads
-    try:
-        inv.db_set("custom_shipping_expense", abs(amount), update_modified=False)
-    except Exception:
-        pass
+    # Only persist if the field was previously empty
+    if stored_exp <= 0:
+        try:
+            inv.db_set("custom_shipping_expense", abs(amount), update_modified=False)
+        except Exception:
+            pass
 
     # Idempotency – avoid duplicate CTs for same purpose
     existing_ct = frappe.db.get_value(
@@ -1533,7 +1544,9 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
         frappe.throw("Invoice not fully paid; cannot one-by-one settle shipping")
 
     company = inv.company
-    shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+    # Read shipping from the stored SI value first, fallback to territory calculation
+    stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    shipping_exp = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
 
     frappe.logger().info(f"DEBUG settle_single_invoice_paid: BEFORE get_pos_cash_account - pos_profile='{pos_profile}', company='{company}'")
     cash_acc = get_pos_cash_account(pos_profile, company)
@@ -1800,7 +1813,9 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
 
     company = inv.company
     order_amount = float(inv.grand_total or 0)
-    shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+    # Read shipping from the stored SI value first, fallback to territory calculation
+    stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    shipping_exp = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
 
     pending_ct = frappe.get_all(
         "Courier Transaction",
