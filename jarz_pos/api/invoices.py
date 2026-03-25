@@ -670,7 +670,7 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
 
 
 @frappe.whitelist()
-def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_time_from: str, delivery_duration: int):
+def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_time_from: str, delivery_duration: int, delivery_slot_label: str = ""):
     """Update delivery slot for a submitted Sales Invoice.
     
     Args:
@@ -678,6 +678,7 @@ def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_t
         delivery_date: Delivery date in YYYY-MM-DD format
         delivery_time_from: Delivery time in HH:MM:SS format
         delivery_duration: Duration in seconds
+        delivery_slot_label: Human-readable slot label (e.g. "21:00 - 22:00 (1h)")
     
     Returns:
         dict: Success status and message
@@ -696,7 +697,9 @@ def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_t
         # Update delivery slot fields
         inv.db_set("custom_delivery_date", delivery_date, update_modified=False)
         inv.db_set("custom_delivery_time_from", delivery_time_from, update_modified=False)
-        inv.db_set("custom_delivery_duration_seconds", delivery_duration, update_modified=False)
+        inv.db_set("custom_delivery_duration", int(delivery_duration), update_modified=False)
+        if delivery_slot_label:
+            inv.db_set("custom_delivery_slot_label", delivery_slot_label, update_modified=False)
         
         frappe.db.commit()
         
