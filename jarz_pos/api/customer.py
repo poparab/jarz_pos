@@ -223,7 +223,7 @@ def get_territories(search=None):
         return []
 
 @frappe.whitelist()
-def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None):
+def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None):
     """Create a new customer quickly from POS with Territory integration"""
     try:
         # Debug: Log the received parameters
@@ -302,7 +302,7 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         frappe.logger().info(f"Address created successfully: {address_doc.name}")
         
         # Create contact
-        contact_doc = frappe.get_doc({
+        contact_payload = {
             "doctype": "Contact",
             "first_name": customer_name,
             "mobile_no": mobile_no,
@@ -311,7 +311,10 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
                 "link_doctype": "Customer",
                 "link_name": customer_doc.name
             }]
-        })
+        }
+        if secondary_mobile:
+            contact_payload["phone"] = secondary_mobile
+        contact_doc = frappe.get_doc(contact_payload)
         
         frappe.logger().info(f"Creating contact")
         contact_doc.insert(ignore_permissions=True)
