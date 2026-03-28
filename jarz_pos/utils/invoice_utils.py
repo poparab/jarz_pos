@@ -22,13 +22,13 @@ def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime
     invoice_doc.territory = customer_doc.territory or "All Territories"
     
     # Set delivery slot fields when delivery_datetime provided (new model)
+    # Note: duration is calculated properly in _apply_delivery_slot_fields from
+    # end_datetime or timetable slot_hours; do NOT set a default here.
     if delivery_datetime:
         try:
             dt = frappe.utils.get_datetime(delivery_datetime)
             invoice_doc.custom_delivery_date = dt.date()
             invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
-            if not getattr(invoice_doc, "custom_delivery_duration", None):
-                invoice_doc.custom_delivery_duration = 60
         except Exception:
             # Non-fatal: let hooks enforce completeness if partially provided later
             pass

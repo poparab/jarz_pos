@@ -77,25 +77,48 @@ def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
         invoice_doc.custom_delivery_date = dt.date()
         invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
 
-        # If request provided an explicit duration, parse it
+        # --- Calculate duration from end_datetime (preferred) ---
+        duration_set = False
         try:
-            raw_duration = getattr(frappe, "form_dict", {}).get("delivery_duration")
+            raw_end = getattr(frappe, "form_dict", {}).get("delivery_end_datetime")
+            if raw_end:
+                end_dt = frappe.utils.get_datetime(raw_end)
+                duration_seconds = int((end_dt - dt).total_seconds())
+                if duration_seconds > 0:
+                    invoice_doc.custom_delivery_duration = duration_seconds
+                    duration_set = True
         except Exception:
-            raw_duration = None
-        parsed_seconds = _parse_duration_to_seconds(raw_duration)
+            pass
 
-        current_val = getattr(invoice_doc, "custom_delivery_duration", None)
-        if parsed_seconds is not None:
-            invoice_doc.custom_delivery_duration = parsed_seconds
-        elif current_val:
-            # Normalize existing value to seconds if it looks like minutes
+        if not duration_set:
+            # Fallback: explicit delivery_duration param
             try:
-                cur = float(current_val)
-                invoice_doc.custom_delivery_duration = int(cur * 60) if cur < 1000 else int(cur)
+                raw_duration = getattr(frappe, "form_dict", {}).get("delivery_duration")
             except Exception:
-                invoice_doc.custom_delivery_duration = 3600
-        else:
-            # Default: 1 hour in seconds
+                raw_duration = None
+            parsed_seconds = _parse_duration_to_seconds(raw_duration)
+            if parsed_seconds is not None:
+                invoice_doc.custom_delivery_duration = parsed_seconds
+                duration_set = True
+
+        if not duration_set:
+            # Fallback: look up timetable slot_hours for the POS profile
+            try:
+                pos_profile_name = getattr(invoice_doc, "pos_profile", None)
+                if pos_profile_name:
+                    slot_hours = frappe.db.get_value(
+                        "POS Profile Timetable",
+                        {"pos_profile": pos_profile_name},
+                        "slot_hours",
+                    )
+                    if slot_hours:
+                        invoice_doc.custom_delivery_duration = int(slot_hours) * 3600
+                        duration_set = True
+            except Exception:
+                pass
+
+        if not duration_set:
+            # Final fallback: 1 hour in seconds
             invoice_doc.custom_delivery_duration = 3600
     except Exception:
         # Non-fatal; let validation hook catch missing fields if required
