@@ -311,6 +311,8 @@ def pay_invoice(
         elif mode_lower == "cash":
             if not pos_profile:
                 frappe.throw("pos_profile is required for Cash payments")
+            from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
+            assert_pos_profile_enabled(pos_profile)
             account_base = pos_profile  # POS profile name itself
         else:
             frappe.throw(f"Unsupported payment_mode: {payment_mode}")

@@ -49,16 +49,11 @@ POS_PROFILE: {pos_profile_name}
     )
     
     try:
-        # Check if POS Profile exists
-        print(f"\n🔍 STEP 1: Checking if POS Profile exists...")
-        profile_exists = frappe.db.exists("POS Profile", pos_profile_name)
-        print(f"📊 POS Profile '{pos_profile_name}' exists: {profile_exists}")
-        
-        if not profile_exists:
-            error_msg = f"POS Profile '{pos_profile_name}' does not exist"
-            print(f"❌ ERROR: {error_msg}")
-            logger.error(f"❌ {error_msg}")
-            frappe.throw(error_msg)
+        # Check if POS Profile exists and is enabled
+        print(f"\n🔍 STEP 1: Checking if POS Profile exists and is enabled...")
+        from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
+        assert_pos_profile_enabled(pos_profile_name)
+        print(f"📊 POS Profile '{pos_profile_name}' is active")
         
         # Get POS Profile Timetable configuration
         print(f"\n🔍 STEP 2: Looking for POS Profile Timetable...")

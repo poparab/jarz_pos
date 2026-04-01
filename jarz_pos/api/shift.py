@@ -15,6 +15,9 @@ from jarz_pos.constants import ACCOUNTS, QUERY_LIMITS
 
 
 def _assert_user_has_profile_access(user: str, pos_profile: str):
+    from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
+    assert_pos_profile_enabled(pos_profile)
+
     has_access = frappe.db.exists(
         "POS Profile User",
         {

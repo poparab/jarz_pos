@@ -11,6 +11,15 @@ import frappe
 from frappe import _dict
 
 
+def assert_pos_profile_enabled(pos_profile_name):
+    """Raise if the POS Profile does not exist or is disabled."""
+    result = frappe.db.get_value("POS Profile", pos_profile_name, ["name", "disabled"], as_dict=True)
+    if not result:
+        frappe.throw(f"POS Profile '{pos_profile_name}' does not exist")
+    if result.disabled:
+        frappe.throw(f"POS Profile '{pos_profile_name}' is disabled")
+
+
 def validate_cart_data(cart_json, logger):
     """Validate and parse cart JSON data."""
     # Validate required parameters
@@ -137,11 +146,7 @@ def validate_pos_profile(pos_profile_name, logger):
         logger.debug(f"Validating provided POS Profile: {pos_profile_name}")
         print(f"   Checking provided POS Profile: {pos_profile_name}")
         
-        if not frappe.db.exists("POS Profile", pos_profile_name):
-            error_msg = f"POS Profile '{pos_profile_name}' does not exist"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
+        assert_pos_profile_enabled(pos_profile_name)
         
         try:
             pos_profile = frappe.get_doc("POS Profile", pos_profile_name)
