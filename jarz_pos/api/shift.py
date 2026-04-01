@@ -340,10 +340,11 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
                     "jarz_pos.shift.ensure_mode_of_payment_account.start_shift",
                 )
 
-        # Always trust system value for opening, never stale/manual input.
         system_balance = flt(_get_account_balance(row_account, company))
-        confirmed_opening = system_balance
-        difference = flt((row or {}).get("difference") or (confirmed_opening - system_balance))
+        # Use user-confirmed opening amount if provided; fall back to system balance.
+        user_opening = (row or {}).get("opening_amount")
+        confirmed_opening = flt(user_opening) if user_opening is not None else system_balance
+        difference = flt(confirmed_opening - system_balance, 2)
 
         opening_doc.append(
             "balance_details",
