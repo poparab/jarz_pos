@@ -6,6 +6,7 @@ Provides trip CRUD, bulk OFD transition, and trip listing.
 
 import frappe
 from frappe import _
+from frappe.utils import flt
 from jarz_pos.constants import WS_EVENTS
 from jarz_pos.services.delivery_handling import (
     mark_courier_outstanding,
@@ -160,20 +161,35 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
 def send_trip_for_delivery(trip_name: str):
     """Bulk OFD transition for all eligible invoices in a trip.
 
-    Skips invoices with pending custom shipping requests.
-    Applies double shipping multiplier if applicable.
+    Idempotent: if the trip is already Out for Delivery it returns the current
+    state without raising an error.  Per-invoice errors are captured and
+    returned without aborting the entire batch – successfully processed
+    invoices are committed individually via savepoints so partial progress
+    is never lost.
 
     Returns:
-        dict with processed/skipped invoices and trip status
+        dict with processed/skipped/failed invoices and trip status
     """
     trip = frappe.get_doc("Delivery Trip", trip_name)
     if trip.status == "Completed":
         frappe.throw(_("Trip {0} is already completed").format(trip_name))
+
+    # Idempotent: already OFD → return current state
     if trip.status == "Out for Delivery":
-        frappe.throw(_("Trip {0} is already out for delivery").format(trip_name))
+        return {
+            "success": True,
+            "trip": trip.name,
+            "status": trip.status,
+            "processed": [],
+            "skipped": [],
+            "failed": [],
+            "is_double_shipping": bool(trip.is_double_shipping),
+            "already_ofd": True,
+        }
 
     processed = []
     skipped = []
+    failed = []
 
     for row in trip.invoices:
         inv = frappe.get_doc("Sales Invoice", row.invoice)
@@ -201,64 +217,81 @@ def send_trip_for_delivery(trip_name: str):
             })
             continue
 
-        # Compute shipping expense (with double shipping multiplier)
-        # Prefer persisted SI value, fall back to territory computation
-        shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
-        if shipping_exp <= 0:
-            shipping_exp = _get_delivery_expense_amount(inv) or 0.0
-            if shipping_exp > 0:
-                try:
+        # --- Savepoint per invoice so partial progress is never lost ---
+        sp_name = f"trip_ofd_{row.invoice.replace('-', '_')}"
+        try:
+            frappe.db.savepoint(sp_name)
+
+            # Compute shipping expense (with double shipping multiplier)
+            shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+            if shipping_exp <= 0:
+                shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+                if shipping_exp > 0:
                     inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
-                except Exception:
-                    pass
-        if trip.is_double_shipping:
-            shipping_exp = shipping_exp * 2
+            if trip.is_double_shipping:
+                shipping_exp = shipping_exp * 2
 
-        # Ensure Delivery Note exists
-        dn_result = ensure_delivery_note_for_invoice(row.invoice)
-        if dn_result.get("error"):
-            skipped.append({
-                "invoice": row.invoice,
-                "reason": f"Delivery Note error: {dn_result['error']}",
-            })
-            continue
+            # Ensure Delivery Note exists
+            dn_result = ensure_delivery_note_for_invoice(row.invoice)
+            if dn_result.get("error"):
+                frappe.db.rollback(save_point=sp_name)
+                failed.append({
+                    "invoice": row.invoice,
+                    "reason": f"Delivery Note error: {dn_result['error']}",
+                })
+                continue
 
-        # Determine if invoice needs courier outstanding (unpaid) or is already paid
-        outstanding = float(frappe.db.get_value("Sales Invoice", row.invoice, "outstanding_amount") or 0)
-        if outstanding > 0.0001:
-            # Unpaid: create courier outstanding with trip link and shipping override
-            mark_courier_outstanding(
-                row.invoice,
-                party_type=trip.courier_party_type,
-                party=trip.courier_party,
-                delivery_trip=trip.name,
-                shipping_override=shipping_exp if trip.is_double_shipping else None,
+            # Mark courier outstanding for unpaid invoices
+            outstanding = flt(frappe.db.get_value("Sales Invoice", row.invoice, "outstanding_amount"))
+            if outstanding > 0.0001:
+                mark_courier_outstanding(
+                    row.invoice,
+                    party_type=trip.courier_party_type,
+                    party=trip.courier_party,
+                    delivery_trip=trip.name,
+                    shipping_override=shipping_exp if trip.is_double_shipping else None,
+                )
+
+            # Set invoice state to Out for Delivery
+            meta = frappe.get_meta("Sales Invoice")
+            for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
+                if meta.get_field(field_name):
+                    inv.db_set(field_name, "Out for Delivery", update_modified=True)
+
+            # Persist child row changes via db_set on the child table
+            frappe.db.set_value(
+                "Delivery Trip Invoice", row.name,
+                {"invoice_status": "Out for Delivery", "shipping_expense": shipping_exp},
+                update_modified=False,
             )
 
-        # Set invoice state to Out for Delivery
-        meta = frappe.get_meta("Sales Invoice")
-        for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
-            if meta.get_field(field_name):
-                inv.db_set(field_name, "Out for Delivery", update_modified=True)
+            # Commit this invoice's changes
+            frappe.db.commit()
 
-        # Update child row status
-        row.invoice_status = "Out for Delivery"
-        row.shipping_expense = shipping_exp
+            processed.append({
+                "invoice": row.invoice,
+                "status": "processed",
+                "shipping_expense": shipping_exp,
+                "delivery_note": dn_result.get("delivery_note"),
+            })
 
-        processed.append({
-            "invoice": row.invoice,
-            "status": "processed",
-            "shipping_expense": shipping_exp,
-            "delivery_note": dn_result.get("delivery_note"),
-        })
+        except Exception as exc:
+            frappe.db.rollback(save_point=sp_name)
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"jarz_pos.trips.send_trip_for_delivery.invoice.{row.invoice}",
+            )
+            failed.append({
+                "invoice": row.invoice,
+                "reason": str(exc),
+            })
 
     # Update trip status
-    if processed and not skipped:
+    if processed and not failed:
         trip.status = "Out for Delivery"
-    elif processed and skipped:
-        # Partial: still mark as OFD since some invoices went out
+    elif processed:
+        # Partial: mark as OFD since some invoices went out
         trip.status = "Out for Delivery"
-    # If all skipped, remain as Created
 
     trip.save(ignore_permissions=True)
     frappe.db.commit()
@@ -268,6 +301,7 @@ def send_trip_for_delivery(trip_name: str):
         "status": trip.status,
         "processed": processed,
         "skipped": skipped,
+        "failed": failed,
         "is_double_shipping": bool(trip.is_double_shipping),
     }, user="*")
 
@@ -277,6 +311,7 @@ def send_trip_for_delivery(trip_name: str):
         "status": trip.status,
         "processed": processed,
         "skipped": skipped,
+        "failed": failed,
         "is_double_shipping": bool(trip.is_double_shipping),
     }
 
@@ -289,6 +324,9 @@ def send_trip_for_delivery(trip_name: str):
 def mark_trip_as_delivered(trip_name: str):
     """Mark all invoices in a trip as Delivered and set trip status to Completed.
 
+    Idempotent: if the trip is already Completed it returns success without
+    raising an error.  Uses a savepoint so partial failures can be rolled back.
+
     Args:
         trip_name: Delivery Trip name
 
@@ -296,27 +334,60 @@ def mark_trip_as_delivered(trip_name: str):
         dict with updated trip and per-invoice results
     """
     trip = frappe.get_doc("Delivery Trip", trip_name)
+
+    # Idempotent: already completed → return current state
     if trip.status == "Completed":
-        frappe.throw(_("Trip {0} is already completed").format(trip_name))
+        return {
+            "success": True,
+            "trip": trip.name,
+            "status": trip.status,
+            "results": [{"invoice": r.invoice, "status": "already_delivered"} for r in trip.invoices],
+            "already_completed": True,
+        }
+
     if trip.status == "Created":
         frappe.throw(_("Trip {0} must be Out for Delivery before marking as delivered").format(trip_name))
 
     meta = frappe.get_meta("Sales Invoice")
     results = []
 
-    for row in trip.invoices:
-        for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
-            if meta.get_field(field_name):
-                frappe.db.set_value(
-                    "Sales Invoice", row.invoice, field_name, "Delivered",
-                    update_modified=True,
-                )
-        row.invoice_status = "Delivered"
-        results.append({"invoice": row.invoice, "status": "delivered"})
+    sp_name = f"trip_delivered_{trip_name.replace('-', '_')}"
+    frappe.db.savepoint(sp_name)
+    try:
+        for row in trip.invoices:
+            current_state = (
+                frappe.db.get_value("Sales Invoice", row.invoice, "custom_sales_invoice_state") or ""
+            ).strip().lower()
 
-    trip.status = "Completed"
-    trip.save(ignore_permissions=True)
-    frappe.db.commit()
+            # Skip if already delivered
+            if current_state == "delivered":
+                results.append({"invoice": row.invoice, "status": "already_delivered"})
+                continue
+
+            for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
+                if meta.get_field(field_name):
+                    frappe.db.set_value(
+                        "Sales Invoice", row.invoice, field_name, "Delivered",
+                        update_modified=True,
+                    )
+            # Persist child row status
+            frappe.db.set_value(
+                "Delivery Trip Invoice", row.name,
+                "invoice_status", "Delivered",
+                update_modified=False,
+            )
+            results.append({"invoice": row.invoice, "status": "delivered"})
+
+        trip.status = "Completed"
+        trip.save(ignore_permissions=True)
+        frappe.db.commit()
+    except Exception:
+        frappe.db.rollback(save_point=sp_name)
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"jarz_pos.trips.mark_trip_as_delivered.{trip_name}",
+        )
+        raise
 
     frappe.publish_realtime(WS_EVENTS.TRIP_COMPLETED, {
         "trip": trip.name,
