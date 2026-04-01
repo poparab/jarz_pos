@@ -584,6 +584,42 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 except Exception:
                     invoice_items[inv.name] = []
 
+        # Batch fetch actual payment method for paid invoices
+        actual_payment_methods: Dict[str, str] = {}
+        try:
+            paid_inv_names = [
+                inv.name for inv in invoices
+                if float(inv.get("outstanding_amount") or 0) < 0.01
+                and str(inv.status or "").strip().lower() in ("paid", "return", "credit note issued")
+            ]
+            if paid_inv_names:
+                pe_refs = frappe.get_all(
+                    "Payment Entry Reference",
+                    filters={
+                        "reference_doctype": "Sales Invoice",
+                        "reference_name": ["in", paid_inv_names],
+                    },
+                    fields=["reference_name", "parent"],
+                )
+                pe_names = list({r.parent for r in pe_refs})
+                if pe_names:
+                    pes = frappe.get_all(
+                        "Payment Entry",
+                        filters={"name": ["in", pe_names], "docstatus": 1, "payment_type": "Receive"},
+                        fields=["name", "paid_to"],
+                    )
+                    pe_account_map = {pe.name: pe.paid_to or "" for pe in pes}
+                    for ref in pe_refs:
+                        account = pe_account_map.get(ref.parent, "").lower()
+                        if "mobile wallet" in account:
+                            actual_payment_methods[ref.reference_name] = "Mobile Wallet"
+                        elif "bank account" in account:
+                            actual_payment_methods[ref.reference_name] = "Instapay"
+                        elif account:
+                            actual_payment_methods[ref.reference_name] = "Cash"
+        except Exception:
+            pass
+
         # Organize invoices by their current state
         for inv in invoices:
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
@@ -665,6 +701,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "accepted_by": inv.get("custom_accepted_by"),
                 "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
                 "payment_method": inv.get("custom_payment_method"),
+                "actual_payment_method": actual_payment_methods.get(inv.name),
                 "pos_profile": inv.get("custom_kanban_profile"),
                 "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
                 "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
