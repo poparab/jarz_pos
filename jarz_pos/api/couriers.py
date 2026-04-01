@@ -252,14 +252,34 @@ def create_delivery_party(
     pos_profile: str | None = None,
     first_name: str | None = None,
     last_name: str | None = None,
+    delivery_partner: str | None = None,
 ):
     """Create a new delivery party (Employee or Supplier) and return unified structure.
 
     Either provide (first_name & last_name) or a combined name.
+    If delivery_partner is provided, sets custom_delivery_partner on the created record.
     Returns: {party_type, party, display_name, phone}
     """
     try:
-        frappe.logger().info(f"create_delivery_party called with: party_type={party_type}, name={name}, first_name={first_name}, last_name={last_name}, phone={phone}, pos_profile={pos_profile}")
+        delivery_partner = (delivery_partner or '').strip() or None
+        # Validate POS profile is active
+        if pos_profile:
+            from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
+            assert_pos_profile_enabled(pos_profile)
+        # Validate delivery_partner permission via POS profile
+        if delivery_partner and pos_profile:
+            try:
+                has_field = bool(frappe.get_meta('POS Profile').get_field('custom_allow_delivery_partner'))
+                if has_field:
+                    allowed = frappe.db.get_value('POS Profile', pos_profile, 'custom_allow_delivery_partner')
+                    if not allowed:
+                        frappe.throw('This POS Profile is not allowed to assign delivery partners.')
+            except frappe.exceptions.ValidationError:
+                raise
+            except Exception:
+                pass  # field doesn't exist yet, allow through
+
+        frappe.logger().info(f"create_delivery_party called with: party_type={party_type}, name={name}, first_name={first_name}, last_name={last_name}, phone={phone}, pos_profile={pos_profile}, delivery_partner={delivery_partner}")
         # Use pos_profile as branch name per requirement
         result = _create_delivery_party(
             party_type=party_type,
@@ -269,13 +289,39 @@ def create_delivery_party(
             first_name=first_name,
             last_name=last_name,
         )
+
+        # Set delivery partner on the created record if provided
+        if delivery_partner and result and result.get('party'):
+            try:
+                doc = frappe.get_doc(result['party_type'], result['party'])
+                if doc.meta.get_field('custom_delivery_partner'):
+                    doc.custom_delivery_partner = delivery_partner
+                    doc.save(ignore_permissions=True)
+                    result['delivery_partner'] = delivery_partner
+            except Exception as dp_err:
+                frappe.logger().warning(f"Failed to set delivery_partner on {result.get('party')}: {dp_err}")
+
         frappe.logger().info(f"create_delivery_party successful: {result}")
         return result
+    except frappe.exceptions.ValidationError:
+        raise
     except Exception as e:
         frappe.logger().error(f"create_delivery_party failed: {str(e)}")
         frappe.logger().error(frappe.get_traceback())
         # Return user-friendly error instead of generic 409
         frappe.throw(f"Failed to create courier: {str(e)}")
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def get_delivery_partners_list():
+    """Return list of active Delivery Partner records for dropdown selection."""
+    partners = frappe.get_all(
+        'Delivery Partner',
+        filters={'is_active': 1},
+        fields=['name', 'partner_name'],
+        order_by='partner_name asc',
+    )
+    return partners
 
 
 # ---------------------------------------------------------------------------

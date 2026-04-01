@@ -28,14 +28,32 @@ def get_pos_profiles():
             'name': ('in', linked_rows),
             'disabled': 0,
         },
-        pluck='name',
+        fields=['name'],
     )
-    return profiles
+
+    # Attach custom_allow_delivery_partner flag if the custom field exists
+    has_dp_field = False
+    try:
+        has_dp_field = bool(frappe.get_meta('POS Profile').get_field('custom_allow_delivery_partner'))
+    except Exception:
+        pass
+
+    result = []
+    for p in profiles:
+        row = p['name']
+        if has_dp_field:
+            allow_dp = frappe.db.get_value('POS Profile', p['name'], 'custom_allow_delivery_partner')
+            result.append({'name': p['name'], 'allow_delivery_partner': bool(allow_dp)})
+        else:
+            result.append(row)
+    return result
 
 @frappe.whitelist(allow_guest=False)
 def get_profile_bundles(profile: str):
     """Return bundles with items available to the given POS profile."""
-    
+    from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
+    assert_pos_profile_enabled(profile)
+
     # For now, just get all available bundles
     # Future: filter by POS profile permissions
     filters = {}
