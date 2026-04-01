@@ -335,6 +335,34 @@ def create_purchase_invoice(
     }
 
 
+@frappe.whitelist()
+def get_purchase_invoices(limit: int = 50, page: int = 0) -> Dict[str, Any]:
+    """Return recent Purchase Invoices for the history tab."""
+    _ensure_manager_access()
+    start = int(page) * int(limit)
+    invoices = frappe.get_all(
+        "Purchase Invoice",
+        fields=[
+            "name", "supplier", "supplier_name", "posting_date",
+            "grand_total", "status", "docstatus", "creation",
+            "is_paid", "outstanding_amount",
+        ],
+        order_by="posting_date desc, creation desc",
+        limit_page_length=int(limit),
+        limit_start=start,
+    )
+    total = frappe.db.count("Purchase Invoice")
+    for inv in invoices:
+        items = frappe.get_all(
+            "Purchase Invoice Item",
+            filters={"parent": inv["name"]},
+            fields=["item_code", "item_name", "qty", "uom", "rate", "amount"],
+            order_by="idx asc",
+        )
+        inv["items"] = items
+    return {"invoices": invoices, "total": total}
+
+
 def _get_freight_and_forwarding_account(company: str) -> Optional[str]:
     """Resolve the 'Freight and Forwarding Charges' expense account for the company.
 

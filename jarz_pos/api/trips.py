@@ -282,6 +282,57 @@ def send_trip_for_delivery(trip_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Mark trip as delivered (bulk Delivered transition)
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist(allow_guest=False)
+def mark_trip_as_delivered(trip_name: str):
+    """Mark all invoices in a trip as Delivered and set trip status to Completed.
+
+    Args:
+        trip_name: Delivery Trip name
+
+    Returns:
+        dict with updated trip and per-invoice results
+    """
+    trip = frappe.get_doc("Delivery Trip", trip_name)
+    if trip.status == "Completed":
+        frappe.throw(_("Trip {0} is already completed").format(trip_name))
+    if trip.status == "Created":
+        frappe.throw(_("Trip {0} must be Out for Delivery before marking as delivered").format(trip_name))
+
+    meta = frappe.get_meta("Sales Invoice")
+    results = []
+
+    for row in trip.invoices:
+        for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
+            if meta.get_field(field_name):
+                frappe.db.set_value(
+                    "Sales Invoice", row.invoice, field_name, "Delivered",
+                    update_modified=True,
+                )
+        row.invoice_status = "Delivered"
+        results.append({"invoice": row.invoice, "status": "delivered"})
+
+    trip.status = "Completed"
+    trip.save(ignore_permissions=True)
+    frappe.db.commit()
+
+    frappe.publish_realtime(WS_EVENTS.TRIP_COMPLETED, {
+        "trip": trip.name,
+        "status": trip.status,
+        "invoices": [r.invoice for r in trip.invoices],
+    }, user="*")
+
+    return {
+        "success": True,
+        "trip": trip.name,
+        "status": trip.status,
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Trip listing & details
 # ---------------------------------------------------------------------------
 
