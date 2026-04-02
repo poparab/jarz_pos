@@ -11,7 +11,7 @@ from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
     make_closing_entry_from_opening,
 )
 from erpnext.accounts.utils import get_balance_on
-from jarz_pos.constants import ACCOUNTS, QUERY_LIMITS
+from jarz_pos.constants import ACCOUNTS, QUERY_LIMITS, WS_EVENTS
 
 
 def _assert_user_has_profile_access(user: str, pos_profile: str):
@@ -411,6 +411,15 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
                 break  # single-account flow
 
     employee = _get_employee_for_user(user)
+
+    # Notify all users on this POS profile about shift start
+    _notify_shift_event(
+        pos_profile=pos_profile,
+        event_type="started",
+        user=user,
+        opening_entry=opening_doc.name,
+    )
+
     return {
         "opening_entry": opening_doc.name,
         "employee": employee,
@@ -725,7 +734,7 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         if row.get("voucher_type") in ("Sales Invoice", "POS Invoice") and row.get("voucher_no")
     }
 
-    return {
+    result = {
         "closing_entry": closing.name,
         "opening_entry": opening.name,
         "status": closing.status,
@@ -752,3 +761,76 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         "account_movements": account_movements,
         "sales_invoices": [],
     }
+
+    # Notify all users on this POS profile about shift end
+    _notify_shift_event(
+        pos_profile=opening.pos_profile,
+        event_type="ended",
+        user=frappe.session.user,
+        opening_entry=opening.name,
+    )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Shift notification helper
+# ---------------------------------------------------------------------------
+
+def _notify_shift_event(*, pos_profile: str, event_type: str, user: str, opening_entry: str):
+    """Send realtime + FCM notifications for shift start/end to all users on the POS profile.
+
+    Args:
+        pos_profile: POS Profile name
+        event_type: "started" or "ended"
+        user: The user who started/ended the shift
+        opening_entry: The POS Opening Entry name
+    """
+    try:
+        user_full_name = frappe.db.get_value("User", user, "full_name") or user
+
+        ws_event = WS_EVENTS.SHIFT_STARTED if event_type == "started" else WS_EVENTS.SHIFT_ENDED
+        payload = {
+            "pos_profile": pos_profile,
+            "event_type": event_type,
+            "user": user,
+            "user_full_name": user_full_name,
+            "opening_entry": opening_entry,
+            "timestamp": now_datetime().isoformat(),
+        }
+
+        # Get all users assigned to this POS profile
+        profile_users = frappe.get_all(
+            "POS Profile User",
+            filters={"parent": pos_profile, "parenttype": "POS Profile"},
+            pluck="user",
+        )
+
+        # Send realtime to each user individually
+        for u in profile_users:
+            frappe.publish_realtime(ws_event, payload, user=u)
+
+        # Send FCM push notifications to registered devices
+        try:
+            from jarz_pos.api.notifications import _get_tokens_for_users, _send_fcm_notifications
+
+            tokens = _get_tokens_for_users(profile_users)
+            if tokens:
+                title = f"Shift {'Started' if event_type == 'started' else 'Ended'}"
+                body = f"{user_full_name} {'opened' if event_type == 'started' else 'closed'} a shift on {pos_profile}"
+                data_payload = {
+                    "type": f"shift_{event_type}",
+                    "pos_profile": pos_profile,
+                    "user": user,
+                    "user_full_name": user_full_name,
+                    "opening_entry": opening_entry,
+                    "title": title,
+                    "body": body,
+                }
+                _send_fcm_notifications(tokens, data_payload)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "shift_notification.fcm_failed")
+
+    except Exception:
+        # Never let notification errors block the shift operation
+        frappe.log_error(frappe.get_traceback(), "shift_notification_failed")

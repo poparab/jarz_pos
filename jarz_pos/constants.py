@@ -69,6 +69,8 @@ class WS_EVENTS:
     CUSTOM_SHIPPING_REQUESTED = "jarz_pos_custom_shipping_requested"
     CUSTOM_SHIPPING_APPROVED = "jarz_pos_custom_shipping_approved"
     CUSTOM_SHIPPING_REJECTED = "jarz_pos_custom_shipping_rejected"
+    SHIFT_STARTED = "jarz_pos_shift_started"
+    SHIFT_ENDED = "jarz_pos_shift_ended"
     TEST_EVENT = "test_event"
 
 

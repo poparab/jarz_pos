@@ -850,13 +850,25 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
     # Build the message
     try:
         # Extract notification content from data
-        title = data_payload.get("customer_name", "New Order")
-        body = f"Total: {data_payload.get('grand_total', 0)}"
-        if data_payload.get("item_summary"):
-            body += f" • {data_payload.get('item_summary')}"
+        # Use explicit title/body if provided, otherwise fall back to invoice fields
+        if "title" in data_payload and "body" in data_payload:
+            title = data_payload["title"]
+            body = data_payload["body"]
+        else:
+            title = data_payload.get("customer_name", "New Order")
+            body = f"Total: {data_payload.get('grand_total', 0)}"
+            if data_payload.get("item_summary"):
+                body += f" • {data_payload.get('item_summary')}"
         
         # Build a Notification payload so the client gets a dismissible system notification
         notification = messaging.Notification(title=title, body=body)
+
+        # Use shift channel for shift events, order alerts channel for everything else
+        msg_type = data_payload.get("type", "")
+        if msg_type in ("shift_started", "shift_ended"):
+            android_channel_id = "jarz_shift_updates"
+        else:
+            android_channel_id = "jarz_order_alerts"
 
         # Send to each token (Firebase Admin SDK doesn't support batch sends in the same way)
         # For better performance, we can use MulticastMessage
@@ -869,7 +881,7 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
                     priority='high',
                     notification=messaging.AndroidNotification(
                         sound='default',
-                        channel_id='jarz_order_alerts',
+                        channel_id=android_channel_id,
                         tag=data_payload.get("invoice_id", "")
                     )
                 ),
