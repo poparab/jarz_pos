@@ -33,7 +33,7 @@ def get_sub_territories(territory_name: str):
         "data": [
             {
                 "name": c.name,
-                "territory_name": c.territory_name,
+                "territory_name": _(c.territory_name),
                 "delivery_income": float(c.delivery_income or 0),
                 "delivery_expense": float(c.delivery_expense or 0),
             }

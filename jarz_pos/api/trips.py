@@ -104,11 +104,13 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
                     inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
                 except Exception:
                     pass
+        _terr = inv.territory or ""
+        _sub = getattr(inv, "custom_sub_territory", None) or ""
         trip.append("invoices", {
             "invoice": inv_name,
             "customer_name": inv.customer_name,
-            "territory": inv.territory,
-            "sub_territory": getattr(inv, "custom_sub_territory", None) or "",
+            "territory": _terr,
+            "sub_territory": _sub,
             "grand_total": float(inv.grand_total or 0),
             "shipping_expense": shipping_exp,
             "invoice_status": (
@@ -580,11 +582,15 @@ def get_trip_details(trip_name: str):
         except Exception:
             pass
 
+        _t_name = frappe.db.get_value("Territory", row.territory, "territory_name") or row.territory if row.territory else ""
+        _st_name = frappe.db.get_value("Territory", row.sub_territory, "territory_name") or row.sub_territory if row.sub_territory else ""
         invoices.append({
             "invoice": row.invoice,
             "customer_name": row.customer_name,
             "territory": row.territory,
             "sub_territory": row.sub_territory,
+            "territory_display": _(_t_name),
+            "sub_territory_display": _(_st_name),
             "grand_total": float(row.grand_total or 0),
             "shipping_expense": float(row.shipping_expense or 0),
             "invoice_status": inv_state,

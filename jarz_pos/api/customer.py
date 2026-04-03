@@ -1,5 +1,6 @@
 # customer.py
 import frappe
+from frappe import _
 from frappe.utils import flt
 from frappe.model.document import Document
 
@@ -34,12 +35,12 @@ def _augment_customer_with_territory(cust_row: dict[str, any]):
             else:
                 cust_row["delivery_expense"] = 0.0
                 
-            cust_row["territory_name"] = territory_doc.territory_name
+            cust_row["territory_name"] = _(territory_doc.territory_name)
         else:
             # Territory doesn't exist - set defaults
             cust_row["delivery_income"] = 0.0
             cust_row["delivery_expense"] = 0.0
-            cust_row["territory_name"] = territory
+            cust_row["territory_name"] = _(territory)
     except Exception as _err:
         # Swallow – augmentation is best-effort; log for debugging
         frappe.logger().warning(f"Territory augmentation failed for customer {cust_row.get('name')}: {_err}")
@@ -201,6 +202,7 @@ def get_territories(search=None):
         
         # Add delivery income/expense if custom fields exist
         for territory in territories:
+            territory["territory_name"] = _(territory.get("territory_name", ""))
             try:
                 territory_doc = frappe.get_doc("Territory", territory['name'])
                 if hasattr(territory_doc, 'delivery_income'):
@@ -375,7 +377,7 @@ def get_territory(territory_id: str | None = None):
     territory_doc = frappe.get_doc("Territory", territory_id)
     result = {
         "id": territory_doc.name,
-        "name": territory_doc.territory_name,
+        "name": _(territory_doc.territory_name),
         "delivery_income": 0.0,
         "delivery_expense": 0.0,
     }
