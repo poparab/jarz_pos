@@ -58,7 +58,7 @@ def get_final_products_report() -> Dict[str, Any]:
     )
 
     if not items:
-        return {"warehouses": [], "items": []}
+        return {"groups": []}
 
     item_codes = [it["item_code"] for it in items]
 
@@ -69,31 +69,45 @@ def get_final_products_report() -> Dict[str, Any]:
         fields=["item_code", "warehouse", "actual_qty"],
     )
 
-    # Build warehouse set and per-item warehouse map
-    warehouse_set = set()
+    # Build per-item warehouse map
     item_wh_map: Dict[str, Dict[str, float]] = {}
     for b in bins:
-        warehouse_set.add(b["warehouse"])
         item_wh_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
 
-    warehouses = sorted(warehouse_set)
+    # Build separate tables per group, Meduim first
+    groups_order = ["Meduim", "Large"]
+    result_groups = []
 
-    result_items = []
-    for it in items:
-        wh_qty = item_wh_map.get(it["item_code"], {})
-        if not wh_qty:
-            continue  # skip items with zero stock in all warehouses
-        total = sum(wh_qty.values())
-        result_items.append({
-            "item_code": it["item_code"],
-            "item_name": it["item_name"],
-            "item_group": it["item_group"],
-            "stock_uom": it["stock_uom"],
-            "warehouse_qty": wh_qty,
-            "total_qty": total,
-        })
+    for group_name in groups_order:
+        group_items = [it for it in items if it["item_group"] == group_name]
+        if not group_items:
+            continue
 
-    return {"warehouses": warehouses, "items": result_items}
+        warehouse_set: set = set()
+        group_result_items = []
+        for it in group_items:
+            wh_qty = item_wh_map.get(it["item_code"], {})
+            if not wh_qty:
+                continue
+            warehouse_set.update(wh_qty.keys())
+            total = sum(wh_qty.values())
+            group_result_items.append({
+                "item_code": it["item_code"],
+                "item_name": it["item_name"],
+                "item_group": it["item_group"],
+                "stock_uom": it["stock_uom"],
+                "warehouse_qty": wh_qty,
+                "total_qty": total,
+            })
+
+        if group_result_items:
+            result_groups.append({
+                "group_name": group_name,
+                "warehouses": sorted(warehouse_set),
+                "items": group_result_items,
+            })
+
+    return {"groups": result_groups}
 
 
 @frappe.whitelist()

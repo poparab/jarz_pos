@@ -356,7 +356,12 @@ def get_expense_bootstrap(filters: Optional[str] = None):
         manager_profiles = _manager_pos_profiles(company)
     else:
         try:
-            user_profiles = get_pos_profiles()
+            raw_profiles = get_pos_profiles()
+            # get_pos_profiles() may return dicts (with 'name' key) or strings
+            user_profiles = [
+                p["name"] if isinstance(p, dict) else p
+                for p in raw_profiles
+            ]
         except Exception:
             user_profiles = []
 
