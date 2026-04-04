@@ -47,7 +47,7 @@ def get_final_products_report() -> Dict[str, Any]:
     """
     _ensure_jarz_manager()
 
-    target_groups = ["Medium", "Large"]
+    target_groups = ["Meduim", "Large"]
 
     # Get all non-disabled items in the target groups
     items = frappe.get_all(
