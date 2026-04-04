@@ -36,6 +36,7 @@ def _augment_customer_with_territory(cust_row: dict[str, any]):
                 cust_row["delivery_expense"] = 0.0
                 
             cust_row["territory_name"] = _(territory_doc.territory_name)
+            cust_row["territory_name_ar"] = getattr(territory_doc, 'custom_territory_name_ar', '') or ''
         else:
             # Territory doesn't exist - set defaults
             cust_row["delivery_income"] = 0.0
@@ -378,6 +379,7 @@ def get_territory(territory_id: str | None = None):
     result = {
         "id": territory_doc.name,
         "name": _(territory_doc.territory_name),
+        "territory_name_ar": getattr(territory_doc, 'custom_territory_name_ar', '') or '',
         "delivery_income": 0.0,
         "delivery_expense": 0.0,
     }

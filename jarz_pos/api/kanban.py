@@ -716,10 +716,16 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             invoice_card["sub_territory"] = sub_terr
             # Translated display names for territory / sub-territory
             if inv_territory and inv_territory not in _territory_name_cache:
+                _ter_doc_vals = frappe.db.get_value("Territory", inv_territory, ["territory_name", "custom_territory_name_ar"], as_dict=True)
                 _territory_name_cache[inv_territory] = frappe._(
-                    frappe.db.get_value("Territory", inv_territory, "territory_name") or inv_territory
+                    (_ter_doc_vals or {}).get("territory_name") or inv_territory
                 )
+                _territory_name_ar_cache = getattr(get_kanban_invoices, '_territory_name_ar_cache', {})
+                _territory_name_ar_cache[inv_territory] = (_ter_doc_vals or {}).get("custom_territory_name_ar") or ""
+                get_kanban_invoices._territory_name_ar_cache = _territory_name_ar_cache
             invoice_card["territory_display"] = _territory_name_cache.get(inv_territory, inv_territory)
+            _territory_name_ar_cache = getattr(get_kanban_invoices, '_territory_name_ar_cache', {})
+            invoice_card["territory_name_ar"] = _territory_name_ar_cache.get(inv_territory, "")
             if sub_terr and sub_terr not in _territory_name_cache:
                 _territory_name_cache[sub_terr] = frappe._(
                     frappe.db.get_value("Territory", sub_terr, "territory_name") or sub_terr

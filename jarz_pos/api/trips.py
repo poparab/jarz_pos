@@ -582,8 +582,12 @@ def get_trip_details(trip_name: str):
         except Exception:
             pass
 
-        _t_name = frappe.db.get_value("Territory", row.territory, "territory_name") or row.territory if row.territory else ""
-        _st_name = frappe.db.get_value("Territory", row.sub_territory, "territory_name") or row.sub_territory if row.sub_territory else ""
+        _t_vals = frappe.db.get_value("Territory", row.territory, ["territory_name", "custom_territory_name_ar"], as_dict=True) if row.territory else {}
+        _t_name = (_t_vals or {}).get("territory_name") or row.territory or ""
+        _t_name_ar = (_t_vals or {}).get("custom_territory_name_ar") or ""
+        _st_vals = frappe.db.get_value("Territory", row.sub_territory, ["territory_name", "custom_territory_name_ar"], as_dict=True) if row.sub_territory else {}
+        _st_name = (_st_vals or {}).get("territory_name") or row.sub_territory or ""
+        _st_name_ar = (_st_vals or {}).get("custom_territory_name_ar") or ""
         invoices.append({
             "invoice": row.invoice,
             "customer_name": row.customer_name,
@@ -591,6 +595,8 @@ def get_trip_details(trip_name: str):
             "sub_territory": row.sub_territory,
             "territory_display": _(_t_name),
             "sub_territory_display": _(_st_name),
+            "territory_name_ar": _t_name_ar,
+            "sub_territory_name_ar": _st_name_ar,
             "grand_total": float(row.grand_total or 0),
             "shipping_expense": float(row.shipping_expense or 0),
             "invoice_status": inv_state,

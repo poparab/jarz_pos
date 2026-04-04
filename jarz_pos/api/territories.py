@@ -24,7 +24,7 @@ def get_sub_territories(territory_name: str):
     children = frappe.get_all(
         "Territory",
         filters={"parent_territory": territory_name},
-        fields=["name", "territory_name", "delivery_income", "delivery_expense"],
+        fields=["name", "territory_name", "delivery_income", "delivery_expense", "custom_territory_name_ar"],
         order_by="territory_name asc",
     )
 
@@ -34,6 +34,7 @@ def get_sub_territories(territory_name: str):
             {
                 "name": c.name,
                 "territory_name": _(c.territory_name),
+                "territory_name_ar": c.custom_territory_name_ar or "",
                 "delivery_income": float(c.delivery_income or 0),
                 "delivery_expense": float(c.delivery_expense or 0),
             }
