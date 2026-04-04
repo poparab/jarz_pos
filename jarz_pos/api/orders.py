@@ -164,62 +164,39 @@ def get_master_orders(
             ["customer", "like", f"%{search_term}%"],
         ]
 
-    # Count total matching records
+    # Count total and fetch paginated results
+    offset = (page - 1) * page_size
+
     if or_filters:
-        # For OR filters with AND filters, we need SQL
-        and_conditions = []
-        and_values = {}
-        idx = 0
-        for key, val in filters.items():
-            if isinstance(val, list):
-                if val[0] == "between":
-                    and_conditions.append(f"`tab{key}`.`{key}` between %(v{idx}a)s and %(v{idx}b)s")
-                    and_values[f"v{idx}a"] = val[1][0]
-                    and_values[f"v{idx}b"] = val[1][1]
-                elif val[0] in (">=", "<=", ">", "<"):
-                    and_conditions.append(f"`posting_date` {val[0]} %(v{idx})s")
-                    and_values[f"v{idx}"] = val[1]
-                elif val[0] == "in":
-                    placeholders = ", ".join([f"%(v{idx}_{j})s" for j in range(len(val[1]))])
-                    and_conditions.append(f"`{key}` in ({placeholders})")
-                    for j, v in enumerate(val[1]):
-                        and_values[f"v{idx}_{j}"] = v
-                else:
-                    and_conditions.append(f"`{key}` {val[0]} %(v{idx})s")
-                    and_values[f"v{idx}"] = val[1]
-            else:
-                and_conditions.append(f"`{key}` = %(v{idx})s")
-                and_values[f"v{idx}"] = val
-            idx += 1
+        # For OR + AND filters, use frappe.get_all with or_filters
+        all_matching = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            or_filters=or_filters,
+            fields=["name"],
+            order_by="posting_date desc, posting_time desc",
+            limit_page_length=0,
+        )
+        total = len(all_matching)
 
-        or_parts = []
-        for of in or_filters:
-            or_parts.append(f"`{of[0]}` like %(search)s")
-        and_values["search"] = f"%{search.strip()}%"
-
-        where = " AND ".join(and_conditions)
-        if where:
-            where += f" AND ({' OR '.join(or_parts)})"
-        else:
-            where = f"({' OR '.join(or_parts)})"
-
-        total = frappe.db.sql(
-            f"SELECT COUNT(*) FROM `tabSales Invoice` WHERE {where}",
-            and_values,
-        )[0][0]
-
-        # Fetch paginated results
-        offset = (page - 1) * page_size
-        field_list = ", ".join([f"`{f}`" for f in fields])
-        rows_raw = frappe.db.sql(
-            f"SELECT {field_list} FROM `tabSales Invoice` WHERE {where} ORDER BY `posting_date` DESC, `posting_time` DESC LIMIT %(limit)s OFFSET %(offset)s",
-            {**and_values, "limit": page_size, "offset": offset},
-            as_dict=True,
+        rows_raw = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            or_filters=or_filters,
+            fields=fields,
+            order_by="posting_date desc, posting_time desc",
+            limit_page_length=page_size,
+            limit_start=offset,
         )
     else:
-        total = frappe.get_count("Sales Invoice", filters=filters)
+        all_matching = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            fields=["name"],
+            limit_page_length=0,
+        )
+        total = len(all_matching)
 
-        offset = (page - 1) * page_size
         rows_raw = frappe.get_all(
             "Sales Invoice",
             filters=filters,
