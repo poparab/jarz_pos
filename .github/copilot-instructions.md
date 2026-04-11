@@ -1,5 +1,7 @@
 # Jarz POS Project - Copilot Instructions
 
+> **DOMAIN ISOLATION**: This app (`jarz_pos`) is completely independent from `jarz_woocommerce_integration`. Never import from, reference, or create dependencies on `jarz_woocommerce_integration` in this codebase.
+
 ## Project Overview
 This workspace contains a complete POS system with two main components:
 1. **Backend/API**: ERPNext custom app at `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos`
