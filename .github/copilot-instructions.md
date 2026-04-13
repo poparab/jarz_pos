@@ -2,6 +2,8 @@
 
 > **DOMAIN ISOLATION**: This app (`jarz_pos`) is completely independent from `jarz_woocommerce_integration`. Never import from, reference, or create dependencies on `jarz_woocommerce_integration` in this codebase.
 
+> **GIT-ONLY DEPLOYMENT**: All code changes to staging/production MUST go through git (local edit → commit → push → pull on server). NEVER edit files directly on any server. If uncommitted local changes are found on a server, commit them to a branch first, merge, then deploy.
+
 ## Project Overview
 This workspace contains a complete POS system with two main components:
 1. **Backend/API**: ERPNext custom app at `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos`
