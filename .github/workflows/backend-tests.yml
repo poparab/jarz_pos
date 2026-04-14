@@ -1,0 +1,41 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "fix/**"]
+    paths:
+      - "jarz_pos/**"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "jarz_pos/**"
+
+# Cancel in-progress runs for the same branch on new pushes.
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: Frappe / jarz_pos Tests
+    # Runs on the self-hosted runner installed on the staging server.
+    # The runner has Docker + a running ERPNext site named "frontend".
+    runs-on: [self-hosted, staging-docker]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Sync app source into the running bench ─────────────────────────────
+      - name: Copy changed app files into container
+        run: |
+          docker cp . erp-backend-1:/home/frappe/frappe-bench/apps/jarz_pos/
+
+      # ── Run tests via bench ────────────────────────────────────────────────
+      - name: Run jarz_pos tests
+        run: |
+          docker exec erp-backend-1 bench \
+            --site frontend \
+            run-tests \
+            --app jarz_pos \
+            --failfast
+        timeout-minutes: 20
