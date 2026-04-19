@@ -70,9 +70,9 @@ def _current_user_allowed_profiles() -> List[str]:
 
 
 def _ensure_manager_dashboard_access() -> None:
-    """Ensure the current user has JARZ Manager or admin-level role for dashboard access."""
+    """Ensure the current user has JARZ Manager, Line Manager, or admin-level role for dashboard access."""
     roles = set(frappe.get_roles())
-    allowed = ROLES.ADMIN | {"JARZ Manager"}
+    allowed = ROLES.ADMIN | {"JARZ Manager", "JARZ line manager", ROLES.JARZ_LINE_MANAGER}
     if not roles.intersection(allowed):
         frappe.throw(_("Not permitted: Manager Dashboard access required"), frappe.PermissionError)
 
