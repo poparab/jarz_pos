@@ -57,14 +57,10 @@ def _get_mfg_defaults(company: str) -> Dict[str, str]:
 
 
 def _ensure_manager_access() -> None:
-    try:
-        roles = set(frappe.get_roles())
-        allowed = ROLES.MANUFACTURING
-        if not roles.intersection(allowed):
-            frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
-    except Exception:
-        # If roles lookup fails (e.g., during background/debug), do not block by default
-        pass
+    roles = set(frappe.get_roles())
+    allowed = ROLES.MANUFACTURING
+    if not roles.intersection(allowed):
+        frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
 def _get_bom_company(bom_name: str) -> str:
@@ -496,11 +492,7 @@ def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, sch
 @frappe.whitelist()
 def list_recent_work_orders(limit: int = 50) -> List[Dict[str, Any]]:
     """Return recent Work Orders sorted by creation (last added first)."""
-    try:
-        _ensure_manager_access()
-    except Exception:
-        # Fallback: allow if ensure function not defined in this module variant
-        pass
+    _ensure_manager_access()
 
     rows = frappe.get_all(
         "Work Order",
