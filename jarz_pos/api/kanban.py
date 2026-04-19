@@ -1288,6 +1288,27 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                     except Exception:
                         pass
 
+            # Persist structured cancellation metadata to queryable fields
+            try:
+                if meta.get_field("custom_cancellation_type"):
+                    reason_text = reason
+                    if notes:
+                        reason_text = f"{reason}\nNotes: {notes}"
+                    frappe.db.set_value(
+                        "Sales Invoice", invoice.name,
+                        "custom_cancellation_type", "POS Cancellation",
+                        update_modified=False,
+                    )
+                    frappe.db.set_value(
+                        "Sales Invoice", invoice.name,
+                        "custom_cancellation_reason", reason_text,
+                        update_modified=False,
+                    )
+            except Exception:
+                frappe.logger().warning(
+                    f"KANBAN API: Unable to set cancellation fields for {invoice.name}"
+                )
+
             comment_lines = [
                 f"Order cancelled by {frappe.session.user}",
                 f"Reason: {reason}",
