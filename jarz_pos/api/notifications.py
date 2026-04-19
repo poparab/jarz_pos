@@ -505,6 +505,11 @@ def get_pending_alerts() -> Dict[str, Any]:
 def handle_invoice_submission(doc: Any) -> None:
     """Emit realtime and push notifications for a newly submitted invoice."""
 
+    # Skip invoices without a POS profile (e.g. WooCommerce orders) —
+    # they have no push-notification recipients.
+    if not getattr(doc, "pos_profile", None):
+        return
+
     try:
         frappe.logger().info(
             f"Invoice submit hook triggered for {getattr(doc, 'name', '?')} pos_profile={getattr(doc, 'pos_profile', None)}"
