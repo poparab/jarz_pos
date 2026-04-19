@@ -9,6 +9,7 @@ Endpoints:
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Union
 import frappe
+from frappe import _
 from jarz_pos.constants import ACCOUNTS, ROLES
 
 try:
@@ -68,6 +69,14 @@ def _current_user_allowed_profiles() -> List[str]:
         return []
 
 
+def _ensure_manager_dashboard_access() -> None:
+    """Ensure the current user has JARZ Manager or admin-level role for dashboard access."""
+    roles = set(frappe.get_roles())
+    allowed = ROLES.ADMIN | {"JARZ Manager"}
+    if not roles.intersection(allowed):
+        frappe.throw(_("Not permitted: Manager Dashboard access required"), frappe.PermissionError)
+
+
 def _get_state_field_options() -> List[str]:
     """Return list of Sales Invoice state options without reading Custom Field doc.
     Prefers 'custom_sales_invoice_state', falls back to legacy names.
@@ -94,6 +103,7 @@ def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, An
     Returns:
         { success, branches: [ { name, title, cash_account, balance } ], total_balance }
     """
+    _ensure_manager_dashboard_access()
     profiles = _current_user_allowed_profiles()
     if not profiles:
         return {"success": True, "branches": [], "total_balance": 0.0}
@@ -140,6 +150,7 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
     Returns:
       { success, invoices: [ ... ] }
     """
+    _ensure_manager_dashboard_access()
     limit = max(1, min(int(limit or 200), 500))
     allowed = _current_user_allowed_profiles()
     if not allowed:
@@ -214,6 +225,7 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
 @frappe.whitelist(allow_guest=False)
 def get_manager_states() -> Dict[str, Any]:
     """Return available Sales Invoice states (same list used by Kanban columns)."""
+    _ensure_manager_dashboard_access()
     try:
         states = _get_state_field_options()
         return {"success": True, "states": states}
@@ -230,6 +242,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
     - new_branch must be in current user's allowed POS Profiles.
     - Field custom_kanban_profile must exist; pos_profile and kanban profile are both updated.
     """
+    _ensure_manager_dashboard_access()
     try:
         frappe.logger().info(f"Transfer invoice request: {invoice_id} -> {new_branch}")
         

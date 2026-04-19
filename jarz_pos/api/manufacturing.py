@@ -111,6 +111,7 @@ def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
 
     Returns: [{ item_code, item_name, stock_uom, default_bom, bom_qty }]
     """
+    _ensure_manager_access()
     term = (search or "").strip()
     cond = ""
     vals: Dict[str, Any] = {}
@@ -159,6 +160,7 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
         components: [{ item_code, item_name, uom, qty_per_bom }]
       }
     """
+    _ensure_manager_access()
     item_code = (item_code or "").strip()
     if not item_code:
         frappe.throw(_("item_code is required"))
@@ -402,6 +404,7 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
       lines: JSON/list of objects with keys: item_code, bom_name, item_qty, scheduled_at (optional ISO)
     Returns per-line results with created names or error.
     """
+    _ensure_manager_access()
     lines = _coerce_lines(lines)
     results: List[Dict[str, Any]] = []
     for ln in lines:
@@ -472,6 +475,7 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
 
 @frappe.whitelist()
 def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, scheduled_at: str | None = None) -> Dict[str, Any]:
+    _ensure_manager_access()
     line = {
         "item_code": item_code,
         "bom_name": bom_name,

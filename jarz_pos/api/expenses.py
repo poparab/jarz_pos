@@ -214,10 +214,9 @@ def _month_label(month_key: str) -> str:
 
 
 def _load_months() -> List[str]:
-    rows = frappe.db.get_all(
-        "Jarz Expense Request",
-        fields=["distinct expense_month as month"],
-        order_by="month desc",
+    rows = frappe.db.sql(
+        "SELECT DISTINCT expense_month AS month FROM `tabJarz Expense Request` ORDER BY expense_month DESC",
+        as_dict=True,
     )
     months = [r["month"] for r in rows if r.get("month")]
     current_month = getdate().strftime("%Y-%m")
