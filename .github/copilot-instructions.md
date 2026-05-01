@@ -4,6 +4,8 @@
 
 > **GIT-ONLY DEPLOYMENT**: All code changes to staging/production MUST go through git (local edit → commit → push → pull on server). NEVER edit files directly on any server. If uncommitted local changes are found on a server, commit them to a branch first, merge, then deploy.
 
+> **ENVIRONMENT PARITY**: Local, staging, and production must stay aligned through GitHub-tracked commits only. The only valid path is local edit -> commit -> push to GitHub -> pull/deploy on staging -> pull/deploy on production. If any environment drifts or contains local-only/server-only code, stop and reconcile through GitHub before continuing.
+
 ## Project Overview
 This workspace contains a complete POS system with two main components:
 1. **Backend/API**: ERPNext custom app at `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos`
