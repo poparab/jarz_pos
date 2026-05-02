@@ -429,16 +429,15 @@ def create_pos_invoice(
         print("\n8️⃣ DOCUMENT VALIDATION:")
         _validate_and_calculate_document(invoice_doc, logger)
 
-        # STEP 8.1: Stock update suppression for Sales Partner invoices (ALL payment types)
-        # Business Rule (2025-09-16): If invoice has a Sales Partner, do NOT update stock at SI creation time.
-        # Rationale: Stock movement is effected via Delivery Note upon Out For Delivery; this keeps SI accounting-only.
+        # STEP 8.1: Keep POS Sales Invoices accounting-only for all payment flows.
+        # Business Rule: Stock movement must happen via Delivery Note on the delivery flow,
+        # so Sales Invoice creation must never reduce stock directly.
         try:
-            if getattr(invoice_doc, 'sales_partner', None):
-                if hasattr(invoice_doc, 'update_stock'):
-                    invoice_doc.update_stock = 0  # int flag expected by ERPNext
-                    print("   🚚 Stock update disabled (sales partner present)")
-                else:
-                    print("   ℹ️ 'update_stock' field not present on Sales Invoice; skipping suppression")
+            if hasattr(invoice_doc, 'update_stock'):
+                invoice_doc.update_stock = 0  # int flag expected by ERPNext
+                print("   🚚 Stock update disabled on POS Sales Invoice")
+            else:
+                print("   ℹ️ 'update_stock' field not present on Sales Invoice; skipping suppression")
         except Exception as _ustk_err:
             print(f"   ⚠️ Could not suppress stock update: {_ustk_err}")
 

@@ -401,11 +401,11 @@ class TestFreeShippingBundleDetection(unittest.TestCase):
 
 
 # ===========================================================================
-# TEST: Stock Update suppression for Sales Partner
+# TEST: Stock Update suppression for POS Sales Invoices
 # ===========================================================================
 
 class TestStockUpdateSuppression(unittest.TestCase):
-    """Verify that sales partner invoices disable stock update at SI creation."""
+    """Verify that POS Sales Invoices never update stock at SI creation."""
 
     def test_sales_partner_disables_stock_update(self):
         """Sales partner invoices should have update_stock=0."""
@@ -418,13 +418,15 @@ class TestStockUpdateSuppression(unittest.TestCase):
 
         self.assertEqual(inv.update_stock, 0)
 
-    def test_regular_invoice_keeps_stock_update(self):
-        """Non-partner invoices should keep update_stock=1."""
+    def test_regular_invoice_disables_stock_update(self):
+        """Regular POS invoices should also keep update_stock=0."""
         inv = _InvoiceDocCapture()
         inv.sales_partner = None
 
-        # Don't modify
-        self.assertEqual(inv.update_stock, 1)
+        if hasattr(inv, "update_stock"):
+            inv.update_stock = 0
+
+        self.assertEqual(inv.update_stock, 0)
 
 
 # ===========================================================================
