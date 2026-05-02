@@ -144,8 +144,32 @@ def _normalize_shift_close_error_message(raw: Any) -> str:
     return text or _("Unknown error while closing the shift.")
 
 
-def _get_shift_close_error_message(exc: Exception, closing=None) -> str:
+def _get_primary_traceback_error_message(traceback_text: str | None) -> str | None:
+    if not traceback_text:
+        return None
+
+    for raw_line in traceback_text.splitlines():
+        line = raw_line.strip()
+        if not line or ": " not in line:
+            continue
+        if line.startswith("Traceback") or line.startswith("File ") or line.startswith("During handling"):
+            continue
+        if not re.match(r"^[A-Za-z0-9_.]+(?:Error|Exception): ", line):
+            continue
+
+        message = line.split(": ", 1)[1].strip()
+        if message:
+            return _normalize_shift_close_error_message(message)
+
+    return None
+
+
+def _get_shift_close_error_message(exc: Exception, closing=None, traceback_text: str | None = None) -> str:
     error_value: Any = None
+
+    primary_traceback_message = _get_primary_traceback_error_message(traceback_text)
+    if primary_traceback_message:
+        return primary_traceback_message
 
     if closing is not None:
         error_value = getattr(closing, "error_message", None)
@@ -745,8 +769,9 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         closing.insert(ignore_permissions=True)
         closing.submit()
     except Exception as exc:
-        error_message = _get_shift_close_error_message(exc, closing)
-        frappe.log_error(frappe.get_traceback(), "jarz_pos.shift.end_shift")
+        traceback_text = frappe.get_traceback()
+        error_message = _get_shift_close_error_message(exc, closing, traceback_text)
+        frappe.log_error(traceback_text, "jarz_pos.shift.end_shift")
         frappe.throw(
             _("Failed to close shift: {0}").format(error_message),
             title=_("Shift Close Failed"),
