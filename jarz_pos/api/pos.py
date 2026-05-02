@@ -2,6 +2,21 @@ import frappe
 from frappe.utils import flt
 from typing import Optional
 
+
+def _get_valid_sales_item_codes(item_codes):
+    """Return item codes that are enabled and allowed for sales."""
+    item_codes = [item_code for item_code in item_codes if item_code]
+    if not item_codes:
+        return set()
+
+    return set(
+        frappe.get_all(
+            'Item',
+            filters={'name': ('in', item_codes), 'disabled': 0, 'is_sales_item': 1},
+            pluck='name',
+        )
+    )
+
 @frappe.whitelist(allow_guest=False)
 def get_pos_profiles():
     """Return list of POS Profile names enabled for the current user.
@@ -57,28 +72,47 @@ def get_profile_bundles(profile: str):
     # For now, just get all available bundles
     # Future: filter by POS profile permissions
     filters = {}
+    try:
+        if frappe.db.has_column('Jarz Bundle', 'disabled'):
+            filters['disabled'] = 0
+    except Exception:
+        pass
 
     bundles = frappe.get_all(
         'Jarz Bundle',
         filters=filters,
-        fields=['name as id', 'bundle_name as name', 'bundle_price as price', 'free_shipping'],
+        fields=['name as id', 'bundle_name as name', 'bundle_price as price', 'free_shipping', 'erpnext_item'],
     )
 
+    valid_bundle_item_codes = _get_valid_sales_item_codes(
+        [bundle.get('erpnext_item') for bundle in bundles]
+    )
+
+    filtered_bundles = []
+
     for b in bundles:
+        if not b.get('erpnext_item') or b['erpnext_item'] not in valid_bundle_item_codes:
+            continue
+
         bundle_item_groups = frappe.get_all(
             'Jarz Bundle Item Group',
             filters={'parent': b['id']},
             fields=['item_group', 'quantity'],
             order_by='idx'
         )
-        
+
         processed_groups = []
+        bundle_has_empty_required_group = False
         for group_info in bundle_item_groups:
             items_in_group = frappe.get_all(
                 'Item',
                 filters={'item_group': group_info['item_group'], 'disabled': 0, 'is_sales_item': 1},
                 fields=['name as id', 'item_name as name', 'standard_rate as price'],
             )
+
+            if not items_in_group:
+                bundle_has_empty_required_group = True
+                break
 
             # Get warehouse from POS profile for stock quantities
             # try:
@@ -123,15 +157,21 @@ def get_profile_bundles(profile: str):
                 'quantity': group_info['quantity'],
                 'items': items_in_group
             })
-            
+
+        if bundle_has_empty_required_group:
+            continue
+
         b['item_groups'] = processed_groups
+        b.pop('erpnext_item', None)
         # Normalize flag for clients
         try:
             b['free_shipping'] = 1 if int(b.get('free_shipping') or 0) else 0
         except Exception:
             b['free_shipping'] = 0
 
-    return bundles
+        filtered_bundles.append(b)
+
+    return filtered_bundles
 
 @frappe.whitelist(allow_guest=False)
 def get_profile_products(profile: str):
