@@ -127,6 +127,44 @@ class TestKanbanOperations(unittest.TestCase):
 		# Should return error for draft invoice
 		self.assertFalse(result.get("success", True))
 
+	@patch('jarz_pos.api.kanban._get_allowed_states')
+	@patch('jarz_pos.api.kanban.frappe')
+	def test_update_invoice_state_saves_submitted_invoice_to_fire_hooks(self, mock_frappe, mock_allowed_states):
+		"""Submitted invoice state changes should use save(), not db_set(), so hooks can run."""
+		from jarz_pos.api.kanban import update_invoice_state
+
+		mock_allowed_states.return_value = ["Out for Delivery", "Delivered"]
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-001"
+		mock_inv.docstatus = 1
+		mock_inv.flags = MagicMock()
+		mock_inv.get.side_effect = lambda fieldname: {
+			"custom_sales_invoice_state": "Out for Delivery",
+			"sales_invoice_state": "Out for Delivery",
+			"custom_state": None,
+			"state": None,
+		}.get(fieldname)
+
+		mock_meta = MagicMock()
+		mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {"custom_sales_invoice_state", "sales_invoice_state"} else None
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.get_meta.return_value = mock_meta
+		mock_frappe.utils.now.return_value = "2026-05-02 07:00:00"
+		mock_frappe.session.user = "tester@example.com"
+		mock_frappe.db.commit = MagicMock()
+		mock_frappe.publish_realtime = MagicMock()
+
+		result = update_invoice_state("INV-001", "Delivered")
+
+		self.assertTrue(result.get("success"))
+		self.assertTrue(mock_inv.flags.ignore_validate_update_after_submit)
+		mock_inv.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
+		mock_inv.db_set.assert_not_called()
+		mock_inv.set.assert_any_call("custom_sales_invoice_state", "Delivered")
+		mock_inv.set.assert_any_call("sales_invoice_state", "Delivered")
+
 	def test_delivery_note_creation_trigger(self):
 		"""Test that moving to 'Out for Delivery' triggers DN creation."""
 		from jarz_pos.api.kanban import update_invoice_state

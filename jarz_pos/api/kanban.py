@@ -1111,18 +1111,24 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         updated_fields: List[str] = []
         for f in fields_to_update:
             try:
-                invoice.db_set(f, new_state, update_modified=True)
+                invoice.set(f, new_state)
                 updated_fields.append(f)
-                print(f"db_set success for field {f}")
-            except Exception:
-                try:
-                    invoice.set(f, new_state)
-                    invoice.save(ignore_permissions=True, ignore_version=True)
-                    updated_fields.append(f + "(saved)")
-                    print(f"save fallback success for field {f}")
-                except Exception as inner_ex:
-                    print(f"Failed updating field {f}: {inner_ex}")
-                    frappe.logger().error(f"Failed updating field {f} on {invoice_id}: {inner_ex}")
+                print(f"set success for field {f}")
+            except Exception as inner_ex:
+                print(f"Failed setting field {f}: {inner_ex}")
+                frappe.logger().error(f"Failed setting field {f} on {invoice_id}: {inner_ex}")
+
+        if not updated_fields:
+            return _failure(f"Failed updating invoice state for {invoice_id}")
+
+        try:
+            invoice.flags.ignore_validate_update_after_submit = True
+            invoice.save(ignore_permissions=True, ignore_version=True)
+            print("invoice save successful")
+        except Exception as save_ex:
+            print(f"Failed saving invoice {invoice_id}: {save_ex}")
+            frappe.logger().error(f"Failed saving invoice {invoice_id}: {save_ex}")
+            return _failure(f"Failed updating invoice state for {invoice_id}: {save_ex}")
 
         try:
             frappe.db.commit()

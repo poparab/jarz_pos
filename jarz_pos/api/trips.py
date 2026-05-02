@@ -405,8 +405,9 @@ def mark_trip_as_delivered(trip_name: str):
     frappe.db.savepoint(sp_name)
     try:
         for row in trip.invoices:
+            inv = frappe.get_doc("Sales Invoice", row.invoice)
             current_state = (
-                frappe.db.get_value("Sales Invoice", row.invoice, "custom_sales_invoice_state") or ""
+                (inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "")
             ).strip().lower()
 
             # Skip if already delivered
@@ -414,12 +415,16 @@ def mark_trip_as_delivered(trip_name: str):
                 results.append({"invoice": row.invoice, "status": "already_delivered"})
                 continue
 
+            fields_updated = False
             for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
                 if meta.get_field(field_name):
-                    frappe.db.set_value(
-                        "Sales Invoice", row.invoice, field_name, "Delivered",
-                        update_modified=True,
-                    )
+                    inv.set(field_name, "Delivered")
+                    fields_updated = True
+
+            if fields_updated:
+                inv.flags.ignore_validate_update_after_submit = True
+                inv.save(ignore_permissions=True, ignore_version=True)
+
             # Persist child row status
             frappe.db.set_value(
                 "Delivery Trip Invoice", row.name,
