@@ -5,6 +5,8 @@ This module handles all delivery and courier-related operations,
 including outstanding management, expense tracking, and settlement.
 """
 
+from contextlib import contextmanager
+
 import frappe
 from jarz_pos.constants import ACCOUNTS, WS_EVENTS
 from jarz_pos.utils.account_utils import (
@@ -25,6 +27,51 @@ DN_LOGIC_VERSION = "2025-09-07a"
 
 # Constant VAT rate on partner fees
 PARTNER_FEES_VAT_RATE = 0.14  # 14%
+
+
+@contextmanager
+def _allow_disabled_invoice_items_for_delivery_note(item_codes: set[str]):
+    """Allow historical invoice items to pass DN creation even if later disabled.
+
+    Existing submitted Sales Invoices must remain fulfillable. ERPNext validates
+    disabled items during Delivery Note creation through validate_end_of_life(),
+    so temporarily scope that check to ignore the disabled flag only for the
+    exact invoice item codes being dispatched.
+    """
+    allowed_item_codes = {item_code for item_code in item_codes if item_code}
+    if not allowed_item_codes:
+        yield
+        return
+
+    try:
+        import erpnext.stock.get_item_details as stock_get_item_details
+        from erpnext.stock.doctype.item import item as item_module
+    except Exception:
+        yield
+        return
+
+    original_item_validate = getattr(item_module, "validate_end_of_life", None)
+    original_get_item_details_validate = getattr(stock_get_item_details, "validate_end_of_life", None)
+
+    if not callable(original_item_validate):
+        yield
+        return
+
+    def _validate_end_of_life(item_code, end_of_life=None, disabled=None):
+        if item_code in allowed_item_codes and disabled:
+            disabled = 0
+        return original_item_validate(item_code, end_of_life=end_of_life, disabled=disabled)
+
+    item_module.validate_end_of_life = _validate_end_of_life
+    if callable(original_get_item_details_validate):
+        stock_get_item_details.validate_end_of_life = _validate_end_of_life
+
+    try:
+        yield
+    finally:
+        item_module.validate_end_of_life = original_item_validate
+        if callable(original_get_item_details_validate):
+            stock_get_item_details.validate_end_of_life = original_get_item_details_validate
 
 def _compute_sales_partner_fees(inv, sales_partner: str, online: bool) -> dict:
     """Compute partner fees (commission + optional online fee) plus VAT.
@@ -220,8 +267,10 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
             pass
 
         dn.flags.ignore_permissions = True
-        dn.insert(ignore_permissions=True)
-        dn.submit()
+        invoice_item_codes = {getattr(it, "item_code", None) for it in si.items}
+        with _allow_disabled_invoice_items_for_delivery_note(invoice_item_codes):
+            dn.insert(ignore_permissions=True)
+            dn.submit()
         # Mark completed (fully billed) per business rule
         try:
             dn.db_set("per_billed", 100, update_modified=False)

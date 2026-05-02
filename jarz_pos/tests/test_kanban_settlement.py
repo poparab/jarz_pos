@@ -257,6 +257,72 @@ class TestKanbanOperations(unittest.TestCase):
 		self.assertIsNotNone(DN_LOGIC_VERSION)
 		self.assertIsInstance(DN_LOGIC_VERSION, str)
 
+	@patch('jarz_pos.services.delivery_handling.frappe')
+	def test_delivery_note_allows_disabled_historical_invoice_items(self, mock_frappe):
+		"""Auto-created DNs should still work for submitted invoices whose items were later disabled."""
+		from jarz_pos.services.delivery_handling import ensure_delivery_note_for_invoice
+		import erpnext.stock.get_item_details as stock_get_item_details
+		from erpnext.stock.doctype.item import item as item_module
+
+		mock_item = MagicMock()
+		mock_item.item_code = "ITEM-001"
+		mock_item.item_name = "Mango Kunafa Medium"
+		mock_item.description = "Disabled after invoice submit"
+		mock_item.qty = 1
+		mock_item.uom = "Nos"
+		mock_item.stock_uom = "Nos"
+		mock_item.conversion_factor = 1
+		mock_item.rate = 530
+		mock_item.amount = 530
+		mock_item.warehouse = "Main WH"
+		mock_item.get.side_effect = lambda key, default=None: getattr(mock_item, key, default)
+
+		mock_invoice = MagicMock()
+		mock_invoice.name = "INV-001"
+		mock_invoice.docstatus = 1
+		mock_invoice.customer = "Customer"
+		mock_invoice.company = "Jarz"
+		mock_invoice.items = [mock_item]
+
+		appended_rows = []
+		mock_dn = MagicMock()
+		mock_dn.name = "DN-001"
+		mock_dn.append.side_effect = lambda child_table, row: appended_rows.append(row)
+		mock_dn.db_set = MagicMock()
+
+		def strict_validate(item_code, end_of_life=None, disabled=None):
+			if disabled:
+				raise Exception(f"Item {item_code} is disabled")
+
+		def validate_delivery_note_items(*args, **kwargs):
+			for row in appended_rows:
+				stock_get_item_details.validate_end_of_life(row["item_code"], disabled=1)
+
+		mock_dn.insert.side_effect = validate_delivery_note_items
+		mock_dn.submit.side_effect = validate_delivery_note_items
+
+		mock_meta = MagicMock()
+		mock_meta.get_field.return_value = None
+
+		mock_frappe.get_doc.side_effect = lambda doctype, name=None: mock_invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_meta.return_value = mock_meta
+		mock_frappe.get_all.return_value = []
+		mock_frappe.new_doc.return_value = mock_dn
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.utils.getdate.return_value = "2026-05-02"
+		mock_frappe.utils.nowtime.return_value = "12:00:00"
+		mock_frappe.utils.today.return_value = "2026-05-02"
+		mock_frappe.utils.add_days.return_value = "2026-04-29"
+
+		with patch.object(stock_get_item_details, 'validate_end_of_life', side_effect=strict_validate) as stock_validate, \
+			 patch.object(item_module, 'validate_end_of_life', side_effect=strict_validate) as item_validate:
+			result = ensure_delivery_note_for_invoice("INV-001")
+
+		self.assertIsNone(result["error"])
+		self.assertEqual(result["delivery_note"], "DN-001")
+		self.assertIs(stock_get_item_details.validate_end_of_life, stock_validate)
+		self.assertIs(item_module.validate_end_of_life, item_validate)
+
 	@patch('jarz_pos.api.kanban.frappe')
 	def test_kanban_publishes_realtime_events(self, mock_frappe):
 		"""Test that state updates publish realtime events."""
