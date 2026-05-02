@@ -61,7 +61,7 @@ before_migrate = [
 # webform_include_css = {"doctype": "public/css/doctype.css"}
 
 # include js in page
-# page_js = {"page" : "public/js/file.js"}
+page_js = {"point-of-sale": "public/js/point_of_sale_close_fix.js"}
 
 # Workspaces
 # ----------
@@ -99,7 +99,7 @@ workspaces = [
 ]
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {"POS Closing Entry": "public/js/pos_closing_entry_fix.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}

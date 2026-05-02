@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+from html import unescape
 from typing import Any
 
 import frappe
@@ -110,6 +113,52 @@ def _get_profile_primary_mode_of_payment(profile) -> str | None:
             return row.get("mode_of_payment")
 
     return (payments[0] or {}).get("mode_of_payment")
+
+
+def _normalize_shift_close_error_message(raw: Any) -> str:
+    if raw is None:
+        return _("Unknown error while closing the shift.")
+
+    if isinstance(raw, dict):
+        raw = raw.get("message") or raw.get("exc") or raw.get("exception") or json.dumps(raw)
+    elif isinstance(raw, list):
+        parts = [_normalize_shift_close_error_message(item) for item in raw]
+        parts = [part for part in parts if part]
+        return "; ".join(parts) if parts else _("Unknown error while closing the shift.")
+
+    text = str(raw).strip()
+    if not text:
+        return _("Unknown error while closing the shift.")
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if parsed is not None and parsed != raw:
+        return _normalize_shift_close_error_message(parsed)
+
+    text = unescape(text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or _("Unknown error while closing the shift.")
+
+
+def _get_shift_close_error_message(exc: Exception, closing=None) -> str:
+    error_value: Any = None
+
+    if closing is not None:
+        error_value = getattr(closing, "error_message", None)
+        if not error_value and getattr(closing, "name", None) and frappe.db.exists("POS Closing Entry", closing.name):
+            error_value = frappe.db.get_value("POS Closing Entry", closing.name, "error_message")
+
+    if not error_value and frappe.message_log:
+        error_value = frappe.message_log[-1]
+
+    if not error_value:
+        error_value = str(exc)
+
+    return _normalize_shift_close_error_message(error_value)
 
 
 def _resolve_pos_profile_account(company: str, pos_profile: str, branch: str | None, mode_of_payment: str | None) -> str | None:
@@ -692,8 +741,16 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         row.expected_amount = system_expected
         row.closing_amount = flt(closing_map.get(row.mode_of_payment, system_expected))
 
-    closing.insert(ignore_permissions=True)
-    closing.submit()
+    try:
+        closing.insert(ignore_permissions=True)
+        closing.submit()
+    except Exception as exc:
+        error_message = _get_shift_close_error_message(exc, closing)
+        frappe.log_error(frappe.get_traceback(), "jarz_pos.shift.end_shift")
+        frappe.throw(
+            _("Failed to close shift: {0}").format(error_message),
+            title=_("Shift Close Failed"),
+        )
 
     # --- Create discrepancy journal entry if closing differs from expected ---
     journal_entry = None
