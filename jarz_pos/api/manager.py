@@ -4,13 +4,13 @@ Endpoints:
 - get_manager_dashboard_summary: list accessible POS Profiles with cash account and current balance.
 - get_manager_orders: recent invoices feed filtered by branch (POS Profile) or all, optional by state.
 - get_manager_states: return available Sales Invoice state options (same as Kanban columns).
-- update_invoice_branch: change custom_kanban_profile for a submitted Sales Invoice (reassign branch).
+- update_invoice_branch: reassign a submitted Sales Invoice by changing custom_kanban_profile only.
 """
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Union
 import frappe
 from frappe import _
-from jarz_pos.constants import ACCOUNTS, ROLES
+from jarz_pos.constants import ACCOUNTS, ROLES, WS_EVENTS
 
 try:
     # ERPNext helper to get account balance as of today
@@ -92,6 +92,60 @@ def _get_state_field_options() -> List[str]:
         return []
     except Exception:
         return []
+
+
+def _state_key(value: Optional[str]) -> Optional[str]:
+    """Normalize a state label into the websocket state-key format."""
+    if not value:
+        return None
+    return str(value).strip().lower().replace(" ", "_")
+
+
+def _publish_invoice_reassignment_refresh(
+    invoice: Any,
+    *,
+    old_branch: Optional[str],
+    new_branch: str,
+    old_state: Optional[str],
+    new_state: str,
+) -> None:
+    """Broadcast a board-refresh event for cross-session Kanban convergence."""
+    invoice_summary = {
+        "name": getattr(invoice, "name", None),
+        "customer": invoice.get("customer"),
+        "customer_name": invoice.get("customer_name"),
+        "grand_total": invoice.get("grand_total"),
+        "status": invoice.get("status"),
+        "posting_date": str(invoice.get("posting_date")) if invoice.get("posting_date") else None,
+        "posting_time": str(invoice.get("posting_time")) if invoice.get("posting_time") else None,
+        "pos_profile": invoice.get("pos_profile"),
+        "kanban_profile": new_branch,
+    }
+    payload = {
+        "event": "invoice_reassigned",
+        "invoice_id": getattr(invoice, "name", None),
+        "old_profile": old_branch,
+        "new_profile": new_branch,
+        "old_state": old_state,
+        "new_state": new_state,
+        "old_state_key": None,
+        "new_state_key": _state_key(new_state),
+        "pos_profile": invoice.get("pos_profile"),
+        "kanban_profile": new_branch,
+        "acceptance_status": invoice.get("custom_acceptance_status"),
+        "updated_by": frappe.session.user,
+        "timestamp": frappe.utils.now(),
+        "force_refresh": True,
+        "invoice": invoice_summary,
+    }
+    try:
+        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Invoice reassignment realtime publish failed for {getattr(invoice, 'name', None)}",
+        )
 
 
 @frappe.whitelist(allow_guest=False)
@@ -235,22 +289,40 @@ def get_manager_states() -> Dict[str, Any]:
 
 @frappe.whitelist(allow_guest=False)
 def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
-    """Update the invoice's branch linkage by setting custom_kanban_profile.
+    """Reassign a submitted POS invoice by updating custom_kanban_profile.
+
+    This is the only supported post-submit branch transfer path.
 
     Rules:
     - Only for submitted POS invoices (docstatus=1 and is_pos=1).
+    - The target POS Profile must exist, be enabled, and be allowed for the current user.
+    - Only custom_kanban_profile and transfer-related Kanban workflow fields are updated.
+    - pos_profile remains unchanged after submit.
     - new_branch must be in current user's allowed POS Profiles.
-    - Field custom_kanban_profile must exist; pos_profile and kanban profile are both updated.
+    - The reassignment touches modified and emits a realtime refresh event for other sessions.
     """
     _ensure_manager_dashboard_access()
     try:
         frappe.logger().info(f"Transfer invoice request: {invoice_id} -> {new_branch}")
         
-        if not invoice_id or not new_branch:
-            return {"success": False, "error": "Missing invoice_id or new_branch"}
+        if not invoice_id:
+            return {"success": False, "error": "invoice_id is required"}
+        if not new_branch:
+            return {"success": False, "error": "new_branch is required"}
+
+        if not frappe.db.exists("Sales Invoice", invoice_id):
+            return {"success": False, "error": f"Sales Invoice {invoice_id} was not found"}
+
+        if not frappe.db.exists("POS Profile", new_branch):
+            return {"success": False, "error": f"Target POS Profile {new_branch} was not found"}
+
+        if int(frappe.db.get_value("POS Profile", new_branch, "disabled") or 0) == 1:
+            return {"success": False, "error": f"Target POS Profile {new_branch} is disabled"}
+
         allowed = _current_user_allowed_profiles()
         if new_branch not in allowed:
-            return {"success": False, "error": "Not allowed to assign to this branch"}
+            return {"success": False, "error": f"Not allowed to assign invoices into branch {new_branch}"}
+
         inv = frappe.get_doc("Sales Invoice", invoice_id)
         
         frappe.logger().info(f"Invoice docstatus: {inv.get('docstatus')}, is_pos: {inv.get('is_pos')}")
@@ -268,8 +340,12 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             or inv.get("state")
             or "Received"
         )
+        current_branch = inv.get("custom_kanban_profile") or inv.get("pos_profile")
 
         frappe.logger().info(f"Current state: '{current_state}'")
+        frappe.logger().info(
+            f"Invoice transfer validated: invoice={inv.name}, user={frappe.session.user}, old_branch={current_branch}, new_branch={new_branch}, state={current_state}"
+        )
         
         # Normalize the state for comparison (strip and lowercase)
         normalized_state = str(current_state).strip().lower()
@@ -377,7 +453,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         
         try:
             for field, value in updates.items():
-                frappe.db.set_value("Sales Invoice", inv.name, field, value, update_modified=False)
+                frappe.db.set_value("Sales Invoice", inv.name, field, value, update_modified=True)
             frappe.db.commit()
         except Exception as e:
             frappe.log_error(f"Error setting values during transfer: {str(e)}\nUpdates: {updates}", "Invoice Transfer")
@@ -390,6 +466,17 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         inv.reload()
 
         try:
+            _publish_invoice_reassignment_refresh(
+                inv,
+                old_branch=current_branch,
+                new_branch=new_branch,
+                old_state=current_state,
+                new_state=target_received,
+            )
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Invoice reassignment realtime publish failed during transfer")
+
+        try:
             notify_invoice_reassignment(inv, new_branch)
         except Exception:
             frappe.log_error(frappe.get_traceback(), "notify_invoice_reassignment failed during transfer")
@@ -397,6 +484,9 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             frappe.db.commit()
         except Exception:
             pass
+        frappe.logger().info(
+            f"Invoice transfer completed: invoice={inv.name}, user={frappe.session.user}, old_branch={current_branch}, new_branch={new_branch}, old_state={current_state}, new_state={target_received}"
+        )
         return {
             "success": True,
             "invoice_id": invoice_id,

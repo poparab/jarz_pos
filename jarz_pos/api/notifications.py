@@ -544,15 +544,19 @@ def handle_invoice_submission(doc: Any) -> None:
         frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
 
 
-def notify_invoice_reassignment(invoice: Union[str, Any], new_pos_profile: str) -> None:
-    """Re-issue invoice alert notification when a manager reassigns the branch.
+def notify_invoice_reassignment(invoice: Union[str, Any], new_kanban_profile: str) -> None:
+    """Re-issue invoice alerts for the new effective Kanban branch after reassignment.
 
     Args:
         invoice: Sales Invoice doc or name to notify for.
-        new_pos_profile: POS Profile that should receive the alert.
+        new_kanban_profile: Effective Kanban profile that should receive the alert.
+
+    The persisted Sales Invoice.pos_profile is not changed here. For legacy
+    consumers, the emitted alert payload still mirrors the effective branch into
+    both `pos_profile` and `kanban_profile`.
     """
 
-    if not new_pos_profile:
+    if not new_kanban_profile:
         return
 
     try:
@@ -562,7 +566,9 @@ def notify_invoice_reassignment(invoice: Union[str, Any], new_pos_profile: str) 
 
         original_profile = getattr(doc, "pos_profile", None)
         try:
-            setattr(doc, "pos_profile", new_pos_profile)
+            # Build the compatibility payload as if the invoice belongs to the new
+            # branch, without mutating the persisted submitted POS Profile.
+            setattr(doc, "pos_profile", new_kanban_profile)
             payload = _build_invoice_alert_payload(doc)
         finally:
             setattr(doc, "pos_profile", original_profile)
@@ -570,12 +576,12 @@ def notify_invoice_reassignment(invoice: Union[str, Any], new_pos_profile: str) 
         if not payload:
             return
 
-        payload["pos_profile"] = new_pos_profile
-        payload["kanban_profile"] = new_pos_profile
+        payload["pos_profile"] = new_kanban_profile
+        payload["kanban_profile"] = new_kanban_profile
         payload["acceptance_status"] = "Pending"
         payload["requires_acceptance"] = True
 
-        recipients = _get_users_for_pos_profiles([new_pos_profile])
+        recipients = _get_users_for_pos_profiles([new_kanban_profile])
         _publish_invoice_alert(payload, recipients)
         _push_new_invoice(payload, recipients)
     except Exception:

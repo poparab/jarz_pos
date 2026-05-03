@@ -1,5 +1,5 @@
 """
-Sales Invoice event handlers (minimal shims)
+Sales Invoice event handlers for Kanban profile seeding and realtime notifications.
 
 These handlers are referenced in hooks.py. Implemented as safe no-ops with
 lightweight behavior so integrations depending on these hooks don't fail.
@@ -32,16 +32,19 @@ def _safe_publish(event: str, message: dict[str, Any]) -> None:
 
 
 def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
-	"""Mirror POS Profile into a custom field used by Kanban, if present.
+	"""Seed Kanban profile from POS Profile on draft invoices only.
 
-	- If doc has `pos_profile` and `custom_kanban_profile`, keep them in sync.
+	- Draft invoices keep `custom_kanban_profile` aligned with `pos_profile`.
+	- Submitted invoices preserve `custom_kanban_profile` so post-submit
+	  branch reassignment remains intact.
 	- Resolve territory-based shipping expense into `custom_shipping_expense`
 	  so every consumer reads the same persisted value.
 	- Safe no-op if fields are missing.
 	"""
 	try:
 		pos_profile = getattr(doc, "pos_profile", None)
-		if pos_profile and hasattr(doc, "custom_kanban_profile"):
+		docstatus = int(getattr(doc, "docstatus", 0) or 0)
+		if docstatus == 0 and pos_profile and hasattr(doc, "custom_kanban_profile"):
 			if getattr(doc, "custom_kanban_profile", None) != pos_profile:
 				setattr(doc, "custom_kanban_profile", pos_profile)
 	except Exception:

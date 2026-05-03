@@ -4,6 +4,22 @@ This module tests manager dashboard and order management API endpoints.
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+
+class _FakeInvoice:
+	"""Minimal Sales Invoice stub for manager API tests."""
+
+	def __init__(self, **data):
+		self._data = dict(data)
+		self.name = self._data["name"]
+
+	def get(self, key, default=None):
+		return self._data.get(key, default)
+
+	def reload(self):
+		return None
 
 
 class TestManagerAPI(unittest.TestCase):
@@ -105,3 +121,98 @@ class TestManagerAPI(unittest.TestCase):
 		# Should return error
 		self.assertFalse(result.get("success"), "Should return success=False for empty new_branch")
 		self.assertIn("error", result, "Should include error message")
+
+	def test_update_invoice_branch_updates_custom_kanban_profile_only(self):
+		"""Submitted invoice reassignment should update custom_kanban_profile and publish refresh events."""
+		from jarz_pos.api.manager import update_invoice_branch
+
+		invoice = _FakeInvoice(
+			name="INV-001",
+			docstatus=1,
+			is_pos=1,
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="In Progress",
+			status="Paid",
+			customer="CUST-001",
+			customer_name="Test Customer",
+			grand_total=250.0,
+			posting_date="2026-05-03",
+			posting_time="12:00:00",
+		)
+
+		meta = MagicMock()
+		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {
+			"custom_kanban_profile",
+			"custom_sales_invoice_state",
+			"custom_acceptance_status",
+			"custom_accepted_by",
+			"custom_accepted_on",
+		} else None
+
+		mock_frappe = MagicMock()
+		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.utils.now.return_value = "2026-05-03 12:30:00"
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: 0 if (doctype, name, field) == ("POS Profile", "Nasr city", "disabled") else None
+		)
+
+		def _set_value(_doctype, _name, field, value, update_modified=True):
+			invoice._data[field] = value
+
+		mock_frappe.db.set_value.side_effect = _set_value
+		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_meta.return_value = meta
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
+			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]), \
+			 patch("jarz_pos.api.manager.notify_invoice_reassignment") as mock_notify, \
+			 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress", "Ready"]):
+			result = update_invoice_branch(invoice_id="INV-001", new_branch="Nasr city")
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(invoice.get("pos_profile"), "Dokki")
+		self.assertEqual(invoice.get("custom_kanban_profile"), "Nasr city")
+		self.assertEqual(invoice.get("custom_sales_invoice_state"), "Received")
+		self.assertEqual(invoice.get("custom_acceptance_status"), "Pending")
+		self.assertIsNone(invoice.get("custom_accepted_by"))
+		self.assertIsNone(invoice.get("custom_accepted_on"))
+		self.assertNotIn("pos_profile", [call.args[2] for call in mock_frappe.db.set_value.call_args_list])
+		self.assertTrue(all(call.kwargs.get("update_modified") is True for call in mock_frappe.db.set_value.call_args_list))
+		mock_notify.assert_called_once_with(invoice, "Nasr city")
+
+		events = [call.args[0] for call in mock_frappe.publish_realtime.call_args_list]
+		self.assertEqual(events, ["jarz_pos_invoice_state_change", "kanban_update"])
+		payload = mock_frappe.publish_realtime.call_args_list[0].args[1]
+		self.assertEqual(payload["event"], "invoice_reassigned")
+		self.assertEqual(payload["old_profile"], "Dokki")
+		self.assertEqual(payload["new_profile"], "Nasr city")
+		self.assertEqual(payload["pos_profile"], "Dokki")
+		self.assertEqual(payload["kanban_profile"], "Nasr city")
+		self.assertIsNone(payload["old_state_key"])
+		self.assertEqual(payload["new_state_key"], "received")
+		self.assertTrue(payload["force_refresh"])
+
+	def test_update_invoice_branch_rejects_disabled_target_profile(self):
+		"""Disabled POS Profiles should fail with a specific validation error."""
+		from jarz_pos.api.manager import update_invoice_branch
+
+		mock_frappe = MagicMock()
+		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: 1 if (doctype, name, field) == ("POS Profile", "Closed Branch", "disabled") else None
+		)
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+			result = update_invoice_branch(invoice_id="INV-001", new_branch="Closed Branch")
+
+		self.assertFalse(result.get("success"))
+		self.assertIn("disabled", result.get("error", "").lower())
+

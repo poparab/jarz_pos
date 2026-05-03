@@ -196,7 +196,7 @@ after_uninstall = "jarz_pos.utils.cleanup.remove_required_delivery_datetime_fiel
 
 doc_events = {
     "Sales Invoice": {
-        # Always mirror POS Profile into custom_kanban_profile
+        # Seed custom_kanban_profile from pos_profile on drafts; preserve submitted reassignments
         "validate": "jarz_pos.events.sales_invoice.sync_kanban_profile",
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
     "on_submit": "jarz_pos.events.sales_invoice.publish_new_invoice",
