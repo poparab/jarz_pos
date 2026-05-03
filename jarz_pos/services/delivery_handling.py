@@ -29,6 +29,42 @@ DN_LOGIC_VERSION = "2025-09-07a"
 PARTNER_FEES_VAT_RATE = 0.14  # 14%
 
 
+def update_submitted_sales_invoice_state(
+    inv,
+    target_state: str,
+    *,
+    field_names: tuple[str, ...] | list[str] | None = None,
+) -> bool:
+    """Persist Sales Invoice state changes via save() so update-after-submit hooks can run."""
+    resolved_fields = tuple(field_names or ("custom_sales_invoice_state",))
+    target_state = (target_state or "").strip()
+    if not target_state:
+        return False
+
+    try:
+        meta = frappe.get_meta("Sales Invoice")
+        existing_fields = [field_name for field_name in resolved_fields if meta.get_field(field_name)]
+        if existing_fields:
+            resolved_fields = tuple(existing_fields)
+    except Exception:
+        pass
+
+    if not resolved_fields:
+        return False
+
+    if all((str(inv.get(field_name) or "").strip() == target_state) for field_name in resolved_fields):
+        return False
+
+    for field_name in resolved_fields:
+        inv.set(field_name, target_state)
+
+    if getattr(inv, "docstatus", 0) == 1:
+        inv.flags.ignore_validate_update_after_submit = True
+
+    inv.save(ignore_permissions=True, ignore_version=True)
+    return True
+
+
 @contextmanager
 def _allow_disabled_invoice_items_for_delivery_note(item_codes: set[str]):
     """Allow historical invoice items to pass DN creation even if later disabled.
@@ -437,12 +473,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         je_name = _create_shipping_expense_to_creditors_je(inv, shipping_exp, creditors_acc, party_type, party)
 
     # Update state (defer state commit to end of request)
-    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
-        try:
-            inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
-        except Exception:
-            inv.set("custom_sales_invoice_state", "Out for Delivery")
-            inv.save(ignore_permissions=True)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
 
     # Mandatory Delivery Note creation (enforced across all flows)
     dn_result = ensure_delivery_note_for_invoice(inv.name)
@@ -581,12 +612,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
             pe_name = pe.name
 
     # Update operational state
-    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
-        try:
-            inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
-        except Exception:
-            inv.set("custom_sales_invoice_state", "Out for Delivery")
-            inv.save(ignore_permissions=True)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
 
     # Delivery Note
     dn_result = ensure_delivery_note_for_invoice(inv.name)
@@ -695,12 +721,7 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
     current_state = (inv.get("custom_sales_invoice_state") or "").strip()
     target_state = "In Progress" if explicit_online else "Out for Delivery"
 
-    if current_state != target_state:
-        try:
-            inv.db_set("custom_sales_invoice_state", target_state, update_modified=True)
-        except Exception:
-            inv.set("custom_sales_invoice_state", target_state)
-            inv.save(ignore_permissions=True)
+    update_submitted_sales_invoice_state(inv, target_state)
 
     # Auto-create Delivery Note only when moving to Out for Delivery
     dn_result = {"delivery_note": None, "reused": False, "logic_version": DN_LOGIC_VERSION}
@@ -826,8 +847,7 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     company = inv.company
     
     # Ensure the invoice is marked Out for delivery before proceeding.
-    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
-        inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=False)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
     
     # Read shipping from the stored SI value first, fallback to territory calculation
     stored = float(getattr(inv, "custom_shipping_expense", 0) or 0)
@@ -901,8 +921,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
             frappe.throw("party_type & party are required (courier must be an Employee or Supplier)")
     
     # Ensure state is Out for delivery (idempotent)
-    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
-        inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=False)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
     
     # Read shipping from the stored SI value first, fallback to territory calculation
     stored_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
@@ -1262,12 +1281,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
 
     # Update operational state idempotently
-    if inv.get("custom_sales_invoice_state") != "Out for Delivery":
-        try:
-            inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
-        except Exception:
-            inv.set("custom_sales_invoice_state", "Out for Delivery")
-            inv.save(ignore_permissions=True)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
 
     freight_acc = get_freight_expense_account(company)
     courier_outstanding_acc = get_courier_outstanding_account(company)
@@ -1496,12 +1510,7 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
         validate_account_exists(cash_acc)
 
         # Update operational state idempotently
-        if inv.get("custom_sales_invoice_state") != "Out for Delivery":
-            try:
-                inv.db_set("custom_sales_invoice_state", "Out for Delivery", update_modified=True)
-            except Exception:
-                inv.set("custom_sales_invoice_state", "Out for Delivery")
-                inv.save(ignore_permissions=True)
+        update_submitted_sales_invoice_state(inv, "Out for Delivery")
 
         # Ensure Delivery Note exists (reuse/create)
         dn_result = ensure_delivery_note_for_invoice(inv.name)

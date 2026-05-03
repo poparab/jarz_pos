@@ -14,6 +14,7 @@ from jarz_pos.services.delivery_handling import (
     _get_delivery_expense_amount,
     _create_shipping_expense_to_creditors_je,
     get_creditors_account,
+    update_submitted_sales_invoice_state,
 )
 
 
@@ -260,8 +261,6 @@ def send_trip_for_delivery(trip_name: str):
     processed = []
 
     try:
-        meta = frappe.get_meta("Sales Invoice")
-
         for row in to_process:
             inv = frappe.get_doc("Sales Invoice", row.invoice)
 
@@ -318,10 +317,12 @@ def send_trip_for_delivery(trip_name: str):
                 ct.delivery_trip = trip.name
                 ct.insert(ignore_permissions=True)
 
-            # Set invoice state to Out for Delivery
-            for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
-                if meta.get_field(field_name):
-                    inv.db_set(field_name, "Out for Delivery", update_modified=True)
+            # Persist submitted SI state via save() so update-after-submit hooks can observe the OFD move.
+            update_submitted_sales_invoice_state(
+                inv,
+                "Out for Delivery",
+                field_names=("custom_sales_invoice_state", "sales_invoice_state"),
+            )
 
             # Persist child row changes
             frappe.db.set_value(

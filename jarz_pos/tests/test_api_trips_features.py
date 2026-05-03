@@ -135,3 +135,78 @@ class TestTripsNewFeatures(unittest.TestCase):
             'Delivery Trip Invoice', 'TRIPINV-10', 'invoice_status', 'Delivered', update_modified=False
         )
         trip.save.assert_called_once_with(ignore_permissions=True)
+
+    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
+    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_state')
+    @patch('jarz_pos.api.trips._get_delivery_expense_amount', return_value=0.0)
+    @patch('jarz_pos.api.trips.ensure_delivery_note_for_invoice')
+    @patch('jarz_pos.api.trips.frappe')
+    def test_send_trip_for_delivery_updates_state_via_helper(
+        self,
+        mock_frappe,
+        mock_dn,
+        mock_shipping,
+        mock_update_state,
+        mock_has_children,
+    ):
+        from jarz_pos.api.trips import send_trip_for_delivery
+
+        trip = MagicMock()
+        trip.name = 'TRIP-5'
+        trip.status = 'Created'
+        trip.is_double_shipping = 0
+        trip.courier_party_type = 'Employee'
+        trip.courier_party = 'EMP-1'
+        trip.invoices = [
+            SimpleNamespace(invoice='SINV-20', name='TRIPINV-20')
+        ]
+
+        invoice = MagicMock()
+        invoice.name = 'SINV-20'
+        invoice.company = 'Test Co'
+        invoice.territory = ''
+        invoice.custom_sub_territory = ''
+        invoice.custom_shipping_expense = 0
+        invoice.get.side_effect = lambda field: {
+            'custom_sales_invoice_state': 'Ready',
+            'sales_invoice_state': 'Ready',
+        }.get(field)
+
+        courier_txn = MagicMock()
+
+        def fake_get_doc(doctype, name):
+            if doctype == 'Delivery Trip':
+                return trip
+            if doctype == 'Sales Invoice':
+                return invoice
+            raise AssertionError(f'Unexpected doctype: {doctype}')
+
+        def fake_db_get_value(doctype, name, field=None):
+            if doctype == 'Sales Invoice' and field == 'outstanding_amount':
+                return 0
+            if doctype == 'Sales Invoice' and field == 'custom_shipping_override_status':
+                return None
+            return None
+
+        mock_frappe.get_doc.side_effect = fake_get_doc
+        mock_frappe.get_all.return_value = []
+        mock_frappe.new_doc.return_value = courier_txn
+        mock_frappe.utils.now_datetime.return_value = '2026-05-03 12:00:00'
+        mock_frappe.db.get_value.side_effect = fake_db_get_value
+        mock_frappe.db.savepoint.return_value = None
+        mock_frappe.db.commit.return_value = None
+        mock_frappe.db.set_value.return_value = None
+        mock_frappe.publish_realtime.return_value = None
+        mock_dn.return_value = {'delivery_note': 'DN-020'}
+
+        result = send_trip_for_delivery('TRIP-5')
+
+        self.assertTrue(result['success'])
+        mock_update_state.assert_called_once_with(
+            invoice,
+            'Out for Delivery',
+            field_names=('custom_sales_invoice_state', 'sales_invoice_state'),
+        )
+        invoice.db_set.assert_not_called()
+        courier_txn.insert.assert_called_once_with(ignore_permissions=True)
+        trip.save.assert_called_once_with(ignore_permissions=True)

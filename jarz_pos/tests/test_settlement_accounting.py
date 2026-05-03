@@ -129,6 +129,58 @@ RECEIVABLE_ACC = "Debtors - TC"
 
 
 # ===========================================================================
+# TEST: update_submitted_sales_invoice_state – save/update-after-submit path
+# ===========================================================================
+
+class TestSubmittedInvoiceStateUpdates(unittest.TestCase):
+    """Verify submitted SI state updates use save() so document hooks can run."""
+
+    @patch("jarz_pos.services.delivery_handling.frappe")
+    def test_uses_save_for_submitted_invoice(self, mock_frappe):
+        from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_state
+
+        inv = _mock_invoice()
+        inv.flags = MagicMock()
+        inv.custom_sales_invoice_state = "Ready"
+        inv.sales_invoice_state = "Ready"
+
+        mock_meta = MagicMock()
+        mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {"custom_sales_invoice_state", "sales_invoice_state"} else None
+        mock_frappe.get_meta.return_value = mock_meta
+
+        changed = update_submitted_sales_invoice_state(
+            inv,
+            "Out for Delivery",
+            field_names=("custom_sales_invoice_state", "sales_invoice_state"),
+        )
+
+        self.assertTrue(changed)
+        self.assertTrue(inv.flags.ignore_validate_update_after_submit)
+        inv.set.assert_any_call("custom_sales_invoice_state", "Out for Delivery")
+        inv.set.assert_any_call("sales_invoice_state", "Out for Delivery")
+        inv.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
+        inv.db_set.assert_not_called()
+
+    @patch("jarz_pos.services.delivery_handling.frappe")
+    def test_is_idempotent_when_state_is_already_set(self, mock_frappe):
+        from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_state
+
+        inv = _mock_invoice()
+        inv.flags = MagicMock()
+        inv.custom_sales_invoice_state = "Out for Delivery"
+
+        mock_meta = MagicMock()
+        mock_meta.get_field.side_effect = lambda name: MagicMock() if name == "custom_sales_invoice_state" else None
+        mock_frappe.get_meta.return_value = mock_meta
+
+        changed = update_submitted_sales_invoice_state(inv, "Out for Delivery")
+
+        self.assertFalse(changed)
+        inv.set.assert_not_called()
+        inv.save.assert_not_called()
+
+
+# ===========================================================================
 # TEST: handle_out_for_delivery_paid – JE structure verification
 # ===========================================================================
 
@@ -225,6 +277,14 @@ class TestOFDPaidJournalEntry(unittest.TestCase):
         """cash_now with zero shipping: No JE lines should be created."""
         _, je, _ = self._run_ofd_paid("cash_now", 0.0)
         self.assertEqual(len(je.accounts), 0, "Zero shipping should produce no JE lines")
+
+    def test_uses_submitted_state_helper(self):
+        """Paid OFD flow should route submitted invoice state changes through the reusable helper."""
+        with patch("jarz_pos.services.delivery_handling.update_submitted_sales_invoice_state") as mock_update_state:
+            self._run_ofd_paid("cash_now", 25.0)
+
+        mock_update_state.assert_called_once()
+        self.assertEqual(mock_update_state.call_args.args[1], "Out for Delivery")
 
     # ── later ──
 
@@ -662,6 +722,14 @@ class TestMarkCourierOutstanding(unittest.TestCase):
         """No PE should be created when outstanding is 0 (already paid)."""
         _, _, pe_fn, _ = self._run_mark(outstanding=0.0, grand_total=500.0)
         pe_fn.assert_not_called()
+
+    def test_uses_submitted_state_helper(self):
+        """Courier outstanding flow should route submitted invoice state changes through the reusable helper."""
+        with patch("jarz_pos.services.delivery_handling.update_submitted_sales_invoice_state") as mock_update_state:
+            self._run_mark()
+
+        mock_update_state.assert_called_once()
+        self.assertEqual(mock_update_state.call_args.args[1], "Out for Delivery")
 
 
 # ===========================================================================

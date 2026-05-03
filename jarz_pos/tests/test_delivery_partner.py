@@ -119,8 +119,9 @@ class TestPartnerUnpaidSettleNow(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
+	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
 	def test_collects_full_order_amount(
-		self, mock_stamp, mock_ct, mock_dn, mock_exp, mock_recv, mock_cash, mock_pe, mock_frappe
+		self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_recv, mock_cash, mock_pe, mock_frappe
 	):
 		from jarz_pos.services.settlement_strategies import handle_partner_unpaid_settle_now
 
@@ -161,6 +162,8 @@ class TestPartnerUnpaidSettleNow(unittest.TestCase):
 
 		# Verify invoice stamped
 		mock_stamp.assert_called_once_with("INV-PU1", "Partner A")
+		mock_update_state.assert_called_once_with(mock_inv, "Out for Delivery")
+		mock_frappe.db.set_value.assert_not_called()
 
 
 class TestPartnerUnpaidSettleLater(unittest.TestCase):
@@ -171,7 +174,8 @@ class TestPartnerUnpaidSettleLater(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
-	def test_creates_unsettled_ct(self, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
+	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
+	def test_creates_unsettled_ct(self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
 		from jarz_pos.services.settlement_strategies import handle_partner_unpaid_settle_later
 
 		mock_inv = MagicMock()
@@ -199,6 +203,8 @@ class TestPartnerUnpaidSettleLater(unittest.TestCase):
 		ct_kwargs = mock_ct.call_args
 		self.assertEqual(ct_kwargs.kwargs["status"], "Unsettled")
 		self.assertEqual(ct_kwargs.kwargs["order_amount"], 300.0)
+		mock_update_state.assert_called_once_with(mock_inv, "Out for Delivery")
+		mock_frappe.db.set_value.assert_not_called()
 
 
 class TestPartnerPaidSettleNow(unittest.TestCase):
@@ -209,7 +215,8 @@ class TestPartnerPaidSettleNow(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
-	def test_no_cash_exchange_for_online(self, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
+	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
+	def test_no_cash_exchange_for_online(self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
 		from jarz_pos.services.settlement_strategies import handle_partner_paid_settle_now
 
 		mock_inv = MagicMock()
@@ -237,6 +244,8 @@ class TestPartnerPaidSettleNow(unittest.TestCase):
 		self.assertEqual(ct_kwargs.kwargs["order_amount"], 0)
 		self.assertEqual(ct_kwargs.kwargs["shipping_amount"], 70.0)
 		self.assertEqual(ct_kwargs.kwargs["status"], "Settled")
+		mock_update_state.assert_called_once_with(mock_inv, "Out for Delivery")
+		mock_frappe.db.set_value.assert_not_called()
 
 
 class TestPartnerPaidSettleLater(unittest.TestCase):
@@ -247,7 +256,8 @@ class TestPartnerPaidSettleLater(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
-	def test_unsettled_fee_only(self, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
+	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
+	def test_unsettled_fee_only(self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
 		from jarz_pos.services.settlement_strategies import handle_partner_paid_settle_later
 
 		mock_inv = MagicMock()
@@ -274,6 +284,8 @@ class TestPartnerPaidSettleLater(unittest.TestCase):
 		ct_kwargs = mock_ct.call_args
 		self.assertEqual(ct_kwargs.kwargs["order_amount"], 0)
 		self.assertEqual(ct_kwargs.kwargs["status"], "Unsettled")
+		mock_update_state.assert_called_once_with(mock_inv, "Out for Delivery")
+		mock_frappe.db.set_value.assert_not_called()
 
 
 class TestPartnerStrategyDict(unittest.TestCase):

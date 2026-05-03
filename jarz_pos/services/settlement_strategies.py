@@ -20,6 +20,7 @@ from jarz_pos.services.delivery_handling import (
     _get_courier_outstanding_account,
     _get_receivable_account,
     _create_payment_entry,
+    update_submitted_sales_invoice_state,
 )
 # Re-export selected delivery handlers at module level so tests can patch via
 # 'jarz_pos.services.settlement_strategies.<name>'
@@ -261,7 +262,7 @@ def handle_partner_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Opt
     shipping = float(_get_delivery_expense_amount(inv) or 0)
 
     # Move to OFD
-    frappe.db.set_value("Sales Invoice", inv.name, "custom_sales_invoice_state", "Out for Delivery", update_modified=False)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
 
     ct_name = _create_partner_courier_transaction(
@@ -300,7 +301,7 @@ def handle_partner_unpaid_settle_later(inv, *, pos_profile: str, payment_type: O
     shipping = float(_get_delivery_expense_amount(inv) or 0)
 
     # Move to OFD
-    frappe.db.set_value("Sales Invoice", inv.name, "custom_sales_invoice_state", "Out for Delivery", update_modified=False)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
 
     ct_name = _create_partner_courier_transaction(
@@ -335,7 +336,7 @@ def handle_partner_paid_settle_now(inv, *, pos_profile: str, payment_type: Optio
     """Partner online-paid settle-now: no cash exchange, just move to OFD and record fee."""
     shipping = float(_get_delivery_expense_amount(inv) or 0)
 
-    frappe.db.set_value("Sales Invoice", inv.name, "custom_sales_invoice_state", "Out for Delivery", update_modified=False)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
 
     ct_name = _create_partner_courier_transaction(
@@ -370,7 +371,7 @@ def handle_partner_paid_settle_later(inv, *, pos_profile: str, payment_type: Opt
     """Partner online-paid settle-later: no cash exchange, just track fee for later partner settlement."""
     shipping = float(_get_delivery_expense_amount(inv) or 0)
 
-    frappe.db.set_value("Sales Invoice", inv.name, "custom_sales_invoice_state", "Out for Delivery", update_modified=False)
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
 
     ct_name = _create_partner_courier_transaction(
