@@ -90,6 +90,39 @@ class TestBundleProcessing(unittest.TestCase):
 
 		self.assertEqual(discount, 0, "Zero child price should result in zero discount or error")
 
+	def test_aggregate_selected_items_uses_group_key_for_duplicate_group_names(self):
+		"""Test same-name bundle groups stay isolated when a stable group key is provided."""
+		from jarz_pos.services.bundle_processing import BundleProcessor
+
+		processor = BundleProcessor(
+			"TEST_BUNDLE",
+			selected_items={
+				"ROW-LARGE-1": [{"id": "ITEM-A"}],
+				"ROW-LARGE-2": [{"id": "ITEM-B"}, {"id": "ITEM-B"}],
+			},
+		)
+
+		first_group = processor._aggregate_selected_items("ROW-LARGE-1", "Large", 1)
+		second_group = processor._aggregate_selected_items("ROW-LARGE-2", "Large", 2)
+
+		self.assertEqual(first_group, {"ITEM-A": {"qty": 1, "rate": None}})
+		self.assertEqual(second_group, {"ITEM-B": {"qty": 2, "rate": None}})
+
+	def test_aggregate_selected_items_falls_back_to_group_name_for_legacy_payload(self):
+		"""Test legacy group-name keyed payloads continue to work."""
+		from jarz_pos.services.bundle_processing import BundleProcessor
+
+		processor = BundleProcessor(
+			"TEST_BUNDLE",
+			selected_items={
+				"Large": [{"id": "ITEM-A"}],
+			},
+		)
+
+		result = processor._aggregate_selected_items("ROW-LARGE-1", "Large", 1)
+
+		self.assertEqual(result, {"ITEM-A": {"qty": 1, "rate": None}})
+
 	def test_process_bundle_item_structure(self):
 		"""Test that process_bundle_item returns correct structure."""
 		from jarz_pos.services.bundle_processing import process_bundle_item

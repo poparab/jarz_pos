@@ -97,7 +97,7 @@ def get_profile_bundles(profile: str):
         bundle_item_groups = frappe.get_all(
             'Jarz Bundle Item Group',
             filters={'parent': b['id']},
-            fields=['item_group', 'quantity'],
+            fields=['name', 'idx', 'item_group', 'quantity'],
             order_by='idx'
         )
 
@@ -154,6 +154,8 @@ def get_profile_bundles(profile: str):
 
             processed_groups.append({
                 'group_name': group_info['item_group'],
+                'group_key': group_info.get('name') or f"{group_info['item_group']}::{group_info.get('idx') or (len(processed_groups) + 1)}",
+                'group_index': group_info.get('idx') or (len(processed_groups) + 1),
                 'quantity': group_info['quantity'],
                 'items': items_in_group
             })

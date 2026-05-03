@@ -86,8 +86,8 @@ class TestPOSCatalogFilters(unittest.TestCase):
 		]
 
 		bundle_groups = {
-			'BUNDLE-VALID': [{'item_group': 'Hot Drinks', 'quantity': 1}],
-			'BUNDLE-EMPTY-GROUP': [{'item_group': 'Pastries', 'quantity': 1}],
+			'BUNDLE-VALID': [{'name': 'ROW-HOT-1', 'idx': 1, 'item_group': 'Hot Drinks', 'quantity': 1}],
+			'BUNDLE-EMPTY-GROUP': [{'name': 'ROW-PASTRY-1', 'idx': 1, 'item_group': 'Pastries', 'quantity': 1}],
 		}
 
 		group_items = {
@@ -159,6 +159,8 @@ class TestPOSCatalogFilters(unittest.TestCase):
 			[
 				{
 					'group_name': 'Hot Drinks',
+					'group_key': 'ROW-HOT-1',
+					'group_index': 1,
 					'quantity': 1,
 					'items': [
 						{'id': 'ITEM-VALID', 'name': 'Valid Product', 'price': 35},

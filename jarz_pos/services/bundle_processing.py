@@ -25,7 +25,7 @@ class BundleProcessor:
         self.bundle_doc = None
         self.parent_item = None
         self.bundle_items = []
-        # Expected shape: { group_name: [ {id: item_code, ...}, ... ] }
+        # Expected shape: { group_key_or_group_name: [ {id: item_code, ...}, ... ] }
         self.selected_items = selected_items or {}
 
     def get_item_rate(self, item_code):
@@ -85,6 +85,7 @@ class BundleProcessor:
                 # The bundle item group contains item_group (not item_code) and quantity (not qty)
                 # We need to get items from this item group
                 item_group_name = item_group_row.item_group
+                item_group_key = getattr(item_group_row, "name", None)
                 item_quantity = item_group_row.quantity
 
                 # Fetch all candidate items within this group for UI parity and validation
@@ -106,6 +107,7 @@ class BundleProcessor:
                 allowed_codes = {row["name"] for row in items_in_group}
 
                 aggregated_selected = self._aggregate_selected_items(
+                    item_group_key,
                     item_group_name,
                     item_quantity,
                 )
@@ -163,13 +165,16 @@ class BundleProcessor:
             frappe.log_error(f"Bundle loading error: {str(e)}", "Bundle Processing")
             raise
 
-    def _aggregate_selected_items(self, item_group_name, required_quantity):
+    def _aggregate_selected_items(self, item_group_key, item_group_name, required_quantity):
         """Normalize and validate selected items coming from the client for a given group."""
         if not self.selected_items:
             return {}
 
         matched_key = None
         for key in self.selected_items.keys():
+            if item_group_key and key == item_group_key:
+                matched_key = key
+                break
             if key == item_group_name:
                 matched_key = key
                 break
