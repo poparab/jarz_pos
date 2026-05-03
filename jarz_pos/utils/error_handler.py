@@ -4,6 +4,8 @@ import frappe
 from frappe import _
 import traceback
 
+from jarz_pos.observability.error_response import unexpected_error_response
+
 
 def handle_api_error(e, context="API Error"):
     """Standardized error handling for API endpoints"""
@@ -16,16 +18,15 @@ def handle_api_error(e, context="API Error"):
     )
     
     # Return standardized error response
-    if frappe.local.response:
-        frappe.local.response.http_status_code = 500
-    
-    return {
-        "success": False,
-        "error": True,
-        "message": error_msg,
-        "context": context,
-        "timestamp": frappe.utils.now()
-    }
+    return unexpected_error_response(
+        e,
+        summary=context,
+        context=context,
+        details={
+            "source": "jarz_pos.utils.error_handler.handle_api_error",
+            "raw_error": error_msg,
+        },
+    )
 
 
 def validate_required_fields(data, required_fields):

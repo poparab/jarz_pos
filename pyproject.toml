@@ -10,6 +10,7 @@ dynamic = ["version"]
 dependencies = [
     # "frappe~=15.0.0" # Installed and managed by bench.
     "firebase-admin>=6.0.0",
+    "sentry-sdk>=2.0.0",
 ]
 
 [build-system]

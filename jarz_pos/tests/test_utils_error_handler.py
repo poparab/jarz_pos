@@ -45,4 +45,11 @@ class TestErrorHandler(unittest.TestCase):
 		self.assertIsInstance(result, dict, "Should return standardized error response")
 		self.assertFalse(result.get("success"), "Should have success=False")
 		self.assertTrue(result.get("error"), "Should flag error")
+		self.assertEqual(
+			result.get("error_code"),
+			"UNEXPECTED_SERVER_ERROR",
+			"Should expose stable unexpected error code",
+		)
+		self.assertTrue(result.get("error_id"), "Should include a support reference id")
+		self.assertTrue(result.get("user_message"), "Should include a safe user-facing message")
 		self.assertEqual(result.get("context"), "Unit Test", "Should include context")

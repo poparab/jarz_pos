@@ -323,13 +323,13 @@ except Exception:
 
 # Request Events
 # ----------------
-# before_request = ["jarz_pos.utils.before_request"]
-# after_request = ["jarz_pos.utils.after_request"]
+before_request = ["jarz_pos.observability.sentry_bootstrap.before_request"]
+after_request = ["jarz_pos.observability.sentry_bootstrap.after_request"]
 
 # Job Events
 # ----------
-# before_job = ["jarz_pos.utils.before_job"]
-# after_job = ["jarz_pos.utils.after_job"]
+before_job = ["jarz_pos.observability.sentry_bootstrap.before_job"]
+after_job = ["jarz_pos.observability.sentry_bootstrap.after_job"]
 
 # User Data Protection
 # --------------------
