@@ -5,7 +5,7 @@ Alternative to websocket-based notifications for mobile clients
 
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import frappe
 from frappe import _
@@ -294,6 +294,9 @@ def get_websocket_debug_info() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 MAX_FCM_TOKENS_PER_BATCH = 500
+DEFAULT_WALK_IN_CUSTOMER = "Walk-in"
+DEFAULT_NEW_ORDER_TITLE = "New Order"
+DEFAULT_ITEM_LABEL = "Item"
 
 
 def _initialize_firebase_app() -> bool:
@@ -652,6 +655,134 @@ def notify_invoice_cancellation(
         )
 
 
+def _pick_display_text(*values: Any, fallback: str = "") -> str:
+    for value in values:
+        text = _safe_str(value).strip()
+        if text:
+            return text
+    return fallback
+
+
+def _format_total_display(value: Any) -> str:
+    try:
+        return f"{float(value or 0):.2f}"
+    except (TypeError, ValueError):
+        return "0.00"
+
+
+def _format_qty_display(value: Any) -> str:
+    try:
+        qty = float(value or 0)
+    except (TypeError, ValueError):
+        return "0"
+
+    if qty.is_integer():
+        return str(int(qty))
+    return f"{qty:g}"
+
+
+def _parse_item_count(value: Any) -> int:
+    try:
+        return max(int(float(_safe_str(value) or 0)), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _item_count_summary(item_count: Any) -> str:
+    count = _parse_item_count(item_count)
+    if count == 1:
+        return "1 item"
+    if count > 1:
+        return f"{count} items"
+    return "No items"
+
+
+def _summarize_items(items: Sequence[Dict[str, Any]]) -> str:
+    summary_parts: List[str] = []
+    for item in list(items)[:5]:
+        item_label = _pick_display_text(
+            item.get("item_name"),
+            item.get("item_code"),
+            fallback=DEFAULT_ITEM_LABEL,
+        )
+        summary_parts.append(f"{item_label} x {_format_qty_display(item.get('qty', 0))}")
+
+    if summary_parts:
+        return ", ".join(summary_parts)
+    return _item_count_summary(len(items))
+
+
+def _enrich_invoice_display_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    raw_items = payload.get("items")
+    items = raw_items if isinstance(raw_items, list) else []
+    item_count = len(items) if isinstance(raw_items, list) else _parse_item_count(payload.get("item_count"))
+    item_summary = _pick_display_text(
+        payload.get("item_summary"),
+        fallback=_summarize_items(items) if items else _item_count_summary(item_count),
+    )
+    customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
+    branch_display = _pick_display_text(
+        payload.get("branch_display"),
+        payload.get("pos_profile"),
+        payload.get("kanban_profile"),
+    )
+    total_display = _pick_display_text(
+        payload.get("total_display"),
+        fallback=_format_total_display(payload.get("grand_total")),
+    )
+
+    body_parts: List[str] = []
+    if branch_display:
+        body_parts.append(branch_display)
+    body_parts.append(f"Total: {total_display}")
+    if item_summary:
+        body_parts.append(item_summary)
+
+    payload.update(
+        {
+            "customer_name": customer_name,
+            "branch_display": branch_display,
+            "total_display": total_display,
+            "item_count": item_count,
+            "item_summary": item_summary,
+            "title": _pick_display_text(
+                payload.get("title"),
+                fallback=f"{DEFAULT_NEW_ORDER_TITLE}: {customer_name}",
+            ),
+            "body": _pick_display_text(
+                payload.get("body"),
+                fallback=" | ".join(body_parts),
+            ),
+        }
+    )
+    return payload
+
+
+def _resolve_notification_content(data_payload: Dict[str, str]) -> Tuple[str, str]:
+    title = _pick_display_text(data_payload.get("title"))
+    body = _pick_display_text(data_payload.get("body"))
+    if title and body:
+        return title, body
+
+    if data_payload.get("type") == "new_invoice":
+        display_payload = _enrich_invoice_display_fields(dict(data_payload))
+        title = title or _pick_display_text(display_payload.get("title"), fallback=DEFAULT_NEW_ORDER_TITLE)
+        body = body or _pick_display_text(display_payload.get("body"), fallback="Open Jarz POS for details")
+        return title, body
+
+    fallback_title = _pick_display_text(
+        data_payload.get("customer_name"),
+        _safe_str(data_payload.get("type")).replace("_", " ").title(),
+        fallback="Jarz POS",
+    )
+    fallback_body = _pick_display_text(
+        data_payload.get("reason"),
+        data_payload.get("invoice_id"),
+        fallback="Open Jarz POS for details",
+    )
+    return title or fallback_title, body or fallback_body
+
+
 def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
     if not doc or not getattr(doc, "name", None):
         return {}
@@ -670,7 +801,10 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
     except Exception:
         pass  # Use the doc we have if reload fails
 
-    customer = getattr(doc, "customer_name", None) or getattr(doc, "customer", "")
+    customer = _pick_display_text(
+        getattr(doc, "customer_name", None),
+        fallback=DEFAULT_WALK_IN_CUSTOMER,
+    )
     state = (
         getattr(doc, "custom_sales_invoice_state", None)
         or getattr(doc, "sales_invoice_state", None)
@@ -681,10 +815,15 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
     items: List[Dict[str, Any]] = []
     try:
         for row in getattr(doc, "items", [])[:15]:
+            item_code = _pick_display_text(getattr(row, "item_code", None))
             items.append(
                 {
-                    "item_code": getattr(row, "item_code", None),
-                    "item_name": getattr(row, "item_name", None) or getattr(row, "item_code", None),
+                    "item_code": item_code,
+                    "item_name": _pick_display_text(
+                        getattr(row, "item_name", None),
+                        item_code,
+                        fallback=DEFAULT_ITEM_LABEL,
+                    ),
                     "qty": float(getattr(row, "qty", 0) or 0),
                 }
             )
@@ -714,11 +853,7 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
         "items": items,
     }
 
-    payload["item_summary"] = ", ".join(
-        f"{item.get('item_name') or item.get('item_code')} × {item.get('qty', 0)}" for item in items[:5]
-    )
-
-    return payload
+    return _enrich_invoice_display_fields(payload)
 
 
 def _resolve_recipients_for_payload(payload: Dict[str, Any]) -> List[str]:
@@ -824,27 +959,33 @@ def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -
 
 
 def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
+    display_payload = _enrich_invoice_display_fields(dict(payload))
     data: Dict[str, str] = {
         "type": event_type,
-        "invoice_id": payload.get("invoice_id", ""),
-        "notification_id": payload.get("invoice_id", ""),
-        "customer_name": payload.get("customer_name", ""),
-        "pos_profile": payload.get("pos_profile", ""),
-        "grand_total": str(payload.get("grand_total", 0)),
-        "sales_invoice_state": payload.get("sales_invoice_state", ""),
-        "timestamp": payload.get("timestamp", frappe.utils.now_datetime().isoformat()),
-        "requires_acceptance": "1" if payload.get("requires_acceptance") else "0",
-        "item_summary": payload.get("item_summary", ""),
+        "invoice_id": display_payload.get("invoice_id", ""),
+        "notification_id": display_payload.get("invoice_id", ""),
+        "customer_name": display_payload.get("customer_name", ""),
+        "pos_profile": display_payload.get("pos_profile", "") or "",
+        "grand_total": str(display_payload.get("grand_total", 0)),
+        "sales_invoice_state": display_payload.get("sales_invoice_state", ""),
+        "timestamp": display_payload.get("timestamp", frappe.utils.now_datetime().isoformat()),
+        "requires_acceptance": "1" if display_payload.get("requires_acceptance") else "0",
+        "item_summary": display_payload.get("item_summary", ""),
+        "branch_display": display_payload.get("branch_display", "") or "",
+        "total_display": display_payload.get("total_display", "0.00"),
+        "item_count": str(display_payload.get("item_count", 0)),
+        "title": display_payload.get("title", "") or "",
+        "body": display_payload.get("body", "") or "",
     }
 
-    delivery_date = payload.get("delivery_date")
+    delivery_date = display_payload.get("delivery_date")
     if delivery_date:
         data["delivery_date"] = delivery_date
-    delivery_time = payload.get("delivery_time_from")
+    delivery_time = display_payload.get("delivery_time_from")
     if delivery_time:
         data["delivery_time"] = delivery_time
 
-    items_json = json.dumps(payload.get("items", []), default=str)
+    items_json = json.dumps(display_payload.get("items", []), default=str)
     data["items"] = items_json
     return data
 
@@ -860,44 +1001,43 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
     
     # Build the message
     try:
-        # Extract notification content from data
-        # Use explicit title/body if provided, otherwise fall back to invoice fields
-        if "title" in data_payload and "body" in data_payload:
-            title = data_payload["title"]
-            body = data_payload["body"]
+        msg_type = data_payload.get("type", "")
+        if msg_type == "new_invoice":
+            notification = None
+            android_notification = None
         else:
-            title = data_payload.get("customer_name", "New Order")
-            body = f"Total: {data_payload.get('grand_total', 0)}"
-            if data_payload.get("item_summary"):
-                body += f" • {data_payload.get('item_summary')}"
-        
-        # Build a Notification payload so the client gets a dismissible system notification
-        notification = messaging.Notification(title=title, body=body)
+            title, body = _resolve_notification_content(data_payload)
+            notification = messaging.Notification(title=title, body=body)
+
+            # Use shift channel for shift events, order alerts channel for everything else
+            if msg_type in ("shift_started", "shift_ended"):
+                android_channel_id = "jarz_shift_updates"
+            else:
+                android_channel_id = "jarz_order_alerts"
+
+            android_notification = messaging.AndroidNotification(
+                sound='default',
+                channel_id=android_channel_id,
+                tag=data_payload.get("invoice_id", "")
+            )
+
+        android_config_kwargs = {"priority": 'high'}
+        if android_notification is not None:
+            android_config_kwargs["notification"] = android_notification
 
         # Use shift channel for shift events, order alerts channel for everything else
-        msg_type = data_payload.get("type", "")
-        if msg_type in ("shift_started", "shift_ended"):
-            android_channel_id = "jarz_shift_updates"
-        else:
-            android_channel_id = "jarz_order_alerts"
-
         # Send to each token (Firebase Admin SDK doesn't support batch sends in the same way)
         # For better performance, we can use MulticastMessage
         messages = []
         for token in tokens[:MAX_FCM_TOKENS_PER_BATCH]:
-            message = messaging.Message(
-                data=data_payload,
-                notification=notification,
-                android=messaging.AndroidConfig(
-                    priority='high',
-                    notification=messaging.AndroidNotification(
-                        sound='default',
-                        channel_id=android_channel_id,
-                        tag=data_payload.get("invoice_id", "")
-                    )
-                ),
-                token=token
-            )
+            message_kwargs = {
+                "data": data_payload,
+                "android": messaging.AndroidConfig(**android_config_kwargs),
+                "token": token,
+            }
+            if notification is not None:
+                message_kwargs["notification"] = notification
+            message = messaging.Message(**message_kwargs)
             messages.append(message)
         
         # Send all messages
