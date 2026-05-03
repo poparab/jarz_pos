@@ -960,6 +960,7 @@ def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -
 
 def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
     display_payload = _enrich_invoice_display_fields(dict(payload))
+    timestamp = display_payload.get("timestamp") or frappe.utils.now_datetime().isoformat()
     data: Dict[str, str] = {
         "type": event_type,
         "invoice_id": display_payload.get("invoice_id", ""),
@@ -968,7 +969,7 @@ def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> D
         "pos_profile": display_payload.get("pos_profile", "") or "",
         "grand_total": str(display_payload.get("grand_total", 0)),
         "sales_invoice_state": display_payload.get("sales_invoice_state", ""),
-        "timestamp": display_payload.get("timestamp", frappe.utils.now_datetime().isoformat()),
+        "timestamp": timestamp,
         "requires_acceptance": "1" if display_payload.get("requires_acceptance") else "0",
         "item_summary": display_payload.get("item_summary", ""),
         "branch_display": display_payload.get("branch_display", "") or "",
