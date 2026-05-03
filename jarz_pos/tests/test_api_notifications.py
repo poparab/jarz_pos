@@ -9,6 +9,13 @@ import unittest
 class TestNotificationAPI(unittest.TestCase):
 	"""Test class for Notification API functionality."""
 
+	def test_legacy_notification_aliases_still_exist(self):
+		"""Legacy endpoint names should remain available for compatibility."""
+		from jarz_pos.api import notifications
+
+		self.assertTrue(callable(notifications.register_device_token))
+		self.assertTrue(callable(notifications.accept_invoice))
+
 	def test_get_recent_invoices_structure(self):
 		"""Test that get_recent_invoices returns correct structure."""
 		from jarz_pos.api.notifications import get_recent_invoices

@@ -413,6 +413,32 @@ def register_mobile_device(
 
 
 @frappe.whitelist(allow_guest=False)
+def register_device_token(
+    token: str,
+    platform: Optional[str] = None,
+    device_name: Optional[str] = None,
+    app_version: Optional[str] = None,
+    pos_profiles: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Backward-compatible alias for older mobile and startup callers."""
+
+    return register_mobile_device(
+        token=token,
+        platform=platform,
+        device_name=device_name,
+        app_version=app_version,
+        pos_profiles=pos_profiles,
+    )
+
+
+@frappe.whitelist(allow_guest=False)
+def accept_invoice(invoice_name: str) -> Dict[str, Any]:
+    """Backward-compatible alias for older accept endpoint callers."""
+
+    return acknowledge_invoice(invoice_name)
+
+
+@frappe.whitelist(allow_guest=False)
 def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
     """Mark an invoice alert as accepted by the current user."""
 
