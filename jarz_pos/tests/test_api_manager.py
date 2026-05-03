@@ -108,19 +108,20 @@ class TestManagerAPI(unittest.TestCase):
 		"""Test that update_invoice_branch validates inputs."""
 		from jarz_pos.api.manager import update_invoice_branch
 
-		# Test with empty invoice_id
-		result = update_invoice_branch(invoice_id="", new_branch="Test Branch")
+		with patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+			# Test with empty invoice_id
+			result = update_invoice_branch(invoice_id="", new_branch="Test Branch")
 
-		# Should return error
-		self.assertFalse(result.get("success"), "Should return success=False for empty invoice_id")
-		self.assertIn("error", result, "Should include error message")
+			# Should return error
+			self.assertFalse(result.get("success"), "Should return success=False for empty invoice_id")
+			self.assertIn("error", result, "Should include error message")
 
-		# Test with empty new_branch
-		result = update_invoice_branch(invoice_id="TEST-INV-001", new_branch="")
+			# Test with empty new_branch
+			result = update_invoice_branch(invoice_id="TEST-INV-001", new_branch="")
 
-		# Should return error
-		self.assertFalse(result.get("success"), "Should return success=False for empty new_branch")
-		self.assertIn("error", result, "Should include error message")
+			# Should return error
+			self.assertFalse(result.get("success"), "Should return success=False for empty new_branch")
+			self.assertIn("error", result, "Should include error message")
 
 	def test_update_invoice_branch_updates_custom_kanban_profile_only(self):
 		"""Submitted invoice reassignment should update custom_kanban_profile and publish refresh events."""
