@@ -124,13 +124,17 @@ class TestManagerAPI(unittest.TestCase):
 			self.assertIn("error", result, "Should include error message")
 
 	def test_update_invoice_branch_updates_custom_kanban_profile_only(self):
-		"""Submitted invoice reassignment should update custom_kanban_profile and publish refresh events."""
+		"""Submitted invoice reassignment should move operational branch and stock rows together."""
 		from jarz_pos.api.manager import update_invoice_branch
+
+		item_row_1 = SimpleNamespace(name="SII-001", item_code="ITEM-001", warehouse="Stores - Dokki")
+		item_row_2 = SimpleNamespace(name="SII-002", item_code="SERVICE-001", warehouse="")
 
 		invoice = _FakeInvoice(
 			name="INV-001",
 			docstatus=1,
 			is_pos=1,
+			company="Jarz",
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
 			custom_sales_invoice_state="In Progress",
@@ -140,11 +144,14 @@ class TestManagerAPI(unittest.TestCase):
 			grand_total=250.0,
 			posting_date="2026-05-03",
 			posting_time="12:00:00",
+			items=[item_row_1, item_row_2],
 		)
+		invoice.add_comment = MagicMock()
 
 		meta = MagicMock()
 		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {
 			"custom_kanban_profile",
+			"set_warehouse",
 			"custom_sales_invoice_state",
 			"custom_acceptance_status",
 			"custom_accepted_by",
@@ -157,16 +164,29 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.utils.now.return_value = "2026-05-03 12:30:00"
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.get_all.return_value = []
 		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: 0 if (doctype, name, field) == ("POS Profile", "Nasr city", "disabled") else None
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "disabled"): 0,
+				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+				("Item", "ITEM-001", "is_stock_item"): 1,
+				("Item", "SERVICE-001", "is_stock_item"): 0,
+			}.get((doctype, name, field))
 		)
 
 		def _set_value(_doctype, _name, field, value, update_modified=True):
-			invoice._data[field] = value
+			if _doctype == "Sales Invoice":
+				invoice._data[field] = value
+			if _doctype == "Sales Invoice Item" and _name == "SII-001" and field == "warehouse":
+				item_row_1.warehouse = value
+			if _doctype == "Sales Invoice Item" and _name == "SII-002" and field == "warehouse":
+				item_row_2.warehouse = value
 
 		mock_frappe.db.set_value.side_effect = _set_value
 		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
 		mock_frappe.get_meta.return_value = meta
+		mock_frappe.has_permission.return_value = True
 
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
 			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
@@ -178,12 +198,16 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertTrue(result.get("success"))
 		self.assertEqual(invoice.get("pos_profile"), "Dokki")
 		self.assertEqual(invoice.get("custom_kanban_profile"), "Nasr city")
+		self.assertEqual(invoice.get("set_warehouse"), "Stores - Nasr city")
 		self.assertEqual(invoice.get("custom_sales_invoice_state"), "Received")
 		self.assertEqual(invoice.get("custom_acceptance_status"), "Pending")
 		self.assertIsNone(invoice.get("custom_accepted_by"))
 		self.assertIsNone(invoice.get("custom_accepted_on"))
+		self.assertEqual(item_row_1.warehouse, "Stores - Nasr city")
+		self.assertEqual(item_row_2.warehouse, "")
 		self.assertNotIn("pos_profile", [call.args[2] for call in mock_frappe.db.set_value.call_args_list])
-		self.assertTrue(all(call.kwargs.get("update_modified") is True for call in mock_frappe.db.set_value.call_args_list))
+		self.assertEqual(result.get("target_warehouse"), "Stores - Nasr city")
+		invoice.add_comment.assert_called_once()
 		mock_notify.assert_called_once_with(invoice, "Nasr city")
 
 		events = [call.args[0] for call in mock_frappe.publish_realtime.call_args_list]
@@ -216,6 +240,198 @@ class TestManagerAPI(unittest.TestCase):
 
 		self.assertFalse(result.get("success"))
 		self.assertIn("disabled", result.get("error", "").lower())
+
+	def test_update_invoice_branch_rejects_target_profile_without_warehouse(self):
+		"""Transfer must fail when the target POS Profile cannot provide a warehouse."""
+		from jarz_pos.api.manager import update_invoice_branch
+
+		invoice = _FakeInvoice(
+			name="INV-002",
+			docstatus=1,
+			is_pos=1,
+			company="Jarz",
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			items=[SimpleNamespace(name="SII-010", item_code="ITEM-001", warehouse="Stores - Dokki")],
+		)
+
+		meta = MagicMock()
+		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {"custom_kanban_profile", "custom_sales_invoice_state"} else None
+
+		mock_frappe = MagicMock()
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.get_all.return_value = []
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "disabled"): 0,
+				("POS Profile", "Nasr city", "warehouse"): None,
+			}.get((doctype, name, field))
+		)
+		mock_frappe.get_doc.return_value = invoice
+		mock_frappe.get_meta.return_value = meta
+		mock_frappe.has_permission.return_value = True
+		mock_frappe.ValidationError = Exception
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
+			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+			result = update_invoice_branch(invoice_id="INV-002", new_branch="Nasr city")
+
+		self.assertFalse(result.get("success"))
+		self.assertIn("warehouse", result.get("error", "").lower())
+
+	def test_update_invoice_branch_rejects_existing_delivery_note(self):
+		"""Transfer must stop once a submitted Delivery Note already exists."""
+		from jarz_pos.api.manager import update_invoice_branch
+
+		invoice = _FakeInvoice(
+			name="INV-003",
+			docstatus=1,
+			is_pos=1,
+			company="Jarz",
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			items=[SimpleNamespace(name="SII-011", item_code="ITEM-001", warehouse="Stores - Dokki")],
+		)
+
+		meta = MagicMock()
+		meta.get_field.side_effect = lambda fieldname: object() if fieldname == "custom_kanban_profile" else None
+
+		mock_frappe = MagicMock()
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.get_all.return_value = ["DN-001"]
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "disabled"): 0,
+			}.get((doctype, name, field))
+		)
+		mock_frappe.get_doc.return_value = invoice
+		mock_frappe.get_meta.return_value = meta
+		mock_frappe.has_permission.return_value = True
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
+			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+			result = update_invoice_branch(invoice_id="INV-003", new_branch="Nasr city")
+
+		self.assertFalse(result.get("success"))
+		self.assertIn("delivery note", result.get("error", "").lower())
+
+	def test_get_invoice_warehouse_alignment_report_lists_misaligned_invoices(self):
+		"""Admin report should surface submitted invoices whose stock rows still point to the old warehouse."""
+		from jarz_pos.api.manager import get_invoice_warehouse_alignment_report
+
+		invoice = _FakeInvoice(
+			name="INV-004",
+			docstatus=1,
+			is_pos=1,
+			company="Jarz",
+			customer="CUST-004",
+			pos_profile="Dokki",
+			custom_kanban_profile="Nasr city",
+			items=[SimpleNamespace(name="SII-020", item_code="ITEM-001", warehouse="Stores - Dokki")],
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.get_roles.return_value = ["System Manager"]
+		mock_frappe.has_permission.return_value = True
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+
+		def _get_all(doctype, **kwargs):
+			if doctype == "Sales Invoice":
+				return [{"name": "INV-004"}]
+			if doctype == "Delivery Note Item":
+				return []
+			return []
+
+		mock_frappe.get_all.side_effect = _get_all
+		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+				("Item", "ITEM-001", "is_stock_item"): 1,
+			}.get((doctype, name, field))
+		)
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+			result = get_invoice_warehouse_alignment_report(limit=25)
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(result.get("count"), 1)
+		self.assertEqual(result["invoices"][0]["invoice_id"], "INV-004")
+		self.assertEqual(result["invoices"][0]["target_warehouse"], "Stores - Nasr city")
+		self.assertEqual(result["invoices"][0]["mismatches"][0]["warehouse"], "Stores - Dokki")
+
+	def test_repair_invoice_warehouse_alignment_apply_updates_eligible_invoice(self):
+		"""Apply mode should repair eligible invoices that are still misaligned and have no Delivery Note."""
+		from jarz_pos.api.manager import repair_invoice_warehouse_alignment
+
+		item_row = SimpleNamespace(name="SII-021", item_code="ITEM-001", warehouse="Stores - Dokki")
+		invoice = _FakeInvoice(
+			name="INV-005",
+			docstatus=1,
+			is_pos=1,
+			company="Jarz",
+			customer="CUST-005",
+			pos_profile="Dokki",
+			custom_kanban_profile="Nasr city",
+			items=[item_row],
+		)
+		invoice.add_comment = MagicMock()
+
+		meta = MagicMock()
+		meta.get_field.side_effect = lambda fieldname: object() if fieldname == "set_warehouse" else None
+
+		mock_frappe = MagicMock()
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.get_roles.return_value = ["System Manager"]
+		mock_frappe.has_permission.return_value = True
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.ValidationError = Exception
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+
+		def _get_all(doctype, **kwargs):
+			if doctype == "Sales Invoice":
+				return [{"name": "INV-005"}]
+			if doctype == "Delivery Note Item":
+				return []
+			return []
+
+		def _set_value(doctype, name, field, value, update_modified=True):
+			if doctype == "Sales Invoice Item" and name == "SII-021" and field == "warehouse":
+				item_row.warehouse = value
+			if doctype == "Sales Invoice" and name == "INV-005" and field == "set_warehouse":
+				invoice._data[field] = value
+
+		mock_frappe.get_all.side_effect = _get_all
+		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_meta.return_value = meta
+		mock_frappe.db.set_value.side_effect = _set_value
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+				("Item", "ITEM-001", "is_stock_item"): 1,
+			}.get((doctype, name, field))
+		)
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+			result = repair_invoice_warehouse_alignment(limit=25, apply_changes=1)
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(result.get("mode"), "apply")
+		self.assertEqual(result.get("applied_count"), 1)
+		self.assertEqual(item_row.warehouse, "Stores - Nasr city")
+		self.assertEqual(invoice.get("set_warehouse"), "Stores - Nasr city")
+		invoice.add_comment.assert_called_once()
 
 	def test_update_cancelled_invoice_status_fields_rejects_non_cancelled_invoice(self):
 		"""Only cancelled Sales Invoices should go through the correction endpoint."""

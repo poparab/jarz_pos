@@ -124,6 +124,75 @@ def _get_acceptance_field_options() -> List[str]:
     return []
 
 
+def _resolve_pos_profile_warehouse(pos_profile_name: str) -> str:
+    """Resolve the stock source warehouse for a POS Profile."""
+    warehouse = (frappe.db.get_value("POS Profile", pos_profile_name, "warehouse") or "").strip()
+    if not warehouse:
+        raise frappe.ValidationError(_(f"Target POS Profile {pos_profile_name} has no warehouse configured."))
+    if not frappe.db.exists("Warehouse", warehouse):
+        raise frappe.ValidationError(_(f"Configured warehouse {warehouse} for POS Profile {pos_profile_name} was not found."))
+    return warehouse
+
+
+def _validate_transfer_target_warehouse(inv: Any, target_warehouse: str) -> None:
+    """Ensure the target warehouse is compatible with the Sales Invoice company."""
+    invoice_company = str(inv.get("company") or "").strip()
+    warehouse_company = str(frappe.db.get_value("Warehouse", target_warehouse, "company") or "").strip()
+    if invoice_company and warehouse_company and invoice_company != warehouse_company:
+        raise frappe.ValidationError(_(f"Target warehouse {target_warehouse} belongs to a different company."))
+
+
+def _get_transfer_stock_rows(inv: Any) -> List[Any]:
+    """Return invoice rows whose warehouse must follow branch reassignment."""
+    stock_rows: List[Any] = []
+    item_stock_cache: Dict[str, bool] = {}
+
+    for row in list(getattr(inv, "items", []) or []):
+        item_code = str(getattr(row, "item_code", "") or "").strip()
+        if not item_code:
+            continue
+        if item_code not in item_stock_cache:
+            item_stock_cache[item_code] = bool(int(frappe.db.get_value("Item", item_code, "is_stock_item") or 0))
+        if item_stock_cache[item_code]:
+            stock_rows.append(row)
+
+    return stock_rows
+
+
+def _find_submitted_delivery_notes(invoice_name: str) -> List[str]:
+    """Return submitted Delivery Notes already linked to the Sales Invoice."""
+    rows = frappe.get_all(
+        "Delivery Note Item",
+        filters={"against_sales_invoice": invoice_name, "docstatus": 1},
+        pluck="parent",
+        limit_page_length=20,
+    ) or []
+    return sorted({row for row in rows if row})
+
+
+def _get_invoice_warehouse_mismatches(inv: Any, expected_warehouse: str) -> List[Dict[str, str]]:
+    """Return stock rows whose warehouse no longer matches the operational branch."""
+    mismatches: List[Dict[str, str]] = []
+    for row in _get_transfer_stock_rows(inv):
+        row_warehouse = str(getattr(row, "warehouse", "") or "").strip()
+        if row_warehouse != expected_warehouse:
+            mismatches.append(
+                {
+                    "row_name": str(getattr(row, "name", "") or "").strip(),
+                    "item_code": str(getattr(row, "item_code", "") or "").strip(),
+                    "warehouse": row_warehouse or "blank",
+                }
+            )
+    return mismatches
+
+
+def _is_truthy_flag(value: Union[bool, int, str, None]) -> bool:
+    """Normalize common truthy flag inputs from whitelisted method arguments."""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _publish_invoice_reassignment_refresh(
     invoice: Any,
     *,
@@ -311,6 +380,197 @@ def get_manager_states() -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
+def get_invoice_warehouse_alignment_report(
+    company: Optional[str] = None,
+    branch: Optional[str] = None,
+    limit: Union[int, str] = 100,
+) -> Dict[str, Any]:
+    """List submitted POS invoices whose item warehouses no longer match the operational branch."""
+    _ensure_manager_dashboard_access()
+    frappe.has_permission("Sales Invoice", throw=True)
+
+    roles = set(frappe.get_roles())
+    if not roles.intersection(ROLES.ADMIN):
+        frappe.throw(_("Not permitted: administrator access required"), frappe.PermissionError)
+
+    try:
+        limit_value = max(1, min(int(limit or 100), 500))
+    except Exception:
+        limit_value = 100
+
+    filters: Dict[str, Any] = {"docstatus": 1, "is_pos": 1}
+    if company:
+        filters["company"] = company
+
+    report_rows = frappe.get_all(
+        "Sales Invoice",
+        filters=filters,
+        fields=["name", "company", "customer", "posting_date", "custom_kanban_profile", "pos_profile"],
+        order_by="modified desc",
+        limit_page_length=limit_value,
+    ) or []
+
+    misaligned_invoices: List[Dict[str, Any]] = []
+    for row in report_rows:
+        invoice_name = row.get("name") if isinstance(row, dict) else getattr(row, "name", None)
+        if not invoice_name:
+            continue
+
+        inv = frappe.get_doc("Sales Invoice", invoice_name)
+        operational_profile = inv.get("custom_kanban_profile") or inv.get("pos_profile")
+        if branch and operational_profile != branch:
+            continue
+
+        submitted_delivery_notes = _find_submitted_delivery_notes(inv.name)
+        if submitted_delivery_notes:
+            continue
+
+        if not operational_profile:
+            misaligned_invoices.append(
+                {
+                    "invoice_id": inv.name,
+                    "company": inv.get("company"),
+                    "customer": inv.get("customer"),
+                    "operational_profile": None,
+                    "target_warehouse": None,
+                    "delivery_notes": [],
+                    "issue": "Invoice has no operational POS Profile configured.",
+                    "mismatches": [],
+                }
+            )
+            continue
+
+        try:
+            expected_warehouse = _resolve_pos_profile_warehouse(operational_profile)
+            _validate_transfer_target_warehouse(inv, expected_warehouse)
+        except frappe.ValidationError as validation_error:
+            misaligned_invoices.append(
+                {
+                    "invoice_id": inv.name,
+                    "company": inv.get("company"),
+                    "customer": inv.get("customer"),
+                    "operational_profile": operational_profile,
+                    "target_warehouse": None,
+                    "delivery_notes": [],
+                    "issue": str(validation_error),
+                    "mismatches": [],
+                }
+            )
+            continue
+
+        mismatches = _get_invoice_warehouse_mismatches(inv, expected_warehouse)
+        if mismatches:
+            misaligned_invoices.append(
+                {
+                    "invoice_id": inv.name,
+                    "company": inv.get("company"),
+                    "customer": inv.get("customer"),
+                    "operational_profile": operational_profile,
+                    "target_warehouse": expected_warehouse,
+                    "delivery_notes": [],
+                    "issue": "Invoice item warehouses do not match the operational branch warehouse.",
+                    "mismatches": mismatches,
+                }
+            )
+
+    return {"success": True, "count": len(misaligned_invoices), "invoices": misaligned_invoices}
+
+
+@frappe.whitelist(allow_guest=False)
+def repair_invoice_warehouse_alignment(
+    company: Optional[str] = None,
+    branch: Optional[str] = None,
+    limit: Union[int, str] = 100,
+    apply_changes: Union[bool, int, str, None] = False,
+) -> Dict[str, Any]:
+    """Dry-run or repair misaligned submitted invoices before Delivery Note creation."""
+    _ensure_manager_dashboard_access()
+    frappe.has_permission("Sales Invoice", throw=True)
+
+    roles = set(frappe.get_roles())
+    if not roles.intersection(ROLES.ADMIN):
+        frappe.throw(_("Not permitted: administrator access required"), frappe.PermissionError)
+
+    report = get_invoice_warehouse_alignment_report(company=company, branch=branch, limit=limit)
+    apply_mode = _is_truthy_flag(apply_changes)
+    if not apply_mode:
+        report["mode"] = "dry_run"
+        return report
+
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    meta = frappe.get_meta("Sales Invoice")
+
+    for entry in report.get("invoices", []):
+        invoice_id = entry.get("invoice_id")
+        if not invoice_id:
+            continue
+
+        inv = frappe.get_doc("Sales Invoice", invoice_id)
+        operational_profile = inv.get("custom_kanban_profile") or inv.get("pos_profile")
+        if not operational_profile:
+            skipped.append({"invoice_id": invoice_id, "issue": "Invoice has no operational POS Profile configured."})
+            continue
+
+        if _find_submitted_delivery_notes(inv.name):
+            skipped.append({
+                "invoice_id": invoice_id,
+                "issue": "Invoice already has a submitted Delivery Note; branch transfer is no longer allowed.",
+            })
+            continue
+
+        try:
+            target_warehouse = _resolve_pos_profile_warehouse(operational_profile)
+            _validate_transfer_target_warehouse(inv, target_warehouse)
+            mismatches = _get_invoice_warehouse_mismatches(inv, target_warehouse)
+            if not mismatches:
+                skipped.append({"invoice_id": invoice_id, "issue": "Invoice is already aligned."})
+                continue
+
+            source_warehouses = sorted({mismatch.get("warehouse") for mismatch in mismatches if mismatch.get("warehouse")})
+            for row in _get_transfer_stock_rows(inv):
+                current_warehouse = str(getattr(row, "warehouse", "") or "").strip()
+                if current_warehouse != target_warehouse:
+                    frappe.db.set_value("Sales Invoice Item", row.name, "warehouse", target_warehouse, update_modified=False)
+                    row.warehouse = target_warehouse
+
+            if meta.get_field("set_warehouse"):
+                frappe.db.set_value("Sales Invoice", inv.name, "set_warehouse", target_warehouse, update_modified=True)
+
+            try:
+                source_warehouse_label = ", ".join(source_warehouses) if source_warehouses else "none"
+                inv.add_comment(
+                    "Edit",
+                    f"Warehouse alignment repair moved item warehouses from {source_warehouse_label} to {target_warehouse} for active kanban profile {operational_profile} by {frappe.session.user}.",
+                )
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), "Invoice warehouse alignment repair comment failed")
+
+            frappe.db.commit()
+            applied.append(
+                {
+                    "invoice_id": inv.name,
+                    "operational_profile": operational_profile,
+                    "target_warehouse": target_warehouse,
+                    "repaired_rows": len(mismatches),
+                }
+            )
+        except Exception as exc:
+            frappe.db.rollback()
+            skipped.append({"invoice_id": invoice_id, "issue": str(exc)})
+
+    return {
+        "success": True,
+        "mode": "apply",
+        "count": report.get("count", 0),
+        "applied_count": len(applied),
+        "skipped_count": len(skipped),
+        "applied": applied,
+        "skipped": skipped,
+    }
+
+
+@frappe.whitelist(allow_guest=False)
 def update_cancelled_invoice_status_fields(
     invoice_id: str,
     sales_invoice_state: Optional[str] = None,
@@ -452,6 +712,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             return {"success": False, "error": f"Not allowed to assign invoices into branch {new_branch}"}
 
         inv = frappe.get_doc("Sales Invoice", invoice_id)
+        frappe.has_permission("Sales Invoice", doc=inv, ptype="write", throw=True)
         
         frappe.logger().info(f"Invoice docstatus: {inv.get('docstatus')}, is_pos: {inv.get('is_pos')}")
         
@@ -491,6 +752,22 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
                 "error": f"Invoice can only be transferred when state is Received, In Progress, or Ready. Current state: {current_state}",
             }
 
+        existing_delivery_notes = _find_submitted_delivery_notes(inv.name)
+        if existing_delivery_notes:
+            return {
+                "success": False,
+                "error": "Invoice already has a submitted Delivery Note; branch transfer is no longer allowed.",
+            }
+
+        try:
+            target_warehouse = _resolve_pos_profile_warehouse(new_branch)
+            _validate_transfer_target_warehouse(inv, target_warehouse)
+        except frappe.ValidationError as validation_error:
+            return {"success": False, "error": str(validation_error)}
+
+        stock_rows = _get_transfer_stock_rows(inv)
+        source_warehouses = sorted({str(getattr(row, "warehouse", "") or "").strip() for row in stock_rows if str(getattr(row, "warehouse", "") or "").strip()})
+
         state_fields: List[str] = []
         for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
             if meta.get_field(candidate):
@@ -499,6 +776,8 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         # Only update custom_kanban_profile, NOT pos_profile
         # pos_profile is read-only after invoice submission and cannot be changed
         updates: Dict[str, Any] = {"custom_kanban_profile": new_branch}
+        if meta.get_field("set_warehouse"):
+            updates["set_warehouse"] = target_warehouse
         
         # Reset to Received state when transferring
         target_received = "Received"
@@ -582,6 +861,13 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         try:
             for field, value in updates.items():
                 frappe.db.set_value("Sales Invoice", inv.name, field, value, update_modified=True)
+            for row in stock_rows:
+                if not getattr(row, "name", None):
+                    raise frappe.ValidationError(_(f"Invoice row for item {getattr(row, 'item_code', '?')} is missing a name and cannot be moved."))
+                current_warehouse = str(getattr(row, "warehouse", "") or "").strip()
+                if current_warehouse != target_warehouse:
+                    frappe.db.set_value("Sales Invoice Item", row.name, "warehouse", target_warehouse, update_modified=False)
+                    row.warehouse = target_warehouse
             frappe.db.commit()
         except Exception as e:
             frappe.log_error(f"Error setting values during transfer: {str(e)}\nUpdates: {updates}", "Invoice Transfer")
@@ -592,6 +878,15 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             frappe.flags.ignore_validate = False
 
         inv.reload()
+
+        try:
+            source_warehouse_label = ", ".join(source_warehouses) if source_warehouses else "none"
+            inv.add_comment(
+                "Edit",
+                f"Invoice transferred from {current_branch} to {new_branch}. Item warehouses moved from {source_warehouse_label} to {target_warehouse} by {frappe.session.user}.",
+            )
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Invoice transfer audit comment failed")
 
         try:
             _publish_invoice_reassignment_refresh(
@@ -620,6 +915,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             "invoice_id": invoice_id,
             "new_branch": new_branch,
             "new_state": target_received,
+            "target_warehouse": target_warehouse,
         }
     except Exception as e:
         frappe.logger().error(f"Update Invoice Branch Error: {str(e)}")

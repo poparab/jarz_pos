@@ -282,6 +282,8 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_invoice.docstatus = 1
 		mock_invoice.customer = "Customer"
 		mock_invoice.company = "Jarz"
+		mock_invoice.pos_profile = "Nasr city"
+		mock_invoice.custom_kanban_profile = "Nasr city"
 		mock_invoice.items = [mock_item]
 
 		appended_rows = []
@@ -309,6 +311,15 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_frappe.get_all.return_value = []
 		mock_frappe.new_doc.return_value = mock_dn
 		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.ValidationError = Exception
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "warehouse"): "Main WH",
+				("Warehouse", "Main WH", "company"): "Jarz",
+				("Item", "ITEM-001", "is_stock_item"): 1,
+			}.get((doctype, name, field))
+		)
 		mock_frappe.utils.getdate.return_value = "2026-05-02"
 		mock_frappe.utils.nowtime.return_value = "12:00:00"
 		mock_frappe.utils.today.return_value = "2026-05-02"
@@ -322,6 +333,52 @@ class TestKanbanOperations(unittest.TestCase):
 		self.assertEqual(result["delivery_note"], "DN-001")
 		self.assertIs(stock_get_item_details.validate_end_of_life, stock_validate)
 		self.assertIs(item_module.validate_end_of_life, item_validate)
+
+	@patch('jarz_pos.services.delivery_handling.frappe')
+	def test_delivery_note_rejects_branch_warehouse_mismatch(self, mock_frappe):
+		"""Auto-created DNs must fail fast when invoice rows still point to the old branch warehouse."""
+		from jarz_pos.services.delivery_handling import ensure_delivery_note_for_invoice
+
+		mock_item = MagicMock()
+		mock_item.name = "SII-001"
+		mock_item.item_code = "ITEM-001"
+		mock_item.warehouse = "Stores - Dokki"
+		mock_item.get.side_effect = lambda key, default=None: getattr(mock_item, key, default)
+
+		mock_invoice = MagicMock()
+		mock_invoice.name = "INV-002"
+		mock_invoice.docstatus = 1
+		mock_invoice.customer = "Customer"
+		mock_invoice.company = "Jarz"
+		mock_invoice.pos_profile = "Dokki"
+		mock_invoice.custom_kanban_profile = "Nasr city"
+		mock_invoice.items = [mock_item]
+
+		mock_meta = MagicMock()
+		mock_meta.get_field.return_value = None
+
+		mock_frappe.get_doc.side_effect = lambda doctype, name=None: mock_invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_meta.return_value = mock_meta
+		mock_frappe.get_all.return_value = []
+		mock_frappe.new_doc.return_value = MagicMock()
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.ValidationError = Exception
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+				("Item", "ITEM-001", "is_stock_item"): 1,
+			}.get((doctype, name, field))
+		)
+		mock_frappe.utils.today.return_value = "2026-05-02"
+		mock_frappe.utils.add_days.return_value = "2026-04-29"
+
+		result = ensure_delivery_note_for_invoice("INV-002")
+
+		self.assertEqual(result["delivery_note"], None)
+		self.assertIn("warehouses do not match operational branch warehouse", result["error"])
+		mock_frappe.new_doc.assert_not_called()
 
 	@patch('jarz_pos.api.kanban.frappe')
 	def test_kanban_publishes_realtime_events(self, mock_frappe):

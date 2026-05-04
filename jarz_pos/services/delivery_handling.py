@@ -8,6 +8,7 @@ including outstanding management, expense tracking, and settlement.
 from contextlib import contextmanager
 
 import frappe
+from frappe import _
 from jarz_pos.constants import ACCOUNTS, WS_EVENTS
 from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
@@ -23,7 +24,7 @@ from jarz_pos.utils.account_utils import (
 # future automation) reuse identical logic & logging.
 # ---------------------------------------------------------------------------
 
-DN_LOGIC_VERSION = "2025-09-07a"
+DN_LOGIC_VERSION = "2026-05-04a"
 
 # Constant VAT rate on partner fees
 PARTNER_FEES_VAT_RATE = 0.14  # 14%
@@ -108,6 +109,58 @@ def _allow_disabled_invoice_items_for_delivery_note(item_codes: set[str]):
         item_module.validate_end_of_life = original_item_validate
         if callable(original_get_item_details_validate):
             stock_get_item_details.validate_end_of_life = original_get_item_details_validate
+
+
+def _resolve_invoice_operational_warehouse(si) -> str:
+    """Resolve the warehouse implied by the invoice's operational POS Profile."""
+    operational_profile = str(si.get("custom_kanban_profile") or si.get("pos_profile") or "").strip()
+    if not operational_profile:
+        raise frappe.ValidationError(_("Sales Invoice {0} has no operational POS Profile.").format(si.name))
+
+    warehouse = str(frappe.db.get_value("POS Profile", operational_profile, "warehouse") or "").strip()
+    if not warehouse:
+        raise frappe.ValidationError(_("POS Profile {0} has no warehouse configured.").format(operational_profile))
+    if not frappe.db.exists("Warehouse", warehouse):
+        raise frappe.ValidationError(_("Configured warehouse {0} for POS Profile {1} was not found.").format(warehouse, operational_profile))
+
+    invoice_company = str(si.get("company") or "").strip()
+    warehouse_company = str(frappe.db.get_value("Warehouse", warehouse, "company") or "").strip()
+    if invoice_company and warehouse_company and invoice_company != warehouse_company:
+        raise frappe.ValidationError(_("Warehouse {0} belongs to a different company.").format(warehouse))
+
+    return warehouse
+
+
+def _get_invoice_stock_rows(si):
+    """Return invoice rows whose warehouses must align with the operational branch."""
+    stock_rows = []
+    item_stock_cache = {}
+
+    for row in list(getattr(si, "items", []) or []):
+        item_code = str(getattr(row, "item_code", "") or "").strip()
+        if not item_code:
+            continue
+        if item_code not in item_stock_cache:
+            item_stock_cache[item_code] = bool(int(frappe.db.get_value("Item", item_code, "is_stock_item") or 0))
+        if item_stock_cache[item_code]:
+            stock_rows.append(row)
+
+    return stock_rows
+
+
+def _get_invoice_warehouse_mismatches(si, expected_warehouse: str):
+    """Return stock rows that no longer match the operational branch warehouse."""
+    mismatches = []
+    for row in _get_invoice_stock_rows(si):
+        item_code = str(getattr(row, "item_code", "") or "").strip()
+        row_warehouse = str(row.get("warehouse") or "").strip() if hasattr(row, "get") else str(getattr(row, "warehouse", "") or "").strip()
+        if row_warehouse != expected_warehouse:
+            mismatches.append({
+                "row_name": str(getattr(row, "name", "") or "").strip(),
+                "item_code": item_code,
+                "warehouse": row_warehouse or "blank",
+            })
+    return mismatches
 
 def _compute_sales_partner_fees(inv, sales_partner: str, online: bool) -> dict:
     """Compute partner fees (commission + optional online fee) plus VAT.
@@ -263,6 +316,28 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
             # Non-fatal – continue to creation path
             frappe.logger().warning(f"AUTO_DN reuse lookup failed for {invoice_name}: {reuse_err}")
 
+        try:
+            expected_warehouse = _resolve_invoice_operational_warehouse(si)
+        except Exception as validation_error:
+            out["error"] = str(validation_error)
+            frappe.logger().warning(f"AUTO_DN warehouse validation failed for {invoice_name}: {validation_error}")
+            return out
+
+        mismatches = _get_invoice_warehouse_mismatches(si, expected_warehouse)
+        if mismatches:
+            mismatch_preview = ", ".join(
+                f"{row['item_code']}({row['row_name'] or '?'})={row['warehouse']}" for row in mismatches[:5]
+            )
+            out["error"] = (
+                f"Invoice item warehouses do not match operational branch warehouse {expected_warehouse}. "
+                "Realign the invoice warehouses before creating Delivery Note."
+            )
+            frappe.log_error(
+                f"AUTO_DN warehouse mismatch for {invoice_name}: expected={expected_warehouse}; mismatches={mismatch_preview}",
+                "AUTO_DN warehouse mismatch",
+            )
+            return out
+
         # Build new Delivery Note
         frappe.logger().info(f"AUTO_DN creating Delivery Note for {invoice_name}")
         dn = frappe.new_doc("Delivery Note")
@@ -272,11 +347,12 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
         dn.posting_time = frappe.utils.nowtime()
         dn.remarks = f"Auto-created from Sales Invoice {si.name} (state -> Out for Delivery)"
 
-        default_wh = None
-        for it in si.items:
-            if it.get("warehouse"):
-                default_wh = it.get("warehouse")
-                break
+        default_wh = expected_warehouse
+        if not default_wh:
+            for it in si.items:
+                if it.get("warehouse"):
+                    default_wh = it.get("warehouse")
+                    break
         if default_wh:
             dn.set_warehouse = default_wh
 
