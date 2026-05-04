@@ -4,6 +4,7 @@ Endpoints:
 - get_manager_dashboard_summary: list accessible POS Profiles with cash account and current balance.
 - get_manager_orders: recent invoices feed filtered by branch (POS Profile) or all, optional by state.
 - get_manager_states: return available Sales Invoice state options (same as Kanban columns).
+- update_cancelled_invoice_status_fields: update limited workflow fields on cancelled Sales Invoices.
 - update_invoice_branch: reassign a submitted Sales Invoice by changing custom_kanban_profile only.
 """
 from __future__ import annotations
@@ -99,6 +100,28 @@ def _state_key(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     return str(value).strip().lower().replace(" ", "_")
+
+
+def _match_option(value: Optional[str], options: List[str]) -> Optional[str]:
+    """Return the canonical option that matches value case-insensitively."""
+    cleaned_value = str(value or "").strip()
+    if not cleaned_value:
+        return None
+    for option in options:
+        if option.lower() == cleaned_value.lower():
+            return option
+    return None
+
+
+def _get_acceptance_field_options() -> List[str]:
+    """Return Acceptance Status select options from Sales Invoice metadata."""
+    try:
+        field = frappe.get_meta("Sales Invoice").get_field("custom_acceptance_status")
+        if field and getattr(field, "options", None):
+            return [opt.strip() for opt in field.options.split("\n") if opt.strip()]
+    except Exception:
+        pass
+    return []
 
 
 def _publish_invoice_reassignment_refresh(
@@ -285,6 +308,111 @@ def get_manager_states() -> Dict[str, Any]:
         return {"success": True, "states": states}
     except Exception as e:
         return {"success": False, "error": str(e), "states": []}
+
+
+@frappe.whitelist(allow_guest=False)
+def update_cancelled_invoice_status_fields(
+    invoice_id: str,
+    sales_invoice_state: Optional[str] = None,
+    acceptance_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Update selected workflow fields on a cancelled Sales Invoice.
+
+    This keeps cancelled documents immutable in general while allowing managers
+    to correct the two Jarz workflow fields that still matter operationally.
+    """
+    _ensure_manager_dashboard_access()
+
+    invoice_id = (invoice_id or "").strip()
+    requested_state = (sales_invoice_state or "").strip()
+    requested_acceptance = (acceptance_status or "").strip()
+
+    if not invoice_id:
+        return {"success": False, "error": "invoice_id is required"}
+    if not requested_state and not requested_acceptance:
+        return {"success": False, "error": "At least one field update is required"}
+
+    try:
+        inv = frappe.get_doc("Sales Invoice", invoice_id)
+        frappe.has_permission("Sales Invoice", doc=inv, ptype="write", throw=True)
+
+        if int(inv.get("docstatus") or 0) != 2:
+            return {"success": False, "error": "Only cancelled Sales Invoices can be updated with this action"}
+
+        meta = frappe.get_meta("Sales Invoice")
+        updates: Dict[str, Any] = {}
+        update_fragments: List[str] = []
+
+        if requested_state:
+            state_options = _get_state_field_options()
+            canonical_state = _match_option(requested_state, state_options) if state_options else requested_state
+            if not canonical_state:
+                return {"success": False, "error": f"Invalid Sales Invoice State: {requested_state}"}
+
+            state_fields = [
+                field_name
+                for field_name in ("custom_sales_invoice_state", "sales_invoice_state")
+                if meta.get_field(field_name)
+            ]
+            if not state_fields:
+                return {"success": False, "error": "Sales Invoice State field was not found on Sales Invoice"}
+
+            if any(str(inv.get(field_name) or "").strip() != canonical_state for field_name in state_fields):
+                for field_name in state_fields:
+                    updates[field_name] = canonical_state
+                update_fragments.append(f"Sales Invoice State = {canonical_state}")
+
+        if requested_acceptance:
+            acceptance_options = _get_acceptance_field_options()
+            canonical_acceptance = _match_option(requested_acceptance, acceptance_options) if acceptance_options else requested_acceptance
+            if not canonical_acceptance:
+                return {"success": False, "error": f"Invalid Acceptance Status: {requested_acceptance}"}
+
+            if not meta.get_field("custom_acceptance_status"):
+                return {"success": False, "error": "Acceptance Status field was not found on Sales Invoice"}
+
+            current_acceptance = str(inv.get("custom_acceptance_status") or "").strip()
+            if current_acceptance != canonical_acceptance:
+                updates["custom_acceptance_status"] = canonical_acceptance
+                if meta.get_field("custom_accepted_by"):
+                    updates["custom_accepted_by"] = frappe.session.user if canonical_acceptance.lower() == "accepted" else None
+                if meta.get_field("custom_accepted_on"):
+                    updates["custom_accepted_on"] = frappe.utils.now_datetime() if canonical_acceptance.lower() == "accepted" else None
+                update_fragments.append(f"Acceptance Status = {canonical_acceptance}")
+
+        if not updates:
+            return {
+                "success": True,
+                "invoice_id": inv.name,
+                "sales_invoice_state": inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state"),
+                "acceptance_status": inv.get("custom_acceptance_status"),
+                "no_change": True,
+            }
+
+        frappe.db.set_value("Sales Invoice", inv.name, updates, update_modified=True)
+        inv.reload()
+
+        try:
+            inv.add_comment(
+                "Edit",
+                f"Cancelled invoice fields updated by {frappe.session.user}: {'; '.join(update_fragments)}",
+            )
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "invoice_id": inv.name,
+            "sales_invoice_state": inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state"),
+            "acceptance_status": inv.get("custom_acceptance_status"),
+            "accepted_by": inv.get("custom_accepted_by"),
+            "accepted_on": inv.get("custom_accepted_on"),
+        }
+    except frappe.PermissionError:
+        raise
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), "update_cancelled_invoice_status_fields failed")
+        return {"success": False, "error": str(exc)}
 
 
 @frappe.whitelist(allow_guest=False)

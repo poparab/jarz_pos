@@ -217,3 +217,86 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertFalse(result.get("success"))
 		self.assertIn("disabled", result.get("error", "").lower())
 
+	def test_update_cancelled_invoice_status_fields_rejects_non_cancelled_invoice(self):
+		"""Only cancelled Sales Invoices should go through the correction endpoint."""
+		from jarz_pos.api.manager import update_cancelled_invoice_status_fields
+
+		invoice = _FakeInvoice(
+			name="INV-OPEN-001",
+			docstatus=1,
+			custom_sales_invoice_state="Ready",
+			custom_acceptance_status="Pending",
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_doc.return_value = invoice
+		mock_frappe.has_permission.return_value = True
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+			result = update_cancelled_invoice_status_fields(
+				invoice_id="INV-OPEN-001",
+				sales_invoice_state="Cancelled",
+			)
+
+		self.assertFalse(result.get("success"))
+		self.assertIn("cancelled", result.get("error", "").lower())
+
+	def test_update_cancelled_invoice_status_fields_updates_state_and_acceptance(self):
+		"""Managers can correct the Jarz workflow fields on cancelled invoices only."""
+		from jarz_pos.api.manager import update_cancelled_invoice_status_fields
+
+		invoice = _FakeInvoice(
+			name="INV-CANCELLED-001",
+			docstatus=2,
+			custom_sales_invoice_state="Cancelled",
+			sales_invoice_state="Cancelled",
+			custom_acceptance_status="Pending",
+			custom_accepted_by=None,
+			custom_accepted_on=None,
+		)
+		invoice.add_comment = MagicMock()
+
+		def _get_field(fieldname):
+			if fieldname == "custom_sales_invoice_state":
+				return SimpleNamespace(options="Received\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled")
+			if fieldname == "sales_invoice_state":
+				return SimpleNamespace(options="Received\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled")
+			if fieldname == "custom_acceptance_status":
+				return SimpleNamespace(options="Pending\nAccepted")
+			if fieldname in {"custom_accepted_by", "custom_accepted_on"}:
+				return object()
+			return None
+
+		meta = MagicMock()
+		meta.get_field.side_effect = _get_field
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.utils.now_datetime.return_value = "2026-05-04 15:00:00"
+		mock_frappe.get_doc.return_value = invoice
+		mock_frappe.get_meta.return_value = meta
+		mock_frappe.has_permission.return_value = True
+
+		def _set_value(_doctype, _name, values, update_modified=True):
+			invoice._data.update(values)
+
+		mock_frappe.db.set_value.side_effect = _set_value
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+			result = update_cancelled_invoice_status_fields(
+				invoice_id="INV-CANCELLED-001",
+				sales_invoice_state="Ready",
+				acceptance_status="Accepted",
+			)
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(invoice.get("custom_sales_invoice_state"), "Ready")
+		self.assertEqual(invoice.get("sales_invoice_state"), "Ready")
+		self.assertEqual(invoice.get("custom_acceptance_status"), "Accepted")
+		self.assertEqual(invoice.get("custom_accepted_by"), "manager@example.com")
+		self.assertEqual(invoice.get("custom_accepted_on"), "2026-05-04 15:00:00")
+		mock_frappe.db.set_value.assert_called_once()
+		invoice.add_comment.assert_called_once()
+

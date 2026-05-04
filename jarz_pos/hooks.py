@@ -99,7 +99,10 @@ workspaces = [
 ]
 
 # include js in doctype views
-doctype_js = {"POS Closing Entry": "public/js/pos_closing_entry_fix.js"}
+doctype_js = {
+    "POS Closing Entry": "public/js/pos_closing_entry_fix.js",
+    "Sales Invoice": "public/js/sales_invoice_cancelled_fields.js",
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
