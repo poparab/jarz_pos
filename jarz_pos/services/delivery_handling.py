@@ -42,6 +42,8 @@ def update_submitted_sales_invoice_state(
     if not target_state:
         return False
 
+    inv_name = str(getattr(inv, "name", "") or "").strip()
+
     try:
         meta = frappe.get_meta("Sales Invoice")
         existing_fields = [field_name for field_name in resolved_fields if meta.get_field(field_name)]
@@ -53,17 +55,49 @@ def update_submitted_sales_invoice_state(
     if not resolved_fields:
         return False
 
-    if all((str(inv.get(field_name) or "").strip() == target_state) for field_name in resolved_fields):
-        return False
+    def _load_working_invoice():
+        if getattr(inv, "docstatus", 0) == 1 and inv_name:
+            try:
+                return frappe.get_doc("Sales Invoice", inv_name)
+            except Exception:
+                pass
+        return inv
 
-    for field_name in resolved_fields:
-        inv.set(field_name, target_state)
+    def _sync_original_invoice(stateful_inv) -> None:
+        if stateful_inv is inv:
+            return
+        for field_name in resolved_fields:
+            try:
+                inv.set(field_name, stateful_inv.get(field_name))
+            except Exception:
+                try:
+                    setattr(inv, field_name, stateful_inv.get(field_name))
+                except Exception:
+                    pass
 
-    if getattr(inv, "docstatus", 0) == 1:
-        inv.flags.ignore_validate_update_after_submit = True
+    for attempt in range(2):
+        working_inv = _load_working_invoice()
 
-    inv.save(ignore_permissions=True, ignore_version=True)
-    return True
+        if all((str(working_inv.get(field_name) or "").strip() == target_state) for field_name in resolved_fields):
+            _sync_original_invoice(working_inv)
+            return False
+
+        for field_name in resolved_fields:
+            working_inv.set(field_name, target_state)
+
+        if getattr(working_inv, "docstatus", 0) == 1:
+            working_inv.flags.ignore_validate_update_after_submit = True
+
+        try:
+            working_inv.save(ignore_permissions=True, ignore_version=True)
+            _sync_original_invoice(working_inv)
+            return True
+        except frappe.TimestampMismatchError:
+            if attempt == 0 and inv_name:
+                continue
+            raise
+
+    return False
 
 
 @contextmanager

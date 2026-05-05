@@ -14,9 +14,32 @@ def _ensure_manager_access() -> None:
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
+def _append_transfer_warehouse_option(
+    out: List[Dict[str, Any]],
+    *,
+    name: str,
+    warehouse: Optional[str],
+) -> None:
+    warehouse = (warehouse or "").strip()
+    if not warehouse:
+        return
+    if any((row.get("warehouse") or "").strip() == warehouse for row in out):
+        return
+    company = frappe.db.get_value("Warehouse", warehouse, "company")
+    out.append({
+        "name": name,
+        "company": company,
+        "warehouse": warehouse,
+    })
+
+
 @frappe.whitelist()
 def list_pos_profiles() -> List[Dict[str, Any]]:
-    """Return POS Profiles with their connected warehouses."""
+    """Return stock transfer options backed by warehouses.
+
+    The stock transfer screen is centered on POS branches, but some warehouse-only
+    destinations such as Finished Goods must also be selectable.
+    """
     _ensure_manager_access()
     rows = frappe.get_all(
         "POS Profile",
@@ -32,6 +55,12 @@ def list_pos_profiles() -> List[Dict[str, Any]]:
             "company": r.get("company"),
             "warehouse": r.get("warehouse"),
         })
+    _append_transfer_warehouse_option(
+        out,
+        name=_("Finished Goods"),
+        warehouse=frappe.db.get_single_value("Manufacturing Settings", "default_fg_warehouse"),
+    )
+    out.sort(key=lambda row: ((row.get("name") or "").lower(), (row.get("warehouse") or "").lower()))
     return out
 
 

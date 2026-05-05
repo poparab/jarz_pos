@@ -364,6 +364,89 @@ def _disable_token(token: str) -> None:
         )
         frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
 
+
+def _get_mobile_device_rows_by_token(token: str) -> List[Dict[str, Any]]:
+    return frappe.get_all(
+        "Jarz Mobile Device",
+        filters={"token": token},
+        fields=["name", "user", "enabled", "modified"],
+        order_by="enabled desc, modified desc",
+    )
+
+
+def _is_enabled_mobile_device(row: Dict[str, Any]) -> bool:
+    try:
+        return int(row.get("enabled") or 0) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _select_mobile_device_row(rows: Sequence[Dict[str, Any]], user: str) -> Optional[Dict[str, Any]]:
+    if not rows:
+        return None
+
+    for candidates in (
+        [row for row in rows if row.get("user") == user and _is_enabled_mobile_device(row)],
+        [row for row in rows if _is_enabled_mobile_device(row)],
+        [row for row in rows if row.get("user") == user],
+        list(rows),
+    ):
+        if candidates:
+            return candidates[0]
+
+    return None
+
+
+def _prune_duplicate_mobile_device_rows(rows: Sequence[Dict[str, Any]], keep_name: str) -> None:
+    for row in rows:
+        docname = row.get("name")
+        if not docname or docname == keep_name:
+            continue
+
+        try:
+            frappe.delete_doc(
+                "Jarz Mobile Device",
+                docname,
+                ignore_permissions=True,
+                force=True,
+            )
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Failed pruning duplicate mobile device row {docname}",
+            )
+
+
+def _update_mobile_device_row(docname: str, payload: Dict[str, Any]) -> Any:
+    values = dict(payload)
+    values["last_seen"] = frappe.utils.now_datetime()
+    frappe.db.set_value("Jarz Mobile Device", docname, values, update_modified=True)
+    return frappe.get_doc("Jarz Mobile Device", docname)
+
+
+def _upsert_mobile_device(payload: Dict[str, Any]) -> Any:
+    token = payload["token"]
+    user = payload["user"]
+    rows = _get_mobile_device_rows_by_token(token)
+    selected = _select_mobile_device_row(rows, user)
+
+    if selected:
+        _prune_duplicate_mobile_device_rows(rows, selected["name"])
+        return _update_mobile_device_row(selected["name"], payload)
+
+    doc = frappe.get_doc({"doctype": "Jarz Mobile Device", **payload})
+    try:
+        doc.insert(ignore_permissions=True)
+        return doc
+    except Exception:
+        rows = _get_mobile_device_rows_by_token(token)
+        selected = _select_mobile_device_row(rows, user)
+        if not selected:
+            raise
+
+        _prune_duplicate_mobile_device_rows(rows, selected["name"])
+        return _update_mobile_device_row(selected["name"], payload)
+
 @frappe.whitelist(allow_guest=False)
 def register_mobile_device(
     token: str,
@@ -386,7 +469,6 @@ def register_mobile_device(
         frappe.throw("Authentication required to register device")
 
     try:
-        docname = frappe.db.get_value("Jarz Mobile Device", {"token": token}, "name")
         payload = {
             "token": token,
             "user": user,
@@ -397,14 +479,7 @@ def register_mobile_device(
             "pos_profiles": _normalise_pos_profile_payload(pos_profiles),
         }
 
-        if docname:
-            doc = frappe.get_doc("Jarz Mobile Device", docname)
-            for field, value in payload.items():
-                setattr(doc, field, value)
-            doc.save(ignore_permissions=True)
-        else:
-            doc = frappe.get_doc({"doctype": "Jarz Mobile Device", **payload})
-            doc.insert(ignore_permissions=True)
+        doc = _upsert_mobile_device(payload)
 
         return {"success": True, "device": doc.name}
     except Exception as exc:

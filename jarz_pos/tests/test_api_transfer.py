@@ -4,6 +4,7 @@ This module tests transfer-related API endpoints.
 """
 
 import unittest
+from unittest.mock import patch
 
 
 class TestTransferAPI(unittest.TestCase):
@@ -28,3 +29,53 @@ class TestTransferAPI(unittest.TestCase):
 		self.assertTrue(
 			hasattr(transfer_module, "__name__"), "Transfer module should have __name__ attribute"
 		)
+
+	def test_list_pos_profiles_includes_finished_goods_option(self):
+		"""Finished Goods warehouse should be selectable even without a POS Profile."""
+		from jarz_pos.api import transfer
+
+		with patch.object(transfer, "_ensure_manager_access"), \
+			 patch.object(
+				transfer.frappe,
+				"get_all",
+				return_value=[{"name": "Dokki", "company": "JARZ", "warehouse": "Stores - Dokki"}],
+			 ), \
+			 patch.object(
+				transfer.frappe.db,
+				"get_single_value",
+				return_value="Finished Goods - J",
+			 ), \
+			 patch.object(
+				transfer.frappe.db,
+				"get_value",
+				return_value="JARZ",
+			 ):
+			result = transfer.list_pos_profiles()
+
+		self.assertTrue(any(row["warehouse"] == "Finished Goods - J" for row in result))
+		finished_goods = next(row for row in result if row["warehouse"] == "Finished Goods - J")
+		self.assertEqual(finished_goods["name"], "Finished Goods")
+
+	def test_list_pos_profiles_does_not_duplicate_finished_goods_warehouse(self):
+		"""Do not append a second option when a POS Profile already uses the FG warehouse."""
+		from jarz_pos.api import transfer
+
+		with patch.object(transfer, "_ensure_manager_access"), \
+			 patch.object(
+				transfer.frappe,
+				"get_all",
+				return_value=[{"name": "Finished Goods Branch", "company": "JARZ", "warehouse": "Finished Goods - J"}],
+			 ), \
+			 patch.object(
+				transfer.frappe.db,
+				"get_single_value",
+				return_value="Finished Goods - J",
+			 ), \
+			 patch.object(
+				transfer.frappe.db,
+				"get_value",
+				return_value="JARZ",
+			 ):
+			result = transfer.list_pos_profiles()
+
+		self.assertEqual(sum(1 for row in result if row["warehouse"] == "Finished Goods - J"), 1)

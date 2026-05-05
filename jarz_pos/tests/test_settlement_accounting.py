@@ -140,14 +140,21 @@ class TestSubmittedInvoiceStateUpdates(unittest.TestCase):
     def test_uses_save_for_submitted_invoice(self, mock_frappe):
         from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_state
 
-        inv = _mock_invoice()
+        inv = _mock_invoice(name="INV-TEST-001")
         inv.flags = MagicMock()
         inv.custom_sales_invoice_state = "Ready"
         inv.sales_invoice_state = "Ready"
 
+        fresh_inv = _mock_invoice(name="INV-TEST-001")
+        fresh_inv.flags = MagicMock()
+        fresh_inv.custom_sales_invoice_state = "Ready"
+        fresh_inv.sales_invoice_state = "Ready"
+
         mock_meta = MagicMock()
         mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {"custom_sales_invoice_state", "sales_invoice_state"} else None
         mock_frappe.get_meta.return_value = mock_meta
+        mock_frappe.get_doc.return_value = fresh_inv
+        mock_frappe.TimestampMismatchError = type("TimestampMismatchError", (Exception,), {})
 
         changed = update_submitted_sales_invoice_state(
             inv,
@@ -156,29 +163,70 @@ class TestSubmittedInvoiceStateUpdates(unittest.TestCase):
         )
 
         self.assertTrue(changed)
-        self.assertTrue(inv.flags.ignore_validate_update_after_submit)
-        inv.set.assert_any_call("custom_sales_invoice_state", "Out for Delivery")
-        inv.set.assert_any_call("sales_invoice_state", "Out for Delivery")
-        inv.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
-        inv.db_set.assert_not_called()
+        mock_frappe.get_doc.assert_called_once_with("Sales Invoice", "INV-TEST-001")
+        self.assertTrue(fresh_inv.flags.ignore_validate_update_after_submit)
+        fresh_inv.set.assert_any_call("custom_sales_invoice_state", "Out for Delivery")
+        fresh_inv.set.assert_any_call("sales_invoice_state", "Out for Delivery")
+        fresh_inv.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
+        inv.save.assert_not_called()
+        fresh_inv.db_set.assert_not_called()
+
+    @patch("jarz_pos.services.delivery_handling.frappe")
+    def test_retries_with_fresh_doc_after_timestamp_mismatch(self, mock_frappe):
+        from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_state
+
+        stale_inv = _mock_invoice(name="INV-TEST-002")
+        stale_inv.flags = MagicMock()
+        stale_inv.custom_sales_invoice_state = "Ready"
+
+        first_fresh = _mock_invoice(name="INV-TEST-002")
+        first_fresh.flags = MagicMock()
+        first_fresh.custom_sales_invoice_state = "Ready"
+
+        second_fresh = _mock_invoice(name="INV-TEST-002")
+        second_fresh.flags = MagicMock()
+        second_fresh.custom_sales_invoice_state = "Ready"
+
+        timestamp_error = type("TimestampMismatchError", (Exception,), {})
+        first_fresh.save.side_effect = timestamp_error("stale")
+
+        mock_meta = MagicMock()
+        mock_meta.get_field.side_effect = lambda name: MagicMock() if name == "custom_sales_invoice_state" else None
+        mock_frappe.get_meta.return_value = mock_meta
+        mock_frappe.get_doc.side_effect = [first_fresh, second_fresh]
+        mock_frappe.TimestampMismatchError = timestamp_error
+
+        changed = update_submitted_sales_invoice_state(stale_inv, "Out for Delivery")
+
+        self.assertTrue(changed)
+        self.assertEqual(mock_frappe.get_doc.call_count, 2)
+        first_fresh.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
+        second_fresh.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
 
     @patch("jarz_pos.services.delivery_handling.frappe")
     def test_is_idempotent_when_state_is_already_set(self, mock_frappe):
         from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_state
 
-        inv = _mock_invoice()
+        inv = _mock_invoice(name="INV-TEST-003")
         inv.flags = MagicMock()
         inv.custom_sales_invoice_state = "Out for Delivery"
+
+        fresh_inv = _mock_invoice(name="INV-TEST-003")
+        fresh_inv.flags = MagicMock()
+        fresh_inv.custom_sales_invoice_state = "Out for Delivery"
 
         mock_meta = MagicMock()
         mock_meta.get_field.side_effect = lambda name: MagicMock() if name == "custom_sales_invoice_state" else None
         mock_frappe.get_meta.return_value = mock_meta
+        mock_frappe.get_doc.return_value = fresh_inv
+        mock_frappe.TimestampMismatchError = type("TimestampMismatchError", (Exception,), {})
 
         changed = update_submitted_sales_invoice_state(inv, "Out for Delivery")
 
         self.assertFalse(changed)
-        inv.set.assert_not_called()
-        inv.save.assert_not_called()
+        mock_frappe.get_doc.assert_called_once_with("Sales Invoice", "INV-TEST-003")
+        fresh_inv.set.assert_not_called()
+        fresh_inv.save.assert_not_called()
 
 
 # ===========================================================================
