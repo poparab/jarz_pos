@@ -20,6 +20,10 @@ from jarz_pos.utils.invoice_utils import (
     add_items_to_invoice,
     verify_invoice_totals
 )
+from jarz_pos.utils.customer_address_utils import (
+    ensure_shipping_address,
+    resolve_customer_shipping_address,
+)
 from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 from jarz_pos.utils.account_utils import (
@@ -204,6 +208,7 @@ def create_pos_invoice(
     pos_profile_name=None,
     delivery_charges_json=None,
     required_delivery_datetime=None,
+    shipping_address_name: str | None = None,
     sales_partner: str | None = None,
     payment_type: str | None = None,
     pickup: bool | None = None,
@@ -281,6 +286,23 @@ def create_pos_invoice(
         # STEP 6: Set Document Fields
         print("\n6️⃣ SETTING DOCUMENT FIELDS:")
         set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
+
+        # STEP 6.A: Resolve and stamp the shipping address explicitly.
+        resolved_shipping_address = resolve_customer_shipping_address(
+            customer_doc.name,
+            preferred_address_name=shipping_address_name,
+        )
+        if shipping_address_name and (
+            not resolved_shipping_address or resolved_shipping_address.get("name") != shipping_address_name
+        ):
+            frappe.throw("Selected shipping address is no longer available for this customer")
+        if resolved_shipping_address:
+            resolved_shipping_address_name = str(resolved_shipping_address.get("name") or "").strip()
+            if resolved_shipping_address_name:
+                ensure_shipping_address(resolved_shipping_address_name)
+                invoice_doc.shipping_address_name = resolved_shipping_address_name
+                invoice_doc.customer_address = resolved_shipping_address_name
+                print(f"   📍 Shipping address set: {resolved_shipping_address_name}")
 
         # STEP 6.0: Mark pickup flag if provided
         is_pickup = bool(pickup)

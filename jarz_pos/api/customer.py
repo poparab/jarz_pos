@@ -4,6 +4,18 @@ from frappe import _
 from frappe.utils import flt
 from frappe.model.document import Document
 
+from jarz_pos.utils.customer_address_utils import (
+    ADDRESS_PHONE_FIELDS,
+    _address_phone,
+    ensure_shipping_address,
+    format_address_text,
+    get_customer_shipping_addresses as _get_customer_shipping_addresses,
+    get_linked_customer_address_names,
+    link_shipping_address_to_invoice,
+    resolve_customer_shipping_address,
+    set_customer_primary_shipping_address,
+)
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -47,6 +59,187 @@ def _augment_customer_with_territory(cust_row: dict[str, any]):
         frappe.logger().warning(f"Territory augmentation failed for customer {cust_row.get('name')}: {_err}")
         cust_row["delivery_income"] = 0.0
         cust_row["delivery_expense"] = 0.0
+
+
+def _customer_phone(customer_doc: Document, selected_address: dict | None = None) -> str:
+    if selected_address:
+        phone = _address_phone(selected_address)
+        if phone:
+            return phone
+
+    for fieldname in ("mobile_no", "phone"):
+        value = str(getattr(customer_doc, fieldname, "") or "").strip()
+        if value:
+            return value
+
+    if customer_doc.customer_primary_contact and frappe.db.exists("Contact", customer_doc.customer_primary_contact):
+        contact_doc = frappe.get_doc("Contact", customer_doc.customer_primary_contact)
+        for fieldname in ("mobile_no", "phone"):
+            value = str(getattr(contact_doc, fieldname, "") or "").strip()
+            if value:
+                return value
+
+    return ""
+
+
+def _build_customer_shipping_address_book(customer: str, invoice: str | None = None) -> dict:
+    customer_doc = frappe.get_doc("Customer", customer)
+    preferred_address_name = ""
+    if invoice and frappe.db.exists("Sales Invoice", invoice):
+        preferred_address_name = str(
+            frappe.db.get_value("Sales Invoice", invoice, "shipping_address_name")
+            or frappe.db.get_value("Sales Invoice", invoice, "customer_address")
+            or ""
+        ).strip()
+
+    addresses = _get_customer_shipping_addresses(customer)
+    selected_address = resolve_customer_shipping_address(
+        customer,
+        preferred_address_name=preferred_address_name or customer_doc.customer_primary_address,
+    )
+    selected_address_name = str(selected_address.get("name") or "").strip() if selected_address else ""
+
+    return {
+        "customer": customer_doc.name,
+        "customer_name": customer_doc.customer_name,
+        "addresses": addresses,
+        "selected_address_name": selected_address_name,
+        "selected_address": dict(selected_address) if selected_address else None,
+        "default_phone": _customer_phone(customer_doc, selected_address),
+    }
+
+
+def _sync_customer_phone(customer_doc: Document, phone: str) -> None:
+    phone = str(phone or "").strip()
+    if not phone:
+        return
+
+    if frappe.db.has_column("Customer", "mobile_no"):
+        customer_doc.mobile_no = phone
+    if frappe.db.has_column("Customer", "phone"):
+        customer_doc.phone = phone
+
+    if customer_doc.customer_primary_contact and frappe.db.exists("Contact", customer_doc.customer_primary_contact):
+        contact_doc = frappe.get_doc("Contact", customer_doc.customer_primary_contact)
+        contact_doc.mobile_no = phone
+        contact_doc.save(ignore_permissions=True)
+    else:
+        contact_doc = frappe.get_doc({
+            "doctype": "Contact",
+            "first_name": customer_doc.customer_name,
+            "mobile_no": phone,
+            "is_primary_contact": 1,
+            "links": [{
+                "link_doctype": "Customer",
+                "link_name": customer_doc.name,
+            }],
+        })
+        contact_doc.insert(ignore_permissions=True)
+        customer_doc.customer_primary_contact = contact_doc.name
+
+
+def _apply_phone_to_address(address_doc: Document, phone: str) -> None:
+    phone = str(phone or "").strip()
+    if not phone:
+        return
+
+    for fieldname in ADDRESS_PHONE_FIELDS:
+        if frappe.db.has_column("Address", fieldname):
+            address_doc.set(fieldname, phone)
+
+
+@frappe.whitelist()
+def get_customer_shipping_addresses(customer, invoice=None):
+    """Return the linked customer shipping-address book and currently selected address."""
+    try:
+        if not customer or not frappe.db.exists("Customer", customer):
+            frappe.throw(_("Customer not found."))
+
+        return _build_customer_shipping_address_book(customer, invoice=invoice)
+    except Exception as e:
+        frappe.log_error(f"get_customer_shipping_addresses: {str(e)}", frappe.get_traceback())
+        frappe.throw(_("Failed to fetch customer shipping addresses."))
+
+
+@frappe.whitelist()
+def save_customer_shipping_address(
+    customer,
+    phone=None,
+    invoice=None,
+    address_name=None,
+    address=None,
+    set_as_primary=1,
+):
+    """Select an existing shipping address or create a new one for a customer."""
+    try:
+        if not customer or not frappe.db.exists("Customer", customer):
+            frappe.throw(_("Customer not found."))
+
+        customer_doc = frappe.get_doc("Customer", customer)
+        normalized_address_name = str(address_name or "").strip()
+        normalized_address = str(address or "").strip()
+        use_as_primary = str(set_as_primary or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+        if normalized_address_name:
+            linked_names = set(get_linked_customer_address_names(customer))
+            if normalized_address_name not in linked_names:
+                frappe.throw(_("Selected address does not belong to this customer."))
+            address_doc = ensure_shipping_address(normalized_address_name)
+            if address_doc is None:
+                frappe.throw(_("Selected address was not found."))
+        else:
+            if not normalized_address:
+                frappe.throw(_("Address is required."))
+
+            address_payload = {
+                "doctype": "Address",
+                "address_title": customer_doc.customer_name,
+                "address_type": "Shipping",
+                "address_line1": normalized_address,
+                "city": customer_doc.territory or "Unknown",
+                "is_primary_address": 1 if use_as_primary else 0,
+                "is_shipping_address": 1,
+                "links": [{
+                    "link_doctype": "Customer",
+                    "link_name": customer_doc.name,
+                }],
+            }
+            for fieldname in ADDRESS_PHONE_FIELDS:
+                if frappe.db.has_column("Address", fieldname) and str(phone or "").strip():
+                    address_payload[fieldname] = str(phone).strip()
+
+            address_doc = frappe.get_doc(address_payload)
+            address_doc.insert(ignore_permissions=True)
+
+        _apply_phone_to_address(address_doc, str(phone or "").strip())
+        address_doc.save(ignore_permissions=True)
+
+        ensure_shipping_address(address_doc.name)
+        if use_as_primary:
+            set_customer_primary_shipping_address(customer_doc.name, address_doc.name)
+            customer_doc.customer_primary_address = address_doc.name
+
+        _sync_customer_phone(customer_doc, str(phone or "").strip())
+        customer_doc.save(ignore_permissions=True)
+
+        if invoice:
+            link_shipping_address_to_invoice(invoice, address_doc.name)
+
+        frappe.db.commit()
+        return {
+            "success": True,
+            "message": "Customer shipping address updated successfully",
+            "selected_address_name": address_doc.name,
+            "selected_address": {
+                "name": address_doc.name,
+                "full_address": format_address_text(address_doc.as_dict()),
+                "phone": _address_phone(address_doc.as_dict(), str(phone or "").strip()),
+            },
+            "address_book": _build_customer_shipping_address_book(customer_doc.name, invoice=invoice),
+        }
+    except Exception as e:
+        frappe.log_error(f"save_customer_shipping_address: {str(e)}", frappe.get_traceback())
+        frappe.throw(_("Failed to save customer shipping address."))
 
 @frappe.whitelist()
 def get_customers(search=None):
@@ -274,7 +467,7 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         address_payload = {
             "doctype": "Address",
             "address_title": customer_name,
-            "address_type": "Billing",
+            "address_type": "Shipping",
             "address_line1": customer_primary_address,
             "city": territory_name,  # Use territory name as city
             "is_primary_address": 1,
@@ -418,104 +611,15 @@ def update_default_address(customer, address, phone, invoice=None):
             
         customer_doc = frappe.get_doc("Customer", customer)
 
-        # ── Determine which Address doc to update ──────────────────────
-        # Priority: SI-linked address > Customer primary address > create new
-        si_addr_name = None
-        if invoice and frappe.db.exists("Sales Invoice", invoice):
-            si_addr_name = (
-                frappe.db.get_value("Sales Invoice", invoice, "shipping_address_name")
-                or frappe.db.get_value("Sales Invoice", invoice, "customer_address")
-            )
-
-        target_addr_name = si_addr_name or customer_doc.customer_primary_address
-
-        if target_addr_name and frappe.db.exists("Address", target_addr_name):
-            # Update existing address
-            address_doc = frappe.get_doc("Address", target_addr_name)
-            address_doc.address_line1 = address
-            address_doc.is_primary_address = 1
-            address_doc.is_shipping_address = 1
-            for fld in ("phone", "phone_number", "phone_no", "mobile_no"):
-                if frappe.db.has_column("Address", fld):
-                    address_doc.set(fld, phone)
-            address_doc.save(ignore_permissions=True)
-            frappe.logger().info(f"Updated existing address: {address_doc.name}")
-        else:
-            # Create new address
-            address_payload = {
-                "doctype": "Address",
-                "address_title": customer_doc.customer_name,
-                "address_type": "Billing",
-                "address_line1": address,
-                "city": customer_doc.territory or "Unknown",
-                "is_primary_address": 1,
-                "is_shipping_address": 1,
-                "links": [{
-                    "link_doctype": "Customer",
-                    "link_name": customer
-                }]
-            }
-            for fld in ("phone", "phone_number", "phone_no", "mobile_no"):
-                if frappe.db.has_column("Address", fld):
-                    address_payload[fld] = phone
-
-            address_doc = frappe.get_doc(address_payload)
-            address_doc.insert(ignore_permissions=True)
-            
-            # Update customer with new primary address
-            customer_doc.customer_primary_address = address_doc.name
-            frappe.logger().info(f"Created new address: {address_doc.name}")
-
-        # ── Link the address to the Sales Invoice if needed ───────────
-        if invoice and frappe.db.exists("Sales Invoice", invoice):
-            si = frappe.get_doc("Sales Invoice", invoice)
-            changed = False
-            if si.shipping_address_name != address_doc.name:
-                si.shipping_address_name = address_doc.name
-                changed = True
-            if si.customer_address != address_doc.name:
-                si.customer_address = address_doc.name
-                changed = True
-            if changed:
-                si.flags.ignore_validate_update_after_submit = True
-                si.save(ignore_permissions=True)
-                frappe.logger().info(f"Linked address {address_doc.name} to SI {invoice}")
-        
-        # Update or create primary contact
-        if customer_doc.customer_primary_contact:
-            # Update existing contact
-            contact_doc = frappe.get_doc("Contact", customer_doc.customer_primary_contact)
-            contact_doc.mobile_no = phone
-            contact_doc.save(ignore_permissions=True)
-            frappe.logger().info(f"Updated existing contact: {contact_doc.name}")
-        else:
-            # Create new contact
-            contact_doc = frappe.get_doc({
-                "doctype": "Contact",
-                "first_name": customer_doc.customer_name,
-                "mobile_no": phone,
-                "is_primary_contact": 1,
-                "links": [{
-                    "link_doctype": "Customer",
-                    "link_name": customer
-                }]
-            })
-            contact_doc.insert(ignore_permissions=True)
-            
-            # Update customer with new primary contact
-            customer_doc.customer_primary_contact = contact_doc.name
-            frappe.logger().info(f"Created new contact: {contact_doc.name}")
-        
-        # Save customer if we created new address or contact
-        if not customer_doc.customer_primary_address or not customer_doc.customer_primary_contact:
-            customer_doc.save(ignore_permissions=True)
-        
-        frappe.db.commit()
-        
-        return {
-            "success": True,
-            "message": "Customer address updated successfully"
-        }
+        result = save_customer_shipping_address(
+            customer=customer,
+            phone=phone,
+            invoice=invoice,
+            address=address,
+            set_as_primary=1,
+        )
+        result["message"] = "Customer address updated successfully"
+        return result
         
     except Exception as e:
         frappe.log_error(f"Error updating customer address: {str(e)}", frappe.get_traceback())

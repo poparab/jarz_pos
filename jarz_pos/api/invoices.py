@@ -37,6 +37,7 @@ def create_pos_invoice():
     pos_profile_name = frappe.form_dict.get('pos_profile_name')
     delivery_charges_json = frappe.form_dict.get('delivery_charges_json')
     required_delivery_datetime = frappe.form_dict.get('required_delivery_datetime')
+    shipping_address_name = frappe.form_dict.get('shipping_address_name')
     sales_partner = frappe.form_dict.get('sales_partner')
     payment_type = frappe.form_dict.get('payment_type')  # 'cash' | 'online' (optional)
     # New: pickup flag (no delivery fee)
@@ -94,6 +95,7 @@ RAW PARAMETERS:
     print(f"\n📋 INCOMING PARAMETERS:")
     print(f"   cart_json: {cart_json} (type: {type(cart_json)})")
     print(f"   customer_name: {customer_name} (type: {type(customer_name)})")
+    print(f"   shipping_address_name: {shipping_address_name} (type: {type(shipping_address_name)})")
     print(f"   pos_profile_name: {pos_profile_name} (type: {type(pos_profile_name)})")
     print(f"   delivery_charges_json: {delivery_charges_json} (type: {type(delivery_charges_json)})")
     print(f"   required_delivery_datetime: {required_delivery_datetime} (type: {type(required_delivery_datetime)})")
@@ -140,6 +142,7 @@ RAW PARAMETERS:
             pos_profile_name,
             delivery_charges_json,
             required_delivery_datetime,
+            shipping_address_name,
             sales_partner,
             payment_type,
             is_pickup,

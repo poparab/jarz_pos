@@ -265,6 +265,8 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         "net_total": float(invoice.net_total or 0),
         "total_taxes_and_charges": float(invoice.total_taxes_and_charges or 0),
         "full_address": full_address,
+        "shipping_address_name": invoice.get("shipping_address_name") or invoice.get("customer_address"),
+        "customer_address": invoice.get("customer_address"),
         "items": items,
         "payment_method": invoice.get("custom_payment_method"),
         "pos_profile": invoice.get("custom_kanban_profile") or invoice.get("pos_profile"),

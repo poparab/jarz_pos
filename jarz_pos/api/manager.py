@@ -478,6 +478,7 @@ def _build_invoice_amendment_request_id(
     cart_json: Any,
     pos_profile_name: Optional[str],
     customer_name: Optional[str],
+    shipping_address_name: Optional[str],
     required_delivery_datetime: Optional[str],
     delivery_end_datetime: Optional[str],
     sales_partner: Optional[str],
@@ -501,6 +502,7 @@ def _build_invoice_amendment_request_id(
         "cart": normalized_cart,
         "pos_profile_name": pos_profile_name,
         "customer_name": customer_name,
+        "shipping_address_name": shipping_address_name,
         "required_delivery_datetime": required_delivery_datetime,
         "delivery_end_datetime": delivery_end_datetime,
         "sales_partner": sales_partner,
@@ -588,6 +590,7 @@ def _run_invoice_amendment_job(
     request_id: str,
     cart_json: Any,
     customer_name: Optional[str] = None,
+    shipping_address_name: Optional[str] = None,
     pos_profile_name: Optional[str] = None,
     required_delivery_datetime: Optional[str] = None,
     delivery_end_datetime: Optional[str] = None,
@@ -623,6 +626,12 @@ def _run_invoice_amendment_job(
 
     cancelled_payment_entries: List[str] = []
     effective_customer_name = (customer_name or source_invoice.get("customer") or "").strip() or "Walking Customer"
+    effective_shipping_address_name = (
+        shipping_address_name
+        or source_invoice.get("shipping_address_name")
+        or source_invoice.get("customer_address")
+        or None
+    )
     effective_pos_profile = (
         pos_profile_name
         or source_invoice.get("custom_kanban_profile")
@@ -669,6 +678,7 @@ def _run_invoice_amendment_job(
                 effective_pos_profile,
                 None,
                 effective_required_delivery_datetime,
+                effective_shipping_address_name,
                 effective_sales_partner,
                 payment_type,
                 effective_pickup,
@@ -741,6 +751,7 @@ def submit_invoice_amendment(
     invoice_id: str,
     cart_json: Any,
     customer_name: Optional[str] = None,
+    shipping_address_name: Optional[str] = None,
     pos_profile_name: Optional[str] = None,
     required_delivery_datetime: Optional[str] = None,
     delivery_end_datetime: Optional[str] = None,
@@ -768,6 +779,7 @@ def submit_invoice_amendment(
         cart_json=cart_json,
         pos_profile_name=pos_profile_name,
         customer_name=customer_name,
+        shipping_address_name=shipping_address_name,
         required_delivery_datetime=required_delivery_datetime or _derive_required_delivery_datetime(source_invoice),
         delivery_end_datetime=delivery_end_datetime or _derive_delivery_end_datetime(source_invoice),
         sales_partner=sales_partner if sales_partner is not None else source_invoice.get("sales_partner"),
@@ -806,6 +818,7 @@ def submit_invoice_amendment(
         request_id=request_id,
         cart_json=cart_json,
         customer_name=customer_name,
+        shipping_address_name=shipping_address_name,
         pos_profile_name=pos_profile_name,
         required_delivery_datetime=required_delivery_datetime,
         delivery_end_datetime=delivery_end_datetime,
