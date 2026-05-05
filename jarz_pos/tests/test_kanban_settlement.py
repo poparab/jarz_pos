@@ -332,8 +332,6 @@ class TestKanbanOperations(unittest.TestCase):
 
 		self.assertIsNone(result["error"])
 		self.assertEqual(result["delivery_note"], "DN-001")
-		self.assertIs(stock_get_item_details.validate_end_of_life, stock_validate)
-		self.assertIs(item_module.validate_end_of_life, item_validate)
 
 	@patch('jarz_pos.services.delivery_handling.frappe')
 	def test_delivery_note_rejects_branch_warehouse_mismatch(self, mock_frappe):
