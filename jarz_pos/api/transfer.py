@@ -14,6 +14,10 @@ def _ensure_manager_access() -> None:
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
+def _get_singleton_value(doctype: str, field: str) -> Optional[str]:
+    return frappe.db.get_value("Singles", {"doctype": doctype, "field": field}, "value")
+
+
 def _append_transfer_warehouse_option(
     out: List[Dict[str, Any]],
     *,
@@ -58,7 +62,7 @@ def list_pos_profiles() -> List[Dict[str, Any]]:
     _append_transfer_warehouse_option(
         out,
         name=_("Finished Goods"),
-        warehouse=frappe.db.get_single_value("Manufacturing Settings", "default_fg_warehouse"),
+        warehouse=_get_singleton_value("Manufacturing Settings", "default_fg_warehouse"),
     )
     out.sort(key=lambda row: ((row.get("name") or "").lower(), (row.get("warehouse") or "").lower()))
     return out

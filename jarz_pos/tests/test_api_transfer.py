@@ -10,6 +10,24 @@ from unittest.mock import patch
 class TestTransferAPI(unittest.TestCase):
 	"""Test class for Transfer API functionality."""
 
+	def test_get_singleton_value_reads_from_singles(self):
+		"""Singleton lookups should remain usable even when the target DocType metadata diverges."""
+		from jarz_pos.api import transfer
+
+		with patch.object(
+			transfer.frappe.db,
+			"get_value",
+			return_value="Finished Goods - J",
+		) as get_value:
+			result = transfer._get_singleton_value("Manufacturing Settings", "default_fg_warehouse")
+
+		get_value.assert_called_once_with(
+			"Singles",
+			{"doctype": "Manufacturing Settings", "field": "default_fg_warehouse"},
+			"value",
+		)
+		self.assertEqual(result, "Finished Goods - J")
+
 	def test_transfer_module_imports(self):
 		"""Test that transfer module can be imported."""
 		try:
@@ -41,8 +59,8 @@ class TestTransferAPI(unittest.TestCase):
 				return_value=[{"name": "Dokki", "company": "JARZ", "warehouse": "Stores - Dokki"}],
 			 ), \
 			 patch.object(
-				transfer.frappe.db,
-				"get_single_value",
+				transfer,
+				"_get_singleton_value",
 				return_value="Finished Goods - J",
 			 ), \
 			 patch.object(
@@ -67,8 +85,8 @@ class TestTransferAPI(unittest.TestCase):
 				return_value=[{"name": "Finished Goods Branch", "company": "JARZ", "warehouse": "Finished Goods - J"}],
 			 ), \
 			 patch.object(
-				transfer.frappe.db,
-				"get_single_value",
+				transfer,
+				"_get_singleton_value",
 				return_value="Finished Goods - J",
 			 ), \
 			 patch.object(
