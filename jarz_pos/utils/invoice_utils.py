@@ -240,18 +240,26 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         "customer_name": invoice.customer_name or invoice.customer,
         "customer": invoice.customer,
         "territory": invoice.territory or "",
+        "sales_partner": invoice.get("sales_partner"),
     # New delivery slot fields
         "delivery_date": invoice.get("custom_delivery_date"),
         "delivery_time_from": invoice.get("custom_delivery_time_from"),
         "delivery_duration": invoice.get("custom_delivery_duration"),
     "delivery_slot_label": invoice.get("custom_delivery_slot_label"),
-        "status": invoice.get("sales_invoice_state") or "Received",
+        "status": invoice.get("custom_sales_invoice_state") or invoice.get("sales_invoice_state") or "Received",
         "posting_date": str(invoice.posting_date),
         "grand_total": float(invoice.grand_total or 0),
         "net_total": float(invoice.net_total or 0),
         "total_taxes_and_charges": float(invoice.total_taxes_and_charges or 0),
         "full_address": full_address,
-        "items": items
+        "items": items,
+        "payment_method": invoice.get("custom_payment_method"),
+        "pos_profile": invoice.get("custom_kanban_profile") or invoice.get("pos_profile"),
+        "outstanding_amount": float(invoice.get("outstanding_amount") or 0),
+        "docstatus_value": int(invoice.get("docstatus") or 0),
+        "doc_status": invoice.get("status"),
+        "is_return": int(invoice.get("is_return") or 0),
+        "delivery_trip": invoice.get("custom_delivery_trip"),
     }
     return data
 

@@ -45,6 +45,7 @@ except Exception:
 # These match the actual field values: "Received", "In Progress", "Ready"
 # Note: "recieved" (misspelled) included for backward compatibility with existing data
 _ALLOWED_TRANSFER_STATES = {"received", "recieved", "in progress", "ready", "preparing"}
+_ALLOWED_AMENDMENT_STATES = _ALLOWED_TRANSFER_STATES
 
 
 def _current_user_allowed_profiles() -> List[str]:
@@ -168,6 +169,125 @@ def _find_submitted_delivery_notes(invoice_name: str) -> List[str]:
         limit_page_length=20,
     ) or []
     return sorted({row for row in rows if row})
+
+
+def _find_submitted_payment_entries(invoice_name: str) -> List[str]:
+    """Return submitted Payment Entries already linked to the Sales Invoice."""
+    ref_rows = frappe.get_all(
+        "Payment Entry Reference",
+        filters={
+            "reference_doctype": "Sales Invoice",
+            "reference_name": invoice_name,
+            "parenttype": "Payment Entry",
+        },
+        pluck="parent",
+        limit_page_length=20,
+    ) or []
+    payment_entry_names = sorted({row for row in ref_rows if row})
+    if not payment_entry_names:
+        return []
+
+    submitted = frappe.get_all(
+        "Payment Entry",
+        filters={"name": ["in", payment_entry_names], "docstatus": 1},
+        pluck="name",
+        limit_page_length=20,
+    ) or []
+    return sorted({row for row in submitted if row})
+
+
+def _get_active_delivery_trip_name(inv: Any) -> Optional[str]:
+    """Return the linked delivery trip when it is still operationally active."""
+    trip_name = str(getattr(inv, "custom_delivery_trip", "") or inv.get("custom_delivery_trip") or "").strip()
+    if not trip_name:
+        return None
+
+    try:
+        trip_status = str(frappe.db.get_value("Delivery Trip", trip_name, "status") or "").strip()
+    except Exception:
+        return trip_name
+
+    if not trip_status or trip_status != "Completed":
+        return trip_name
+    return None
+
+
+def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
+    """Return whether a submitted POS invoice can start the ERP-first amendment flow."""
+    invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
+    current_state = str(inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "").strip()
+    normalized_state = current_state.lower()
+
+    def _blocked(code: str, reason: str, **extra: Any) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "can_amend": False,
+            "amendment_block_code": code,
+            "amendment_block_reason": reason,
+        }
+        payload.update(extra)
+        return payload
+
+    if not invoice_name:
+        return _blocked("invoice_missing", _("Invoice was not found."))
+
+    if int(inv.get("docstatus") or 0) != 1:
+        return _blocked("invoice_not_submitted", _("Only submitted invoices can be amended."))
+
+    if int(inv.get("is_return") or 0):
+        return _blocked("return_invoice", _("Return invoices cannot be amended from this workflow."))
+
+    if normalized_state not in _ALLOWED_AMENDMENT_STATES:
+        return _blocked(
+            "state_not_supported",
+            _("This invoice can only be amended before dispatch while it is still in an operational prep state."),
+        )
+
+    delivery_notes = _find_submitted_delivery_notes(invoice_name)
+    if delivery_notes:
+        return _blocked(
+            "delivery_note_exists",
+            _("This invoice already has a submitted Delivery Note and must use a corrective workflow."),
+            delivery_notes=delivery_notes,
+        )
+
+    active_trip = _get_active_delivery_trip_name(inv)
+    if active_trip:
+        return _blocked(
+            "delivery_trip_exists",
+            _("This invoice is already linked to an active delivery trip and cannot be amended here."),
+            delivery_trip=active_trip,
+        )
+
+    has_unsettled_courier_txn = False
+    try:
+        has_unsettled_courier_txn = bool(
+            frappe.db.exists(
+                "Courier Transaction",
+                {"reference_invoice": invoice_name, "status": ["!=", "Settled"]},
+            )
+        )
+    except Exception:
+        has_unsettled_courier_txn = False
+
+    if has_unsettled_courier_txn:
+        return _blocked(
+            "courier_transaction_exists",
+            _("This invoice has an unsettled courier transaction and cannot be amended here."),
+        )
+
+    payment_entries = _find_submitted_payment_entries(invoice_name)
+    if payment_entries:
+        return _blocked(
+            "payment_entry_exists",
+            _("This invoice already has a submitted Payment Entry and cannot be amended here."),
+            payment_entries=payment_entries,
+        )
+
+    return {
+        "can_amend": True,
+        "amendment_block_code": None,
+        "amendment_block_reason": None,
+    }
 
 
 def _get_invoice_warehouse_mismatches(inv: Any, expected_warehouse: str) -> List[Dict[str, str]]:

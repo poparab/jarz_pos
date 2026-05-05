@@ -101,6 +101,16 @@ except ImportError:
         
         return filter_conditions
 
+try:
+    from jarz_pos.api.manager import get_invoice_amendment_eligibility
+except Exception:
+    def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:  # type: ignore
+        return {
+            "can_amend": False,
+            "amendment_block_code": "unavailable",
+            "amendment_block_reason": "Invoice amendment eligibility is unavailable.",
+        }
+
 # Optional notification helper import (fail-safe)
 try:
     from jarz_pos.api.notifications import notify_invoice_cancellation  # type: ignore
@@ -261,6 +271,63 @@ def _resolve_customer_phone(customer: str) -> str:
         return phone
     except Exception:
         return ""
+
+
+def _ensure_invoice_detail_access(invoice: frappe.Document) -> None:
+    """Restrict invoice details to the current user's assigned POS Profiles."""
+    allowed_profiles = _get_current_user_pos_profiles()
+    if not allowed_profiles:
+        frappe.throw(_("Not permitted: no POS Profiles assigned"), frappe.PermissionError)
+
+    invoice_profile = str(invoice.get("custom_kanban_profile") or invoice.get("pos_profile") or "").strip()
+    if invoice_profile not in allowed_profiles:
+        frappe.throw(_("Not permitted for this invoice branch"), frappe.PermissionError)
+
+
+def _get_territory_shipping_values(territory_name: str) -> Dict[str, float]:
+    """Resolve configured delivery income/expense defaults for a territory."""
+    if not territory_name:
+        return {"income": 0.0, "expense": 0.0}
+
+    income = 0.0
+    expense = 0.0
+    try:
+        terr = frappe.get_doc("Territory", territory_name)
+        for field_name in ["shipping_income", "delivery_income", "courier_income", "shipping_income_amount"]:
+            if field_name in terr.as_dict():
+                try:
+                    income = float(terr.get(field_name) or 0)
+                    break
+                except Exception:
+                    pass
+        for field_name in ["shipping_expense", "delivery_expense", "courier_expense", "shipping_expense_amount"]:
+            if field_name in terr.as_dict():
+                try:
+                    expense = float(terr.get(field_name) or 0)
+                    break
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {"income": income, "expense": expense}
+
+
+def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, float]:
+    """Return effective shipping values after override and pickup rules."""
+    if _is_pickup_invoice(invoice):
+        return {"income": 0.0, "expense": 0.0}
+
+    shipping = _get_territory_shipping_values(invoice.get("territory") or "")
+    override_status = str(invoice.get("custom_shipping_override_status") or "").strip()
+    override_amount = float(invoice.get("custom_shipping_override") or 0)
+    persisted_expense = float(invoice.get("custom_shipping_expense") or 0)
+
+    if override_status == "Approved" and override_amount > 0:
+        shipping["expense"] = override_amount
+    elif persisted_expense > 0:
+        shipping["expense"] = persisted_expense
+
+    return shipping
 
 # Backwards compatibility wrappers (kept in case referenced elsewhere in file)
 
@@ -1404,7 +1471,11 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
     try:
         frappe.logger().debug(f"KANBAN API: get_invoice_details - Invoice: {invoice_id}")
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
+        _ensure_invoice_detail_access(invoice)
         data = format_invoice_data(invoice)
+        shipping = _get_invoice_shipping_values(invoice)
+        data["shipping_income"] = float(shipping.get("income") or 0.0)
+        data["shipping_expense"] = float(shipping.get("expense") or 0.0)
         # Add is_pickup flag consistently
         try:
             data["is_pickup"] = _is_pickup_invoice(invoice)
@@ -1431,6 +1502,7 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
             )
         except Exception:
             data["has_unsettled_courier_txn"] = False
+        data.update(get_invoice_amendment_eligibility(invoice))
         return _success(data=data)
     except Exception as e:
         error_msg = f"Error getting invoice details: {str(e)}"
