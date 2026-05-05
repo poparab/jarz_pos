@@ -127,6 +127,35 @@ class TestKanbanOperations(unittest.TestCase):
 		# Should return error for draft invoice
 		self.assertFalse(result.get("success", True))
 
+	@patch('jarz_pos.api.kanban.get_invoice_hard_mutation_blocker')
+	@patch('jarz_pos.api.kanban.frappe')
+	def test_cancel_invoice_rejects_hard_mutation_blockers(self, mock_frappe, mock_blocker):
+		"""Cancel flow should reuse the shared hard-blocker guardrail."""
+		from jarz_pos.api.kanban import cancel_invoice
+
+		mock_invoice = MagicMock()
+		mock_invoice.name = 'INV-001'
+		mock_invoice.docstatus = 1
+		mock_invoice.is_return = 0
+		mock_invoice.get.side_effect = lambda fieldname: {
+			'custom_sales_invoice_state': 'Ready',
+			'sales_invoice_state': 'Ready',
+		}.get(fieldname)
+
+		mock_frappe.session.user = 'manager@example.com'
+		mock_frappe.get_roles.return_value = ['JARZ line manager']
+		mock_frappe.get_doc.return_value = mock_invoice
+		mock_blocker.return_value = {
+			'mutation_block_code': 'journal_entry_exists',
+			'mutation_block_reason': 'This invoice already has settlement journal entries and cannot be changed from this workflow.',
+		}
+
+		result = cancel_invoice('INV-001', 'Customer requested')
+
+		self.assertFalse(result.get('success'))
+		self.assertIn('journal', result.get('error', '').lower())
+		mock_blocker.assert_called_once_with(mock_invoice)
+
 	@patch('jarz_pos.api.kanban._get_allowed_states')
 	@patch('jarz_pos.api.kanban.frappe')
 	def test_update_invoice_state_saves_submitted_invoice_to_fire_hooks(self, mock_frappe, mock_allowed_states):

@@ -102,7 +102,7 @@ except ImportError:
         return filter_conditions
 
 try:
-    from jarz_pos.api.manager import get_invoice_amendment_eligibility
+    from jarz_pos.api.manager import get_invoice_amendment_eligibility, get_invoice_hard_mutation_blocker
 except Exception:
     def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:  # type: ignore
         return {
@@ -110,6 +110,9 @@ except Exception:
             "amendment_block_code": "unavailable",
             "amendment_block_reason": "Invoice amendment eligibility is unavailable.",
         }
+
+    def get_invoice_hard_mutation_blocker(inv: Any) -> Optional[Dict[str, Any]]:  # type: ignore
+        return None
 
 # Optional notification helper import (fail-safe)
 try:
@@ -1271,6 +1274,13 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
         if int(getattr(invoice, "is_return", 0) or 0):
             return _failure("Return invoices cannot be cancelled")
 
+        mutation_blocker = get_invoice_hard_mutation_blocker(invoice)
+        if mutation_blocker:
+            return _failure(
+                mutation_blocker.get("mutation_block_reason")
+                or "This invoice cannot be changed from this workflow"
+            )
+
         current_state = (
             invoice.get("custom_sales_invoice_state")
             or invoice.get("sales_invoice_state")
@@ -1282,14 +1292,6 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
         blocked_states = {"out_for_delivery", "out-for-delivery", "delivered", "completed", "cancelled"}
         if normalized_state in blocked_states:
             return _failure("Invoice already dispatched; cancellation blocked")
-
-        dn_exists = frappe.get_all(
-            "Delivery Note Item",
-            filters={"against_sales_invoice": invoice.name, "docstatus": 1},
-            limit=1,
-        )
-        if dn_exists:
-            return _failure("Delivery Note already exists; use the return workflow")
 
         outstanding = float(invoice.outstanding_amount or 0.0)
         grand_total = float(invoice.grand_total or 0.0)

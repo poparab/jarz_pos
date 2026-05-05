@@ -225,13 +225,26 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     # Get items
     items = []
     for item in invoice.items:
-        items.append({
+        item_payload = {
             "item_code": item.item_code,
             "item_name": item.item_name,
             "qty": float(item.qty),
             "rate": float(item.rate),
-            "amount": float(item.amount)
-        })
+            "amount": float(item.amount),
+        }
+        for fieldname in [
+            "price_list_rate",
+            "discount_percentage",
+            "discount_amount",
+            "is_bundle_parent",
+            "is_bundle_child",
+            "bundle_code",
+            "parent_bundle",
+        ]:
+            value = getattr(item, fieldname, None)
+            if value not in (None, ""):
+                item_payload[fieldname] = value
+        items.append(item_payload)
     
     # Create formatted invoice data
     data = {

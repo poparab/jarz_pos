@@ -3,6 +3,7 @@
 This module tests manager dashboard and order management API endpoints.
 """
 
+from contextlib import nullcontext
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -108,6 +109,187 @@ class TestManagerAPI(unittest.TestCase):
 
 		# Verify states structure
 		self.assertIsInstance(result["states"], list, "States should be a list")
+
+	def test_get_invoice_amendment_eligibility_rejects_sales_partner_transactions(self):
+		"""Amendment flow must stop once Sales Partner settlement artifacts exist."""
+		from jarz_pos.api.manager import get_invoice_amendment_eligibility
+
+		invoice = _FakeInvoice(
+			name="INV-SPT-001",
+			docstatus=1,
+			is_return=0,
+			custom_sales_invoice_state="Ready",
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.side_effect = lambda doctype, **kwargs: {
+			"Delivery Note Item": [],
+			"Delivery Trip Invoice": [],
+			"Courier Transaction": [],
+			"Sales Partner Transactions": ["SPT-001"],
+			"Journal Entry": [],
+			"Journal Entry Account": [],
+		}.get(doctype, [])
+		mock_frappe.db.get_value.return_value = None
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe):
+			result = get_invoice_amendment_eligibility(invoice)
+
+		self.assertFalse(result.get("can_amend"))
+		self.assertEqual(result.get("amendment_block_code"), "sales_partner_transaction_exists")
+		self.assertEqual(result.get("sales_partner_transactions"), ["SPT-001"])
+
+	def test_get_invoice_amendment_eligibility_rejects_submitted_journal_entries(self):
+		"""Amendment flow must stop once settlement Journal Entries exist."""
+		from jarz_pos.api.manager import get_invoice_amendment_eligibility
+
+		invoice = _FakeInvoice(
+			name="INV-JE-001",
+			docstatus=1,
+			is_return=0,
+			custom_sales_invoice_state="Ready",
+		)
+
+		def _get_all(doctype, **kwargs):
+			if doctype == "Journal Entry" and kwargs.get("filters", {}).get("docstatus") == 1:
+				return ["JE-001"]
+			return []
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.side_effect = _get_all
+		mock_frappe.db.get_value.return_value = None
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe):
+			result = get_invoice_amendment_eligibility(invoice)
+
+		self.assertFalse(result.get("can_amend"))
+		self.assertEqual(result.get("amendment_block_code"), "journal_entry_exists")
+		self.assertEqual(result.get("journal_entries"), ["JE-001"])
+
+	def test_submit_invoice_amendment_uses_queueable_job_path(self):
+		"""Public amendment submit should execute the queueable job entrypoint with a stable request id."""
+		from jarz_pos.api.manager import submit_invoice_amendment
+
+		source_invoice = _FakeInvoice(
+			name="INV-AMD-001",
+			docstatus=1,
+			is_return=0,
+			custom_sales_invoice_state="Ready",
+			sales_partner=None,
+			custom_payment_method="Cash",
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_doc.return_value = source_invoice
+		mock_frappe.has_permission.return_value = True
+		mock_frappe.enqueue.return_value = {"success": True, "request_id": "amd-INV-AMD-001-1234"}
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
+			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+			result = submit_invoice_amendment(invoice_id="INV-AMD-001", cart_json="[]")
+
+		self.assertTrue(result.get("success"))
+		self.assertTrue(mock_frappe.enqueue.called)
+		self.assertEqual(mock_frappe.enqueue.call_args.args[0], "jarz_pos.api.manager._run_invoice_amendment_job")
+		self.assertEqual(mock_frappe.enqueue.call_args.kwargs["queue"], "short")
+		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["now"])
+		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["job_id"].startswith("amd-INV-AMD-001-"))
+
+	def test_submit_invoice_amendment_returns_existing_replacement_idempotently(self):
+		"""Repeated submit requests should return the existing replacement invoice instead of reprocessing."""
+		from jarz_pos.api.manager import submit_invoice_amendment
+
+		source_invoice = _FakeInvoice(
+			name="INV-AMD-002",
+			docstatus=1,
+			is_return=0,
+			custom_sales_invoice_state="Ready",
+		)
+		replacement_invoice = _FakeInvoice(name="INV-AMD-002-1")
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.has_permission.return_value = True
+		mock_frappe.get_doc.side_effect = lambda doctype, name: source_invoice if name == "INV-AMD-002" else replacement_invoice
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
+			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value="INV-AMD-002-1"), \
+			 patch("jarz_pos.api.manager.format_invoice_data", return_value={"name": "INV-AMD-002-1"}):
+			result = submit_invoice_amendment(invoice_id="INV-AMD-002", cart_json="[]")
+
+		self.assertTrue(result.get("success"))
+		self.assertTrue(result.get("already_processed"))
+		self.assertEqual(result.get("replacement_invoice_id"), "INV-AMD-002-1")
+		mock_frappe.enqueue.assert_not_called()
+
+	def test_run_invoice_amendment_job_cancels_payment_entries_before_recreate(self):
+		"""The amendment job should cancel linked payment entries before recreating the replacement invoice."""
+		from jarz_pos.api.manager import _run_invoice_amendment_job
+
+		source_invoice = _FakeInvoice(
+			name="INV-AMD-003",
+			docstatus=1,
+			is_return=0,
+			customer="CUST-003",
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			custom_payment_method="Cash",
+			woo_order_id=14500,
+		)
+		source_invoice.flags = SimpleNamespace(ignore_permissions=False, ignore_woo_outbound=False)
+		source_invoice.cancel = MagicMock()
+		source_invoice.add_comment = MagicMock()
+
+		replacement_invoice = _FakeInvoice(name="INV-AMD-003-1")
+		replacement_invoice.add_comment = MagicMock()
+
+		payment_entry = MagicMock()
+		payment_entry.name = "PE-001"
+		payment_entry.get.side_effect = lambda fieldname, default=None: 1 if fieldname == "docstatus" else default
+		payment_entry.cancel = MagicMock()
+		payment_entry.flags = SimpleNamespace(ignore_permissions=False)
+
+		meta = MagicMock()
+		meta.get_field.return_value = None
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.local.site = "frontend"
+		mock_frappe.get_doc.side_effect = lambda doctype, name: {
+			("Sales Invoice", "INV-AMD-003"): source_invoice,
+			("Sales Invoice", "INV-AMD-003-1"): replacement_invoice,
+			("Payment Entry", "PE-001"): payment_entry,
+		}[(doctype, name)]
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.get_meta.return_value = meta
+		mock_frappe.db.savepoint = MagicMock()
+		mock_frappe.db.rollback = MagicMock()
+		mock_frappe.db.set_value = MagicMock()
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-001"]), \
+			 patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()), \
+			 patch("jarz_pos.api.manager._create_amendment_invoice", return_value={"invoice_name": "INV-AMD-003-1"}) as mock_create_invoice, \
+			 patch("jarz_pos.api.manager.format_invoice_data", return_value={"name": "INV-AMD-003-1"}):
+			result = _run_invoice_amendment_job(
+				invoice_id="INV-AMD-003",
+				request_id="amd-INV-AMD-003-1234",
+				cart_json="[]",
+			)
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(result.get("cancelled_payment_entries"), ["PE-001"])
+		payment_entry.cancel.assert_called_once()
+		source_invoice.cancel.assert_called_once()
+		self.assertEqual(mock_create_invoice.call_args.kwargs["amended_from"], "INV-AMD-003")
+		self.assertEqual(mock_create_invoice.call_args.kwargs["woo_order_id"], 14500)
 
 	def test_update_invoice_branch_validation(self):
 		"""Test that update_invoice_branch validates inputs."""

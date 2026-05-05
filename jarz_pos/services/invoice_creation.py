@@ -208,6 +208,8 @@ def create_pos_invoice(
     payment_type: str | None = None,
     pickup: bool | None = None,
     payment_method: str | None = None,
+    amended_from: str | None = None,
+    woo_order_id: int | None = None,
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -329,6 +331,20 @@ def create_pos_invoice(
                 print(f"   💳 Payment Method set: {payment_method}")
             except Exception as pm_err:
                 print(f"   ⚠️ Could not set Payment Method: {pm_err}")
+
+        # STEP 6.4: Preserve amendment lineage and remote Woo link before submit
+        if amended_from:
+            try:
+                invoice_doc.amended_from = amended_from
+                print(f"   🔁 Amendment source set: {amended_from}")
+            except Exception as amend_err:
+                print(f"   ⚠️ Could not set amended_from: {amend_err}")
+        if woo_order_id:
+            try:
+                invoice_doc.woo_order_id = woo_order_id
+                print(f"   🛒 Existing Woo Order ID set: {woo_order_id}")
+            except Exception as woo_err:
+                print(f"   ⚠️ Could not set woo_order_id: {woo_err}")
 
         # STEP 7: Add Items to Document
         print("\n7️⃣ ADDING ITEMS:")

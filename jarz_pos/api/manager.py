@@ -8,6 +8,9 @@ Endpoints:
 - update_invoice_branch: reassign a submitted Sales Invoice by changing custom_kanban_profile only.
 """
 from __future__ import annotations
+from contextlib import contextmanager
+import hashlib
+import json
 from typing import List, Dict, Any, Optional, Union
 import frappe
 from frappe import _
@@ -39,6 +42,17 @@ try:
 except Exception:
     def notify_invoice_reassignment(*args, **kwargs):  # type: ignore
         return None
+
+try:
+    from jarz_pos.utils.invoice_utils import format_invoice_data
+except Exception:
+    def format_invoice_data(invoice_doc):  # type: ignore
+        return {"name": getattr(invoice_doc, "name", None)}
+
+try:
+    from jarz_pos.services.invoice_creation import create_pos_invoice as _create_amendment_invoice
+except Exception:
+    _create_amendment_invoice = None  # type: ignore
 
 
 # Allowed states for invoice transfer (normalized: lowercase, no extra spaces)
@@ -196,9 +210,101 @@ def _find_submitted_payment_entries(invoice_name: str) -> List[str]:
     return sorted({row for row in submitted if row})
 
 
+def _find_courier_transactions(invoice_name: str) -> List[str]:
+    """Return courier transactions already linked to the Sales Invoice."""
+    try:
+        rows = frappe.get_all(
+            "Courier Transaction",
+            filters={"reference_invoice": invoice_name},
+            pluck="name",
+            limit_page_length=20,
+        ) or []
+    except Exception:
+        rows = []
+    return sorted({row for row in rows if row})
+
+
+def _find_sales_partner_transactions(invoice_name: str) -> List[str]:
+    """Return Sales Partner Transaction rows already linked to the Sales Invoice."""
+    try:
+        rows = frappe.get_all(
+            "Sales Partner Transactions",
+            filters={"reference_invoice": invoice_name},
+            pluck="name",
+            limit_page_length=20,
+        ) or []
+    except Exception:
+        rows = []
+    return sorted({row for row in rows if row})
+
+
+def _find_submitted_journal_entries(invoice_name: str) -> List[str]:
+    """Return submitted Journal Entries that already settled against the invoice."""
+    journal_entry_names = set()
+
+    try:
+        title_rows = frappe.get_all(
+            "Journal Entry",
+            filters={"docstatus": 1, "title": ["like", f"%{invoice_name}%"]},
+            pluck="name",
+            limit_page_length=20,
+        ) or []
+        journal_entry_names.update(row for row in title_rows if row)
+    except Exception:
+        pass
+
+    try:
+        remark_rows = frappe.get_all(
+            "Journal Entry",
+            filters={"docstatus": 1, "user_remark": ["like", f"%{invoice_name}%"]},
+            pluck="name",
+            limit_page_length=20,
+        ) or []
+        journal_entry_names.update(row for row in remark_rows if row)
+    except Exception:
+        pass
+
+    try:
+        ref_rows = frappe.get_all(
+            "Journal Entry Account",
+            filters={
+                "reference_type": "Sales Invoice",
+                "reference_name": invoice_name,
+                "parenttype": "Journal Entry",
+            },
+            pluck="parent",
+            limit_page_length=20,
+        ) or []
+        ref_names = sorted({row for row in ref_rows if row})
+        if ref_names:
+            submitted = frappe.get_all(
+                "Journal Entry",
+                filters={"name": ["in", ref_names], "docstatus": 1},
+                pluck="name",
+                limit_page_length=20,
+            ) or []
+            journal_entry_names.update(row for row in submitted if row)
+    except Exception:
+        pass
+
+    return sorted(journal_entry_names)
+
+
 def _get_active_delivery_trip_name(inv: Any) -> Optional[str]:
     """Return the linked delivery trip when it is still operationally active."""
+    invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
     trip_name = str(getattr(inv, "custom_delivery_trip", "") or inv.get("custom_delivery_trip") or "").strip()
+    if not trip_name and invoice_name:
+        try:
+            linked_trips = frappe.get_all(
+                "Delivery Trip Invoice",
+                filters={"invoice": invoice_name},
+                pluck="parent",
+                limit_page_length=5,
+            ) or []
+            trip_name = next((row for row in linked_trips if row), "")
+        except Exception:
+            trip_name = ""
     if not trip_name:
         return None
 
@@ -209,6 +315,55 @@ def _get_active_delivery_trip_name(inv: Any) -> Optional[str]:
 
     if not trip_status or trip_status != "Completed":
         return trip_name
+    return None
+
+
+def get_invoice_hard_mutation_blocker(inv: Any) -> Optional[Dict[str, Any]]:
+    """Return the first downstream artifact that blocks cancel/amend mutations."""
+    invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
+    if not invoice_name:
+        return None
+
+    delivery_notes = _find_submitted_delivery_notes(invoice_name)
+    if delivery_notes:
+        return {
+            "mutation_block_code": "delivery_note_exists",
+            "mutation_block_reason": _("This invoice already has a submitted Delivery Note and must use a corrective workflow."),
+            "delivery_notes": delivery_notes,
+        }
+
+    active_trip = _get_active_delivery_trip_name(inv)
+    if active_trip:
+        return {
+            "mutation_block_code": "delivery_trip_exists",
+            "mutation_block_reason": _("This invoice is already linked to an active delivery trip and cannot be changed from this workflow."),
+            "delivery_trip": active_trip,
+        }
+
+    courier_transactions = _find_courier_transactions(invoice_name)
+    if courier_transactions:
+        return {
+            "mutation_block_code": "courier_transaction_exists",
+            "mutation_block_reason": _("This invoice already has courier settlement artifacts and cannot be changed from this workflow."),
+            "courier_transactions": courier_transactions,
+        }
+
+    sales_partner_transactions = _find_sales_partner_transactions(invoice_name)
+    if sales_partner_transactions:
+        return {
+            "mutation_block_code": "sales_partner_transaction_exists",
+            "mutation_block_reason": _("This invoice already has sales partner settlement artifacts and cannot be changed from this workflow."),
+            "sales_partner_transactions": sales_partner_transactions,
+        }
+
+    journal_entries = _find_submitted_journal_entries(invoice_name)
+    if journal_entries:
+        return {
+            "mutation_block_code": "journal_entry_exists",
+            "mutation_block_reason": _("This invoice already has settlement journal entries and cannot be changed from this workflow."),
+            "journal_entries": journal_entries,
+        }
+
     return None
 
 
@@ -242,45 +397,16 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
             _("This invoice can only be amended before dispatch while it is still in an operational prep state."),
         )
 
-    delivery_notes = _find_submitted_delivery_notes(invoice_name)
-    if delivery_notes:
+    mutation_blocker = get_invoice_hard_mutation_blocker(inv)
+    if mutation_blocker:
         return _blocked(
-            "delivery_note_exists",
-            _("This invoice already has a submitted Delivery Note and must use a corrective workflow."),
-            delivery_notes=delivery_notes,
-        )
-
-    active_trip = _get_active_delivery_trip_name(inv)
-    if active_trip:
-        return _blocked(
-            "delivery_trip_exists",
-            _("This invoice is already linked to an active delivery trip and cannot be amended here."),
-            delivery_trip=active_trip,
-        )
-
-    has_unsettled_courier_txn = False
-    try:
-        has_unsettled_courier_txn = bool(
-            frappe.db.exists(
-                "Courier Transaction",
-                {"reference_invoice": invoice_name, "status": ["!=", "Settled"]},
-            )
-        )
-    except Exception:
-        has_unsettled_courier_txn = False
-
-    if has_unsettled_courier_txn:
-        return _blocked(
-            "courier_transaction_exists",
-            _("This invoice has an unsettled courier transaction and cannot be amended here."),
-        )
-
-    payment_entries = _find_submitted_payment_entries(invoice_name)
-    if payment_entries:
-        return _blocked(
-            "payment_entry_exists",
-            _("This invoice already has a submitted Payment Entry and cannot be amended here."),
-            payment_entries=payment_entries,
+            mutation_blocker.get("mutation_block_code") or "mutation_blocked",
+            mutation_blocker.get("mutation_block_reason") or _("This invoice cannot be changed from this workflow."),
+            **{
+                key: value
+                for key, value in mutation_blocker.items()
+                if key not in {"mutation_block_code", "mutation_block_reason"}
+            },
         )
 
     return {
@@ -288,6 +414,407 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
         "amendment_block_code": None,
         "amendment_block_reason": None,
     }
+
+
+def _derive_required_delivery_datetime(inv: Any) -> Optional[str]:
+    """Derive the delivery start datetime from the invoice's stored slot fields."""
+    delivery_date = str(inv.get("custom_delivery_date") or "").strip()
+    delivery_time_from = str(inv.get("custom_delivery_time_from") or "").strip()
+    if not delivery_date or not delivery_time_from:
+        return None
+    normalized_time = delivery_time_from if len(delivery_time_from) > 5 else f"{delivery_time_from}:00"
+    return f"{delivery_date} {normalized_time}"
+
+
+def _derive_delivery_end_datetime(inv: Any) -> Optional[str]:
+    """Derive the delivery end datetime from the invoice's duration metadata."""
+    start_text = _derive_required_delivery_datetime(inv)
+    if not start_text:
+        return None
+
+    raw_duration = inv.get("custom_delivery_duration")
+    if raw_duration in (None, ""):
+        return None
+
+    try:
+        start_dt = frappe.utils.get_datetime(start_text)
+        if isinstance(raw_duration, str) and ":" in raw_duration:
+            parts = [int(part or 0) for part in raw_duration.split(":")]
+            while len(parts) < 3:
+                parts.append(0)
+            duration_seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+        else:
+            duration_seconds = int(float(raw_duration or 0))
+        if duration_seconds <= 0:
+            return None
+        return frappe.utils.add_to_date(start_dt, seconds=duration_seconds, as_string=True)
+    except Exception:
+        return None
+
+
+@contextmanager
+def _temporary_invoice_creation_form_context(
+    *,
+    required_delivery_datetime: Optional[str] = None,
+    delivery_end_datetime: Optional[str] = None,
+) -> Any:
+    """Temporarily seed form_dict so invoice creation keeps the chosen slot duration."""
+    previous_form_dict = getattr(frappe, "form_dict", None)
+    next_form_dict = frappe._dict(dict(previous_form_dict or {}))
+    if required_delivery_datetime:
+        next_form_dict["required_delivery_datetime"] = required_delivery_datetime
+    if delivery_end_datetime:
+        next_form_dict["delivery_end_datetime"] = delivery_end_datetime
+    frappe.form_dict = next_form_dict
+    try:
+        yield
+    finally:
+        frappe.form_dict = previous_form_dict
+
+
+def _build_invoice_amendment_request_id(
+    *,
+    invoice_id: str,
+    cart_json: Any,
+    pos_profile_name: Optional[str],
+    customer_name: Optional[str],
+    required_delivery_datetime: Optional[str],
+    delivery_end_datetime: Optional[str],
+    sales_partner: Optional[str],
+    payment_type: Optional[str],
+    pickup: Union[bool, int, str, None],
+    payment_method: Optional[str],
+    provided_idempotency_key: Optional[str] = None,
+) -> str:
+    """Build a stable idempotency key for amendment retries of the same payload."""
+    provided = str(provided_idempotency_key or "").strip()
+    if provided:
+        return provided
+
+    try:
+        normalized_cart = frappe.parse_json(cart_json) if isinstance(cart_json, str) else cart_json
+    except Exception:
+        normalized_cart = cart_json
+
+    payload = {
+        "invoice_id": invoice_id,
+        "cart": normalized_cart,
+        "pos_profile_name": pos_profile_name,
+        "customer_name": customer_name,
+        "required_delivery_datetime": required_delivery_datetime,
+        "delivery_end_datetime": delivery_end_datetime,
+        "sales_partner": sales_partner,
+        "payment_type": payment_type,
+        "pickup": _is_truthy_flag(pickup),
+        "payment_method": payment_method,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return f"amd-{invoice_id}-{digest[:16]}"
+
+
+def _find_existing_amendment_invoice(source_invoice_id: str) -> Optional[str]:
+    """Return the existing replacement invoice for a cancelled source invoice when present."""
+    try:
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters={"amended_from": source_invoice_id, "docstatus": ["!=", 2]},
+            pluck="name",
+            order_by="creation desc",
+            limit_page_length=1,
+        ) or []
+    except Exception:
+        rows = []
+    return rows[0] if rows else None
+
+
+def _add_invoice_audit_comment(invoice_name: str, comment: str) -> None:
+    """Add a best-effort audit comment to an invoice."""
+    if not comment:
+        return
+    try:
+        frappe.get_doc("Sales Invoice", invoice_name).add_comment("Comment", comment)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"Invoice amendment audit comment failed for {invoice_name}")
+
+
+def _mark_source_invoice_as_amended(
+    source_invoice_name: str,
+    *,
+    replacement_invoice_name: str,
+    request_id: str,
+    initiated_by: str,
+) -> None:
+    """Persist structured amendment metadata on the superseded source invoice."""
+    meta = frappe.get_meta("Sales Invoice")
+    reason_text = (
+        f"Superseded by {replacement_invoice_name} through POS amendment flow. "
+        f"Request ID: {request_id}. Initiated by: {initiated_by}."
+    )
+    updates: Dict[str, Any] = {}
+    if meta.get_field("custom_cancellation_type"):
+        updates["custom_cancellation_type"] = "Amended"
+    if meta.get_field("custom_cancellation_reason"):
+        updates["custom_cancellation_reason"] = reason_text
+    if updates:
+        frappe.db.set_value("Sales Invoice", source_invoice_name, updates, update_modified=False)
+
+
+def _build_invoice_amendment_response(
+    *,
+    request_id: str,
+    source_invoice_name: str,
+    replacement_invoice_name: str,
+    cancelled_payment_entries: Optional[List[str]] = None,
+    already_processed: bool = False,
+) -> Dict[str, Any]:
+    """Return the stable API response for a completed amendment orchestration."""
+    replacement_invoice = frappe.get_doc("Sales Invoice", replacement_invoice_name)
+    return {
+        "success": True,
+        "request_id": request_id,
+        "source_invoice_id": source_invoice_name,
+        "replacement_invoice_id": replacement_invoice_name,
+        "cancelled_payment_entries": cancelled_payment_entries or [],
+        "already_processed": already_processed,
+        "invoice": format_invoice_data(replacement_invoice),
+    }
+
+
+def _run_invoice_amendment_job(
+    *,
+    invoice_id: str,
+    request_id: str,
+    cart_json: Any,
+    customer_name: Optional[str] = None,
+    pos_profile_name: Optional[str] = None,
+    required_delivery_datetime: Optional[str] = None,
+    delivery_end_datetime: Optional[str] = None,
+    sales_partner: Optional[str] = None,
+    payment_type: Optional[str] = None,
+    pickup: Union[bool, int, str, None] = None,
+    payment_method: Optional[str] = None,
+    initiated_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
+    if _create_amendment_invoice is None:
+        frappe.throw(_("Invoice amendment service is unavailable."))
+
+    logger = frappe.logger("jarz_pos.api.manager", allow_site=frappe.local.site)
+    source_invoice = frappe.get_doc("Sales Invoice", invoice_id)
+    existing_replacement = _find_existing_amendment_invoice(invoice_id)
+    if existing_replacement:
+        return _build_invoice_amendment_response(
+            request_id=request_id,
+            source_invoice_name=invoice_id,
+            replacement_invoice_name=existing_replacement,
+            already_processed=True,
+        )
+
+    eligibility = get_invoice_amendment_eligibility(source_invoice)
+    if not eligibility.get("can_amend"):
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": eligibility.get("amendment_block_reason") or _("Invoice amendment is blocked."),
+            "amendment_block_code": eligibility.get("amendment_block_code"),
+        }
+
+    cancelled_payment_entries: List[str] = []
+    effective_customer_name = (customer_name or source_invoice.get("customer") or "").strip() or "Walking Customer"
+    effective_pos_profile = (
+        pos_profile_name
+        or source_invoice.get("custom_kanban_profile")
+        or source_invoice.get("pos_profile")
+        or ""
+    ).strip()
+    effective_sales_partner = (sales_partner if sales_partner is not None else source_invoice.get("sales_partner") or None)
+    effective_payment_method = (
+        payment_method if payment_method is not None else source_invoice.get("custom_payment_method") or None
+    )
+    effective_pickup = _is_truthy_flag(pickup) or _is_truthy_flag(source_invoice.get("custom_is_pickup"))
+    effective_required_delivery_datetime = required_delivery_datetime or _derive_required_delivery_datetime(source_invoice)
+    effective_delivery_end_datetime = delivery_end_datetime or _derive_delivery_end_datetime(source_invoice)
+    woo_order_id = source_invoice.get("woo_order_id")
+    initiated_by = (initiated_by or frappe.session.user or "Unknown User").strip()
+
+    save_point = f"invoice_amendment_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:10]}"
+    try:
+        frappe.db.savepoint(save_point)
+    except Exception:
+        save_point = ""
+
+    try:
+        payment_entries = _find_submitted_payment_entries(invoice_id)
+        for payment_entry_name in payment_entries:
+            payment_entry = frappe.get_doc("Payment Entry", payment_entry_name)
+            if int(payment_entry.get("docstatus") or 0) != 1:
+                continue
+            payment_entry.flags.ignore_permissions = True
+            payment_entry.cancel()
+            cancelled_payment_entries.append(payment_entry.name)
+
+        source_invoice.flags.ignore_permissions = True
+        source_invoice.flags.ignore_woo_outbound = True
+        source_invoice.cancel()
+
+        with _temporary_invoice_creation_form_context(
+            required_delivery_datetime=effective_required_delivery_datetime,
+            delivery_end_datetime=effective_delivery_end_datetime,
+        ):
+            creation_result = _create_amendment_invoice(
+                cart_json,
+                effective_customer_name,
+                effective_pos_profile,
+                None,
+                effective_required_delivery_datetime,
+                effective_sales_partner,
+                payment_type,
+                effective_pickup,
+                effective_payment_method,
+                amended_from=invoice_id,
+                woo_order_id=woo_order_id,
+            )
+
+        replacement_invoice_name = (
+            creation_result.get("invoice_name")
+            or creation_result.get("name")
+            or ""
+        )
+        if not replacement_invoice_name:
+            frappe.throw(_("Invoice amendment did not return the replacement invoice name."))
+
+        _mark_source_invoice_as_amended(
+            invoice_id,
+            replacement_invoice_name=replacement_invoice_name,
+            request_id=request_id,
+            initiated_by=initiated_by,
+        )
+        _add_invoice_audit_comment(
+            invoice_id,
+            (
+                f"Invoice amended by {initiated_by}. Superseded by {replacement_invoice_name}. "
+                f"Request ID: {request_id}."
+            ),
+        )
+        _add_invoice_audit_comment(
+            replacement_invoice_name,
+            (
+                f"Created as amendment of {invoice_id} by {initiated_by}. "
+                f"Request ID: {request_id}."
+            ),
+        )
+
+        logger.info(
+            {
+                "event": "invoice_amendment_completed",
+                "source_invoice": invoice_id,
+                "replacement_invoice": replacement_invoice_name,
+                "request_id": request_id,
+                "cancelled_payment_entries": cancelled_payment_entries,
+            }
+        )
+        return _build_invoice_amendment_response(
+            request_id=request_id,
+            source_invoice_name=invoice_id,
+            replacement_invoice_name=replacement_invoice_name,
+            cancelled_payment_entries=cancelled_payment_entries,
+        )
+    except Exception as exc:
+        if save_point:
+            frappe.db.rollback(save_point=save_point)
+        logger.error(
+            {
+                "event": "invoice_amendment_failed",
+                "source_invoice": invoice_id,
+                "request_id": request_id,
+                "error": str(exc),
+            }
+        )
+        frappe.log_error(frappe.get_traceback(), "submit_invoice_amendment failed")
+        return {"success": False, "request_id": request_id, "error": str(exc)}
+
+
+@frappe.whitelist(allow_guest=False)
+def submit_invoice_amendment(
+    invoice_id: str,
+    cart_json: Any,
+    customer_name: Optional[str] = None,
+    pos_profile_name: Optional[str] = None,
+    required_delivery_datetime: Optional[str] = None,
+    delivery_end_datetime: Optional[str] = None,
+    sales_partner: Optional[str] = None,
+    payment_type: Optional[str] = None,
+    pickup: Union[bool, int, str, None] = None,
+    payment_method: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Supersede a submitted invoice and recreate it from the edited POS cart payload."""
+    _ensure_manager_dashboard_access()
+
+    invoice_id = (invoice_id or "").strip()
+    if not invoice_id:
+        return {"success": False, "error": "invoice_id is required"}
+    if not cart_json:
+        return {"success": False, "error": "cart_json is required"}
+
+    source_invoice = frappe.get_doc("Sales Invoice", invoice_id)
+    frappe.has_permission("Sales Invoice", doc=source_invoice, ptype="write", throw=True)
+
+    existing_replacement = _find_existing_amendment_invoice(invoice_id)
+    request_id = _build_invoice_amendment_request_id(
+        invoice_id=invoice_id,
+        cart_json=cart_json,
+        pos_profile_name=pos_profile_name,
+        customer_name=customer_name,
+        required_delivery_datetime=required_delivery_datetime or _derive_required_delivery_datetime(source_invoice),
+        delivery_end_datetime=delivery_end_datetime or _derive_delivery_end_datetime(source_invoice),
+        sales_partner=sales_partner if sales_partner is not None else source_invoice.get("sales_partner"),
+        payment_type=payment_type,
+        pickup=pickup,
+        payment_method=payment_method if payment_method is not None else source_invoice.get("custom_payment_method"),
+        provided_idempotency_key=idempotency_key,
+    )
+    if existing_replacement:
+        return _build_invoice_amendment_response(
+            request_id=request_id,
+            source_invoice_name=invoice_id,
+            replacement_invoice_name=existing_replacement,
+            already_processed=True,
+        )
+
+    if int(source_invoice.get("docstatus") or 0) != 1:
+        return {"success": False, "request_id": request_id, "error": "Only submitted invoices can be amended"}
+
+    eligibility = get_invoice_amendment_eligibility(source_invoice)
+    if not eligibility.get("can_amend"):
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": eligibility.get("amendment_block_reason") or _("Invoice amendment is blocked."),
+            "amendment_block_code": eligibility.get("amendment_block_code"),
+        }
+
+    return frappe.enqueue(
+        "jarz_pos.api.manager._run_invoice_amendment_job",
+        queue="short",
+        timeout=1200,
+        now=True,
+        job_id=request_id,
+        invoice_id=invoice_id,
+        request_id=request_id,
+        cart_json=cart_json,
+        customer_name=customer_name,
+        pos_profile_name=pos_profile_name,
+        required_delivery_datetime=required_delivery_datetime,
+        delivery_end_datetime=delivery_end_datetime,
+        sales_partner=sales_partner,
+        payment_type=payment_type,
+        pickup=pickup,
+        payment_method=payment_method,
+        initiated_by=frappe.session.user,
+    )
 
 
 def _get_invoice_warehouse_mismatches(inv: Any, expected_warehouse: str) -> List[Dict[str, str]]:
