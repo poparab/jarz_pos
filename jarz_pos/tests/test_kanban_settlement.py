@@ -285,6 +285,7 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_invoice.pos_profile = "Nasr city"
 		mock_invoice.custom_kanban_profile = "Nasr city"
 		mock_invoice.items = [mock_item]
+		mock_invoice.get.side_effect = lambda key, default=None: getattr(mock_invoice, key, default)
 
 		appended_rows = []
 		mock_dn = MagicMock()
@@ -325,7 +326,7 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_frappe.utils.today.return_value = "2026-05-02"
 		mock_frappe.utils.add_days.return_value = "2026-04-29"
 
-		with patch.object(stock_get_item_details, 'validate_end_of_life', side_effect=strict_validate) as stock_validate, \
+		with patch.object(stock_get_item_details, 'validate_end_of_life', side_effect=strict_validate, create=True) as stock_validate, \
 			 patch.object(item_module, 'validate_end_of_life', side_effect=strict_validate) as item_validate:
 			result = ensure_delivery_note_for_invoice("INV-001")
 
@@ -353,6 +354,7 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_invoice.pos_profile = "Dokki"
 		mock_invoice.custom_kanban_profile = "Nasr city"
 		mock_invoice.items = [mock_item]
+		mock_invoice.get.side_effect = lambda key, default=None: getattr(mock_invoice, key, default)
 
 		mock_meta = MagicMock()
 		mock_meta.get_field.return_value = None

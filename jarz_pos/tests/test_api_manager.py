@@ -15,6 +15,11 @@ class _FakeInvoice:
 		self._data = dict(data)
 		self.name = self._data["name"]
 
+	def __getattr__(self, key):
+		if key in self._data:
+			return self._data[key]
+		raise AttributeError(key)
+
 	def get(self, key, default=None):
 		return self._data.get(key, default)
 
