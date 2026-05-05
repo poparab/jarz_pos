@@ -16,15 +16,20 @@ class TestTransferAPI(unittest.TestCase):
 
 		with patch.object(
 			transfer.frappe.db,
-			"get_value",
-			return_value="Finished Goods - J",
-		) as get_value:
+			"sql",
+			return_value=[{"value": "Finished Goods - J"}],
+		) as sql:
 			result = transfer._get_singleton_value("Manufacturing Settings", "default_fg_warehouse")
 
-		get_value.assert_called_once_with(
-			"Singles",
-			{"doctype": "Manufacturing Settings", "field": "default_fg_warehouse"},
-			"value",
+		sql.assert_called_once_with(
+			"""
+		SELECT value
+		FROM `tabSingles`
+		WHERE doctype = %s AND field = %s
+		LIMIT 1
+		""",
+			("Manufacturing Settings", "default_fg_warehouse"),
+			as_dict=True,
 		)
 		self.assertEqual(result, "Finished Goods - J")
 

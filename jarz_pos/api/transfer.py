@@ -15,7 +15,17 @@ def _ensure_manager_access() -> None:
 
 
 def _get_singleton_value(doctype: str, field: str) -> Optional[str]:
-    return frappe.db.get_value("Singles", {"doctype": doctype, "field": field}, "value")
+    rows = frappe.db.sql(
+        """
+        SELECT value
+        FROM `tabSingles`
+        WHERE doctype = %s AND field = %s
+        LIMIT 1
+        """,
+        (doctype, field),
+        as_dict=True,
+    )
+    return rows[0].get("value") if rows else None
 
 
 def _append_transfer_warehouse_option(
