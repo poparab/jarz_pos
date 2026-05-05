@@ -89,6 +89,44 @@ def publish_state_change_if_needed(doc: Any, method: Optional[str] = None) -> No
 	_safe_publish("jarz_pos:invoice_state", {"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)})
 
 
+def mark_cancelled_invoice_workflow_fields(doc: Any, method: Optional[str] = None) -> None:
+	"""Keep Jarz workflow fields aligned whenever a Sales Invoice is cancelled."""
+	if not frappe or not doc or not getattr(doc, "name", None):
+		return
+
+	try:
+		meta = frappe.get_meta("Sales Invoice")
+		updates: dict[str, Any] = {}
+
+		for fieldname in ("custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"):
+			if not meta.get_field(fieldname):
+				continue
+			if str(getattr(doc, fieldname, None) or "").strip() != "Cancelled":
+				updates[fieldname] = "Cancelled"
+
+		if meta.get_field("custom_acceptance_status"):
+			current_acceptance = str(getattr(doc, "custom_acceptance_status", None) or "").strip()
+			if current_acceptance != "Accepted":
+				updates["custom_acceptance_status"] = "Accepted"
+
+			accepted_by = getattr(getattr(frappe, "session", None), "user", None)
+			if meta.get_field("custom_accepted_by") and accepted_by and not getattr(doc, "custom_accepted_by", None):
+				updates["custom_accepted_by"] = accepted_by
+
+			if meta.get_field("custom_accepted_on") and not getattr(doc, "custom_accepted_on", None):
+				updates["custom_accepted_on"] = frappe.utils.now_datetime()
+
+		if not updates:
+			return
+
+		frappe.db.set_value("Sales Invoice", doc.name, updates, update_modified=False)
+		for fieldname, value in updates.items():
+			setattr(doc, fieldname, value)
+	except Exception:
+		if frappe:
+			frappe.log_error(frappe.get_traceback(), "mark_cancelled_invoice_workflow_fields failed")
+
+
 def validate_invoice_before_submit(doc: Any, method: Optional[str] = None) -> None:
 	"""Placeholder for pre-submit validations (e.g., bundle checks).
 
