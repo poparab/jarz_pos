@@ -1,0 +1,241 @@
+{
+ "actions": [],
+ "autoname": "PROMO-.#####",
+ "creation": "2026-05-05 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "rule_name",
+  "enabled",
+  "priority",
+  "column_break_top",
+  "promotion_scope",
+  "rule_type",
+  "description",
+  "section_break_scope",
+  "company",
+  "currency",
+  "territory",
+  "customer_group",
+  "column_break_scope",
+  "pos_profile",
+  "is_pickup_allowed",
+  "channels",
+  "section_break_threshold",
+  "threshold_basis",
+  "minimum_threshold",
+  "maximum_threshold",
+  "minimum_item_qty",
+  "section_break_schedule",
+  "active_from",
+  "active_to",
+  "section_break_application",
+  "apply_to_shipping_income",
+  "apply_to_legacy_delivery_charges"
+ ],
+ "fields": [
+  {
+   "fieldname": "rule_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Rule Name",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "100",
+   "fieldname": "priority",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Priority",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_top",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Delivery",
+   "fieldname": "promotion_scope",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Promotion Scope",
+   "options": "\nDelivery",
+   "reqd": 1
+  },
+  {
+   "default": "Free Delivery",
+   "fieldname": "rule_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Rule Type",
+   "options": "\nFree Delivery",
+   "reqd": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "section_break_scope",
+   "fieldtype": "Section Break",
+   "label": "Scope"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fetch_from": "company.default_currency",
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "territory",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Territory",
+   "options": "Territory"
+  },
+  {
+   "fieldname": "customer_group",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Customer Group",
+   "options": "Customer Group"
+  },
+  {
+   "fieldname": "column_break_scope",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "POS Profile",
+   "options": "POS Profile"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_pickup_allowed",
+   "fieldtype": "Check",
+   "label": "Allow Pickup Orders"
+  },
+  {
+   "fieldname": "channels",
+   "fieldtype": "Table",
+   "label": "Channels",
+   "options": "Jarz Promotion Rule Channel"
+  },
+  {
+   "fieldname": "section_break_threshold",
+   "fieldtype": "Section Break",
+   "label": "Threshold"
+  },
+  {
+   "default": "Merchandise Subtotal",
+   "fieldname": "threshold_basis",
+   "fieldtype": "Select",
+   "label": "Threshold Basis",
+   "options": "\nMerchandise Subtotal\nItem Quantity",
+   "reqd": 1
+  },
+  {
+   "fieldname": "minimum_threshold",
+   "fieldtype": "Currency",
+   "label": "Minimum Threshold",
+   "options": "currency"
+  },
+  {
+   "fieldname": "maximum_threshold",
+   "fieldtype": "Currency",
+   "label": "Maximum Threshold",
+   "options": "currency"
+  },
+  {
+   "fieldname": "minimum_item_qty",
+   "fieldtype": "Float",
+   "label": "Minimum Item Quantity"
+  },
+  {
+   "fieldname": "section_break_schedule",
+   "fieldtype": "Section Break",
+   "label": "Schedule"
+  },
+  {
+   "fieldname": "active_from",
+   "fieldtype": "Datetime",
+   "label": "Active From"
+  },
+  {
+   "fieldname": "active_to",
+   "fieldtype": "Datetime",
+   "label": "Active To"
+  },
+  {
+   "fieldname": "section_break_application",
+   "fieldtype": "Section Break",
+   "label": "Application"
+  },
+  {
+   "default": "1",
+   "fieldname": "apply_to_shipping_income",
+   "fieldtype": "Check",
+   "label": "Apply To Shipping Income"
+  },
+  {
+   "default": "1",
+   "fieldname": "apply_to_legacy_delivery_charges",
+   "fieldtype": "Check",
+   "label": "Apply To Legacy Delivery Charges"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-05-05 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Promotion Rule",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager"
+  }
+ ],
+ "sort_field": "priority",
+ "sort_order": "ASC",
+ "states": [],
+ "track_changes": 1
+}

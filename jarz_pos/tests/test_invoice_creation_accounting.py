@@ -13,6 +13,7 @@ invoice type variant:
 
 import unittest
 import json
+from datetime import datetime
 from unittest.mock import patch, MagicMock, PropertyMock
 
 
@@ -398,6 +399,167 @@ class TestFreeShippingBundleDetection(unittest.TestCase):
                 bundle_candidates.append(bcode)
 
         self.assertEqual(len(bundle_candidates), 0, "Regular items should have no bundle candidates")
+
+
+# ===========================================================================
+# TEST: Delivery promotion resolution
+# ===========================================================================
+
+class TestDeliveryPromotionResolution(unittest.TestCase):
+    """Verify rule matching for the 999 EGP delivery promotion."""
+
+    def _invoice_with_items(self, items):
+        inv = _InvoiceDocCapture()
+        inv.company = "Jarz Company"
+        inv.pos_profile = "Main POS"
+        logger = MagicMock()
+
+        with patch("jarz_pos.utils.invoice_utils.frappe") as mf:
+            mf.get_doc.return_value = MagicMock(stock_uom="Unit")
+
+            from jarz_pos.utils.invoice_utils import add_items_to_invoice
+            add_items_to_invoice(inv, items, logger)
+
+        return inv
+
+    def _mock_rule(self, minimum_threshold=999.0):
+        rule = MagicMock()
+        rule.rule_name = "Free Delivery >= 999 EGP"
+        rule.rule_type = "Free Delivery"
+        rule.company = None
+        rule.territory = None
+        rule.customer_group = None
+        rule.pos_profile = None
+        rule.threshold_basis = "Merchandise Subtotal"
+        rule.minimum_threshold = minimum_threshold
+        rule.maximum_threshold = None
+        rule.minimum_item_qty = None
+        rule.active_from = None
+        rule.active_to = None
+        rule.is_pickup_allowed = 0
+        rule.apply_to_shipping_income = 1
+        rule.apply_to_legacy_delivery_charges = 1
+        rule.channels = []
+        return rule
+
+    def test_free_delivery_rule_matches_threshold(self):
+        inv = self._invoice_with_items([
+            {"item_code": "ITEM-1", "qty": 2, "price_list_rate": 500.0},
+        ])
+        customer = _mock_customer(territory="Cairo")
+        customer.customer_group = "Retail"
+        pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
+
+        with patch("jarz_pos.services.delivery_promotions.frappe") as mf:
+            mf.db.exists.return_value = True
+            mf.get_all.return_value = ["PROMO-0001"]
+            mf.get_doc.return_value = self._mock_rule()
+            mf.utils.now_datetime.return_value = datetime(2026, 5, 5, 12, 0, 0)
+
+            from jarz_pos.services.delivery_promotions import resolve_delivery_promotion
+            decision = resolve_delivery_promotion(inv, customer_doc=customer, pos_profile=pos_profile)
+
+        self.assertTrue(decision.matched)
+        self.assertEqual(decision.rule_name, "Free Delivery >= 999 EGP")
+        self.assertTrue(decision.suppress_shipping_income)
+        self.assertTrue(decision.suppress_legacy_delivery_charges)
+        self.assertAlmostEqual(decision.merchandise_subtotal, 1000.0, places=2)
+
+    def test_free_delivery_rule_does_not_match_below_threshold(self):
+        inv = self._invoice_with_items([
+            {"item_code": "ITEM-1", "qty": 2, "price_list_rate": 499.0},
+        ])
+        customer = _mock_customer(territory="Cairo")
+        pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
+
+        with patch("jarz_pos.services.delivery_promotions.frappe") as mf:
+            mf.db.exists.return_value = True
+            mf.get_all.return_value = ["PROMO-0001"]
+            mf.get_doc.return_value = self._mock_rule()
+            mf.utils.now_datetime.return_value = datetime(2026, 5, 5, 12, 0, 0)
+
+            from jarz_pos.services.delivery_promotions import resolve_delivery_promotion
+            decision = resolve_delivery_promotion(inv, customer_doc=customer, pos_profile=pos_profile)
+
+        self.assertFalse(decision.matched)
+        self.assertFalse(decision.suppress_shipping_income)
+        self.assertFalse(decision.suppress_legacy_delivery_charges)
+        self.assertAlmostEqual(decision.merchandise_subtotal, 998.0, places=2)
+
+
+# ===========================================================================
+# TEST: Delivery promotion invoice integration
+# ===========================================================================
+
+class TestDeliveryPromotionInvoiceIntegration(unittest.TestCase):
+    """Verify create_pos_invoice respects resolved delivery promotions."""
+
+    def _append_items(self, invoice_doc, processed_items, logger):
+        for item_data in processed_items:
+            row = invoice_doc.append("items", {})
+            row.item_code = item_data["item_code"]
+            row.qty = float(item_data.get("qty", 1) or 1)
+            row.price_list_rate = float(item_data.get("price_list_rate", item_data.get("rate", 0)) or 0)
+            row.discount_percentage = float(item_data.get("discount_percentage", 0) or 0)
+
+    def _set_invoice_fields(self, invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
+        invoice_doc.customer = customer_doc.name
+        invoice_doc.customer_name = customer_doc.customer_name
+        invoice_doc.company = pos_profile.company
+        invoice_doc.pos_profile = pos_profile.name
+        invoice_doc.territory = customer_doc.territory
+
+    def test_matched_promotion_skips_shipping_tax_insertion(self):
+        inv = _InvoiceDocCapture()
+        customer = _mock_customer(territory="Cairo")
+        pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
+        processed_items = [{"item_code": "ITEM-1", "qty": 2, "price_list_rate": 500.0}]
+        tax_calls = []
+
+        def _capture_tax_call(invoice_doc, amount, delivery_description=None):
+            tax_calls.append((amount, delivery_description))
+
+        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1"}]), \
+             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
+             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
+             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
+             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
+             patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items), \
+             patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv), \
+             patch("jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields), \
+             patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items), \
+             patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"), \
+             patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"), \
+             patch("jarz_pos.services.invoice_creation._save_document"), \
+             patch("jarz_pos.services.invoice_creation._submit_document"), \
+             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
+             patch("jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes", side_effect=_capture_tax_call), \
+             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
+             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit") as apply_audit, \
+             patch("jarz_pos.services.invoice_creation.frappe") as mf:
+            from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
+            resolve_promo.return_value = DeliveryPromotionDecision(
+                matched=True,
+                rule_name="Free Delivery >= 999 EGP",
+                rule_type="Free Delivery",
+                merchandise_subtotal=1000.0,
+                item_qty=2.0,
+                suppress_shipping_income=True,
+                suppress_legacy_delivery_charges=True,
+            )
+
+            mf.local.site = "test-site"
+            mf.logger.return_value = MagicMock()
+            mf.utils.now.return_value = "2026-05-05 12:00:00"
+            mf.db.exists.side_effect = lambda doctype, name=None: doctype == "Territory" and name == "Cairo"
+            mf.get_doc.return_value = MagicMock(delivery_income=30.0)
+            mf.get_all.return_value = []
+
+            from jarz_pos.services.invoice_creation import create_pos_invoice
+            create_pos_invoice(cart_json="[]", customer_name=customer.name)
+
+        self.assertEqual(tax_calls, [], "Matched free-delivery promotion should suppress shipping tax rows")
+        apply_audit.assert_called_once()
 
 
 # ===========================================================================

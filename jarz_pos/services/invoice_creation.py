@@ -8,6 +8,7 @@ including validation, document creation, and submission.
 import frappe
 import traceback
 from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
+from jarz_pos.services import delivery_promotions as _delivery_promotions
 from jarz_pos.utils.validation_utils import (
     validate_cart_data, 
     validate_customer, 
@@ -382,8 +383,40 @@ def create_pos_invoice(
         except Exception:
             free_shipping_waived = False
 
-        # STEP 7.4 & 7.5 only execute when NOT in Sales Partner mode and no free-shipping waiver
-        if not partner_tax_suppressed and not free_shipping_waived and not bool(pickup):
+        delivery_promotion = _delivery_promotions.DeliveryPromotionDecision()
+        try:
+            delivery_promotion = _delivery_promotions.resolve_delivery_promotion(
+                invoice_doc,
+                customer_doc=customer_doc,
+                pos_profile=pos_profile,
+                channel="flutter",
+                is_pickup=bool(pickup),
+            )
+            if delivery_promotion.matched:
+                _delivery_promotions.apply_delivery_promotion_audit(invoice_doc, delivery_promotion)
+                print(
+                    "   🎯 Delivery promotion matched: "
+                    f"{delivery_promotion.rule_name} "
+                    f"(merchandise_subtotal={delivery_promotion.merchandise_subtotal:.2f})"
+                )
+        except Exception as promo_err:
+            print(f"   ⚠️ Delivery promotion resolution failed: {promo_err}")
+
+        suppress_shipping_income = (
+            partner_tax_suppressed
+            or free_shipping_waived
+            or bool(pickup)
+            or delivery_promotion.suppress_shipping_income
+        )
+        suppress_legacy_delivery_charges = (
+            partner_tax_suppressed
+            or free_shipping_waived
+            or bool(pickup)
+            or delivery_promotion.suppress_legacy_delivery_charges
+        )
+
+        # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
+        if not suppress_shipping_income:
             # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
             print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
             try:
@@ -415,15 +448,33 @@ def create_pos_invoice(
             except Exception as ship_err:
                 print(f"   ❌ Failed adding shipping income: {ship_err}")
                 # Do not abort – continue invoice creation
-
-            # STEP 7.5: Add Delivery Charges (legacy param based)
-            if delivery_charges:
-                print("\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
-                add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
         else:
-            print("\n7️⃣.4️⃣ & 7️⃣.5️⃣ SKIPPED: Sales Partner tax suppression active")
+            print("\n7️⃣.4️⃣ SKIPPED: Shipping income suppressed")
+            if partner_tax_suppressed:
+                print("   🤝 Sales Partner tax suppression active")
             if free_shipping_waived:
-                print("   🚚 Free-shipping bundle detected – shipping income suppressed")
+                print("   🚚 Free-shipping bundle detected")
+            if bool(pickup):
+                print("   🚏 Pickup mode enabled")
+            if delivery_promotion.suppress_shipping_income:
+                print(f"   🎯 Promotion matched: {delivery_promotion.rule_name}")
+
+        # STEP 7.5: Add Delivery Charges (legacy param based)
+        if delivery_charges and not suppress_legacy_delivery_charges:
+            print("\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
+            add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
+        else:
+            print("\n7️⃣.5️⃣ SKIPPED: Delivery charges suppressed or not provided")
+            if not delivery_charges:
+                print("   ℹ️ No legacy delivery charges provided")
+            if partner_tax_suppressed:
+                print("   🤝 Sales Partner tax suppression active")
+            if free_shipping_waived:
+                print("   🚚 Free-shipping bundle detected")
+            if bool(pickup):
+                print("   🚏 Pickup mode enabled")
+            if delivery_promotion.suppress_legacy_delivery_charges:
+                print(f"   🎯 Promotion matched: {delivery_promotion.rule_name}")
 
         # STEP 8: Validate and Calculate Document
         print("\n8️⃣ DOCUMENT VALIDATION:")
