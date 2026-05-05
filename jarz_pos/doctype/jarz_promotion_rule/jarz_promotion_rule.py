@@ -9,10 +9,20 @@ class JarzPromotionRule(Document):
         self.rule_type = self.rule_type or "Free Delivery"
         self.threshold_basis = self.threshold_basis or "Merchandise Subtotal"
 
+        self._normalize_optional_numbers()
+
         self._sync_currency()
         self._validate_active_window()
         self._validate_thresholds()
         self._validate_channels()
+
+    def _normalize_optional_numbers(self):
+        for fieldname in ("minimum_threshold", "maximum_threshold", "minimum_item_qty"):
+            value = getattr(self, fieldname, None)
+            if value in (None, ""):
+                continue
+            if float(value or 0) <= 0:
+                setattr(self, fieldname, None)
 
     def _sync_currency(self):
         if self.company:
@@ -35,18 +45,9 @@ class JarzPromotionRule(Document):
         if self.threshold_basis not in {"Merchandise Subtotal", "Item Quantity"}:
             frappe.throw("Threshold Basis must be either 'Merchandise Subtotal' or 'Item Quantity'.")
 
-        if self.minimum_threshold is not None and float(self.minimum_threshold or 0) < 0:
-            frappe.throw("Minimum Threshold cannot be negative.")
-
-        if self.maximum_threshold is not None and float(self.maximum_threshold or 0) < 0:
-            frappe.throw("Maximum Threshold cannot be negative.")
-
         if self.minimum_threshold and self.maximum_threshold:
             if float(self.maximum_threshold) < float(self.minimum_threshold):
                 frappe.throw("Maximum Threshold must be greater than or equal to Minimum Threshold.")
-
-        if self.minimum_item_qty is not None and float(self.minimum_item_qty or 0) < 0:
-            frappe.throw("Minimum Item Quantity cannot be negative.")
 
         if not self.apply_to_shipping_income and not self.apply_to_legacy_delivery_charges:
             frappe.throw("At least one delivery target must be enabled for the rule to have an effect.")

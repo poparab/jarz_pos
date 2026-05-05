@@ -432,8 +432,8 @@ class TestDeliveryPromotionResolution(unittest.TestCase):
         rule.pos_profile = None
         rule.threshold_basis = "Merchandise Subtotal"
         rule.minimum_threshold = minimum_threshold
-        rule.maximum_threshold = None
-        rule.minimum_item_qty = None
+        rule.maximum_threshold = 0.0
+        rule.minimum_item_qty = 0.0
         rule.active_from = None
         rule.active_to = None
         rule.is_pickup_allowed = 0

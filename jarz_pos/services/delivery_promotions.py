@@ -126,12 +126,16 @@ def _rule_matches_threshold(rule, decision: DeliveryPromotionDecision) -> bool:
     if basis == "Item Quantity":
         metric_value = decision.item_qty
         minimum_value = float(getattr(rule, "minimum_item_qty", 0) or 0)
+        if minimum_value <= 0:
+            minimum_value = 0.0
         maximum_value = None
     else:
         metric_value = decision.merchandise_subtotal
         minimum_value = float(getattr(rule, "minimum_threshold", 0) or 0)
         maximum_value = getattr(rule, "maximum_threshold", None)
-        maximum_value = float(maximum_value) if maximum_value not in (None, "") else None
+        maximum_value = float(maximum_value or 0) if maximum_value not in (None, "") else None
+        if maximum_value is not None and maximum_value <= 0:
+            maximum_value = None
 
     if minimum_value and metric_value < minimum_value:
         return False
