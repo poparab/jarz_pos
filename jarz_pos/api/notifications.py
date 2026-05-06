@@ -1105,8 +1105,12 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
     try:
         msg_type = data_payload.get("type", "")
         if msg_type == "new_invoice":
-            notification = None
-            android_notification = None
+            title, body = _resolve_notification_content(data_payload)
+            notification = messaging.Notification(title=title, body=body)
+            android_notification = messaging.AndroidNotification(
+                channel_id='jarz_order_alerts',
+                tag=data_payload.get("invoice_id", "")
+            )
         else:
             title, body = _resolve_notification_content(data_payload)
             notification = messaging.Notification(title=title, body=body)

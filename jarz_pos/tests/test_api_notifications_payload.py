@@ -97,7 +97,7 @@ class TestNotificationPayloadContract(unittest.TestCase):
         self.assertEqual(title, "New Order: Walk-in")
         self.assertEqual(body, "Maadi | Total: 80.00 | 2 items")
 
-    def test_send_fcm_notifications_sends_new_invoice_as_data_only(self):
+    def test_send_fcm_notifications_sends_new_invoice_with_notification_and_data(self):
         from jarz_pos.api import notifications
 
         fake_messaging = SimpleNamespace(
@@ -125,10 +125,19 @@ class TestNotificationPayloadContract(unittest.TestCase):
         message_kwargs = fake_messaging.Message.call_args.kwargs
         self.assertEqual(message_kwargs["data"], data_payload)
         self.assertEqual(message_kwargs["android"].priority, "high")
-        self.assertNotIn("notification", message_kwargs)
-        self.assertFalse(hasattr(message_kwargs["android"], "notification"))
-        fake_messaging.Notification.assert_not_called()
-        fake_messaging.AndroidNotification.assert_not_called()
+        self.assertIn("notification", message_kwargs)
+        self.assertEqual(message_kwargs["notification"].title, "New Order: Walk-in")
+        self.assertEqual(message_kwargs["notification"].body, "Nasr City | Total: 100.00 | Latte x 1")
+        self.assertEqual(message_kwargs["android"].notification.channel_id, "jarz_order_alerts")
+        self.assertEqual(message_kwargs["android"].notification.tag, "SINV-0003")
+        fake_messaging.Notification.assert_called_once_with(
+            title="New Order: Walk-in",
+            body="Nasr City | Total: 100.00 | Latte x 1",
+        )
+        fake_messaging.AndroidNotification.assert_called_once_with(
+            channel_id='jarz_order_alerts',
+            tag='SINV-0003',
+        )
         fake_messaging.send.assert_called_once()
 
     def test_send_fcm_notifications_keeps_notification_payload_for_non_order_types(self):
