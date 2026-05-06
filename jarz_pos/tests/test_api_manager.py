@@ -174,6 +174,8 @@ class TestManagerAPI(unittest.TestCase):
 			name="INV-AMD-001",
 			docstatus=1,
 			is_return=0,
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
 			custom_sales_invoice_state="Ready",
 			sales_partner=None,
 			custom_payment_method="Cash",
@@ -181,6 +183,7 @@ class TestManagerAPI(unittest.TestCase):
 
 		mock_frappe = MagicMock()
 		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.get_doc.return_value = source_invoice
 		mock_frappe.has_permission.return_value = True
 		mock_frappe.enqueue.return_value = {"success": True, "request_id": "amd-INV-AMD-001-1234"}
@@ -206,12 +209,15 @@ class TestManagerAPI(unittest.TestCase):
 			name="INV-AMD-002",
 			docstatus=1,
 			is_return=0,
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
 			custom_sales_invoice_state="Ready",
 		)
 		replacement_invoice = _FakeInvoice(name="INV-AMD-002-1")
 
 		mock_frappe = MagicMock()
 		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.has_permission.return_value = True
 		mock_frappe.get_doc.side_effect = lambda doctype, name: source_invoice if name == "INV-AMD-002" else replacement_invoice
 
@@ -224,6 +230,72 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertTrue(result.get("success"))
 		self.assertTrue(result.get("already_processed"))
 		self.assertEqual(result.get("replacement_invoice_id"), "INV-AMD-002-1")
+		mock_frappe.enqueue.assert_not_called()
+
+	def test_submit_invoice_amendment_allows_staff_with_assigned_pos_profile(self):
+		"""Staff linked to the invoice POS Profile should be able to submit amendments."""
+		from jarz_pos.api.manager import submit_invoice_amendment
+
+		source_invoice = _FakeInvoice(
+			name="INV-AMD-STAFF-001",
+			docstatus=1,
+			is_return=0,
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			sales_partner=None,
+			custom_payment_method="Cash",
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.get_roles.return_value = ["Sales User"]
+		mock_frappe.get_doc.return_value = source_invoice
+		mock_frappe.enqueue.return_value = {"success": True, "request_id": "amd-INV-AMD-STAFF-001-1234"}
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]), \
+				 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+			result = submit_invoice_amendment(
+				invoice_id="INV-AMD-STAFF-001",
+				cart_json="[]",
+				pos_profile_name="Dokki",
+			)
+
+		self.assertTrue(result.get("success"))
+		mock_frappe.enqueue.assert_called_once()
+		mock_frappe.has_permission.assert_not_called()
+
+	def test_submit_invoice_amendment_rejects_staff_without_profile_access(self):
+		"""Staff should not amend invoices outside their assigned POS Profiles."""
+		from jarz_pos.api.manager import submit_invoice_amendment
+
+		source_invoice = _FakeInvoice(
+			name="INV-AMD-STAFF-002",
+			docstatus=1,
+			is_return=0,
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.get_roles.return_value = ["Sales User"]
+		mock_frappe.get_doc.return_value = source_invoice
+		mock_frappe.PermissionError = PermissionError
+		mock_frappe.throw.side_effect = PermissionError("Not permitted")
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+			with self.assertRaises(PermissionError):
+				submit_invoice_amendment(
+					invoice_id="INV-AMD-STAFF-002",
+					cart_json="[]",
+					pos_profile_name="Dokki",
+				)
+
 		mock_frappe.enqueue.assert_not_called()
 
 	def test_run_invoice_amendment_job_cancels_payment_entries_before_recreate(self):
@@ -348,6 +420,7 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe = MagicMock()
 		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
 		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.utils.now.return_value = "2026-05-03 12:30:00"
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
@@ -409,6 +482,70 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertEqual(payload["new_state_key"], "received")
 		self.assertTrue(payload["force_refresh"])
 
+	def test_update_invoice_branch_allows_staff_with_assigned_profiles(self):
+		"""Staff assigned to both source and target POS Profiles should be able to transfer invoices."""
+		from jarz_pos.api.manager import update_invoice_branch
+
+		item_row = SimpleNamespace(name="SII-020", item_code="ITEM-001", warehouse="Stores - Dokki")
+		invoice = _FakeInvoice(
+			name="INV-STAFF-TRANSFER-001",
+			docstatus=1,
+			is_pos=1,
+			company="Jarz",
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			items=[item_row],
+		)
+		invoice.add_comment = MagicMock()
+
+		meta = MagicMock()
+		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {
+			"custom_kanban_profile",
+			"set_warehouse",
+			"custom_sales_invoice_state",
+			"custom_acceptance_status",
+			"custom_accepted_by",
+			"custom_accepted_on",
+		} else None
+
+		mock_frappe = MagicMock()
+		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.get_roles.return_value = ["Sales User"]
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.get_all.return_value = []
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "disabled"): 0,
+				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+				("Item", "ITEM-001", "is_stock_item"): 1,
+			}.get((doctype, name, field))
+		)
+
+		def _set_value(_doctype, _name, field, value, update_modified=True):
+			if _doctype == "Sales Invoice":
+				invoice._data[field] = value
+			if _doctype == "Sales Invoice Item" and _name == "SII-020" and field == "warehouse":
+				item_row.warehouse = value
+
+		mock_frappe.db.set_value.side_effect = _set_value
+		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_meta.return_value = meta
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki", "Nasr city"]), \
+				 patch("jarz_pos.api.manager.notify_invoice_reassignment"), \
+				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress", "Ready"]):
+			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-001", new_branch="Nasr city")
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(invoice.get("custom_kanban_profile"), "Nasr city")
+		self.assertEqual(item_row.warehouse, "Stores - Nasr city")
+		mock_frappe.has_permission.assert_not_called()
+
 	def test_update_invoice_branch_rejects_disabled_target_profile(self):
 		"""Disabled POS Profiles should fail with a specific validation error."""
 		from jarz_pos.api.manager import update_invoice_branch
@@ -448,6 +585,7 @@ class TestManagerAPI(unittest.TestCase):
 
 		mock_frappe = MagicMock()
 		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.get_all.return_value = []
 		mock_frappe.db.get_value.side_effect = (
@@ -489,6 +627,7 @@ class TestManagerAPI(unittest.TestCase):
 
 		mock_frappe = MagicMock()
 		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.get_all.return_value = ["DN-001"]
 		mock_frappe.db.get_value.side_effect = (

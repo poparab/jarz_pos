@@ -85,12 +85,53 @@ def _current_user_allowed_profiles() -> List[str]:
         return []
 
 
+def _has_manager_dashboard_access() -> bool:
+    roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
+    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, "JARZ line manager", ROLES.JARZ_LINE_MANAGER}
+    return bool(roles.intersection(allowed))
+
+
 def _ensure_manager_dashboard_access() -> None:
     """Ensure the current user has JARZ Manager, Line Manager, or admin-level role for dashboard access."""
-    roles = set(frappe.get_roles())
-    allowed = ROLES.ADMIN | {"JARZ Manager", "JARZ line manager", ROLES.JARZ_LINE_MANAGER}
-    if not roles.intersection(allowed):
+    if not _has_manager_dashboard_access():
         frappe.throw(_("Not permitted: Manager Dashboard access required"), frappe.PermissionError)
+
+
+def _ensure_profile_scoped_invoice_access(
+    inv: Any,
+    *,
+    action_label: str,
+    extra_profiles: Optional[List[str]] = None,
+) -> None:
+    if _has_manager_dashboard_access():
+        return
+
+    allowed_profiles = {
+        str(profile or "").strip()
+        for profile in _current_user_allowed_profiles()
+        if str(profile or "").strip()
+    }
+    if not allowed_profiles:
+        frappe.throw(
+            _("Not permitted: no assigned POS Profile was found for this user."),
+            frappe.PermissionError,
+        )
+
+    required_profiles: List[str] = []
+    operational_profile = str(inv.get("custom_kanban_profile") or inv.get("pos_profile") or "").strip()
+    if operational_profile:
+        required_profiles.append(operational_profile)
+    for profile in extra_profiles or []:
+        cleaned = str(profile or "").strip()
+        if cleaned:
+            required_profiles.append(cleaned)
+
+    unauthorized_profiles = sorted({profile for profile in required_profiles if profile not in allowed_profiles})
+    if unauthorized_profiles:
+        frappe.throw(
+            _("Not permitted: {0} is limited to your assigned POS Profiles.").format(action_label),
+            frappe.PermissionError,
+        )
 
 
 def _get_state_field_options() -> List[str]:
@@ -762,8 +803,6 @@ def submit_invoice_amendment(
     idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload."""
-    _ensure_manager_dashboard_access()
-
     invoice_id = (invoice_id or "").strip()
     if not invoice_id:
         return {"success": False, "error": "invoice_id is required"}
@@ -771,7 +810,12 @@ def submit_invoice_amendment(
         return {"success": False, "error": "cart_json is required"}
 
     source_invoice = frappe.get_doc("Sales Invoice", invoice_id)
-    frappe.has_permission("Sales Invoice", doc=source_invoice, ptype="write", throw=True)
+    requested_profile = (pos_profile_name or "").strip()
+    _ensure_profile_scoped_invoice_access(
+        source_invoice,
+        action_label="invoice amendment",
+        extra_profiles=[requested_profile] if requested_profile else None,
+    )
 
     existing_replacement = _find_existing_amendment_invoice(invoice_id)
     request_id = _build_invoice_amendment_request_id(
@@ -1349,7 +1393,6 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
     - new_branch must be in current user's allowed POS Profiles.
     - The reassignment touches modified and emits a realtime refresh event for other sessions.
     """
-    _ensure_manager_dashboard_access()
     try:
         frappe.logger().info(f"Transfer invoice request: {invoice_id} -> {new_branch}")
         
@@ -1367,12 +1410,12 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         if int(frappe.db.get_value("POS Profile", new_branch, "disabled") or 0) == 1:
             return {"success": False, "error": f"Target POS Profile {new_branch} is disabled"}
 
-        allowed = _current_user_allowed_profiles()
-        if new_branch not in allowed:
-            return {"success": False, "error": f"Not allowed to assign invoices into branch {new_branch}"}
-
         inv = frappe.get_doc("Sales Invoice", invoice_id)
-        frappe.has_permission("Sales Invoice", doc=inv, ptype="write", throw=True)
+        _ensure_profile_scoped_invoice_access(
+            inv,
+            action_label="invoice transfer",
+            extra_profiles=[new_branch],
+        )
         
         frappe.logger().info(f"Invoice docstatus: {inv.get('docstatus')}, is_pos: {inv.get('is_pos')}")
         

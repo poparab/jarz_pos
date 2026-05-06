@@ -21,6 +21,25 @@ class PaymentSource:
     pos_profile: Optional[str] = None
 
 
+def _current_user_pos_profile_names() -> List[str]:
+    try:
+        raw_profiles = get_pos_profiles() or []
+    except Exception:
+        return []
+
+    profiles: List[str] = []
+    seen = set()
+    for profile in raw_profiles:
+        if isinstance(profile, dict):
+            name = str(profile.get("name") or "").strip()
+        else:
+            name = str(profile or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            profiles.append(name)
+    return profiles
+
+
 def _is_manager() -> bool:
     roles = set(frappe.get_roles(frappe.session.user))
     return ROLES.JARZ_MANAGER in roles
@@ -354,15 +373,7 @@ def get_expense_bootstrap(filters: Optional[str] = None):
     if is_manager:
         manager_profiles = _manager_pos_profiles(company)
     else:
-        try:
-            raw_profiles = get_pos_profiles()
-            # get_pos_profiles() may return dicts (with 'name' key) or strings
-            user_profiles = [
-                p["name"] if isinstance(p, dict) else p
-                for p in raw_profiles
-            ]
-        except Exception:
-            user_profiles = []
+        user_profiles = _current_user_pos_profile_names()
 
     payment_sources: List[PaymentSource] = []
     source_profiles: Sequence[str] = manager_profiles if is_manager and manager_profiles else user_profiles
@@ -450,7 +461,7 @@ def create_expense(payload: Optional[str] = None, **kwargs):
         pos_profile = data.get("pos_profile") or data.get("payment_label") or data.get("payment_source")
         if not pos_profile:
             frappe.throw(_("POS profile is required for expense."))
-        accessible = set(get_pos_profiles())
+        accessible = set(_current_user_pos_profile_names())
         if pos_profile not in accessible:
             frappe.throw(_("You do not have access to POS Profile: {0}").format(pos_profile))
         paying_account = _resolve_named_account(company, pos_profile)
