@@ -8,6 +8,7 @@ from jarz_pos.utils.customer_address_utils import (
     ADDRESS_PHONE_FIELDS,
     _address_phone,
     ensure_shipping_address,
+    find_matching_customer_address,
     format_address_text,
     get_customer_shipping_addresses as _get_customer_shipping_addresses,
     get_linked_customer_address_names,
@@ -191,25 +192,31 @@ def save_customer_shipping_address(
             if not normalized_address:
                 frappe.throw(_("Address is required."))
 
-            address_payload = {
-                "doctype": "Address",
-                "address_title": customer_doc.customer_name,
-                "address_type": "Shipping",
-                "address_line1": normalized_address,
-                "city": customer_doc.territory or "Unknown",
-                "is_primary_address": 1 if use_as_primary else 0,
-                "is_shipping_address": 1,
-                "links": [{
-                    "link_doctype": "Customer",
-                    "link_name": customer_doc.name,
-                }],
-            }
-            for fieldname in ADDRESS_PHONE_FIELDS:
-                if frappe.db.has_column("Address", fieldname) and str(phone or "").strip():
-                    address_payload[fieldname] = str(phone).strip()
+            matching_address = find_matching_customer_address(customer_doc.name, normalized_address)
+            if matching_address:
+                address_doc = ensure_shipping_address(str(matching_address.get("name") or ""))
+                if address_doc is None:
+                    frappe.throw(_("Matching customer address was not found."))
+            else:
+                address_payload = {
+                    "doctype": "Address",
+                    "address_title": customer_doc.customer_name,
+                    "address_type": "Shipping",
+                    "address_line1": normalized_address,
+                    "city": customer_doc.territory or "Unknown",
+                    "is_primary_address": 1 if use_as_primary else 0,
+                    "is_shipping_address": 1,
+                    "links": [{
+                        "link_doctype": "Customer",
+                        "link_name": customer_doc.name,
+                    }],
+                }
+                for fieldname in ADDRESS_PHONE_FIELDS:
+                    if frappe.db.has_column("Address", fieldname) and str(phone or "").strip():
+                        address_payload[fieldname] = str(phone).strip()
 
-            address_doc = frappe.get_doc(address_payload)
-            address_doc.insert(ignore_permissions=True)
+                address_doc = frappe.get_doc(address_payload)
+                address_doc.insert(ignore_permissions=True)
 
         _apply_phone_to_address(address_doc, str(phone or "").strip())
         address_doc.save(ignore_permissions=True)

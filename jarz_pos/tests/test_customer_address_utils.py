@@ -22,7 +22,7 @@ class TestCustomerAddressUtils(unittest.TestCase):
             module = importlib.import_module("jarz_pos.utils.customer_address_utils")
             return importlib.reload(module)
 
-    def test_get_customer_shipping_addresses_prefers_shipping_rows(self):
+    def test_get_customer_shipping_addresses_keeps_legacy_rows_visible(self):
         utils = self._load_utils_module()
 
         dynamic_link_rows = [
@@ -70,25 +70,139 @@ class TestCustomerAddressUtils(unittest.TestCase):
              patch.object(utils.frappe.db, "has_column", return_value=True):
             result = utils.get_customer_shipping_addresses("CUST-1")
 
-        self.assertEqual([row["name"] for row in result], ["ADDR-SHIP-2", "ADDR-SHIP-1"])
-        self.assertTrue(all(row["is_shipping_address"] for row in result))
-        self.assertEqual(result[0]["full_address"], "Shipping 2, Giza")
+        self.assertEqual([row["name"] for row in result], ["ADDR-SHIP-1", "ADDR-SHIP-2", "ADDR-BILL"])
+        self.assertEqual(result[0]["full_address"], "Shipping 1, Apt 5, Cairo")
+        self.assertEqual(result[2]["full_address"], "Billing 1, Cairo")
+
+    def test_get_customer_shipping_addresses_dedupes_equivalent_rows(self):
+        utils = self._load_utils_module()
+
+        dynamic_link_rows = [
+            {"parent": "ADDR-DUP-BILL"},
+            {"parent": "ADDR-DUP-SHIP"},
+            {"parent": "ADDR-UNIQUE"},
+        ]
+        address_rows = [
+            {
+                "name": "ADDR-DUP-BILL",
+                "address_type": "Billing",
+                "address_line1": "12 Road",
+                "address_line2": "",
+                "city": "Giza",
+                "is_primary_address": 1,
+                "is_shipping_address": 0,
+                "modified": "2026-05-05 12:00:00",
+                "mobile_no": "",
+            },
+            {
+                "name": "ADDR-DUP-SHIP",
+                "address_type": "Shipping",
+                "address_line1": "12 Road",
+                "address_line2": "",
+                "city": "Giza",
+                "is_primary_address": 0,
+                "is_shipping_address": 1,
+                "modified": "2026-05-05 11:00:00",
+                "mobile_no": "0100",
+            },
+            {
+                "name": "ADDR-UNIQUE",
+                "address_type": "Shipping",
+                "address_line1": "8 Nile St",
+                "address_line2": "",
+                "city": "Cairo",
+                "is_primary_address": 0,
+                "is_shipping_address": 1,
+                "modified": "2026-05-05 10:00:00",
+                "mobile_no": "0102",
+            },
+        ]
+
+        with patch.object(utils.frappe, "get_all", side_effect=[dynamic_link_rows, address_rows]), \
+             patch.object(utils.frappe.db, "has_column", return_value=True):
+            result = utils.get_customer_shipping_addresses("CUST-2")
+
+        self.assertEqual([row["name"] for row in result], ["ADDR-DUP-SHIP", "ADDR-UNIQUE"])
+        self.assertTrue(result[0]["is_primary_address"])
+        self.assertTrue(result[0]["is_shipping_address"])
+        self.assertEqual(result[0]["phone"], "0100")
 
     def test_resolve_customer_shipping_address_ignores_billing_preference_when_shipping_exists(self):
         utils = self._load_utils_module()
 
         candidates = [
-            {"name": "ADDR-SHIP-1", "is_shipping_address": True, "is_primary_address": True},
-            {"name": "ADDR-SHIP-2", "is_shipping_address": True, "is_primary_address": False},
+            {"name": "ADDR-SHIP-1", "address_line1": "Shipping 1", "address_line2": "", "city": "Cairo", "is_shipping_address": True, "is_primary_address": True},
+            {"name": "ADDR-SHIP-2", "address_line1": "Shipping 2", "address_line2": "", "city": "Giza", "is_shipping_address": True, "is_primary_address": False},
+        ]
+        raw_rows = [
+            {"name": "ADDR-BILL", "address_line1": "Billing 1", "address_line2": "", "city": "Cairo", "is_shipping_address": False, "is_primary_address": False},
+            {"name": "ADDR-SHIP-1", "address_line1": "Shipping 1", "address_line2": "", "city": "Cairo", "is_shipping_address": True, "is_primary_address": True},
+            {"name": "ADDR-SHIP-2", "address_line1": "Shipping 2", "address_line2": "", "city": "Giza", "is_shipping_address": True, "is_primary_address": False},
         ]
 
         with patch.object(utils, "get_customer_shipping_addresses", return_value=candidates), \
+             patch.object(utils, "get_linked_customer_addresses", return_value=raw_rows), \
              patch.object(utils.frappe.db, "get_value", return_value="ADDR-SHIP-1"):
             result = utils.resolve_customer_shipping_address(
                 "CUST-1",
                 preferred_address_name="ADDR-BILL",
             )
 
+        self.assertEqual(result["name"], "ADDR-SHIP-1")
+
+    def test_resolve_customer_shipping_address_maps_duplicate_preference_to_canonical_candidate(self):
+        utils = self._load_utils_module()
+
+        candidates = [
+            {"name": "ADDR-SHIP-1", "address_line1": "12 Road", "address_line2": "", "city": "Giza", "is_shipping_address": True, "is_primary_address": True},
+        ]
+        raw_rows = [
+            {"name": "ADDR-LEGACY-1", "address_line1": "12 Road", "address_line2": "", "city": "Giza", "is_shipping_address": False, "is_primary_address": False},
+            {"name": "ADDR-SHIP-1", "address_line1": "12 Road", "address_line2": "", "city": "Giza", "is_shipping_address": True, "is_primary_address": True},
+        ]
+
+        with patch.object(utils, "get_customer_shipping_addresses", return_value=candidates), \
+             patch.object(utils, "get_linked_customer_addresses", return_value=raw_rows), \
+             patch.object(utils.frappe.db, "get_value", return_value=None):
+            result = utils.resolve_customer_shipping_address(
+                "CUST-1",
+                preferred_address_name="ADDR-LEGACY-1",
+            )
+
+        self.assertEqual(result["name"], "ADDR-SHIP-1")
+
+    def test_find_matching_customer_address_reuses_existing_line1_match(self):
+        utils = self._load_utils_module()
+
+        raw_rows = [
+            {
+                "name": "ADDR-SHIP-1",
+                "address_type": "Shipping",
+                "address_line1": "12 Road",
+                "address_line2": "",
+                "city": "Giza",
+                "is_primary_address": 1,
+                "is_shipping_address": 1,
+                "modified": "2026-05-05 12:00:00",
+                "mobile_no": "0101",
+            },
+            {
+                "name": "ADDR-SHIP-2",
+                "address_type": "Shipping",
+                "address_line1": "8 Nile St",
+                "address_line2": "",
+                "city": "Cairo",
+                "is_primary_address": 0,
+                "is_shipping_address": 1,
+                "modified": "2026-05-05 11:00:00",
+                "mobile_no": "0102",
+            },
+        ]
+
+        with patch.object(utils, "get_linked_customer_addresses", return_value=raw_rows):
+            result = utils.find_matching_customer_address("CUST-1", "12 Road")
+
+        self.assertIsNotNone(result)
         self.assertEqual(result["name"], "ADDR-SHIP-1")
 
     def test_ensure_shipping_address_updates_type_and_flag(self):
