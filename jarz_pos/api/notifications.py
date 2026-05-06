@@ -1108,6 +1108,7 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
             title, body = _resolve_notification_content(data_payload)
             notification = messaging.Notification(title=title, body=body)
             android_notification = messaging.AndroidNotification(
+                sound='default',
                 channel_id='jarz_order_alerts',
                 tag=data_payload.get("invoice_id", "")
             )

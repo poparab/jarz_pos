@@ -129,12 +129,14 @@ class TestNotificationPayloadContract(unittest.TestCase):
         self.assertEqual(message_kwargs["notification"].title, "New Order: Walk-in")
         self.assertEqual(message_kwargs["notification"].body, "Nasr City | Total: 100.00 | Latte x 1")
         self.assertEqual(message_kwargs["android"].notification.channel_id, "jarz_order_alerts")
+        self.assertEqual(message_kwargs["android"].notification.sound, "default")
         self.assertEqual(message_kwargs["android"].notification.tag, "SINV-0003")
         fake_messaging.Notification.assert_called_once_with(
             title="New Order: Walk-in",
             body="Nasr City | Total: 100.00 | Latte x 1",
         )
         fake_messaging.AndroidNotification.assert_called_once_with(
+            sound='default',
             channel_id='jarz_order_alerts',
             tag='SINV-0003',
         )
