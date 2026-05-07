@@ -189,9 +189,9 @@ after_uninstall = "jarz_pos.utils.cleanup.remove_required_delivery_datetime_fiel
 # ---------------
 # Override standard doctype classes
 
-# override_doctype_class = {
-# 	"ToDo": "custom_app.overrides.CustomToDo"
-# }
+override_doctype_class = {
+    "POS Closing Entry": "jarz_pos.overrides.pos_closing_entry.POSClosingEntry",
+}
 
 # Document Events
 # ---------------
