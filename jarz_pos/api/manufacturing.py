@@ -78,6 +78,40 @@ def _get_bom_company(bom_name: str) -> str:
         return ""
 
 
+def _resolve_scheduled_datetime(scheduled_at: Any):
+    if scheduled_at:
+        return get_datetime(scheduled_at)
+    return get_datetime(frappe.utils.now_datetime())
+
+
+def _apply_posting_datetime(stock_entry: Any, scheduled_dt: Any) -> None:
+    posting_date = scheduled_dt.strftime("%Y-%m-%d")
+    posting_time = scheduled_dt.strftime("%H:%M:%S")
+
+    if isinstance(stock_entry, Document):
+        stock_entry.posting_date = posting_date
+        stock_entry.posting_time = posting_time
+        stock_entry.set_posting_time = 1
+        return
+
+    if isinstance(stock_entry, (dict, FrappeDict)):
+        stock_entry["posting_date"] = posting_date
+        stock_entry["posting_time"] = posting_time
+        stock_entry["set_posting_time"] = 1
+
+
+def _set_work_order_actual_dates(work_order: str, scheduled_dt: Any) -> None:
+    wo_doc = frappe.get_doc("Work Order", work_order)
+    wo_doc.db_set("actual_start_date", scheduled_dt, update_modified=False)
+    wo_doc.db_set("actual_end_date", scheduled_dt, update_modified=False)
+    wo_doc.actual_start_date = scheduled_dt
+    wo_doc.actual_end_date = scheduled_dt
+    if hasattr(wo_doc, "set_lead_time"):
+        wo_doc.set_lead_time()
+        if getattr(wo_doc, "lead_time", None) is not None:
+            wo_doc.db_set("lead_time", wo_doc.lead_time, update_modified=False)
+
+
 def _find_company_warehouse(company: str, warehouse_type: str | None, name_hints: list[str]) -> str | None:
     """Pick a reasonable warehouse for the company.
     Priority: exact warehouse_type match -> name contains any hint -> any leaf warehouse for company.
@@ -360,7 +394,7 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
     }
 
 
-def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, str]) -> str:
+def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, str], scheduled_dt: Any) -> str:
     # Create and submit a Work Order for the given line dict
     wip_wh = defaults.get("wip_warehouse")
     fg_wh = defaults.get("fg_warehouse")
@@ -378,7 +412,7 @@ def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, s
         "production_item": line["item_code"],
         "qty": float(line["item_qty"]),
         "bom_no": line["bom_name"],
-        "planned_start_date": get_datetime(line.get("scheduled_at")) if line.get("scheduled_at") else frappe.utils.now_datetime(),
+        "planned_start_date": scheduled_dt,
         "transfer_material_against": "Work Order",
         # Set defaults if present
         "wip_warehouse": wip_wh,
@@ -413,7 +447,7 @@ def _resolve_make_stock_entry():
         return None
 
 
-def _make_and_submit_se(work_order: str, purpose: str, qty: float) -> str:
+def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt: Any) -> str:
     creator = _resolve_make_stock_entry()
     if not creator:
         frappe.throw(_("Could not resolve ERPNext make_stock_entry helper"))
@@ -448,6 +482,7 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float) -> str:
     is_mapping = isinstance(se, (dict, FrappeDict))
     if not is_document and not is_mapping:
         frappe.throw(_("make_stock_entry did not return a Document or dict-like mapping"))
+    _apply_posting_datetime(se, scheduled_dt)
     # Ensure finished qty is set for Manufacture
     # Ensure finished qty is set for Manufacture
     try:
@@ -550,6 +585,7 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
                 frappe.log_error(title="JARZ – MFG start line", message=f"Line: {ln}")
             except Exception:
                 pass
+            scheduled_dt = _resolve_scheduled_datetime(ln.get("scheduled_at"))
             # Always respect the BOM's company; fallback to default if missing
             company = _get_bom_company(ln["bom_name"]) or _get_default_company()
             if not company:
@@ -557,24 +593,25 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
             _assert_material_availability(ln, company)
             defaults = _get_mfg_defaults(company)
 
-            wo_name = _ensure_work_order(ln, company, defaults)
+            wo_name = _ensure_work_order(ln, company, defaults, scheduled_dt)
             try:
                 frappe.log_error(title="JARZ – MFG WO created", message=f"WO: {wo_name}\nCompany: {company}\nWIP: {defaults.get('wip_warehouse')}\nFG: {defaults.get('fg_warehouse')}")
             except Exception:
                 pass
             qty = float(ln["item_qty"])
-            se1 = _make_and_submit_se(wo_name, "Material Transfer for Manufacture", qty)
+            se1 = _make_and_submit_se(wo_name, "Material Transfer for Manufacture", qty, scheduled_dt)
             try:
                 frappe.log_error(title="JARZ – MFG SE1 done", message=f"WO: {wo_name}\nSE1: {se1}")
             except Exception:
                 pass
-            se2 = _make_and_submit_se(wo_name, "Manufacture", qty)
+            se2 = _make_and_submit_se(wo_name, "Manufacture", qty, scheduled_dt)
             try:
                 frappe.log_error(title="JARZ – MFG SE2 done", message=f"WO: {wo_name}\nSE2: {se2}")
             except Exception:
                 pass
             # Refresh WO status; after Manufacture entry, it should be Completed when produced qty >= planned qty
             try:
+                _set_work_order_actual_dates(wo_name, scheduled_dt)
                 wo_doc = frappe.get_doc("Work Order", wo_name)
                 if hasattr(wo_doc, "update_status"):
                     wo_doc.update_status()

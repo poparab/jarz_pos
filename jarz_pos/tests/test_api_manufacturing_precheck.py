@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 
@@ -86,3 +87,77 @@ class TestManufacturingPrecheck(unittest.TestCase):
         self.assertFalse(result["results"][0]["ok"])
         self.assertIn("blocked by precheck", result["results"][0]["error"])
         mock_frappe.log_error.assert_called()
+
+    def test_make_and_submit_se_applies_requested_posting_datetime(self):
+        from jarz_pos.api import manufacturing
+
+        scheduled_dt = datetime(2026, 5, 8, 14, 30, 0)
+        inserted_doc = MagicMock()
+        inserted_doc.name = "STE-0001"
+
+        with patch(
+            "jarz_pos.api.manufacturing._resolve_make_stock_entry",
+            return_value=MagicMock(return_value={"doctype": "Stock Entry"}),
+        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.get_doc.return_value = inserted_doc
+
+            name = manufacturing._make_and_submit_se(
+                "WO-0001",
+                "Manufacture",
+                3,
+                scheduled_dt,
+            )
+
+        payload = mock_frappe.get_doc.call_args.args[0]
+        self.assertEqual("STE-0001", name)
+        self.assertEqual("2026-05-08", payload["posting_date"])
+        self.assertEqual("14:30:00", payload["posting_time"])
+        self.assertEqual(1, payload["set_posting_time"])
+        self.assertEqual(3, payload["fg_completed_qty"])
+        inserted_doc.insert.assert_called_once()
+        inserted_doc.submit.assert_called_once()
+
+    def test_submit_work_orders_propagates_scheduled_datetime_to_follow_up_documents(self):
+        from jarz_pos.api import manufacturing
+
+        line = {
+            "item_code": "PIST-CAKE",
+            "bom_name": "BOM-PIST-CAKE",
+            "item_qty": 5,
+            "scheduled_at": "2026-05-08 14:30:00",
+        }
+        scheduled_dt = datetime(2026, 5, 8, 14, 30, 0)
+        wo_doc = MagicMock()
+        wo_doc.status = "Completed"
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.api.manufacturing._assert_material_availability"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_mfg_defaults", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_scheduled_datetime", return_value=scheduled_dt
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order", return_value="WO-0001"
+        ) as mock_ensure_work_order, patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se", side_effect=["STE-1", "STE-2"]
+        ) as mock_make_and_submit_se, patch(
+            "jarz_pos.api.manufacturing._set_work_order_actual_dates"
+        ) as mock_set_work_order_actual_dates, patch(
+            "jarz_pos.api.manufacturing.frappe"
+        ) as mock_frappe:
+            mock_frappe.get_doc.return_value = wo_doc
+
+            result = manufacturing.submit_work_orders([line])
+
+        mock_ensure_work_order.assert_called_once_with(line, "Jarz Co", {}, scheduled_dt)
+        self.assertEqual(
+            [
+                ("WO-0001", "Material Transfer for Manufacture", 5.0, scheduled_dt),
+                ("WO-0001", "Manufacture", 5.0, scheduled_dt),
+            ],
+            [call.args for call in mock_make_and_submit_se.call_args_list],
+        )
+        mock_set_work_order_actual_dates.assert_called_once_with("WO-0001", scheduled_dt)
+        self.assertTrue(result["results"][0]["ok"])
