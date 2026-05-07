@@ -26,6 +26,14 @@ try:
     from erpnext.manufacturing.doctype.work_order.work_order import make_stock_entry  # type: ignore
 except Exception:  # pragma: no cover
     make_stock_entry = None  # type: ignore
+try:
+    from erpnext.manufacturing.doctype.bom.bom import get_bom_items_as_dict  # type: ignore
+except Exception:  # pragma: no cover
+    get_bom_items_as_dict = None  # type: ignore
+try:
+    from erpnext.stock.utils import get_latest_stock_qty  # type: ignore
+except Exception:  # pragma: no cover
+    get_latest_stock_qty = None  # type: ignore
 
 
 def _get_default_company() -> str:
@@ -101,6 +109,165 @@ def _find_company_warehouse(company: str, warehouse_type: str | None, name_hints
         return None
 
 
+def _resolve_get_bom_items_as_dict():
+    if get_bom_items_as_dict:
+        return get_bom_items_as_dict
+    try:
+        fn = frappe.get_attr("erpnext.manufacturing.doctype.bom.bom.get_bom_items_as_dict")
+        if fn:
+            return fn
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_get_latest_stock_qty():
+    if get_latest_stock_qty:
+        return get_latest_stock_qty
+    try:
+        fn = frappe.get_attr("erpnext.stock.utils.get_latest_stock_qty")
+        if fn:
+            return fn
+    except Exception:
+        pass
+    return None
+
+
+def _get_live_stock_qty(item_code: str, warehouse: str) -> float:
+    getter = _resolve_get_latest_stock_qty()
+    if getter:
+        try:
+            return float(getter(item_code, warehouse) or 0)
+        except Exception:
+            pass
+    try:
+        return float(
+            frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse}, "actual_qty") or 0
+        )
+    except Exception:
+        return 0.0
+
+
+def _get_required_material_rows(bom_name: str, company: str, qty: float) -> List[Dict[str, Any]]:
+    getter = _resolve_get_bom_items_as_dict()
+    if not getter:
+        frappe.throw(_("Could not resolve ERPNext BOM items helper"))
+
+    item_dict = getter(bom_name, company, qty=qty, fetch_exploded=1)
+    rows: List[Dict[str, Any]] = []
+    for item in sorted(item_dict.values(), key=lambda row: row.get("idx") or float("inf")):
+        if item.get("include_item_in_manufacturing") in (0, "0", False):
+            continue
+
+        item_code = str(item.get("item_code") or "")
+        source_warehouse = item.get("source_warehouse") or item.get("default_warehouse")
+        rows.append(
+            {
+                "item_code": item_code,
+                "item_name": item.get("item_name") or item_code,
+                "uom": item.get("uom") or DEFAULT_UOM,
+                "required_qty": float(item.get("qty") or 0),
+                "source_warehouse": source_warehouse,
+                "available_qty": _get_live_stock_qty(item_code, source_warehouse) if source_warehouse else 0.0,
+            }
+        )
+    return rows
+
+
+def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Dict[str, Any]]:
+    issues: List[Dict[str, Any]] = []
+    required_rows = _get_required_material_rows(line["bom_name"], company, float(line["item_qty"]))
+    for row in required_rows:
+        source_warehouse = row.get("source_warehouse")
+        if not source_warehouse:
+            issues.append(
+                {
+                    "type": "missing_source_warehouse",
+                    "item_code": row["item_code"],
+                    "item_name": row["item_name"],
+                }
+            )
+            continue
+
+        try:
+            is_group = int(frappe.db.get_value("Warehouse", source_warehouse, "is_group") or 0)
+        except Exception:
+            is_group = 0
+
+        if is_group:
+            issues.append(
+                {
+                    "type": "group_source_warehouse",
+                    "item_code": row["item_code"],
+                    "item_name": row["item_name"],
+                    "source_warehouse": source_warehouse,
+                }
+            )
+            continue
+
+        required_qty = float(row.get("required_qty") or 0)
+        available_qty = float(row.get("available_qty") or 0)
+        if available_qty + 1e-9 < required_qty:
+            issues.append(
+                {
+                    "type": "insufficient_stock",
+                    "item_code": row["item_code"],
+                    "item_name": row["item_name"],
+                    "uom": row.get("uom") or DEFAULT_UOM,
+                    "required_qty": required_qty,
+                    "available_qty": available_qty,
+                    "missing_qty": required_qty - available_qty,
+                    "source_warehouse": source_warehouse,
+                }
+            )
+
+    return issues
+
+
+def _format_precheck_issue(item_name: str, item_code: str) -> str:
+    if item_name and item_name != item_code:
+        return f"{item_name} ({item_code})"
+    return item_code
+
+
+def _assert_material_availability(line: Dict[str, Any], company: str) -> None:
+    issues = _get_material_precheck_issues(line, company)
+    if not issues:
+        return
+
+    detail_parts: List[str] = []
+    for issue in issues:
+        item_label = _format_precheck_issue(issue.get("item_name") or issue["item_code"], issue["item_code"])
+        issue_type = issue.get("type")
+        if issue_type == "missing_source_warehouse":
+            detail_parts.append(_("{0} has no source warehouse configured").format(item_label))
+        elif issue_type == "group_source_warehouse":
+            detail_parts.append(
+                _("{0} uses group warehouse {1} as source warehouse").format(
+                    item_label, issue.get("source_warehouse") or ""
+                )
+            )
+        else:
+            detail_parts.append(
+                _("{0} in Warehouse {1} is short by {2} {3} (required {4}, available {5})").format(
+                    item_label,
+                    issue.get("source_warehouse") or "",
+                    f"{float(issue.get('missing_qty') or 0):.3f}",
+                    issue.get("uom") or DEFAULT_UOM,
+                    f"{float(issue.get('required_qty') or 0):.3f}",
+                    f"{float(issue.get('available_qty') or 0):.3f}",
+                )
+            )
+
+    frappe.throw(
+        _("Manufacturing pre-check failed for {0} on BOM {1}: {2}").format(
+            line["item_code"],
+            line["bom_name"],
+            "; ".join(detail_parts),
+        )
+    )
+
+
 @frappe.whitelist()
 def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
     """List Items that have a default BOM, with basic info.
@@ -171,35 +338,8 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
         frappe.throw(_(f"No submitted default BOM found for Item {item_code}"))
 
     item = frappe.db.get_value("Item", item_code, ["item_name", "stock_uom"], as_dict=True)
-    comps = frappe.db.get_all(
-        "BOM Item",
-        filters={"parent": bom["name"], "docstatus": ["<", 2]},
-        fields=["item_code", "item_name", "uom", "qty"],
-        order_by="idx asc",
-    )
-    # Compute available stock per component across warehouses of the BOM's company
-    availability: Dict[str, float] = {}
-    try:
-        company = bom.get("company") if isinstance(bom, dict) else None
-        codes = [c["item_code"] for c in comps] if comps else []
-        if company and codes:
-            # Avoid SQL errors with single item tuple; build placeholders dynamically
-            placeholders = ",".join(["%s"] * len(codes))
-            sql = f"""
-                SELECT b.item_code, COALESCE(SUM(b.actual_qty), 0) AS qty
-                FROM `tabBin` b
-                INNER JOIN `tabWarehouse` w ON w.name = b.warehouse
-                WHERE w.company = %s AND w.is_group = 0 AND b.item_code IN ({placeholders})
-                GROUP BY b.item_code
-            """
-            args = [company] + codes
-            rows = frappe.db.sql(sql, args, as_dict=True)  # type: ignore
-            for r in rows:
-                availability[str(r.get("item_code"))] = float(r.get("qty") or 0)
-    except Exception:
-        # If anything fails, leave availability empty
-        pass
-    # qty in BOM Item corresponds to the component requirement for one BOM (which yields bom.quantity finished items)
+    company = (bom.get("company") if isinstance(bom, dict) else None) or _get_default_company()
+    comps = _get_required_material_rows(bom["name"], company, float(bom.get("quantity") or 1))
     return {
         "item_code": item_code,
         "item_name": item.get("item_name") if item else item_code,
@@ -211,8 +351,9 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
                 "item_code": c["item_code"],
                 "item_name": c.get("item_name") or c["item_code"],
                 "uom": c.get("uom") or DEFAULT_UOM,
-                "qty_per_bom": float(c.get("qty") or 0),
-                "available_qty": float(availability.get(c["item_code"], 0)),
+                "qty_per_bom": float(c.get("required_qty") or 0),
+                "available_qty": float(c.get("available_qty") or 0),
+                "source_warehouse": c.get("source_warehouse"),
             }
             for c in comps
         ],
@@ -413,6 +554,7 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
             company = _get_bom_company(ln["bom_name"]) or _get_default_company()
             if not company:
                 frappe.throw(_("Company is not configured on BOM and no Default Company set"))
+            _assert_material_availability(ln, company)
             defaults = _get_mfg_defaults(company)
 
             wo_name = _ensure_work_order(ln, company, defaults)

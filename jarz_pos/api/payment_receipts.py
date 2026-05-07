@@ -5,6 +5,53 @@ import frappe
 import base64
 import os
 from typing import List, Dict, Any
+from frappe import _
+from frappe.exceptions import PermissionError as FrappePermissionError
+
+from jarz_pos.constants import ROLES
+
+
+def _current_user_roles() -> set[str]:
+    return {
+        str(role or "").strip()
+        for role in (frappe.get_roles(frappe.session.user) or [])
+        if str(role or "").strip()
+    }
+
+
+def _has_payment_receipt_confirm_access(pos_profile: str | None = None) -> bool:
+    roles = _current_user_roles()
+
+    if ROLES.ADMIN.intersection(roles) or ROLES.JARZ_MANAGER in roles:
+        return True
+
+    if "JARZ line manager" not in roles and ROLES.JARZ_LINE_MANAGER not in roles:
+        return False
+
+    if not pos_profile:
+        return True
+
+    from jarz_pos.api.manager import _current_user_allowed_profiles
+
+    allowed_profiles = {
+        str(profile or "").strip()
+        for profile in (_current_user_allowed_profiles() or [])
+        if str(profile or "").strip()
+    }
+    if not allowed_profiles:
+        return False
+
+    return str(pos_profile or "").strip() in allowed_profiles
+
+
+def _ensure_payment_receipt_confirm_access(pos_profile: str | None = None) -> None:
+    if _has_payment_receipt_confirm_access(pos_profile):
+        return
+
+    frappe.throw(
+        _("Only branch managers and above can confirm payment receipts."),
+        FrappePermissionError,
+    )
 
 
 @frappe.whitelist()
@@ -66,6 +113,10 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
             except Exception:
                 receipt['customer_name'] = 'Unknown'
                 receipt['invoice_id'] = receipt['sales_invoice']
+
+            receipt['can_confirm'] = _has_payment_receipt_confirm_access(
+                receipt.get('pos_profile')
+            )
         
         frappe.logger().info(f"Retrieved {len(receipts)} payment receipts")
         
@@ -206,6 +257,7 @@ def confirm_receipt(receipt_name: str):
         frappe.logger().info(f"Confirming receipt {receipt_name}")
         
         receipt = frappe.get_doc('POS Payment Receipt', receipt_name)
+        _ensure_payment_receipt_confirm_access(getattr(receipt, 'pos_profile', None))
         
         if receipt.status == 'Confirmed':
             return {
@@ -227,6 +279,8 @@ def confirm_receipt(receipt_name: str):
             'message': 'Receipt confirmed successfully'
         }
     
+    except FrappePermissionError:
+        raise
     except Exception as e:
         frappe.logger().error(f"Failed to confirm receipt: {str(e)}")
         frappe.throw(f"Failed to confirm receipt: {str(e)}")

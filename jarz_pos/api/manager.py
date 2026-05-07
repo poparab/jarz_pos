@@ -1,6 +1,7 @@
 """Manager Dashboard APIs for Branch Live Feed.
 
 Endpoints:
+- get_transfer_target_branches: list accessible active POS Profiles without balance data for transfer pickers.
 - get_manager_dashboard_summary: list accessible POS Profiles with cash account and current balance.
 - get_manager_orders: recent invoices feed filtered by branch (POS Profile) or all, optional by state.
 - get_manager_states: return available Sales Invoice state options (same as Kanban columns).
@@ -942,6 +943,16 @@ def _publish_invoice_reassignment_refresh(
             frappe.get_traceback(),
             f"Invoice reassignment realtime publish failed for {getattr(invoice, 'name', None)}",
         )
+
+
+@frappe.whitelist(allow_guest=False)
+def get_transfer_target_branches() -> Dict[str, Any]:
+    """Return active POS Profiles accessible to the current user for transfer pickers."""
+    profiles = _current_user_allowed_profiles()
+    return {
+        "success": True,
+        "branches": [{"name": profile, "title": profile} for profile in profiles],
+    }
 
 
 @frappe.whitelist(allow_guest=False)

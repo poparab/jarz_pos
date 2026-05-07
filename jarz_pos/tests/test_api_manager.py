@@ -53,6 +53,82 @@ class TestManagerAPI(unittest.TestCase):
 			self.assertIn("cash_account", branch, "Branch should have cash_account")
 			self.assertIn("balance", branch, "Branch should have balance")
 
+	def test_get_transfer_target_branches_returns_assigned_active_profiles_for_staff(self):
+		"""Assigned staff should only receive active POS Profiles linked to their user."""
+		from jarz_pos.api.manager import get_transfer_target_branches
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+
+		def _get_all(doctype, **kwargs):
+			if doctype == "Has Role":
+				return [{"role": "Sales User"}]
+			if doctype == "POS Profile User":
+				return ["Dokki", "Closed Branch", "Nasr city"]
+			if doctype == "POS Profile":
+				return ["Dokki", "Nasr city"]
+			return []
+
+		mock_frappe.get_all.side_effect = _get_all
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe):
+			result = get_transfer_target_branches()
+
+		self.assertEqual(
+			result,
+			{
+				"success": True,
+				"branches": [
+					{"name": "Dokki", "title": "Dokki"},
+					{"name": "Nasr city", "title": "Nasr city"},
+				],
+			},
+		)
+
+	def test_get_transfer_target_branches_returns_minimal_shape_for_admin_scope(self):
+		"""Admin-scoped users should receive the same lightweight picker structure."""
+		from jarz_pos.api.manager import get_transfer_target_branches
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+
+		def _get_all(doctype, **kwargs):
+			if doctype == "Has Role":
+				return [{"role": "System Manager"}]
+			if doctype == "POS Profile":
+				return ["Dokki", "Nasr city"]
+			return []
+
+		mock_frappe.get_all.side_effect = _get_all
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe):
+			result = get_transfer_target_branches()
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(
+			result.get("branches"),
+			[
+				{"name": "Dokki", "title": "Dokki"},
+				{"name": "Nasr city", "title": "Nasr city"},
+			],
+		)
+		for branch in result["branches"]:
+			self.assertEqual(set(branch.keys()), {"name", "title"})
+
+	def test_get_transfer_target_branches_does_not_require_manager_dashboard_access(self):
+		"""Transfer branch picker should work for assigned staff without manager dashboard access."""
+		from jarz_pos.api.manager import get_transfer_target_branches
+
+		with patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
+				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access", side_effect=AssertionError("dashboard gate should not run")), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+			result = get_transfer_target_branches()
+
+		self.assertEqual(
+			result,
+			{"success": True, "branches": [{"name": "Dokki", "title": "Dokki"}]},
+		)
+
 	def test_get_manager_orders_structure(self):
 		"""Test that get_manager_orders returns correct structure."""
 		from jarz_pos.api.manager import get_manager_orders
