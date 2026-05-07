@@ -47,7 +47,11 @@ def get_final_products_report() -> Dict[str, Any]:
     """
     _ensure_jarz_manager()
 
-    target_groups = ["Meduim", "Large"]
+    group_aliases = {
+        "Medium": {"Medium", "Meduim"},
+        "Large": {"Large"},
+    }
+    target_groups = sorted({group for aliases in group_aliases.values() for group in aliases})
 
     # Get all non-disabled items in the target groups
     items = frappe.get_all(
@@ -74,12 +78,14 @@ def get_final_products_report() -> Dict[str, Any]:
     for b in bins:
         item_wh_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
 
-    # Build separate tables per group, Meduim first
-    groups_order = ["Meduim", "Large"]
+    # Build separate tables per group, Medium first.
+    groups_order = ["Medium", "Large"]
     result_groups = []
 
     for group_name in groups_order:
-        group_items = [it for it in items if it["item_group"] == group_name]
+        group_items = [
+            it for it in items if it["item_group"] in group_aliases[group_name]
+        ]
         if not group_items:
             continue
 
@@ -94,7 +100,7 @@ def get_final_products_report() -> Dict[str, Any]:
             group_result_items.append({
                 "item_code": it["item_code"],
                 "item_name": it["item_name"],
-                "item_group": it["item_group"],
+                "item_group": group_name,
                 "stock_uom": it["stock_uom"],
                 "warehouse_qty": wh_qty,
                 "total_qty": total,
