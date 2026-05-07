@@ -2,6 +2,8 @@ import frappe
 from frappe.utils import flt
 from typing import Optional
 
+from jarz_pos.utils.invoice_utils import sanitize_printable_text
+
 
 def _get_valid_sales_item_codes(item_codes):
     """Return item codes that are enabled and allowed for sales."""
@@ -467,10 +469,10 @@ def get_receipt_config():
         from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
         s = get_jarz_settings()
         return {
-            "header": (s.receipt_header_text or "").strip() or defaults["header"],
-            "footer": (s.receipt_footer_text or "").strip() or defaults["footer"],
-            "phone": (s.receipt_phone or "").strip() or defaults["phone"],
-            "website": (s.receipt_website or "").strip() or defaults["website"],
+            "header": sanitize_printable_text(s.receipt_header_text) or defaults["header"],
+            "footer": sanitize_printable_text(s.receipt_footer_text) or defaults["footer"],
+            "phone": sanitize_printable_text(s.receipt_phone) or defaults["phone"],
+            "website": sanitize_printable_text(s.receipt_website) or defaults["website"],
             "logo": (s.receipt_logo or "").strip() or defaults["logo"],
         }
     except Exception:

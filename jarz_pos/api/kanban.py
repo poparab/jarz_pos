@@ -31,7 +31,8 @@ try:
     from jarz_pos.utils.invoice_utils import (
         get_address_details,
         format_invoice_data,
-        apply_invoice_filters
+        apply_invoice_filters,
+        sanitize_printable_text,
     )
 except ImportError:
     # Fallback implementations if utils don't exist
@@ -70,6 +71,11 @@ except ImportError:
             "delivery_duration": getattr(invoice, "custom_delivery_duration", None),
             "items": items
         }
+
+    def sanitize_printable_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).split())
     
     def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
         filter_conditions = {"docstatus": 1, "is_pos": 1}
@@ -636,7 +642,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                     if parent in invoice_items:
                         invoice_items[parent].append({
                             "item_code": row.get("item_code"),
-                            "item_name": row.get("item_name"),
+                            "item_name": sanitize_printable_text(row.get("item_name")),
                             "qty": row.get("qty"),
                             "rate": row.get("rate"),
                             "amount": row.get("amount"),
@@ -651,6 +657,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                         fields=["item_code", "item_name", "qty", "rate", "amount"],
                         limit=100,
                     )
+                    for item in items:
+                        item["item_name"] = sanitize_printable_text(item.get("item_name"))
                     invoice_items[inv.name] = items
                 except Exception:
                     invoice_items[inv.name] = []
@@ -745,35 +753,35 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             invoice_card = {
                 "name": inv.name,
                 "invoice_id_short": inv.name.split('-')[-1] if '-' in inv.name else inv.name,
-                "customer_name": inv.customer_name or inv.customer,
-                "customer": inv.customer,
-                "territory": inv.territory or "",
+                "customer_name": sanitize_printable_text(inv.customer_name or inv.customer),
+                "customer": sanitize_printable_text(inv.customer),
+                "territory": sanitize_printable_text(inv.territory or ""),
                 "sales_partner": inv.get("sales_partner"),
                 # Delivery slot: date + start time + duration
                 "delivery_date": getattr(inv, "custom_delivery_date", None),
                 "delivery_time_from": getattr(inv, "custom_delivery_time_from", None),
                 "delivery_duration": getattr(inv, "custom_delivery_duration", None),
-                "delivery_slot_label": getattr(inv, "custom_delivery_slot_label", None),
-                "status": state,  # Kanban state (custom field)
-                "doc_status": doc_status_label,  # ERPNext doc status, with Overdue normalized to Unpaid
+                "delivery_slot_label": sanitize_printable_text(getattr(inv, "custom_delivery_slot_label", None)),
+                "status": sanitize_printable_text(state),  # Kanban state (custom field)
+                "doc_status": sanitize_printable_text(doc_status_label),  # ERPNext doc status, with Overdue normalized to Unpaid
                 "posting_date": str(inv.posting_date),
                 "grand_total": float(inv.grand_total or 0),
                 "net_total": float(inv.net_total or 0),
                 "total_taxes_and_charges": float(inv.total_taxes_and_charges or 0),
-                "full_address": invoice_addresses.get(inv.name, ""),
+                "full_address": sanitize_printable_text(invoice_addresses.get(inv.name, "")),
                 "items": invoice_items.get(inv.name, []),
                 "shipping_income": terr_ship.get("income", 0.0),
                 "shipping_expense": terr_ship.get("expense", 0.0),
                 "has_unsettled_courier_txn": bool(has_unsettled),
-                "customer_phone": customer_phone,
+                "customer_phone": sanitize_printable_text(customer_phone),
                 "is_pickup": bool(is_pickup),
-                "acceptance_status": acceptance_status,
+                "acceptance_status": sanitize_printable_text(acceptance_status),
                 "requires_acceptance": acceptance_status_lower != "accepted",
                 "accepted_by": inv.get("custom_accepted_by"),
                 "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
-                "payment_method": inv.get("custom_payment_method"),
-                "actual_payment_method": actual_payment_methods.get(inv.name),
-                "pos_profile": inv.get("custom_kanban_profile"),
+                "payment_method": sanitize_printable_text(inv.get("custom_payment_method")),
+                "actual_payment_method": sanitize_printable_text(actual_payment_methods.get(inv.name)),
+                "pos_profile": sanitize_printable_text(inv.get("custom_kanban_profile")),
                 "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
                 "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
                 "is_return": int(getattr(inv, "is_return", 0) or 0),
@@ -783,7 +791,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             # ── Sub-territory, trip & shipping override fields ──────────
             inv_territory = inv.territory or ""
             sub_terr = getattr(inv, "custom_sub_territory", None) or inv.get("custom_sub_territory") or ""
-            invoice_card["sub_territory"] = sub_terr
+            invoice_card["sub_territory"] = sanitize_printable_text(sub_terr)
             # Translated display names for territory / sub-territory
             if inv_territory and inv_territory not in _territory_name_cache:
                 _ter_doc_vals = frappe.db.get_value("Territory", inv_territory, ["territory_name", "custom_territory_name_ar"], as_dict=True)
@@ -793,21 +801,21 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 _territory_name_ar_cache = getattr(get_kanban_invoices, '_territory_name_ar_cache', {})
                 _territory_name_ar_cache[inv_territory] = (_ter_doc_vals or {}).get("custom_territory_name_ar") or ""
                 get_kanban_invoices._territory_name_ar_cache = _territory_name_ar_cache
-            invoice_card["territory_display"] = _territory_name_cache.get(inv_territory, inv_territory)
+            invoice_card["territory_display"] = sanitize_printable_text(_territory_name_cache.get(inv_territory, inv_territory))
             _territory_name_ar_cache = getattr(get_kanban_invoices, '_territory_name_ar_cache', {})
-            invoice_card["territory_name_ar"] = _territory_name_ar_cache.get(inv_territory, "")
+            invoice_card["territory_name_ar"] = sanitize_printable_text(_territory_name_ar_cache.get(inv_territory, ""))
             if sub_terr and sub_terr not in _territory_name_cache:
                 _territory_name_cache[sub_terr] = frappe._(
                     frappe.db.get_value("Territory", sub_terr, "territory_name") or sub_terr
                 )
-            invoice_card["sub_territory_display"] = _territory_name_cache.get(sub_terr, sub_terr) if sub_terr else ""
+            invoice_card["sub_territory_display"] = sanitize_printable_text(_territory_name_cache.get(sub_terr, sub_terr) if sub_terr else "")
             # Cache territory→has_children lookup
             if inv_territory and inv_territory not in _sub_territory_cache:
                 _sub_territory_cache[inv_territory] = bool(
                     frappe.db.exists("Territory", {"parent_territory": inv_territory})
                 )
             invoice_card["has_sub_territories"] = _sub_territory_cache.get(inv_territory, False)
-            invoice_card["delivery_trip"] = getattr(inv, "custom_delivery_trip", None) or inv.get("custom_delivery_trip") or ""
+            invoice_card["delivery_trip"] = sanitize_printable_text(getattr(inv, "custom_delivery_trip", None) or inv.get("custom_delivery_trip") or "")
             invoice_card["shipping_override"] = float(
                 getattr(inv, "custom_shipping_override", 0) or inv.get("custom_shipping_override") or 0
             )
@@ -1491,7 +1499,7 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         try:
             customer_phone = _resolve_customer_phone(invoice.get("customer") or "")
             if customer_phone:
-                data["customer_phone"] = customer_phone
+                data["customer_phone"] = sanitize_printable_text(customer_phone)
         except Exception:
             pass
         # Augment with unsettled courier txn flag

@@ -3,7 +3,27 @@ This module provides common helper functions that are used across different API 
 """
 from __future__ import annotations
 import frappe
+import re
 from typing import Dict, List, Any, Optional, Union
+
+
+_PRINT_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B-\x1F\x7F-\x9F]")
+_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+
+
+def sanitize_printable_text(value: Any) -> str:
+    """Normalize printable payload text for thermal-receipt consumers.
+
+    This strips control characters and HTML while preserving ordinary spaces,
+    punctuation, URLs, and Arabic text.
+    """
+    if value is None:
+        return ""
+
+    text = frappe.as_unicode(value)
+    text = _HTML_TAG_PATTERN.sub(" ", text)
+    text = _PRINT_CONTROL_PATTERN.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
@@ -198,11 +218,11 @@ def get_address_details(address_name: str) -> str:
         
     try:
         address_doc = frappe.get_doc("Address", address_name)
-        full_address = f"{address_doc.address_line1 or ''}"
+        full_address = sanitize_printable_text(address_doc.address_line1 or "")
         if address_doc.address_line2:
-            full_address += f", {address_doc.address_line2}"
+            full_address += f", {sanitize_printable_text(address_doc.address_line2)}"
         if address_doc.city:
-            full_address += f", {address_doc.city}"
+            full_address += f", {sanitize_printable_text(address_doc.city)}"
         return full_address.strip(", ")
     except Exception as e:
         frappe.log_error(f"Error fetching address details: {str(e)}", "Address Utils")
@@ -227,7 +247,7 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     for item in invoice.items:
         item_payload = {
             "item_code": item.item_code,
-            "item_name": item.item_name,
+            "item_name": sanitize_printable_text(item.item_name),
             "qty": float(item.qty),
             "rate": float(item.rate),
             "amount": float(item.amount),
@@ -250,16 +270,16 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     data = {
         "name": invoice.name,
         "invoice_id_short": invoice.name.split('-')[-1] if '-' in invoice.name else invoice.name,
-        "customer_name": invoice.customer_name or invoice.customer,
-        "customer": invoice.customer,
-        "territory": invoice.territory or "",
+        "customer_name": sanitize_printable_text(invoice.customer_name or invoice.customer),
+        "customer": sanitize_printable_text(invoice.customer),
+        "territory": sanitize_printable_text(invoice.territory or ""),
         "sales_partner": invoice.get("sales_partner"),
     # New delivery slot fields
         "delivery_date": invoice.get("custom_delivery_date"),
         "delivery_time_from": invoice.get("custom_delivery_time_from"),
         "delivery_duration": invoice.get("custom_delivery_duration"),
-    "delivery_slot_label": invoice.get("custom_delivery_slot_label"),
-        "status": invoice.get("custom_sales_invoice_state") or invoice.get("sales_invoice_state") or "Received",
+    "delivery_slot_label": sanitize_printable_text(invoice.get("custom_delivery_slot_label")),
+        "status": sanitize_printable_text(invoice.get("custom_sales_invoice_state") or invoice.get("sales_invoice_state") or "Received"),
         "posting_date": str(invoice.posting_date),
         "grand_total": float(invoice.grand_total or 0),
         "net_total": float(invoice.net_total or 0),
