@@ -19,6 +19,8 @@ class PaymentSource:
     category: str
     balance: float
     pos_profile: Optional[str] = None
+    label_en: Optional[str] = None
+    label_ar: Optional[str] = None
 
 
 def _current_user_pos_profile_names() -> List[str]:
@@ -95,6 +97,97 @@ def _resolve_named_account(company: str, label: str) -> Optional[str]:
     return None
 
 
+def _account_label_columns() -> Tuple[bool, bool]:
+    cached = getattr(frappe.flags, "jarz_pos_account_label_columns", None)
+    if cached is not None:
+        return cached
+
+    has_en = False
+    has_ar = False
+    try:
+        has_en = bool(frappe.db.has_column("Account", "custom_account_name_en"))
+    except Exception:
+        pass
+    try:
+        has_ar = bool(frappe.db.has_column("Account", "custom_account_name_ar"))
+    except Exception:
+        pass
+
+    cached = (has_en, has_ar)
+    frappe.flags.jarz_pos_account_label_columns = cached
+    return cached
+
+
+def _account_label_fields() -> List[str]:
+    fields = ["name", "account_name"]
+    has_en, has_ar = _account_label_columns()
+    if has_en:
+        fields.append("custom_account_name_en")
+    if has_ar:
+        fields.append("custom_account_name_ar")
+    return fields
+
+
+def _fallback_label(value: Any, fallback: str = "") -> str:
+    cleaned = str(value or "").strip()
+    return cleaned or fallback
+
+
+def _account_label_map(
+    accounts: Sequence[str],
+    fallback_labels: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict[str, str]]:
+    unique_accounts: List[str] = []
+    seen: set[str] = set()
+    for account in accounts:
+        cleaned = _fallback_label(account)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        unique_accounts.append(cleaned)
+
+    if not unique_accounts:
+        return {}
+
+    rows = frappe.get_all(
+        "Account",
+        filters={"name": ["in", unique_accounts]},
+        fields=_account_label_fields(),
+        limit_page_length=len(unique_accounts),
+    )
+    rows_by_name = {row["name"]: row for row in rows}
+    labels: Dict[str, Dict[str, str]] = {}
+    fallback_labels = fallback_labels or {}
+
+    for account in unique_accounts:
+        row = rows_by_name.get(account) or {"name": account}
+        label = _fallback_label(fallback_labels.get(account) or row.get("account_name") or row.get("name"), account)
+        labels[account] = {
+            "label": label,
+            "label_en": _fallback_label(row.get("custom_account_name_en"), label),
+            "label_ar": _fallback_label(row.get("custom_account_name_ar"), label),
+        }
+
+    return labels
+
+
+def _bilingual_label_from_account(
+    account: Optional[str],
+    fallback_label: Optional[str],
+    account_labels: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, str]:
+    label = _fallback_label(fallback_label)
+    account_name = _fallback_label(account)
+    if account_labels and account_name:
+        labels = account_labels.get(account_name)
+        if labels:
+            return {
+                "label_en": _fallback_label(labels.get("label_en"), label),
+                "label_ar": _fallback_label(labels.get("label_ar"), label),
+            }
+    return {"label_en": label, "label_ar": label}
+
+
 def _balance_on(account: str, company: Optional[str] = None) -> float:
     from erpnext.accounts.utils import get_balance_on
 
@@ -129,10 +222,17 @@ def _indirect_expense_accounts(company: str) -> List[Dict[str, Any]]:
         order by account_name asc
     """
     rows = frappe.db.sql(sql, company, as_dict=True) if condition else []
+    fallback_labels = {
+        row["name"]: _fallback_label(row.get("account_name"), row["name"])
+        for row in rows
+    }
+    account_labels = _account_label_map(list(fallback_labels), fallback_labels)
     return [
         {
             "account": r["name"],
-            "label": r.get("account_name") or r["name"],
+            "label": fallback_labels[r["name"]],
+            "label_en": account_labels.get(r["name"], {}).get("label_en") or fallback_labels[r["name"]],
+            "label_ar": account_labels.get(r["name"], {}).get("label_ar") or fallback_labels[r["name"]],
         }
         for r in rows
     ]
@@ -204,6 +304,15 @@ def _cashlike_accounts(company: str) -> List[PaymentSource]:
             )
         )
         seen_accounts.add(row["name"])
+
+    fallback_labels = {source.account: source.label for source in accounts if source.account}
+    account_labels = _account_label_map(list(fallback_labels), fallback_labels)
+    for source in accounts:
+        labels = account_labels.get(source.account)
+        if not labels:
+            continue
+        source.label_en = labels.get("label_en") or source.label
+        source.label_ar = labels.get("label_ar") or source.label
     return accounts
 
 
@@ -215,6 +324,8 @@ def _serialize_payment_sources(sources: Sequence[PaymentSource]) -> List[Dict[st
                 "id": src.account,
                 "account": src.account,
                 "label": src.label,
+                "label_en": src.label_en or src.label,
+                "label_ar": src.label_ar or src.label,
                 "category": src.category,
                 "balance": src.balance,
                 "pos_profile": src.pos_profile,
@@ -244,12 +355,37 @@ def _load_months() -> List[str]:
     return months
 
 
-def _serialize_expense(doc: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_expense(
+    doc: Dict[str, Any],
+    account_labels: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, Any]:
     status_map = {
         0: "Pending Approval" if doc.get("requires_approval") else STATUS.DRAFT,
         1: "Approved",
         2: STATUS.CANCELLED,
     }
+    reason_label = doc.get("reason_label") or doc.get("reason_account")
+    payment_label = doc.get("payment_source_label") or doc.get("paying_account")
+
+    if account_labels is None:
+        fallback_labels: Dict[str, str] = {}
+        reason_account = _fallback_label(doc.get("reason_account"))
+        payment_account = _fallback_label(doc.get("paying_account"))
+        if reason_account:
+            fallback_labels[reason_account] = _fallback_label(reason_label, reason_account)
+        if payment_account and doc.get("payment_source_type") != "POS Profile":
+            fallback_labels[payment_account] = _fallback_label(payment_label, payment_account)
+        account_labels = _account_label_map(list(fallback_labels), fallback_labels)
+
+    reason_labels = _bilingual_label_from_account(doc.get("reason_account"), reason_label, account_labels)
+    if doc.get("payment_source_type") == "POS Profile":
+        payment_labels = {
+            "label_en": _fallback_label(payment_label),
+            "label_ar": _fallback_label(payment_label),
+        }
+    else:
+        payment_labels = _bilingual_label_from_account(doc.get("paying_account"), payment_label, account_labels)
+
     timeline: List[Dict[str, Any]] = []
     timeline.append(
         {
@@ -280,9 +416,13 @@ def _serialize_expense(doc: Dict[str, Any]) -> Dict[str, Any]:
         "amount": flt(doc.get("amount")),
         "currency": doc.get("currency"),
         "reason_account": doc.get("reason_account"),
-        "reason_label": doc.get("reason_label") or doc.get("reason_account"),
+        "reason_label": reason_label,
+        "reason_label_en": reason_labels["label_en"],
+        "reason_label_ar": reason_labels["label_ar"],
         "paying_account": doc.get("paying_account"),
-        "payment_label": doc.get("payment_source_label") or doc.get("paying_account"),
+        "payment_label": payment_label,
+        "payment_label_en": payment_labels["label_en"],
+        "payment_label_ar": payment_labels["label_ar"],
         "payment_source_type": doc.get("payment_source_type"),
         "pos_profile": doc.get("pos_profile"),
         "requires_approval": bool(doc.get("requires_approval")),
@@ -299,6 +439,24 @@ def _serialize_expense(doc: Dict[str, Any]) -> Dict[str, Any]:
         "timeline": [t for t in timeline if t.get("timestamp")],
     }
     return payload
+
+
+def _serialize_expenses(expenses: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    fallback_labels: Dict[str, str] = {}
+    for expense in expenses:
+        reason_account = _fallback_label(expense.get("reason_account"))
+        if reason_account and reason_account not in fallback_labels:
+            fallback_labels[reason_account] = _fallback_label(expense.get("reason_label"), reason_account)
+
+        if expense.get("payment_source_type") == "POS Profile":
+            continue
+
+        payment_account = _fallback_label(expense.get("paying_account"))
+        if payment_account and payment_account not in fallback_labels:
+            fallback_labels[payment_account] = _fallback_label(expense.get("payment_source_label"), payment_account)
+
+    account_labels = _account_label_map(list(fallback_labels), fallback_labels)
+    return [_serialize_expense(expense, account_labels=account_labels) for expense in expenses]
 
 
 def _collect_expenses(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -413,7 +571,7 @@ def get_expense_bootstrap(filters: Optional[str] = None):
         ],
         "payment_sources": serialized_sources,
         "reasons": _indirect_expense_accounts(company),
-        "expenses": [_serialize_expense(exp) for exp in expenses],
+        "expenses": _serialize_expenses(expenses),
         "summary": {
             "total_amount": summary_total,
             "pending_count": len(pending),
