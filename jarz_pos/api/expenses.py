@@ -259,6 +259,15 @@ def _pos_profile_accounts(company: str, profiles: Sequence[str]) -> List[Payment
         seen.add(account)
         balance = _balance_on(account, company)
         result.append(PaymentSource(account=account, label=profile, category="pos_profile", balance=balance, pos_profile=profile))
+
+    fallback_labels = {source.account: source.label for source in result if source.account}
+    account_labels = _account_label_map(list(fallback_labels), fallback_labels)
+    for source in result:
+        labels = account_labels.get(source.account)
+        if not labels:
+            continue
+        source.label_en = labels.get("label_en") or source.label
+        source.label_ar = labels.get("label_ar") or source.label
     return result
 
 
@@ -373,18 +382,12 @@ def _serialize_expense(
         payment_account = _fallback_label(doc.get("paying_account"))
         if reason_account:
             fallback_labels[reason_account] = _fallback_label(reason_label, reason_account)
-        if payment_account and doc.get("payment_source_type") != "POS Profile":
+        if payment_account:
             fallback_labels[payment_account] = _fallback_label(payment_label, payment_account)
         account_labels = _account_label_map(list(fallback_labels), fallback_labels)
 
     reason_labels = _bilingual_label_from_account(doc.get("reason_account"), reason_label, account_labels)
-    if doc.get("payment_source_type") == "POS Profile":
-        payment_labels = {
-            "label_en": _fallback_label(payment_label),
-            "label_ar": _fallback_label(payment_label),
-        }
-    else:
-        payment_labels = _bilingual_label_from_account(doc.get("paying_account"), payment_label, account_labels)
+    payment_labels = _bilingual_label_from_account(doc.get("paying_account"), payment_label, account_labels)
 
     timeline: List[Dict[str, Any]] = []
     timeline.append(
@@ -447,9 +450,6 @@ def _serialize_expenses(expenses: Sequence[Dict[str, Any]]) -> List[Dict[str, An
         reason_account = _fallback_label(expense.get("reason_account"))
         if reason_account and reason_account not in fallback_labels:
             fallback_labels[reason_account] = _fallback_label(expense.get("reason_label"), reason_account)
-
-        if expense.get("payment_source_type") == "POS Profile":
-            continue
 
         payment_account = _fallback_label(expense.get("paying_account"))
         if payment_account and payment_account not in fallback_labels:
