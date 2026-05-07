@@ -185,6 +185,37 @@ def _get_shift_close_error_message(exc: Exception, closing=None, traceback_text:
     return _normalize_shift_close_error_message(error_value)
 
 
+def _normalize_closing_balances_payload(
+    closing_balances: list[dict[str, Any]] | dict[str, Any] | str | None,
+) -> list[dict[str, Any]]:
+    if closing_balances is None:
+        return []
+
+    payload = closing_balances
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except Exception:
+            frappe.throw(_("Invalid closing balances payload."))
+
+    if isinstance(payload, dict):
+        payload = [payload]
+
+    if not isinstance(payload, list):
+        frappe.throw(_("Invalid closing balances payload."))
+
+    normalized: list[dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            frappe.throw(_("Invalid closing balances row."))
+        normalized.append(row)
+
+    return normalized
+
+
 def _resolve_pos_profile_account(company: str, pos_profile: str, branch: str | None, mode_of_payment: str | None) -> str | None:
     # Required by business flow: use the account named after the POS Profile.
     if frappe.db.exists("Account", {"company": company, "is_group": 0, "account_name": pos_profile}):
@@ -738,6 +769,8 @@ def _create_discrepancy_journal_entry(
 def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | None = None):
     if not pos_opening_entry:
         frappe.throw(_("POS Opening Entry is required"))
+
+    closing_balances = _normalize_closing_balances_payload(closing_balances)
 
     opening = frappe.get_doc("POS Opening Entry", pos_opening_entry)
 
