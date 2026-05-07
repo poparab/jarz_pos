@@ -406,6 +406,11 @@ def get_territories(search=None):
             territory["territory_name"] = _(territory.get("territory_name", ""))
             try:
                 territory_doc = frappe.get_doc("Territory", territory['name'])
+                territory["territory_name_ar"] = getattr(
+                    territory_doc,
+                    "custom_territory_name_ar",
+                    "",
+                ) or ""
                 if hasattr(territory_doc, 'delivery_income'):
                     territory["delivery_income"] = flt(territory_doc.delivery_income)
                 else:
@@ -416,6 +421,7 @@ def get_territories(search=None):
                 else:
                     territory["delivery_expense"] = 0.0
             except Exception:
+                territory["territory_name_ar"] = ""
                 territory["delivery_income"] = 0.0
                 territory["delivery_expense"] = 0.0
             
