@@ -637,3 +637,267 @@ def update_default_address(customer, address, phone, invoice=None):
     except Exception as e:
         frappe.log_error(f"Error updating customer address: {str(e)}", frappe.get_traceback())
         frappe.throw(f"Failed to update customer address: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Address management — edit, delete, change on invoice
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def update_customer_shipping_address(
+    customer,
+    address_name,
+    address_line1=None,
+    address_line2=None,
+    city=None,
+    phone=None,
+    pincode=None,
+):
+    """Edit fields on an existing shipping address owned by this customer.
+
+    Args:
+        customer: Customer ID.
+        address_name: Name of the Address doc to update.
+        address_line1: New first line (optional).
+        address_line2: New second line (optional).
+        city: Territory/city name (optional; used to resolve shipping costs).
+        phone: New phone (optional).
+        pincode: Postal code (optional).
+
+    Returns:
+        dict: Updated address-book payload identical to
+              ``get_customer_shipping_addresses``.
+    """
+    try:
+        if not customer or not frappe.db.exists("Customer", customer):
+            frappe.throw(_("Customer not found."))
+
+        linked_names = set(get_linked_customer_address_names(customer))
+        if address_name not in linked_names:
+            frappe.throw(_("Address does not belong to this customer."))
+
+        if not frappe.db.exists("Address", address_name):
+            frappe.throw(_("Address not found."))
+
+        address_doc = frappe.get_doc("Address", address_name)
+
+        if str(address_line1 or "").strip():
+            address_doc.address_line1 = str(address_line1).strip()
+        if address_line2 is not None:
+            address_doc.address_line2 = str(address_line2).strip()
+        if str(city or "").strip():
+            address_doc.city = str(city).strip()
+        if str(pincode or "").strip():
+            address_doc.pincode = str(pincode).strip()
+
+        _apply_phone_to_address(address_doc, str(phone or "").strip())
+
+        address_doc.address_type = "Shipping"
+        address_doc.is_shipping_address = 1
+        address_doc.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        return _build_customer_shipping_address_book(customer)
+    except Exception as e:
+        frappe.log_error(f"update_customer_shipping_address: {str(e)}", frappe.get_traceback())
+        frappe.throw(_("Failed to update address."))
+
+
+@frappe.whitelist()
+def delete_customer_shipping_address(customer, address_name):
+    """Delete a shipping address that belongs to this customer.
+
+    Refuses deletion if any non-cancelled Sales Invoice still references the
+    address (via ``shipping_address_name`` or ``customer_address``).
+
+    Args:
+        customer: Customer ID.
+        address_name: Name of the Address doc to delete.
+
+    Returns:
+        dict: ``{"success": True}`` on success or raises with an error that
+              includes an ``invoices`` key listing blocking invoice names.
+    """
+    try:
+        if not customer or not frappe.db.exists("Customer", customer):
+            frappe.throw(_("Customer not found."))
+
+        linked_names = set(get_linked_customer_address_names(customer))
+        if address_name not in linked_names:
+            frappe.throw(_("Address does not belong to this customer."))
+
+        if not frappe.db.exists("Address", address_name):
+            frappe.throw(_("Address not found."))
+
+        # Check if any non-cancelled invoices reference this address.
+        blocking_invoices = frappe.get_all(
+            "Sales Invoice",
+            filters=[
+                ["docstatus", "!=", 2],
+                ["shipping_address_name", "=", address_name],
+            ],
+            fields=["name"],
+            limit=20,
+        ) or []
+        also_blocking = frappe.get_all(
+            "Sales Invoice",
+            filters=[
+                ["docstatus", "!=", 2],
+                ["customer_address", "=", address_name],
+                ["shipping_address_name", "!=", address_name],
+            ],
+            fields=["name"],
+            limit=20,
+        ) or []
+        blocking = list({r["name"] for r in blocking_invoices + also_blocking})
+
+        if blocking:
+            frappe.throw(
+                _("Cannot delete address: it is referenced by {0} invoice(s). "
+                  "Reassign the address on these invoices first: {1}").format(
+                    len(blocking), ", ".join(blocking[:10])
+                )
+            )
+
+        # Clear customer_primary_address if it pointed to this address.
+        customer_doc = frappe.get_doc("Customer", customer)
+        if customer_doc.customer_primary_address == address_name:
+            remaining = [n for n in linked_names if n != address_name]
+            customer_doc.customer_primary_address = remaining[0] if remaining else ""
+            customer_doc.save(ignore_permissions=True)
+
+        frappe.delete_doc("Address", address_name, ignore_permissions=True, force=True)
+        frappe.db.commit()
+
+        return {"success": True, "address_book": _build_customer_shipping_address_book(customer)}
+    except Exception as e:
+        frappe.log_error(f"delete_customer_shipping_address: {str(e)}", frappe.get_traceback())
+        frappe.throw(_("Failed to delete address."))
+
+
+@frappe.whitelist()
+def change_invoice_shipping_address(invoice_name, address_name):
+    """Re-link a Sales Invoice to a different shipping address and optionally
+    recompute shipping income / expense when the territory changes.
+
+    Only allowed when the invoice has **not** yet gone Out for Delivery and
+    has no downstream settlement artifacts (Courier Transaction, Sales Partner
+    Transaction, Journal Entry from Settle Later).  Payment-only (paid but
+    pre-OFD) invoices are explicitly allowed.
+
+    Args:
+        invoice_name: Name of the Sales Invoice.
+        address_name: Name of the Address doc to link.
+
+    Returns:
+        dict with keys: success, territory_changed, old_territory, new_territory,
+        old_expense, new_expense, old_income, new_income.
+    """
+    try:
+        if not frappe.db.exists("Sales Invoice", invoice_name):
+            frappe.throw(_("Sales Invoice not found."))
+        if not frappe.db.exists("Address", address_name):
+            frappe.throw(_("Address not found."))
+
+        inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+        # Gate: check for settlement artifacts (OFD Delivery Note, trip, courier, partner, JE).
+        try:
+            from jarz_pos.api.manager import get_invoice_hard_mutation_blocker
+            blocker = get_invoice_hard_mutation_blocker(inv)
+            if blocker:
+                frappe.throw(
+                    blocker.get("mutation_block_reason")
+                    or _("This invoice cannot have its address changed at this stage.")
+                )
+        except ImportError:
+            pass
+
+        # Re-link address fields on the SI (works on Submitted via ignore_validate_update_after_submit).
+        link_shipping_address_to_invoice(invoice_name, address_name)
+
+        old_territory = str(inv.territory or "").strip()
+        address_doc = frappe.get_doc("Address", address_name)
+        new_territory = str(address_doc.city or "").strip()  # city holds territory name by convention
+
+        # Validate the city/territory value actually exists as a Territory.
+        if new_territory and not frappe.db.exists("Territory", new_territory):
+            new_territory = old_territory  # fall back silently
+
+        territory_changed = bool(new_territory and new_territory != old_territory)
+
+        # Helper to read shipping values from Territory.
+        def _territory_values(territory: str):
+            if not territory or not frappe.db.exists("Territory", territory):
+                return 0.0, 0.0
+            try:
+                terr = frappe.get_doc("Territory", territory)
+                income = flt(getattr(terr, "delivery_income", 0) or 0)
+                expense = flt(getattr(terr, "delivery_expense", 0) or 0)
+                return income, expense
+            except Exception:
+                return 0.0, 0.0
+
+        old_income, old_expense = _territory_values(old_territory)
+        new_income = old_income
+        new_expense = old_expense
+
+        if territory_changed:
+            # Update territory on invoice.
+            frappe.db.set_value(
+                "Sales Invoice", invoice_name, "territory", new_territory, update_modified=False
+            )
+
+            new_income, new_expense = _territory_values(new_territory)
+
+            # Recompute custom_shipping_expense unless an Approved override is in place.
+            override_status = str(
+                frappe.db.get_value("Sales Invoice", invoice_name, "custom_shipping_override_status") or ""
+            ).strip()
+            if override_status != "Approved":
+                # Check sub-territory override.
+                sub_terr = str(
+                    frappe.db.get_value("Sales Invoice", invoice_name, "custom_sub_territory") or ""
+                ).strip()
+                if sub_terr and frappe.db.exists("Territory", sub_terr):
+                    sub_expense = flt(frappe.db.get_value("Territory", sub_terr, "delivery_expense") or 0)
+                    if sub_expense > 0:
+                        new_expense = sub_expense
+                frappe.db.set_value(
+                    "Sales Invoice", invoice_name, "custom_shipping_expense", new_expense, update_modified=False
+                )
+                # Clear sub-territory since territory changed; user must re-select.
+                frappe.db.set_value(
+                    "Sales Invoice", invoice_name, "custom_sub_territory", "", update_modified=False
+                )
+
+            # Append a comment on the SI for audit trail.
+            try:
+                frappe.get_doc({
+                    "doctype": "Comment",
+                    "comment_type": "Info",
+                    "reference_doctype": "Sales Invoice",
+                    "reference_name": invoice_name,
+                    "content": _(
+                        "Shipping address changed to {0}. Territory updated from {1} to {2}. "
+                        "Shipping expense: {3} → {4}."
+                    ).format(address_name, old_territory, new_territory, old_expense, new_expense),
+                }).insert(ignore_permissions=True)
+            except Exception:
+                pass
+
+        frappe.db.commit()
+
+        return {
+            "success": True,
+            "territory_changed": territory_changed,
+            "old_territory": old_territory,
+            "new_territory": new_territory if territory_changed else old_territory,
+            "old_expense": old_expense,
+            "new_expense": new_expense,
+            "old_income": old_income,
+            "new_income": new_income,
+        }
+    except Exception as e:
+        frappe.log_error(f"change_invoice_shipping_address: {str(e)}", frappe.get_traceback())
+        frappe.throw(_("Failed to change invoice shipping address."))
