@@ -477,3 +477,27 @@ def get_receipt_config():
         }
     except Exception:
         return defaults
+
+
+@frappe.whitelist(allow_guest=False)
+def get_territory_pos_profile(customer: str):
+    """Return the POS Profile mapped to the given customer's territory.
+
+    Response shape::
+
+        {
+            "customer": "<customer name>",
+            "territory": "<territory name or null>",
+            "territory_pos_profile": "<pos profile name or null>"
+        }
+    """
+    from jarz_pos.utils.invoice_utils import resolve_territory_pos_profile
+
+    customer = (customer or "").strip()
+    territory = frappe.db.get_value("Customer", customer, "territory") if customer else None
+    territory_profile = resolve_territory_pos_profile(customer) if customer else None
+    return {
+        "customer": customer,
+        "territory": territory or None,
+        "territory_pos_profile": territory_profile,
+    }

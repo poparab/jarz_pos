@@ -260,6 +260,7 @@ override_whitelisted_methods = {
     "get_item_details": "jarz_pos.api.pos.get_item_details",
     "get_profile_bundles": "jarz_pos.api.pos.get_profile_bundles",
     "test_bundle_debug": "jarz_pos.api.pos.test_bundle_debug",
+    "get_territory_pos_profile": "jarz_pos.api.pos.get_territory_pos_profile",
     # User API Methods
     "jarz_pos.api.user.get_current_user_roles": "jarz_pos.api.user.get_current_user_roles",
     # Shift API Methods

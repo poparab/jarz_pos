@@ -641,6 +641,7 @@ def _run_invoice_amendment_job(
     pickup: Union[bool, int, str, None] = None,
     payment_method: Optional[str] = None,
     initiated_by: Optional[str] = None,
+    pos_profile_override: Union[bool, int, str, None] = None,
 ) -> Dict[str, Any]:
     """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
     if _create_amendment_invoice is None:
@@ -689,6 +690,14 @@ def _run_invoice_amendment_job(
     effective_delivery_end_datetime = delivery_end_datetime or _derive_delivery_end_datetime(source_invoice)
     woo_order_id = source_invoice.get("woo_order_id")
     initiated_by = (initiated_by or frappe.session.user or "Unknown User").strip()
+
+    # Territory → POS profile safety check (before any DB writes)
+    from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory
+    assert_pos_profile_matches_territory(
+        effective_customer_name,
+        effective_pos_profile,
+        override=_is_truthy_flag(pos_profile_override),
+    )
 
     save_point = f"invoice_amendment_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:10]}"
     try:
@@ -802,6 +811,7 @@ def submit_invoice_amendment(
     pickup: Union[bool, int, str, None] = None,
     payment_method: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    pos_profile_override: Union[bool, int, str, None] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload."""
     invoice_id = (invoice_id or "").strip()
@@ -872,6 +882,7 @@ def submit_invoice_amendment(
         pickup=pickup,
         payment_method=payment_method,
         initiated_by=frappe.session.user,
+        pos_profile_override=pos_profile_override,
     )
 
 

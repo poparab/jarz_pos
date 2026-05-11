@@ -50,6 +50,16 @@ def create_pos_invoice():
             is_pickup = raw_pickup.strip().lower() in {"1", "true", "yes", "on"}
     except Exception:
         is_pickup = False
+    # New: pos_profile_override flag — caller has already confirmed mismatch
+    raw_pos_profile_override = frappe.form_dict.get('pos_profile_override')
+    is_pos_profile_override = False
+    try:
+        if isinstance(raw_pos_profile_override, (int, float)):
+            is_pos_profile_override = int(raw_pos_profile_override) == 1
+        elif isinstance(raw_pos_profile_override, str):
+            is_pos_profile_override = raw_pos_profile_override.strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        is_pos_profile_override = False
     # New delivery slot fields (optional; preferred)
     delivery_date = frappe.form_dict.get('delivery_date')
     delivery_time_from = frappe.form_dict.get('delivery_time_from')
@@ -126,7 +136,11 @@ RAW PARAMETERS:
                 frappe.throw(error_msg)
         
         print(f"\n🔄 Calling core function...")
-        
+
+        # Territory → POS profile safety check (before any DB writes)
+        from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory
+        assert_pos_profile_matches_territory(customer_name, pos_profile_name, override=is_pos_profile_override)
+
         # Prefer new delivery slot fields; if provided, synthesize a delivery_datetime for service layer
         if delivery_date and delivery_time_from:
             try:

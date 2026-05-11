@@ -351,3 +351,67 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
             filter_conditions["grand_total"] = ["<=", filters['amountTo']]
             
     return filter_conditions
+
+
+# ---------------------------------------------------------------------------
+# Territory → POS Profile helpers
+# ---------------------------------------------------------------------------
+
+def resolve_territory_pos_profile(customer_name: str) -> Optional[str]:
+    """Return the POS Profile configured on the customer's territory, or None if not set.
+
+    Returns None when:
+    - customer_name is blank
+    - customer has no territory
+    - the Territory doctype has no pos_profile field (app not installed)
+    - the territory has no POS profile assigned
+    """
+    if not customer_name:
+        return None
+    territory = frappe.db.get_value("Customer", customer_name, "territory")
+    if not territory:
+        return None
+    # Defensive: field exists only when jarz_woocommerce_integration is installed
+    try:
+        if not frappe.get_meta("Territory").get_field("pos_profile"):
+            return None
+    except Exception:
+        return None
+    return frappe.db.get_value("Territory", territory, "pos_profile") or None
+
+
+def assert_pos_profile_matches_territory(
+    customer_name: str,
+    pos_profile_name: str,
+    override: bool = False,
+) -> None:
+    """Raise a ValidationError with code POS_PROFILE_TERRITORY_MISMATCH when the
+    selected POS profile does not match the customer's territory profile and the
+    caller has not supplied an explicit override.
+
+    Both "no territory" and "territory has no pos_profile" are treated as a
+    mismatch and require confirmation (override=True) to proceed.
+    """
+    import json as _json
+
+    if override:
+        return
+
+    territory_profile = resolve_territory_pos_profile(customer_name)
+    selected = (pos_profile_name or "").strip()
+    territory = (territory_profile or "").strip()
+
+    if selected and territory and selected == territory:
+        return
+
+    customer_territory = frappe.db.get_value("Customer", customer_name, "territory") or ""
+    frappe.throw(
+        _json.dumps({
+            "code": "POS_PROFILE_TERRITORY_MISMATCH",
+            "selected_profile": selected,
+            "territory_profile": territory,
+            "customer_territory": customer_territory,
+        }),
+        frappe.ValidationError,
+        title="POS_PROFILE_TERRITORY_MISMATCH",
+    )
