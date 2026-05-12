@@ -74,6 +74,7 @@ def run(dry_run: bool = False) -> Dict[str, Any]:
 
     kept = 0
     disabled = 0
+    disabled_tokens = 0
     unexpected_errors = 0
 
     for token, device_rows in token_to_rows.items():
@@ -93,6 +94,7 @@ def run(dry_run: bool = False) -> Dict[str, Any]:
             if _is_invalid_token_error(exc):
                 # Stale token — disable all rows sharing it
                 disabled += len(device_rows)
+                disabled_tokens += 1
                 row_names = [r["name"] for r in device_rows]
                 print(f"  DISABLE  {token[:40]}... — {str(exc)[:80]} ({row_names})")
 
@@ -130,6 +132,7 @@ def run(dry_run: bool = False) -> Dict[str, Any]:
     summary = {
         "kept": kept,
         "disabled": disabled,
+        "disabled_tokens": disabled_tokens,
         "unexpected_errors": unexpected_errors,
         "total": total,
         "dry_run": dry_run,
@@ -138,14 +141,9 @@ def run(dry_run: bool = False) -> Dict[str, Any]:
     print("\n[FCM Backfill] Summary:")
     print(f"  Tokens probed : {len(token_to_rows)}")
     print(f"  Kept valid    : {kept}")
-    print(f"  Disabled stale: {disabled} rows ({sum(1 for t in token_to_rows if _token_was_disabled(t, token_to_rows, disabled_count=disabled))} tokens)")
+    print(f"  Disabled stale: {disabled} rows ({disabled_tokens} tokens)")
     print(f"  Unexpected err: {unexpected_errors}")
     if dry_run:
         print("  [DRY RUN — no DB changes made]")
 
     return summary
-
-
-def _token_was_disabled(token: str, token_to_rows: Dict[str, List], disabled_count: int) -> bool:
-    """Helper for summary reporting only."""
-    return False  # Placeholder; not critical for correctness
