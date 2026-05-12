@@ -4,6 +4,7 @@ Alternative to websocket-based notifications for mobile clients
 """
 
 import json
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -19,6 +20,12 @@ try:
 except ImportError:
     FIREBASE_AVAILABLE = False
     frappe.log_error("firebase-admin package not installed. FCM notifications disabled.", "FCM Import Warning")
+
+# Module-level state to throttle init-failure Error Log writes (one per process).
+_FIREBASE_INIT_STATE: Dict[str, Any] = {"failed_logged": False, "ok": False}
+
+# Per-process set of tokens whose unexpected send-errors have already been Error-Logged.
+_FCM_LOGGED_ERROR_TOKENS: set = set()
 
 
 @frappe.whitelist(allow_guest=False)
@@ -303,7 +310,7 @@ def _initialize_firebase_app() -> bool:
     """Initialize Firebase Admin SDK if not already initialized."""
     if not FIREBASE_AVAILABLE:
         return False
-    
+
     try:
         # Check if already initialized
         firebase_admin.get_app()
@@ -311,28 +318,109 @@ def _initialize_firebase_app() -> bool:
     except ValueError:
         # Not initialized, try to initialize
         pass
-    
+
     # Try to load service account from config
     service_account_path = frappe.local.conf.get("fcm_service_account_path")
     service_account_json = frappe.local.conf.get("fcm_service_account")
-    
+
+    def _log_init_failure(msg: str, title: str) -> None:
+        """Write to Error Log exactly once per process lifetime."""
+        if not _FIREBASE_INIT_STATE["failed_logged"]:
+            frappe.log_error(msg, title)
+            _FIREBASE_INIT_STATE["failed_logged"] = True
+
     try:
         if service_account_path:
+            # Resolve bare filenames to the canonical site private/files location.
+            if not os.path.isabs(service_account_path):
+                service_account_path = os.path.join(
+                    frappe.get_site_path("private", "files"), service_account_path
+                )
             cred = credentials.Certificate(service_account_path)
             firebase_admin.initialize_app(cred)
+            _FIREBASE_INIT_STATE["ok"] = True
+            _FIREBASE_INIT_STATE["failed_logged"] = False
             return True
         elif service_account_json:
             if isinstance(service_account_json, str):
                 service_account_json = json.loads(service_account_json)
             cred = credentials.Certificate(service_account_json)
             firebase_admin.initialize_app(cred)
+            _FIREBASE_INIT_STATE["ok"] = True
+            _FIREBASE_INIT_STATE["failed_logged"] = False
             return True
         else:
-            frappe.log_error("No Firebase service account configured in site_config", "FCM Init Failed")
+            _log_init_failure(
+                "No Firebase service account configured in site_config "
+                "(fcm_service_account_path or fcm_service_account)",
+                "FCM Init Failed",
+            )
             return False
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "Firebase initialization failed")
+        _log_init_failure(frappe.get_traceback(), "Firebase initialization failed")
         return False
+
+
+@frappe.whitelist(allow_guest=False)
+def health_check_firebase() -> Dict[str, Any]:
+    """Return Firebase SDK readiness without sending any push notification.
+
+    Response fields:
+    - ok (bool): True if SDK is initialized and ready.
+    - sdk_available (bool): True if the firebase-admin package is installed.
+    - reason (str): Human-readable status or error description.
+    - resolved_path (str | None): Absolute path to the service-account file (if configured).
+    """
+    if not FIREBASE_AVAILABLE:
+        return {
+            "ok": False,
+            "sdk_available": False,
+            "reason": "firebase-admin package is not installed",
+            "resolved_path": None,
+        }
+
+    raw_path = frappe.local.conf.get("fcm_service_account_path")
+    resolved_path: Optional[str] = None
+    if raw_path:
+        resolved_path = (
+            raw_path
+            if os.path.isabs(raw_path)
+            else os.path.join(frappe.get_site_path("private", "files"), raw_path)
+        )
+
+    try:
+        firebase_admin.get_app()
+        return {
+            "ok": True,
+            "sdk_available": True,
+            "reason": "Firebase app already initialized",
+            "resolved_path": resolved_path,
+        }
+    except ValueError:
+        pass
+
+    ok = _initialize_firebase_app()
+    if ok:
+        return {
+            "ok": True,
+            "sdk_available": True,
+            "reason": "Firebase app initialized successfully",
+            "resolved_path": resolved_path,
+        }
+
+    if resolved_path and not os.path.exists(resolved_path):
+        reason = "Service account file not found at resolved path"
+    elif not frappe.local.conf.get("fcm_service_account_path") and not frappe.local.conf.get("fcm_service_account"):
+        reason = "No service account configured in site_config"
+    else:
+        reason = "Firebase initialization failed \u2014 check Error Log for details"
+
+    return {
+        "ok": False,
+        "sdk_available": True,
+        "reason": reason,
+        "resolved_path": resolved_path,
+    }
 
 
 def _disable_token(token: str) -> None:
@@ -1092,6 +1180,35 @@ def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> D
     return data
 
 
+def _is_invalid_token_error(exc: Exception) -> bool:
+    """Return True when *exc* indicates an FCM token is no longer valid.
+
+    Checks (in order):
+    1. SDK exception class (UnregisteredError, SenderIdMismatchError).
+    2. error_code / code attribute on the exception.
+    3. Case-insensitive substring match against known error strings.
+    """
+    if FIREBASE_AVAILABLE:
+        try:
+            from firebase_admin import messaging as fb_messaging  # noqa: PLC0415
+            if isinstance(exc, getattr(fb_messaging, "UnregisteredError", ())):
+                return True
+            if isinstance(exc, getattr(fb_messaging, "SenderIdMismatchError", ())):
+                return True
+        except Exception:
+            pass
+    code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
+    if code in {"registration-token-not-registered", "invalid-argument", "NOT_FOUND"}:
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        "notregistered",
+        "registration-token-not-registered",
+        "requested entity was not found",
+        "invalid registration",
+    ))
+
+
 def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str]) -> None:
     """Send FCM push notifications using Firebase Admin SDK (V1 API)."""
     if not _initialize_firebase_app():
@@ -1155,14 +1272,23 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
                     response = messaging.send(message)
                     frappe.logger().info(f"FCM message sent successfully: {response}")
                 except Exception as send_err:
-                    err_text = str(send_err)
-                    frappe.log_error(f"Failed to send FCM to token: {err_text}", "FCM Send Error")
-                    # Auto-disable tokens that are no longer valid
-                    if any(code in err_text for code in ("NotRegistered", "registration-token-not-registered")):
+                    token = message.token
+                    if _is_invalid_token_error(send_err):
+                        # Expected — token is stale/unregistered; log at INFO only, then disable.
+                        frappe.logger("fcm").info(
+                            f"FCM invalid token (disabling): {str(send_err)}"
+                        )
                         try:
-                            _disable_token(message.token)
+                            _disable_token(token)
                         except Exception:
                             frappe.log_error(frappe.get_traceback(), "FCM Token Disable Failed")
+                    else:
+                        # Unexpected failure — log to Error Log once per unique token per process.
+                        if token not in _FCM_LOGGED_ERROR_TOKENS:
+                            frappe.log_error(
+                                f"Failed to send FCM to token: {str(send_err)}", "FCM Send Error"
+                            )
+                            _FCM_LOGGED_ERROR_TOKENS.add(token)
                     
     except Exception:
         frappe.log_error(frappe.get_traceback(), "FCM push failed")
