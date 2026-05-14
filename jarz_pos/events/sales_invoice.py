@@ -134,3 +134,37 @@ def validate_invoice_before_submit(doc: Any, method: Optional[str] = None) -> No
 	"""
 	return None
 
+
+def stamp_out_for_delivery_flag(doc: Any, method: Optional[str] = None) -> None:
+	"""Permanently set custom_was_out_for_delivery=1 the first time the invoice
+	enters the 'Out for Delivery' state.  Once set, this flag is never cleared —
+	it acts as a hard lock preventing automated amendments even if the state
+	is later changed back (e.g., mis-click correction).
+	"""
+	if not frappe or not doc or not getattr(doc, "name", None):
+		return
+	try:
+		meta = frappe.get_meta("Sales Invoice")
+		if not meta.get_field("custom_was_out_for_delivery"):
+			return
+		# Already permanently flagged — nothing to do.
+		if int(getattr(doc, "custom_was_out_for_delivery", 0) or 0):
+			return
+		current_state = str(
+			getattr(doc, "custom_sales_invoice_state", None)
+			or getattr(doc, "sales_invoice_state", None)
+			or ""
+		).strip()
+		if current_state == "Out for Delivery":
+			frappe.db.set_value(
+				"Sales Invoice",
+				doc.name,
+				"custom_was_out_for_delivery",
+				1,
+				update_modified=False,
+			)
+			doc.custom_was_out_for_delivery = 1
+	except Exception:
+		if frappe:
+			frappe.log_error(frappe.get_traceback(), "stamp_out_for_delivery_flag failed")
+

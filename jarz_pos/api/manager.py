@@ -642,6 +642,8 @@ def _run_invoice_amendment_job(
     payment_method: Optional[str] = None,
     initiated_by: Optional[str] = None,
     pos_profile_override: Union[bool, int, str, None] = None,
+    suppress_shipping_income: Union[bool, int, None] = None,
+    suppress_legacy_delivery_charges: Union[bool, int, None] = None,
 ) -> Dict[str, Any]:
     """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
     if _create_amendment_invoice is None:
@@ -699,6 +701,23 @@ def _run_invoice_amendment_job(
         override=_is_truthy_flag(pos_profile_override),
     )
 
+    # Advisory lock shared with the Woo amendment path (order_amendment.py).
+    # Prevents POS and Woo webhook races on the same invoice.
+    inv_lock_key = f"inv:{invoice_id}"
+    inv_lock_acquired = False
+    try:
+        lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 5)", (inv_lock_key,))
+        inv_lock_acquired = bool(lock_result and lock_result[0] and lock_result[0][0] == 1)
+        if not inv_lock_acquired:
+            return {
+                "success": False,
+                "request_id": request_id,
+                "error": "Invoice is currently being modified by another process. Please retry.",
+                "amendment_block_code": "invoice_locked",
+            }
+    except Exception:
+        inv_lock_acquired = False
+
     save_point = f"invoice_amendment_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:10]}"
     try:
         frappe.db.savepoint(save_point)
@@ -736,6 +755,8 @@ def _run_invoice_amendment_job(
                 effective_payment_method,
                 amended_from=invoice_id,
                 woo_order_id=woo_order_id,
+                suppress_shipping_income=bool(suppress_shipping_income) if suppress_shipping_income is not None else None,
+                suppress_legacy_delivery_charges=bool(suppress_legacy_delivery_charges) if suppress_legacy_delivery_charges is not None else None,
             )
 
         replacement_invoice_name = (
@@ -795,6 +816,12 @@ def _run_invoice_amendment_job(
         )
         frappe.log_error(frappe.get_traceback(), "submit_invoice_amendment failed")
         return {"success": False, "request_id": request_id, "error": str(exc)}
+    finally:
+        if inv_lock_acquired:
+            try:
+                frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
+            except Exception:
+                pass
 
 
 @frappe.whitelist(allow_guest=False)
@@ -812,6 +839,8 @@ def submit_invoice_amendment(
     payment_method: Optional[str] = None,
     idempotency_key: Optional[str] = None,
     pos_profile_override: Union[bool, int, str, None] = None,
+    suppress_shipping_income: Union[bool, int, None] = None,
+    suppress_legacy_delivery_charges: Union[bool, int, None] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload."""
     invoice_id = (invoice_id or "").strip()
@@ -883,6 +912,8 @@ def submit_invoice_amendment(
         payment_method=payment_method,
         initiated_by=frappe.session.user,
         pos_profile_override=pos_profile_override,
+        suppress_shipping_income=suppress_shipping_income,
+        suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
     )
 
 

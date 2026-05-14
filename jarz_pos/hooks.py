@@ -204,7 +204,10 @@ doc_events = {
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
     "on_submit": "jarz_pos.events.sales_invoice.publish_new_invoice",
     # Emit state-change events for already-submitted invoices edited elsewhere
-    "on_update_after_submit": "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
+    "on_update_after_submit": [
+        "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
+        "jarz_pos.events.sales_invoice.stamp_out_for_delivery_flag",
+    ],
         # Keep operational workflow fields aligned across all cancellation paths.
         "on_cancel": "jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",
         # Validate bundle items before submission
