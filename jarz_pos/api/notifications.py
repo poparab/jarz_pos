@@ -22,7 +22,13 @@ except ImportError:
     frappe.log_error("firebase-admin package not installed. FCM notifications disabled.", "FCM Import Warning")
 
 # Module-level state to throttle init-failure Error Log writes (one per process).
-_FIREBASE_INIT_STATE: Dict[str, Any] = {"failed_logged": False, "ok": False}
+_FIREBASE_INIT_STATE: Dict[str, Any] = {
+    "failed_logged": False,
+    "ok": False,
+    "raw_path": None,
+    "resolved_path": None,
+    "path_source": None,
+}
 
 # Per-process set of tokens whose unexpected send-errors have already been Error-Logged.
 _FCM_LOGGED_ERROR_TOKENS: set = set()
@@ -329,16 +335,113 @@ def _initialize_firebase_app() -> bool:
             frappe.log_error(msg, title)
             _FIREBASE_INIT_STATE["failed_logged"] = True
 
+    def _mark_init_state(
+        *,
+        ok: bool,
+        raw_path: Optional[str] = None,
+        resolved_path: Optional[str] = None,
+        path_source: Optional[str] = None,
+    ) -> None:
+        _FIREBASE_INIT_STATE["ok"] = ok
+        _FIREBASE_INIT_STATE["raw_path"] = raw_path
+        _FIREBASE_INIT_STATE["resolved_path"] = resolved_path
+        _FIREBASE_INIT_STATE["path_source"] = path_source
+
+    def _get_bench_path() -> Optional[str]:
+        try:
+            site_path = frappe.get_site_path()
+        except Exception:
+            return None
+
+        if not site_path:
+            return None
+
+        return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
+
+    def _resolve_fcm_service_account_path(
+        raw_path: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str], List[str]]:
+        normalized = (raw_path or "").strip()
+        if not normalized:
+            return None, None, []
+
+        candidates: List[Tuple[str, str]] = []
+        bench_path = _get_bench_path()
+        basename = os.path.basename(normalized)
+
+        def add_candidate(source: str, path: Optional[str]) -> None:
+            if not path:
+                return
+            normalized_path = os.path.normpath(path)
+            if any(existing_path == normalized_path for _, existing_path in candidates):
+                return
+            candidates.append((source, normalized_path))
+
+        private_files_path: Optional[str] = None
+        try:
+            private_files_path = frappe.get_site_path("private", "files")
+        except Exception:
+            private_files_path = None
+
+        if os.path.isabs(normalized):
+            add_candidate("configured_path", normalized)
+            if private_files_path:
+                add_candidate(
+                    "private_files_basename",
+                    os.path.join(private_files_path, basename),
+                )
+            if bench_path:
+                add_candidate("bench_path_basename", os.path.join(bench_path, basename))
+        else:
+            if private_files_path:
+                add_candidate("private_files", os.path.join(private_files_path, normalized))
+            if bench_path:
+                add_candidate("bench_path", os.path.join(bench_path, normalized))
+            add_candidate("working_directory", os.path.abspath(normalized))
+
+        for source, candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate, source, [path for _, path in candidates]
+
+        if not candidates:
+            return None, None, []
+
+        return candidates[0][1], candidates[0][0], [path for _, path in candidates]
+
     try:
         if service_account_path:
-            # Resolve bare filenames to the canonical site private/files location.
-            if not os.path.isabs(service_account_path):
-                service_account_path = os.path.join(
-                    frappe.get_site_path("private", "files"), service_account_path
+            resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(
+                service_account_path
+            )
+            if not resolved_path or not os.path.exists(resolved_path):
+                _mark_init_state(
+                    ok=False,
+                    raw_path=service_account_path,
+                    resolved_path=resolved_path,
+                    path_source=path_source,
                 )
-            cred = credentials.Certificate(service_account_path)
+                _log_init_failure(
+                    frappe.as_json(
+                        {
+                            "configured_path": service_account_path,
+                            "resolved_path": resolved_path,
+                            "path_source": path_source,
+                            "candidate_paths": candidate_paths,
+                            "site": getattr(frappe.local, "site", None),
+                        }
+                    ),
+                    "FCM Init Failed",
+                )
+                return False
+
+            cred = credentials.Certificate(resolved_path)
             firebase_admin.initialize_app(cred)
-            _FIREBASE_INIT_STATE["ok"] = True
+            _mark_init_state(
+                ok=True,
+                raw_path=service_account_path,
+                resolved_path=resolved_path,
+                path_source=path_source,
+            )
             _FIREBASE_INIT_STATE["failed_logged"] = False
             return True
         elif service_account_json:
@@ -346,10 +449,11 @@ def _initialize_firebase_app() -> bool:
                 service_account_json = json.loads(service_account_json)
             cred = credentials.Certificate(service_account_json)
             firebase_admin.initialize_app(cred)
-            _FIREBASE_INIT_STATE["ok"] = True
+            _mark_init_state(ok=True)
             _FIREBASE_INIT_STATE["failed_logged"] = False
             return True
         else:
+            _mark_init_state(ok=False)
             _log_init_failure(
                 "No Firebase service account configured in site_config "
                 "(fcm_service_account_path or fcm_service_account)",
@@ -357,6 +461,12 @@ def _initialize_firebase_app() -> bool:
             )
             return False
     except Exception:
+        _mark_init_state(
+            ok=False,
+            raw_path=service_account_path,
+            resolved_path=_FIREBASE_INIT_STATE.get("resolved_path"),
+            path_source=_FIREBASE_INIT_STATE.get("path_source"),
+        )
         _log_init_failure(frappe.get_traceback(), "Firebase initialization failed")
         return False
 
@@ -370,6 +480,9 @@ def health_check_firebase() -> Dict[str, Any]:
     - sdk_available (bool): True if the firebase-admin package is installed.
     - reason (str): Human-readable status or error description.
     - resolved_path (str | None): Absolute path to the service-account file (if configured).
+    - raw_path (str | None): Raw path value from site_config.
+    - path_source (str | None): Which resolution path source won.
+    - file_exists (bool): Whether the resolved file exists.
     """
     if not FIREBASE_AVAILABLE:
         return {
@@ -377,16 +490,80 @@ def health_check_firebase() -> Dict[str, Any]:
             "sdk_available": False,
             "reason": "firebase-admin package is not installed",
             "resolved_path": None,
+            "raw_path": None,
+            "path_source": None,
+            "file_exists": False,
         }
 
     raw_path = frappe.local.conf.get("fcm_service_account_path")
     resolved_path: Optional[str] = None
+    path_source: Optional[str] = None
+    candidate_paths: List[str] = []
+
+    def _get_bench_path() -> Optional[str]:
+        try:
+            site_path = frappe.get_site_path()
+        except Exception:
+            return None
+
+        if not site_path:
+            return None
+
+        return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
+
+    def _resolve_fcm_service_account_path(
+        raw_path: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str], List[str]]:
+        normalized = (raw_path or "").strip()
+        if not normalized:
+            return None, None, []
+
+        candidates: List[Tuple[str, str]] = []
+        bench_path = _get_bench_path()
+        basename = os.path.basename(normalized)
+
+        def add_candidate(source: str, path: Optional[str]) -> None:
+            if not path:
+                return
+            normalized_path = os.path.normpath(path)
+            if any(existing_path == normalized_path for _, existing_path in candidates):
+                return
+            candidates.append((source, normalized_path))
+
+        private_files_path: Optional[str] = None
+        try:
+            private_files_path = frappe.get_site_path("private", "files")
+        except Exception:
+            private_files_path = None
+
+        if os.path.isabs(normalized):
+            add_candidate("configured_path", normalized)
+            if private_files_path:
+                add_candidate(
+                    "private_files_basename",
+                    os.path.join(private_files_path, basename),
+                )
+            if bench_path:
+                add_candidate("bench_path_basename", os.path.join(bench_path, basename))
+        else:
+            if private_files_path:
+                add_candidate("private_files", os.path.join(private_files_path, normalized))
+            if bench_path:
+                add_candidate("bench_path", os.path.join(bench_path, normalized))
+            add_candidate("working_directory", os.path.abspath(normalized))
+
+        for source, candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate, source, [path for _, path in candidates]
+
+        if not candidates:
+            return None, None, []
+
+        return candidates[0][1], candidates[0][0], [path for _, path in candidates]
+
     if raw_path:
-        resolved_path = (
-            raw_path
-            if os.path.isabs(raw_path)
-            else os.path.join(frappe.get_site_path("private", "files"), raw_path)
-        )
+        resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(raw_path)
+    file_exists = bool(resolved_path and os.path.exists(resolved_path))
 
     try:
         firebase_admin.get_app()
@@ -395,6 +572,9 @@ def health_check_firebase() -> Dict[str, Any]:
             "sdk_available": True,
             "reason": "Firebase app already initialized",
             "resolved_path": resolved_path,
+            "raw_path": raw_path,
+            "path_source": path_source,
+            "file_exists": file_exists,
         }
     except ValueError:
         pass
@@ -405,10 +585,16 @@ def health_check_firebase() -> Dict[str, Any]:
             "ok": True,
             "sdk_available": True,
             "reason": "Firebase app initialized successfully",
-            "resolved_path": resolved_path,
+            "resolved_path": _FIREBASE_INIT_STATE.get("resolved_path") or resolved_path,
+            "raw_path": _FIREBASE_INIT_STATE.get("raw_path") or raw_path,
+            "path_source": _FIREBASE_INIT_STATE.get("path_source") or path_source,
+            "file_exists": bool(
+                (_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
+                and os.path.exists(_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
+            ),
         }
 
-    if resolved_path and not os.path.exists(resolved_path):
+    if resolved_path and not file_exists:
         reason = "Service account file not found at resolved path"
     elif not frappe.local.conf.get("fcm_service_account_path") and not frappe.local.conf.get("fcm_service_account"):
         reason = "No service account configured in site_config"
@@ -420,6 +606,10 @@ def health_check_firebase() -> Dict[str, Any]:
         "sdk_available": True,
         "reason": reason,
         "resolved_path": resolved_path,
+        "raw_path": raw_path,
+        "path_source": path_source,
+        "file_exists": file_exists,
+        "candidate_paths": candidate_paths,
     }
 
 

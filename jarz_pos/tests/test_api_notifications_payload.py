@@ -1,10 +1,97 @@
 import unittest
+import os
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
 class TestNotificationPayloadContract(unittest.TestCase):
+
+    def test_health_check_firebase_resolves_relative_path_from_bench_root(self):
+        from jarz_pos.api import notifications
+
+        site_root = os.path.normpath("/home/frappe/frappe-bench/sites/frontend")
+        expected_path = os.path.normpath(
+            "/home/frappe/frappe-bench/jarz-pos-firebase-adminsdk-fbsvc-5842596d09.json"
+        )
+
+        def fake_get_site_path(*parts):
+            return os.path.join(site_root, *parts) if parts else site_root
+
+        def fake_exists(path):
+            return os.path.normpath(path) == expected_path
+
+        local_stub = SimpleNamespace(
+            conf={"fcm_service_account_path": "jarz-pos-firebase-adminsdk-fbsvc-5842596d09.json"}
+        )
+
+        with patch.object(notifications, "FIREBASE_AVAILABLE", True), patch.object(
+            notifications.frappe, "local", local_stub
+        ), patch.object(
+            notifications.frappe, "get_site_path", side_effect=fake_get_site_path
+        ), patch.object(
+            notifications.os.path, "exists", side_effect=fake_exists
+        ), patch.object(
+            notifications.firebase_admin, "get_app", side_effect=ValueError("not initialized")
+        ), patch.object(
+            notifications, "_initialize_firebase_app", return_value=False
+        ):
+            result = notifications.health_check_firebase()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["raw_path"], "jarz-pos-firebase-adminsdk-fbsvc-5842596d09.json")
+        self.assertEqual(result["resolved_path"], expected_path)
+        self.assertEqual(result["path_source"], "bench_path")
+        self.assertTrue(result["file_exists"])
+
+    def test_initialize_firebase_app_uses_bench_root_fallback_for_relative_path(self):
+        from jarz_pos.api import notifications
+
+        site_root = os.path.normpath("/home/frappe/frappe-bench/sites/frontend")
+        expected_path = os.path.normpath(
+            "/home/frappe/frappe-bench/jarz-pos-firebase-adminsdk-fbsvc-5842596d09.json"
+        )
+
+        def fake_get_site_path(*parts):
+            return os.path.join(site_root, *parts) if parts else site_root
+
+        def fake_exists(path):
+            return os.path.normpath(path) == expected_path
+
+        local_stub = SimpleNamespace(
+            conf={"fcm_service_account_path": "jarz-pos-firebase-adminsdk-fbsvc-5842596d09.json"}
+        )
+        fake_credentials = SimpleNamespace(Certificate=Mock(return_value="cred"))
+
+        with patch.object(notifications, "FIREBASE_AVAILABLE", True), patch.object(
+            notifications.frappe, "local", local_stub
+        ), patch.object(
+            notifications.frappe, "get_site_path", side_effect=fake_get_site_path
+        ), patch.object(
+            notifications.os.path, "exists", side_effect=fake_exists
+        ), patch.object(
+            notifications.firebase_admin, "get_app", side_effect=ValueError("not initialized")
+        ), patch.object(
+            notifications.firebase_admin, "initialize_app"
+        ) as initialize_app, patch.object(
+            notifications, "credentials", fake_credentials
+        ), patch.object(
+            notifications.frappe, "log_error"
+        ):
+            notifications._FIREBASE_INIT_STATE = {
+                "failed_logged": False,
+                "ok": False,
+                "raw_path": None,
+                "resolved_path": None,
+                "path_source": None,
+            }
+            ok = notifications._initialize_firebase_app()
+
+        self.assertTrue(ok)
+        fake_credentials.Certificate.assert_called_once_with(expected_path)
+        initialize_app.assert_called_once_with("cred")
+        self.assertEqual(notifications._FIREBASE_INIT_STATE["resolved_path"], expected_path)
+        self.assertEqual(notifications._FIREBASE_INIT_STATE["path_source"], "bench_path")
 
     def test_build_invoice_alert_payload_adds_display_safe_fields(self):
         from jarz_pos.api.notifications import _build_invoice_alert_payload
