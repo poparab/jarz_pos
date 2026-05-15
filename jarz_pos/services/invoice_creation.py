@@ -215,6 +215,8 @@ def create_pos_invoice(
     payment_method: str | None = None,
     amended_from: str | None = None,
     woo_order_id: int | None = None,
+    suppress_shipping_income: bool | None = None,
+    suppress_legacy_delivery_charges: bool | None = None,
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -441,13 +443,15 @@ def create_pos_invoice(
             print(f"   ⚠️ Delivery promotion resolution failed: {promo_err}")
 
         suppress_shipping_income = (
-            partner_tax_suppressed
+            (suppress_shipping_income is True)  # explicit hint from amendment caller
+            or partner_tax_suppressed
             or free_shipping_waived
             or bool(pickup)
             or delivery_promotion.suppress_shipping_income
         )
         suppress_legacy_delivery_charges = (
-            partner_tax_suppressed
+            (suppress_legacy_delivery_charges is True)  # explicit hint from amendment caller
+            or partner_tax_suppressed
             or free_shipping_waived
             or bool(pickup)
             or delivery_promotion.suppress_legacy_delivery_charges

@@ -321,10 +321,42 @@ def _get_territory_shipping_values(territory_name: str) -> Dict[str, float]:
     return {"income": income, "expense": expense}
 
 
-def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, float]:
-    """Return effective shipping values after override and pickup rules."""
+def _read_shipping_income_from_taxes(invoice: frappe.Document) -> Optional[float]:
+    """Read the actual shipping-income amount from the SI taxes table.
+
+    Returns the amount if a matching 'Shipping Income' tax row exists,
+    0.0 if the invoice has other tax rows but none is a shipping-income row
+    (meaning shipping was suppressed on the original), or None when the invoice
+    has no taxes at all (caller should fall back to the territory default).
+    """
+    try:
+        taxes = invoice.get("taxes") or []
+        for row in taxes:
+            desc = str(row.get("description") or "").strip().lower()
+            if desc.startswith("shipping income"):
+                return float(row.get("tax_amount") or 0)
+        # Invoice has tax rows but none is shipping income → was suppressed.
+        if taxes:
+            return 0.0
+        # No taxes at all → could be a legacy invoice; fall back to territory.
+        return None
+    except Exception:
+        return None
+
+
+def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, Any]:
+    """Return effective shipping values after override and pickup rules.
+
+    Reads the *actual* shipping income that the source invoice carried rather
+    than always re-deriving from the territory default.  This is critical for
+    amendment: an invoice that was free-shipping must not be re-charged on the
+    replacement.
+
+    Returns a dict with keys: income (float), expense (float),
+    was_free_shipping (bool).
+    """
     if _is_pickup_invoice(invoice):
-        return {"income": 0.0, "expense": 0.0}
+        return {"income": 0.0, "expense": 0.0, "was_free_shipping": False}
 
     shipping = _get_territory_shipping_values(invoice.get("territory") or "")
     override_status = str(invoice.get("custom_shipping_override_status") or "").strip()
@@ -336,6 +368,38 @@ def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, float]:
     elif persisted_expense > 0:
         shipping["expense"] = persisted_expense
 
+    # Income side: use what the SI actually carried, not the territory default.
+    actual_income = _read_shipping_income_from_taxes(invoice)
+    if actual_income is not None:
+        shipping["income"] = actual_income
+
+    # was_free_shipping: income is zero AND at least one linked Jarz Bundle
+    # has free_shipping=1.  This flag is propagated to the Flutter client so
+    # the amendment flow does not re-inject the territory shipping charge.
+    was_free_shipping = False
+    if float(shipping.get("income") or 0) == 0.0:
+        try:
+            bundle_codes: List[str] = []
+            for row in invoice.get("items") or []:
+                bc = str(row.get("bundle_code") or "").strip()
+                pb = str(row.get("parent_bundle") or "").strip()
+                if bc and bc not in bundle_codes:
+                    bundle_codes.append(bc)
+                if pb and pb not in bundle_codes:
+                    bundle_codes.append(pb)
+            if bundle_codes:
+                cols = set(frappe.db.get_table_columns("Jarz Bundle") or [])
+                if "free_shipping" in cols:
+                    any_free = frappe.get_all(
+                        "Jarz Bundle",
+                        filters={"name": ["in", bundle_codes], "free_shipping": 1},
+                        pluck="name",
+                    )
+                    was_free_shipping = bool(any_free)
+        except Exception:
+            was_free_shipping = False
+
+    shipping["was_free_shipping"] = was_free_shipping
     return shipping
 
 # Backwards compatibility wrappers (kept in case referenced elsewhere in file)
@@ -1486,6 +1550,7 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         shipping = _get_invoice_shipping_values(invoice)
         data["shipping_income"] = float(shipping.get("income") or 0.0)
         data["shipping_expense"] = float(shipping.get("expense") or 0.0)
+        data["was_free_shipping"] = bool(shipping.get("was_free_shipping", False))
         # Add is_pickup flag consistently
         try:
             data["is_pickup"] = _is_pickup_invoice(invoice)
