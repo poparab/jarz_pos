@@ -4,6 +4,27 @@ from unittest.mock import MagicMock, patch
 
 
 class TestManufacturingPrecheck(unittest.TestCase):
+    def test_resolve_work_order_warehouses_prefers_item_default_fg_warehouse(self):
+        from jarz_pos.api import manufacturing
+
+        line = {"item_code": "TRANSIT-CAKE", "bom_name": "BOM-TRANSIT-CAKE", "item_qty": 2}
+        defaults = {"wip_warehouse": "WIP - J", "fg_warehouse": "Finished Goods - J"}
+
+        def fake_get_value(doctype, filters=None, fieldname=None):
+            if doctype == "Item Default":
+                return "Goods In Transit - J"
+            if doctype == "Warehouse" and filters == "Goods In Transit - J" and fieldname == "company":
+                return "Jarz Co"
+            return None
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.db.get_value.side_effect = fake_get_value
+
+            resolved = manufacturing._resolve_work_order_warehouses(line, "Jarz Co", defaults)
+
+        self.assertEqual("WIP - J", resolved["wip_warehouse"])
+        self.assertEqual("Goods In Transit - J", resolved["fg_warehouse"])
+
     def test_get_material_precheck_issues_reports_source_warehouse_shortage(self):
         from jarz_pos.api import manufacturing
 
@@ -161,3 +182,47 @@ class TestManufacturingPrecheck(unittest.TestCase):
         )
         mock_set_work_order_actual_dates.assert_called_once_with("WO-0001", scheduled_dt)
         self.assertTrue(result["results"][0]["ok"])
+
+    def test_submit_work_orders_reports_resolved_work_order_warehouses(self):
+        from jarz_pos.api import manufacturing
+
+        line = {
+            "item_code": "TRANSIT-CAKE",
+            "bom_name": "BOM-TRANSIT-CAKE",
+            "item_qty": 5,
+            "scheduled_at": "2026-05-08 14:30:00",
+        }
+        scheduled_dt = datetime(2026, 5, 8, 14, 30, 0)
+        wo_doc = MagicMock()
+        wo_doc.status = "Completed"
+        wo_doc.wip_warehouse = "WIP - J"
+        wo_doc.fg_warehouse = "Goods In Transit - J"
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.api.manufacturing._assert_material_availability"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_mfg_defaults",
+            return_value={"wip_warehouse": "WIP - J", "fg_warehouse": "Finished Goods - J"},
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_work_order_warehouses",
+            return_value={"wip_warehouse": "WIP - J", "fg_warehouse": "Goods In Transit - J"},
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_scheduled_datetime", return_value=scheduled_dt
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order", return_value="WO-0001"
+        ), patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se", side_effect=["STE-1", "STE-2"]
+        ), patch(
+            "jarz_pos.api.manufacturing._set_work_order_actual_dates"
+        ), patch(
+            "jarz_pos.api.manufacturing.frappe"
+        ) as mock_frappe:
+            mock_frappe.get_doc.return_value = wo_doc
+
+            result = manufacturing.submit_work_orders([line])
+
+        self.assertTrue(result["results"][0]["ok"])
+        self.assertEqual("WIP - J", result["results"][0]["wip_warehouse"])
+        self.assertEqual("Goods In Transit - J", result["results"][0]["fg_warehouse"])

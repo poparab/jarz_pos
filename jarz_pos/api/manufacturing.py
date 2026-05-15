@@ -43,6 +43,44 @@ def _get_default_company() -> str:
         return ""
 
 
+def _coerce_str(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _warehouse_belongs_to_company(warehouse: str, company: str) -> bool:
+    warehouse = _coerce_str(warehouse)
+    company = _coerce_str(company)
+    if not warehouse or not company:
+        return False
+
+    try:
+        return _coerce_str(frappe.db.get_value("Warehouse", warehouse, "company")) == company
+    except Exception:
+        return False
+
+
+def _get_item_default_warehouse(item_code: str, company: str) -> str | None:
+    item_code = _coerce_str(item_code)
+    company = _coerce_str(company)
+    if not item_code or not company:
+        return None
+
+    try:
+        warehouse = _coerce_str(
+            frappe.db.get_value(
+                "Item Default",
+                {"parent": item_code, "parenttype": "Item", "company": company},
+                "default_warehouse",
+            )
+        )
+    except Exception:
+        return None
+
+    if warehouse and _warehouse_belongs_to_company(warehouse, company):
+        return warehouse
+    return None
+
+
 def _get_mfg_defaults(company: str) -> Dict[str, str]:
     # Best-effort defaults for warehouses
     out: Dict[str, str] = {"company": company}
@@ -141,6 +179,36 @@ def _find_company_warehouse(company: str, warehouse_type: str | None, name_hints
         return any_wh
     except Exception:
         return None
+
+
+def _resolve_work_order_warehouses(line: Dict[str, Any], company: str, defaults: Dict[str, str]) -> Dict[str, str]:
+    resolved: Dict[str, str] = {"company": company}
+
+    requested_wip = _coerce_str(line.get("wip_warehouse"))
+    requested_fg = _coerce_str(line.get("fg_warehouse") or line.get("target_warehouse"))
+    default_wip = _coerce_str(defaults.get("wip_warehouse"))
+    default_fg = _coerce_str(defaults.get("fg_warehouse"))
+
+    if _warehouse_belongs_to_company(requested_wip, company):
+        resolved["wip_warehouse"] = requested_wip
+    elif default_wip:
+        resolved["wip_warehouse"] = default_wip
+
+    if _warehouse_belongs_to_company(requested_fg, company):
+        resolved["fg_warehouse"] = requested_fg
+    else:
+        item_fg = _get_item_default_warehouse(line.get("item_code"), company)
+        if item_fg:
+            resolved["fg_warehouse"] = item_fg
+        elif default_fg:
+            resolved["fg_warehouse"] = default_fg
+
+    if not resolved.get("wip_warehouse"):
+        resolved["wip_warehouse"] = _find_company_warehouse(company, "WIP", ["WIP", "Work In Progress"]) or ""
+    if not resolved.get("fg_warehouse"):
+        resolved["fg_warehouse"] = _find_company_warehouse(company, "Finished Goods", ["FG", "Finished Goods"]) or ""
+
+    return resolved
 
 
 def _resolve_get_bom_items_as_dict():
@@ -396,8 +464,9 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
 
 def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, str], scheduled_dt: Any) -> str:
     # Create and submit a Work Order for the given line dict
-    wip_wh = defaults.get("wip_warehouse")
-    fg_wh = defaults.get("fg_warehouse")
+    resolved_defaults = _resolve_work_order_warehouses(line, company, defaults)
+    wip_wh = resolved_defaults.get("wip_warehouse")
+    fg_wh = resolved_defaults.get("fg_warehouse")
     if not wip_wh:
         wip_wh = _find_company_warehouse(company, "WIP", ["WIP", "Work In Progress"]) or None
     if not fg_wh:
@@ -592,10 +661,11 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
                 frappe.throw(_("Company is not configured on BOM and no Default Company set"))
             _assert_material_availability(ln, company)
             defaults = _get_mfg_defaults(company)
+            resolved_defaults = _resolve_work_order_warehouses(ln, company, defaults)
 
             wo_name = _ensure_work_order(ln, company, defaults, scheduled_dt)
             try:
-                frappe.log_error(title="JARZ – MFG WO created", message=f"WO: {wo_name}\nCompany: {company}\nWIP: {defaults.get('wip_warehouse')}\nFG: {defaults.get('fg_warehouse')}")
+                frappe.log_error(title="JARZ – MFG WO created", message=f"WO: {wo_name}\nCompany: {company}\nWIP: {resolved_defaults.get('wip_warehouse')}\nFG: {resolved_defaults.get('fg_warehouse')}")
             except Exception:
                 pass
             qty = float(ln["item_qty"])
@@ -630,8 +700,8 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
                 "manufacture_entry": se2,
                 "line": ln,
                 "company": company,
-                "wip_warehouse": defaults.get("wip_warehouse"),
-                "fg_warehouse": defaults.get("fg_warehouse"),
+                "wip_warehouse": getattr(wo_doc, "wip_warehouse", None) or resolved_defaults.get("wip_warehouse"),
+                "fg_warehouse": getattr(wo_doc, "fg_warehouse", None) or resolved_defaults.get("fg_warehouse"),
                 "wo_status": (wo_doc.status if 'wo_doc' in locals() else None),
             })
         except Exception as e:
