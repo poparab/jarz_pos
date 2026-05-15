@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
+from frappe.utils import strip_html
 from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 
 
@@ -198,6 +199,42 @@ def _to_stock_qty(item_code: str, qty: float, uom: Optional[str]) -> float:
     )
     factor = float(rows[0].get("conversion_factor") if rows else 1)
     return float(qty) * factor
+
+
+def _format_inventory_qty(value: float) -> str:
+    text = f"{float(value):.3f}"
+    return text.rstrip("0").rstrip(".")
+
+
+def _build_missing_valuation_rate_message(
+    item_code: str,
+    warehouse: str,
+    current_qty: float,
+    counted_qty: float,
+) -> str:
+    item_name = frappe.db.get_value("Item", item_code, "item_name")
+    item_label = item_code
+    if item_name and item_name != item_code:
+        item_label = f"{item_code} ({item_name})"
+
+    return _(
+        "Cannot increase stock for Item {0} in Warehouse {1} from {2} to {3} because no valuation rate could be resolved from stock ledger entries, last purchase rate, or item prices. Set a Buying Item Price or Last Purchase Rate for this item, create a prior valued stock entry, or enable 'Allow Zero Valuation Rate' in Stock Settings."
+    ).format(
+        item_label,
+        warehouse,
+        _format_inventory_qty(current_qty),
+        _format_inventory_qty(counted_qty),
+    )
+
+
+def _normalize_inventory_error_text(message: Any) -> str:
+    return " ".join(strip_html(str(message or "")).split())
+
+
+def _build_negative_stock_submission_message(error: Exception) -> str:
+    return _(
+        "Cannot submit this inventory count because the selected posting date would make a later stock movement go negative. {0} Try a later posting date or increase the counted quantity for the affected item."
+    ).format(_normalize_inventory_error_text(error))
 
 
 @frappe.whitelist()
@@ -412,10 +449,15 @@ def submit_reconciliation(
                 if vr is None and allow_zero_val:
                     vr = 0.0
                 if vr is None:
-                    # As a last resort, fail with a clear message rather than a generic ValidationError
-                    frappe.throw(_(
-                        "Valuation Rate required for Item {0}. Please set a Buying Item Price or enable 'Allow Zero Valuation Rate' in Stock Settings."
-                    ).format(code))
+                    # Keep the failure user-facing, but explain which item/warehouse increase caused it.
+                    frappe.throw(
+                        _build_missing_valuation_rate_message(
+                            item_code=code,
+                            warehouse=warehouse,
+                            current_qty=current,
+                            counted_qty=counted_stock_qty,
+                        )
+                    )
                 row["valuation_rate"] = float(vr)
 
             # Handle batch/serial requirements
@@ -463,6 +505,8 @@ def submit_reconciliation(
             frappe.log_error(tb, "jarz_pos.submit_reconciliation")
             if debug_flag:
                 return {"ok": False, "error": str(e), "traceback": tb}
+            if e.__class__.__name__.endswith("NegativeStockError"):
+                frappe.throw(_build_negative_stock_submission_message(e))
             frappe.throw(_(f"Submit reconciliation failed: {e}"))
 
         return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
