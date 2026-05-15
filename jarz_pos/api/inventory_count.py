@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
@@ -59,6 +59,116 @@ def list_item_groups(search: Optional[str] = None) -> List[Dict[str, Any]]:
     
     fields = ["name", "item_group_name"]
     return frappe.get_all("Item Group", filters=filters, or_filters=or_filters, fields=fields, order_by="name asc", limit=QUERY_LIMITS.DEFAULT_LIST)
+
+
+def _warehouse_count_profile_is_available() -> bool:
+    try:
+        return bool(frappe.db.exists("DocType", "Warehouse Count Profile"))
+    except Exception:
+        return False
+
+
+def _get_active_warehouse_count_profile_name(warehouse: str) -> Optional[str]:
+    if not warehouse or not _warehouse_count_profile_is_available():
+        return None
+    names = frappe.get_all(
+        "Warehouse Count Profile",
+        filters={"warehouse": warehouse, "enabled": 1},
+        pluck="name",
+        limit=1,
+    )
+    return names[0] if names else None
+
+
+def _expand_item_groups(item_groups: List[str], include_child_groups: bool) -> List[str]:
+    normalized = [group.strip() for group in item_groups if group and group.strip()]
+    if not include_child_groups or not normalized:
+        return list(dict.fromkeys(normalized))
+
+    expanded: List[str] = []
+    for group in normalized:
+        bounds = frappe.db.get_value("Item Group", group, ["lft", "rgt"], as_dict=True)
+        if not bounds:
+            continue
+        descendants = frappe.get_all(
+            "Item Group",
+            filters={
+                "lft": [">=", bounds.get("lft")],
+                "rgt": ["<=", bounds.get("rgt")],
+            },
+            pluck="name",
+        )
+        expanded.extend(descendants or [group])
+    return list(dict.fromkeys(expanded))
+
+
+def _get_enabled_profile_item_groups(profile_doc: Any) -> List[str]:
+    rows = getattr(profile_doc, "item_groups", []) or []
+    return [
+        str(row.item_group).strip()
+        for row in rows
+        if getattr(row, "item_group", None) and int(getattr(row, "enabled", 1) or 0)
+    ]
+
+
+def _get_enabled_profile_item_exceptions(profile_doc: Any) -> Tuple[Set[str], Set[str]]:
+    includes: Set[str] = set()
+    excludes: Set[str] = set()
+    rows = getattr(profile_doc, "item_exceptions", []) or []
+    for row in rows:
+        if not int(getattr(row, "enabled", 1) or 0):
+            continue
+        item_code = str(getattr(row, "item_code", "") or "").strip()
+        action = str(getattr(row, "action", "") or "").strip().title()
+        if not item_code or action not in {"Include", "Exclude"}:
+            continue
+        if action == "Include":
+            includes.add(item_code)
+        else:
+            excludes.add(item_code)
+    return includes, excludes
+
+
+def _resolve_count_item_codes(warehouse: str) -> Optional[List[str]]:
+    profile_name = _get_active_warehouse_count_profile_name(warehouse)
+    if not profile_name:
+        return None
+
+    profile_doc = frappe.get_cached_doc("Warehouse Count Profile", profile_name)
+    allowed_groups = _expand_item_groups(
+        _get_enabled_profile_item_groups(profile_doc),
+        bool(getattr(profile_doc, "include_child_groups", 0)),
+    )
+    included_items, excluded_items = _get_enabled_profile_item_exceptions(profile_doc)
+
+    allowed_codes: Set[str] = set()
+    if allowed_groups:
+        allowed_codes.update(
+            frappe.get_all(
+                "Item",
+                filters={
+                    "item_group": ["in", allowed_groups],
+                    "disabled": 0,
+                    "has_variants": 0,
+                },
+                pluck="name",
+            ),
+        )
+    if included_items:
+        allowed_codes.update(
+            frappe.get_all(
+                "Item",
+                filters={
+                    "name": ["in", sorted(included_items)],
+                    "disabled": 0,
+                    "has_variants": 0,
+                },
+                pluck="name",
+            ),
+        )
+
+    allowed_codes.difference_update(excluded_items)
+    return sorted(allowed_codes)
 
 
 def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
@@ -146,6 +256,11 @@ def list_items_for_count(
         frappe.throw(_("warehouse is required"))
 
     filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0}
+    allowed_codes = _resolve_count_item_codes(warehouse)
+    if allowed_codes is not None:
+        if not allowed_codes:
+            return []
+        filters["name"] = ["in", allowed_codes]
     if item_group:
         filters["item_group"] = item_group
     or_filters: List[Any] = []
