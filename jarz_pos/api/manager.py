@@ -627,6 +627,49 @@ def _mark_source_invoice_as_amended(
         frappe.db.set_value("Sales Invoice", source_invoice_name, updates, update_modified=False)
 
 
+def _repoint_woocommerce_order_map(
+    *,
+    woo_order_id: str,
+    new_invoice_name: str,
+    logger: Any = None,
+) -> None:
+    """After amendment, point the WooCommerce Order Map at the live replacement
+    invoice and clear the cached hash so the next inbound webhook re-evaluates
+    the order instead of short-circuiting with "unchanged".
+
+    Errors are swallowed so a map-update failure can never abort an already-
+    successful amendment.
+    """
+    try:
+        maps = frappe.get_all(
+            "WooCommerce Order Map",
+            filters={"woo_order_id": woo_order_id},
+            fields=["name"],
+            limit=1,
+        )
+        if not maps:
+            return
+        frappe.db.set_value(
+            "WooCommerce Order Map",
+            maps[0]["name"],
+            {
+                "erpnext_sales_invoice": new_invoice_name,
+                "hash": "",
+            },
+            update_modified=False,
+        )
+    except Exception as exc:
+        if logger:
+            logger.warning(
+                {
+                    "event": "woo_order_map_repoint_failed",
+                    "woo_order_id": woo_order_id,
+                    "new_invoice": new_invoice_name,
+                    "error": str(exc),
+                }
+            )
+
+
 def _build_invoice_amendment_response(
     *,
     request_id: str,
@@ -827,6 +870,32 @@ def _run_invoice_amendment_job(
             "submitted_total": submitted_total,
         }
 
+    # H4: When the source invoice has a woo_order_id we must also hold the
+    # Woo inbound lock so a concurrent webhook cannot race the cancel-then-submit
+    # window and create a duplicate invoice against the same WooCommerce order.
+    woo_lock_key = f"woo-order-{woo_order_id}" if woo_order_id else None
+    woo_lock_acquired = False
+    if woo_lock_key:
+        try:
+            woo_lock_result = frappe.db.sql("SELECT GET_LOCK(%s, 5)", (woo_lock_key,))
+            woo_lock_acquired = bool(
+                woo_lock_result and woo_lock_result[0] and woo_lock_result[0][0] == 1
+            )
+            if not woo_lock_acquired:
+                if inv_lock_acquired:
+                    try:
+                        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
+                    except Exception:
+                        pass
+                return {
+                    "success": False,
+                    "request_id": request_id,
+                    "error": "The Woo order is currently being synced. Please retry in a moment.",
+                    "amendment_block_code": "woo_order_locked",
+                }
+        except Exception:
+            woo_lock_acquired = False
+
     save_point = f"invoice_amendment_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:10]}"
     try:
         frappe.db.savepoint(save_point)
@@ -834,14 +903,26 @@ def _run_invoice_amendment_job(
         save_point = ""
 
     try:
+        # H1: Per-PE try/except so a single failed cancellation does not leave
+        # previously-cancelled PEs orphaned against a still-submitted source invoice.
         payment_entries = _find_submitted_payment_entries(invoice_id)
+        pe_cancel_errors: List[str] = []
         for payment_entry_name in payment_entries:
-            payment_entry = frappe.get_doc("Payment Entry", payment_entry_name)
-            if int(payment_entry.get("docstatus") or 0) != 1:
-                continue
-            payment_entry.flags.ignore_permissions = True
-            payment_entry.cancel()
-            cancelled_payment_entries.append(payment_entry.name)
+            try:
+                payment_entry = frappe.get_doc("Payment Entry", payment_entry_name)
+                if int(payment_entry.get("docstatus") or 0) != 1:
+                    continue
+                payment_entry.flags.ignore_permissions = True
+                payment_entry.cancel()
+                cancelled_payment_entries.append(payment_entry.name)
+            except Exception as pe_exc:
+                pe_cancel_errors.append(f"{payment_entry_name}: {pe_exc}")
+
+        if pe_cancel_errors:
+            raise Exception(
+                f"Failed to cancel {len(pe_cancel_errors)} payment "
+                f"entry/entries: {'; '.join(pe_cancel_errors)}"
+            )
 
         source_invoice.flags.ignore_permissions = True
         source_invoice.flags.ignore_woo_outbound = True
@@ -897,6 +978,16 @@ def _run_invoice_amendment_job(
             ),
         )
 
+        # H3: Repoint WooCommerce Order Map from the cancelled source to the live
+        # replacement and clear the cached hash so the next inbound webhook
+        # re-evaluates the order rather than skipping as "unchanged".
+        if woo_order_id:
+            _repoint_woocommerce_order_map(
+                woo_order_id=woo_order_id,
+                new_invoice_name=replacement_invoice_name,
+                logger=logger,
+            )
+
         logger.info(
             {
                 "event": "invoice_amendment_completed",
@@ -906,6 +997,31 @@ def _run_invoice_amendment_job(
                 "cancelled_payment_entries": cancelled_payment_entries,
             }
         )
+
+        # H5: Notify all open clients so kanban boards refresh without a manual
+        # page reload.  Fire-and-forget: a publish failure must never abort
+        # the amendment that has already succeeded.
+        try:
+            frappe.publish_realtime(
+                "jarz_pos_invoice_amended",
+                {
+                    "source_invoice_id": invoice_id,
+                    "replacement_invoice_id": replacement_invoice_name,
+                    "request_id": request_id,
+                    "timestamp": frappe.utils.now(),
+                },
+                user="*",
+            )
+        except Exception as pub_exc:
+            logger.warning(
+                {
+                    "event": "invoice_amendment_realtime_publish_failed",
+                    "source_invoice": invoice_id,
+                    "replacement_invoice": replacement_invoice_name,
+                    "error": str(pub_exc),
+                }
+            )
+
         return _build_invoice_amendment_response(
             request_id=request_id,
             source_invoice_name=invoice_id,
@@ -926,6 +1042,12 @@ def _run_invoice_amendment_job(
         frappe.log_error(frappe.get_traceback(), "submit_invoice_amendment failed")
         return {"success": False, "request_id": request_id, "error": str(exc)}
     finally:
+        # Release locks in reverse acquisition order (woo first, then inv).
+        if woo_lock_acquired and woo_lock_key:
+            try:
+                frappe.db.sql("SELECT RELEASE_LOCK(%s)", (woo_lock_key,))
+            except Exception:
+                pass
         if inv_lock_acquired:
             try:
                 frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))

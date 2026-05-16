@@ -7,6 +7,11 @@ They test:
   3. _run_invoice_amendment_job rejects stale source total (B5 / C-test-3)
   4. _run_invoice_amendment_job rejects suspicious cart shrink (B5 / C-test-4)
   5. B2 re-eligibility check after advisory lock fires before mutating PEs (B2 / C-test-5)
+  --- Phase-2 additions ---
+  6. H1: PE cancel failure raises BEFORE source invoice is cancelled (H1 / C-test-6)
+  7. H3: WooCommerce Order Map is repointed to replacement after successful amendment (H3 / C-test-7)
+  8. H4: woo-order lock is acquired when source invoice has woo_order_id (H4 / C-test-8)
+  9. H5: publish_realtime is called with the correct event and payload (H5 / C-test-9)
 """
 
 import json
@@ -385,6 +390,371 @@ class TestAmendmentReEligibilityAfterLock(unittest.TestCase):
         self.assertFalse(result.get("success"))
         self.assertEqual(result.get("amendment_block_code"), "custom_shipping_request_exists")
         self.assertEqual(cancel_called, [], "source_invoice.cancel() must NOT have been called")
+
+
+# ---------------------------------------------------------------------------
+# Test 6 – H1: PE cancel failure raises BEFORE source invoice is cancelled
+# ---------------------------------------------------------------------------
+
+class TestPECancelFailureIsolation(unittest.TestCase):
+    """If a Payment Entry cancel raises, the source invoice must remain
+    docstatus=1 (not cancelled) and the job must return success=False.
+    """
+
+    def test_pe_failure_leaves_source_submitted(self):
+        inv = _make_invoice(grand_total=500.0)
+        cart = _make_cart_json([{"rate": 250, "qty": 2}])
+
+        source_cancel_called = []
+
+        class FakeSourceInvoice:
+            name = "ACC-SINV-TEST-001"
+            docstatus = 1
+            grand_total = 500.0
+            is_return = 0
+            custom_sales_invoice_state = "Received"
+            sales_invoice_state = "Received"
+            custom_delivery_date = None
+            custom_delivery_time_from = None
+            custom_delivery_duration = None
+            custom_delivery_trip = None
+            custom_is_pickup = False
+            custom_payment_method = None
+            custom_kanban_profile = "Nasr city"
+            pos_profile = "Nasr city"
+            customer = "Test Customer"
+            sales_partner = None
+            woo_order_id = None
+            items = []
+            flags = SimpleNamespace(ignore_permissions=False, ignore_woo_outbound=False)
+
+            def get(self, key, default=None):
+                return getattr(self, key, default)
+
+            def cancel(self):
+                source_cancel_called.append("cancelled")
+
+            def reload(self):
+                pass
+
+        class FakeBadPE:
+            docstatus = 1
+            name = "PE-BAD-001"
+            flags = SimpleNamespace(ignore_permissions=False)
+
+            def get(self, key, default=None):
+                return getattr(self, key, default)
+
+            def cancel(self):
+                raise Exception("PE validation hook blocked cancellation")
+
+        mf = MagicMock()
+        mf._ = lambda x: x
+        mf.parse_json.side_effect = json.loads
+        mf.db.sql.return_value = [[1]]  # lock acquired
+        mf.session.user = "test@example.com"
+        mf.local.site = "frontend"
+        mf.logger.return_value = MagicMock()
+        mf.db.savepoint.return_value = None
+        mf.db.rollback.return_value = None
+        mf.get_traceback.return_value = ""
+        mf.log_error.return_value = None
+
+        def get_doc_side_effect(doctype, name=None):
+            if doctype == "Sales Invoice":
+                return FakeSourceInvoice()
+            if doctype == "Payment Entry":
+                return FakeBadPE()
+            return MagicMock()
+
+        with (
+            patch("jarz_pos.api.manager.frappe", mf),
+            patch("jarz_pos.api.manager._create_amendment_invoice", MagicMock()),
+            patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+            patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+            patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-BAD-001"]),
+            patch("jarz_pos.api.manager.frappe.get_doc", side_effect=get_doc_side_effect),
+            patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+        ):
+            from jarz_pos.api.manager import _run_invoice_amendment_job
+
+            result = _run_invoice_amendment_job(
+                invoice_id="ACC-SINV-TEST-001",
+                request_id="test-req-h1",
+                cart_json=cart,
+                pos_profile_name="Nasr city",
+            )
+
+        self.assertFalse(result.get("success"), f"Expected failure, got: {result}")
+        self.assertIn("PE-BAD-001", result.get("error", ""), "Error must mention failed PE")
+        self.assertEqual(source_cancel_called, [], "source_invoice.cancel() must NOT have been called")
+
+
+# ---------------------------------------------------------------------------
+# Test 7 – H3: WooCommerce Order Map repointed after successful amendment
+# ---------------------------------------------------------------------------
+
+class TestWooOrderMapRepoint(unittest.TestCase):
+    """After a successful amendment, _repoint_woocommerce_order_map must be called
+    with the new invoice name when woo_order_id is set on the source invoice.
+    """
+
+    def test_map_repoint_called_with_woo_order_id(self):
+        cart = _make_cart_json([{"rate": 250, "qty": 2}])
+
+        class FakeWooInvoice:
+            name = "ACC-SINV-WOO-001"
+            docstatus = 1
+            grand_total = 500.0
+            is_return = 0
+            custom_sales_invoice_state = "Received"
+            sales_invoice_state = "Received"
+            custom_delivery_date = None
+            custom_delivery_time_from = None
+            custom_delivery_duration = None
+            custom_delivery_trip = None
+            custom_is_pickup = False
+            custom_payment_method = None
+            custom_kanban_profile = "Nasr city"
+            pos_profile = "Nasr city"
+            customer = "Test Customer"
+            sales_partner = None
+            woo_order_id = "14999"
+            items = []
+            flags = SimpleNamespace(ignore_permissions=False, ignore_woo_outbound=False)
+
+            def get(self, key, default=None):
+                return getattr(self, key, default)
+
+            def cancel(self):
+                pass
+
+            def reload(self):
+                pass
+
+        mf = MagicMock()
+        mf._ = lambda x: x
+        mf.parse_json.side_effect = json.loads
+        mf.db.sql.return_value = [[1]]  # both locks acquired
+        mf.session.user = "test@example.com"
+        mf.local.site = "frontend"
+        mf.logger.return_value = MagicMock()
+        mf.db.savepoint.return_value = None
+        mf.utils.now.return_value = "2026-05-16 12:00:00"
+
+        repoint_calls = []
+
+        def fake_repoint(*, woo_order_id, new_invoice_name, logger=None):
+            repoint_calls.append((woo_order_id, new_invoice_name))
+
+        with (
+            patch("jarz_pos.api.manager.frappe", mf),
+            patch("jarz_pos.api.manager._create_amendment_invoice",
+                  return_value={"invoice_name": "ACC-SINV-WOO-002"}),
+            patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+            patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+            patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=[]),
+            patch("jarz_pos.api.manager.frappe.get_doc", return_value=FakeWooInvoice()),
+            patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+            patch("jarz_pos.api.manager._mark_source_invoice_as_amended", return_value=None),
+            patch("jarz_pos.api.manager._add_invoice_audit_comment", return_value=None),
+            patch("jarz_pos.api.manager._build_invoice_amendment_response",
+                  return_value={"success": True}),
+            patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", MagicMock()),
+            patch("jarz_pos.api.manager._repoint_woocommerce_order_map", side_effect=fake_repoint),
+        ):
+            from jarz_pos.api.manager import _run_invoice_amendment_job
+
+            result = _run_invoice_amendment_job(
+                invoice_id="ACC-SINV-WOO-001",
+                request_id="test-req-h3",
+                cart_json=cart,
+                pos_profile_name="Nasr city",
+            )
+
+        self.assertEqual(len(repoint_calls), 1, "Map repoint must be called exactly once")
+        woo_id, new_inv = repoint_calls[0]
+        self.assertEqual(woo_id, "14999")
+        self.assertEqual(new_inv, "ACC-SINV-WOO-002")
+
+
+# ---------------------------------------------------------------------------
+# Test 8 – H4: woo-order advisory lock is acquired when woo_order_id is set
+# ---------------------------------------------------------------------------
+
+class TestWooOrderLockAcquired(unittest.TestCase):
+    """When the source invoice has woo_order_id, the job must acquire BOTH the
+    inv: lock AND the woo-order: lock before touching any documents.
+    """
+
+    def test_woo_lock_acquired_for_woo_invoice(self):
+        cart = _make_cart_json([{"rate": 250, "qty": 2}])
+        lock_calls = []
+
+        class FakeWooInvoice:
+            name = "ACC-SINV-WOO-003"
+            docstatus = 1
+            grand_total = 500.0
+            is_return = 0
+            custom_sales_invoice_state = "Received"
+            sales_invoice_state = "Received"
+            custom_delivery_date = None
+            custom_delivery_time_from = None
+            custom_delivery_duration = None
+            custom_delivery_trip = None
+            custom_is_pickup = False
+            custom_payment_method = None
+            custom_kanban_profile = "Nasr city"
+            pos_profile = "Nasr city"
+            customer = "Test Customer"
+            sales_partner = None
+            woo_order_id = "15000"
+            items = []
+            flags = SimpleNamespace(ignore_permissions=False, ignore_woo_outbound=False)
+
+            def get(self, key, default=None):
+                return getattr(self, key, default)
+
+            def cancel(self):
+                pass
+
+            def reload(self):
+                pass
+
+        def db_sql_side_effect(query, *args, **kwargs):
+            params = args[0] if args else ()
+            lock_key = params[0] if params else ""
+            if "GET_LOCK" in query:
+                lock_calls.append(lock_key)
+                return [[1]]
+            return [[1]]
+
+        mf = MagicMock()
+        mf._ = lambda x: x
+        mf.parse_json.side_effect = json.loads
+        mf.db.sql.side_effect = db_sql_side_effect
+        mf.session.user = "test@example.com"
+        mf.local.site = "frontend"
+        mf.logger.return_value = MagicMock()
+        mf.db.savepoint.return_value = None
+        mf.utils.now.return_value = "2026-05-16 12:00:00"
+
+        with (
+            patch("jarz_pos.api.manager.frappe", mf),
+            patch("jarz_pos.api.manager._create_amendment_invoice",
+                  return_value={"invoice_name": "ACC-SINV-WOO-004"}),
+            patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+            patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+            patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=[]),
+            patch("jarz_pos.api.manager.frappe.get_doc", return_value=FakeWooInvoice()),
+            patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+            patch("jarz_pos.api.manager._mark_source_invoice_as_amended", return_value=None),
+            patch("jarz_pos.api.manager._add_invoice_audit_comment", return_value=None),
+            patch("jarz_pos.api.manager._build_invoice_amendment_response",
+                  return_value={"success": True}),
+            patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", MagicMock()),
+            patch("jarz_pos.api.manager._repoint_woocommerce_order_map", return_value=None),
+        ):
+            from jarz_pos.api.manager import _run_invoice_amendment_job
+
+            _run_invoice_amendment_job(
+                invoice_id="ACC-SINV-WOO-003",
+                request_id="test-req-h4",
+                cart_json=cart,
+                pos_profile_name="Nasr city",
+            )
+
+        acquired_keys = [k for k in lock_calls]
+        self.assertIn("inv:ACC-SINV-WOO-003", acquired_keys, "inv: lock must be acquired")
+        self.assertIn("woo-order-15000", acquired_keys, "woo-order: lock must be acquired")
+
+
+# ---------------------------------------------------------------------------
+# Test 9 – H5: publish_realtime fired with correct event and payload
+# ---------------------------------------------------------------------------
+
+class TestAmendmentPublishRealtime(unittest.TestCase):
+    """After a successful amendment, frappe.publish_realtime must be called
+    with event='jarz_pos_invoice_amended' and include both invoice IDs.
+    """
+
+    def test_publish_realtime_called_on_success(self):
+        cart = _make_cart_json([{"rate": 250, "qty": 2}])
+
+        class FakeInvoiceSimple:
+            name = "ACC-SINV-RT-001"
+            docstatus = 1
+            grand_total = 500.0
+            is_return = 0
+            custom_sales_invoice_state = "Received"
+            sales_invoice_state = "Received"
+            custom_delivery_date = None
+            custom_delivery_time_from = None
+            custom_delivery_duration = None
+            custom_delivery_trip = None
+            custom_is_pickup = False
+            custom_payment_method = None
+            custom_kanban_profile = "Nasr city"
+            pos_profile = "Nasr city"
+            customer = "Test Customer"
+            sales_partner = None
+            woo_order_id = None
+            items = []
+            flags = SimpleNamespace(ignore_permissions=False, ignore_woo_outbound=False)
+
+            def get(self, key, default=None):
+                return getattr(self, key, default)
+
+            def cancel(self):
+                pass
+
+            def reload(self):
+                pass
+
+        publish_calls = []
+
+        mf = MagicMock()
+        mf._ = lambda x: x
+        mf.parse_json.side_effect = json.loads
+        mf.db.sql.return_value = [[1]]
+        mf.session.user = "test@example.com"
+        mf.local.site = "frontend"
+        mf.logger.return_value = MagicMock()
+        mf.db.savepoint.return_value = None
+        mf.utils.now.return_value = "2026-05-16 12:00:00"
+        mf.publish_realtime.side_effect = lambda event, payload, **kwargs: publish_calls.append(
+            (event, payload)
+        )
+
+        with (
+            patch("jarz_pos.api.manager.frappe", mf),
+            patch("jarz_pos.api.manager._create_amendment_invoice",
+                  return_value={"invoice_name": "ACC-SINV-RT-002"}),
+            patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+            patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+            patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=[]),
+            patch("jarz_pos.api.manager.frappe.get_doc", return_value=FakeInvoiceSimple()),
+            patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+            patch("jarz_pos.api.manager._mark_source_invoice_as_amended", return_value=None),
+            patch("jarz_pos.api.manager._add_invoice_audit_comment", return_value=None),
+            patch("jarz_pos.api.manager._build_invoice_amendment_response",
+                  return_value={"success": True}),
+            patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", MagicMock()),
+        ):
+            from jarz_pos.api.manager import _run_invoice_amendment_job
+
+            result = _run_invoice_amendment_job(
+                invoice_id="ACC-SINV-RT-001",
+                request_id="test-req-h5",
+                cart_json=cart,
+                pos_profile_name="Nasr city",
+            )
+
+        self.assertEqual(len(publish_calls), 1, "publish_realtime must be called exactly once")
+        event, payload = publish_calls[0]
+        self.assertEqual(event, "jarz_pos_invoice_amended")
+        self.assertEqual(payload.get("source_invoice_id"), "ACC-SINV-RT-001")
+        self.assertEqual(payload.get("replacement_invoice_id"), "ACC-SINV-RT-002")
 
 
 if __name__ == "__main__":
