@@ -53,9 +53,12 @@ def _load_module():
     class _UnregisteredError(Exception):
         pass
 
+    class _SenderIdMismatchError(Exception):
+        pass
+
     fake_messaging = types.ModuleType("firebase_admin.messaging")
     fake_messaging.UnregisteredError = _UnregisteredError
-    fake_messaging.SenderIdMismatchError = Exception  # Unused here but must exist
+    fake_messaging.SenderIdMismatchError = _SenderIdMismatchError
     fake_messaging.Notification = MagicMock()
     fake_messaging.AndroidNotification = MagicMock()
     fake_messaging.AndroidConfig = MagicMock()
@@ -162,40 +165,12 @@ class TestFcmLoggingNoErrorSpam(unittest.TestCase):
 
     def test_unexpected_error_logs_to_error_log_once(self):
         """An unexpected error (e.g. quota) logs to Error Log, but only once per token."""
-        self.mod.frappe.messaging = self.mod.frappe  # reset messaging reference
-        # Patch the messaging.send on the loaded module to raise a quota error
-        import types as _types
         quota_exc = Exception("Quota exceeded for quota metric 'cloudfunctions.googleapis.com'")
-        self.mod.messaging = _types.SimpleNamespace(
-            send=MagicMock(side_effect=quota_exc),
-            Notification=MagicMock(),
-            AndroidNotification=MagicMock(),
-            AndroidConfig=MagicMock(),
-            Message=MagicMock(return_value=SimpleNamespace(token="some-token")),
-        )
+        self.mod._FCM_LOGGED_ERROR_TOKENS.discard("some-token")
+        result = self.mod._new_fcm_send_result(["some-token"])
 
-        # Trigger via module-level send directly to avoid Firebase init path
-        original_messaging = self.mod.messaging if hasattr(self.mod, "messaging") else None
-
-        # Use the module's _FCM_LOGGED_ERROR_TOKENS and a patched send loop
-        # Call _send_fcm_notifications 10 times with 'some-token'
-        # Patch messaging.send at module level
-        with patch.object(sys.modules.get("firebase_admin.messaging", _types.SimpleNamespace()), "send",
-                          side_effect=quota_exc):
-            # Reset error token set so the first unexpected error is fresh
-            self.mod._FCM_LOGGED_ERROR_TOKENS.discard("some-token")
-            data = self._make_data()
-            # We can't easily patch messaging.send here without complex setup,
-            # so just verify the _FCM_LOGGED_ERROR_TOKENS set is used correctly
-            # by manually simulating what the send loop does.
-            for _ in range(10):
-                token = "some-token"
-                if not self.mod._is_invalid_token_error(quota_exc):
-                    if token not in self.mod._FCM_LOGGED_ERROR_TOKENS:
-                        self.mod.frappe.log_error(
-                            f"Failed to send FCM to token: {str(quota_exc)}", "FCM Send Error"
-                        )
-                        self.mod._FCM_LOGGED_ERROR_TOKENS.add(token)
+        for _ in range(10):
+            self.mod._record_fcm_send_error("some-token", quota_exc, result)
 
         error_log_calls = [
             c for c in self.fake_frappe.log_error.call_args_list

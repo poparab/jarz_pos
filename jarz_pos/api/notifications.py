@@ -24,10 +24,12 @@ except ImportError:
 # Module-level state to throttle init-failure Error Log writes (one per process).
 _FIREBASE_INIT_STATE: Dict[str, Any] = {
     "failed_logged": False,
+    "push_skipped_logged": False,
     "ok": False,
     "raw_path": None,
     "resolved_path": None,
     "path_source": None,
+    "path_warning": None,
 }
 
 # Per-process set of tokens whose unexpected send-errors have already been Error-Logged.
@@ -312,6 +314,109 @@ DEFAULT_NEW_ORDER_TITLE = "New Order"
 DEFAULT_ITEM_LABEL = "Item"
 
 
+def _get_fcm_logger() -> Any:
+    try:
+        return frappe.logger("fcm")
+    except TypeError:
+        return frappe.logger()
+
+
+def _log_fcm_info(message: str) -> None:
+    try:
+        _get_fcm_logger().info(message)
+    except Exception:
+        pass
+
+
+def _get_bench_path() -> Optional[str]:
+    try:
+        site_path = frappe.get_site_path()
+    except Exception:
+        return None
+
+    if not site_path:
+        return None
+
+    return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
+
+
+def _get_site_private_files_path() -> Optional[str]:
+    try:
+        return frappe.get_site_path("private", "files")
+    except Exception:
+        return None
+
+
+def _resolve_fcm_service_account_path(
+    raw_path: Optional[str],
+) -> Tuple[Optional[str], Optional[str], List[str]]:
+    normalized = (raw_path or "").strip()
+    if not normalized:
+        return None, None, []
+
+    candidates: List[Tuple[str, str]] = []
+    bench_path = _get_bench_path()
+    private_files_path = _get_site_private_files_path()
+    basename = os.path.basename(normalized)
+
+    def add_candidate(source: str, path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized_path = os.path.normpath(path)
+        if any(existing_path == normalized_path for _, existing_path in candidates):
+            return
+        candidates.append((source, normalized_path))
+
+    if os.path.isabs(normalized):
+        add_candidate("configured_path", normalized)
+        if private_files_path and basename:
+            add_candidate("private_files_basename", os.path.join(private_files_path, basename))
+        if bench_path and basename:
+            add_candidate("bench_path_basename", os.path.join(bench_path, basename))
+    else:
+        if private_files_path:
+            add_candidate("private_files", os.path.join(private_files_path, normalized))
+        if bench_path:
+            add_candidate("bench_path", os.path.join(bench_path, normalized))
+        add_candidate("working_directory", os.path.abspath(normalized))
+
+    for source, candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate, source, [path for _, path in candidates]
+
+    if not candidates:
+        return None, None, []
+
+    return candidates[0][1], candidates[0][0], [path for _, path in candidates]
+
+
+def _path_is_under(path: Optional[str], root: Optional[str]) -> bool:
+    if not path or not root:
+        return False
+
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        normalized_root = os.path.normcase(os.path.abspath(root))
+        return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
+    except Exception:
+        return False
+
+
+def _get_fcm_path_warning(resolved_path: Optional[str]) -> Optional[str]:
+    private_files_path = _get_site_private_files_path()
+    if not resolved_path or not private_files_path:
+        return None
+
+    if _path_is_under(resolved_path, private_files_path):
+        return None
+
+    return (
+        "Firebase service account resolves outside the site private files directory. "
+        "In Docker deployments this path may not be visible to queue workers; place the JSON under "
+        f"{private_files_path} or set fcm_service_account_path to a shared site path."
+    )
+
+
 def _initialize_firebase_app() -> bool:
     """Initialize Firebase Admin SDK if not already initialized."""
     if not FIREBASE_AVAILABLE:
@@ -320,6 +425,9 @@ def _initialize_firebase_app() -> bool:
     try:
         # Check if already initialized
         firebase_admin.get_app()
+        _FIREBASE_INIT_STATE["ok"] = True
+        _FIREBASE_INIT_STATE["failed_logged"] = False
+        _FIREBASE_INIT_STATE["push_skipped_logged"] = False
         return True
     except ValueError:
         # Not initialized, try to initialize
@@ -346,67 +454,7 @@ def _initialize_firebase_app() -> bool:
         _FIREBASE_INIT_STATE["raw_path"] = raw_path
         _FIREBASE_INIT_STATE["resolved_path"] = resolved_path
         _FIREBASE_INIT_STATE["path_source"] = path_source
-
-    def _get_bench_path() -> Optional[str]:
-        try:
-            site_path = frappe.get_site_path()
-        except Exception:
-            return None
-
-        if not site_path:
-            return None
-
-        return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
-
-    def _resolve_fcm_service_account_path(
-        raw_path: Optional[str],
-    ) -> Tuple[Optional[str], Optional[str], List[str]]:
-        normalized = (raw_path or "").strip()
-        if not normalized:
-            return None, None, []
-
-        candidates: List[Tuple[str, str]] = []
-        bench_path = _get_bench_path()
-        basename = os.path.basename(normalized)
-
-        def add_candidate(source: str, path: Optional[str]) -> None:
-            if not path:
-                return
-            normalized_path = os.path.normpath(path)
-            if any(existing_path == normalized_path for _, existing_path in candidates):
-                return
-            candidates.append((source, normalized_path))
-
-        private_files_path: Optional[str] = None
-        try:
-            private_files_path = frappe.get_site_path("private", "files")
-        except Exception:
-            private_files_path = None
-
-        if os.path.isabs(normalized):
-            add_candidate("configured_path", normalized)
-            if private_files_path:
-                add_candidate(
-                    "private_files_basename",
-                    os.path.join(private_files_path, basename),
-                )
-            if bench_path:
-                add_candidate("bench_path_basename", os.path.join(bench_path, basename))
-        else:
-            if private_files_path:
-                add_candidate("private_files", os.path.join(private_files_path, normalized))
-            if bench_path:
-                add_candidate("bench_path", os.path.join(bench_path, normalized))
-            add_candidate("working_directory", os.path.abspath(normalized))
-
-        for source, candidate in candidates:
-            if os.path.exists(candidate):
-                return candidate, source, [path for _, path in candidates]
-
-        if not candidates:
-            return None, None, []
-
-        return candidates[0][1], candidates[0][0], [path for _, path in candidates]
+        _FIREBASE_INIT_STATE["path_warning"] = _get_fcm_path_warning(resolved_path)
 
     try:
         if service_account_path:
@@ -443,6 +491,7 @@ def _initialize_firebase_app() -> bool:
                 path_source=path_source,
             )
             _FIREBASE_INIT_STATE["failed_logged"] = False
+            _FIREBASE_INIT_STATE["push_skipped_logged"] = False
             return True
         elif service_account_json:
             if isinstance(service_account_json, str):
@@ -451,6 +500,7 @@ def _initialize_firebase_app() -> bool:
             firebase_admin.initialize_app(cred)
             _mark_init_state(ok=True)
             _FIREBASE_INIT_STATE["failed_logged"] = False
+            _FIREBASE_INIT_STATE["push_skipped_logged"] = False
             return True
         else:
             _mark_init_state(ok=False)
@@ -500,70 +550,10 @@ def health_check_firebase() -> Dict[str, Any]:
     path_source: Optional[str] = None
     candidate_paths: List[str] = []
 
-    def _get_bench_path() -> Optional[str]:
-        try:
-            site_path = frappe.get_site_path()
-        except Exception:
-            return None
-
-        if not site_path:
-            return None
-
-        return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
-
-    def _resolve_fcm_service_account_path(
-        raw_path: Optional[str],
-    ) -> Tuple[Optional[str], Optional[str], List[str]]:
-        normalized = (raw_path or "").strip()
-        if not normalized:
-            return None, None, []
-
-        candidates: List[Tuple[str, str]] = []
-        bench_path = _get_bench_path()
-        basename = os.path.basename(normalized)
-
-        def add_candidate(source: str, path: Optional[str]) -> None:
-            if not path:
-                return
-            normalized_path = os.path.normpath(path)
-            if any(existing_path == normalized_path for _, existing_path in candidates):
-                return
-            candidates.append((source, normalized_path))
-
-        private_files_path: Optional[str] = None
-        try:
-            private_files_path = frappe.get_site_path("private", "files")
-        except Exception:
-            private_files_path = None
-
-        if os.path.isabs(normalized):
-            add_candidate("configured_path", normalized)
-            if private_files_path:
-                add_candidate(
-                    "private_files_basename",
-                    os.path.join(private_files_path, basename),
-                )
-            if bench_path:
-                add_candidate("bench_path_basename", os.path.join(bench_path, basename))
-        else:
-            if private_files_path:
-                add_candidate("private_files", os.path.join(private_files_path, normalized))
-            if bench_path:
-                add_candidate("bench_path", os.path.join(bench_path, normalized))
-            add_candidate("working_directory", os.path.abspath(normalized))
-
-        for source, candidate in candidates:
-            if os.path.exists(candidate):
-                return candidate, source, [path for _, path in candidates]
-
-        if not candidates:
-            return None, None, []
-
-        return candidates[0][1], candidates[0][0], [path for _, path in candidates]
-
     if raw_path:
         resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(raw_path)
     file_exists = bool(resolved_path and os.path.exists(resolved_path))
+    path_warning = _get_fcm_path_warning(resolved_path)
 
     try:
         firebase_admin.get_app()
@@ -575,6 +565,7 @@ def health_check_firebase() -> Dict[str, Any]:
             "raw_path": raw_path,
             "path_source": path_source,
             "file_exists": file_exists,
+            "warning": _FIREBASE_INIT_STATE.get("path_warning") or path_warning,
         }
     except ValueError:
         pass
@@ -592,6 +583,7 @@ def health_check_firebase() -> Dict[str, Any]:
                 (_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
                 and os.path.exists(_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
             ),
+            "warning": _FIREBASE_INIT_STATE.get("path_warning") or path_warning,
         }
 
     if resolved_path and not file_exists:
@@ -610,6 +602,7 @@ def health_check_firebase() -> Dict[str, Any]:
         "path_source": path_source,
         "file_exists": file_exists,
         "candidate_paths": candidate_paths,
+        "warning": path_warning,
     }
 
 
@@ -914,13 +907,13 @@ def handle_invoice_submission(doc: Any) -> None:
         _publish_invoice_alert(payload, recipients)
         
         # Send push notification
-        _push_new_invoice(payload, recipients)
-        
-        frappe.log_error(
-            f"Invoice {payload.get('invoice_id')} notification sent. "
-            f"Requires acceptance: {payload.get('requires_acceptance')}, "
-            f"Recipients: {len(recipients)}",
-            "Invoice Notification Sent"
+        push_result = _push_new_invoice(payload, recipients)
+        _log_fcm_info(
+            "Invoice notification processed "
+            f"invoice={payload.get('invoice_id')} recipients={len(recipients)} "
+            f"fcm_status={push_result.get('status')} "
+            f"fcm_success={push_result.get('success_count', 0)} "
+            f"fcm_failure={push_result.get('failure_count', 0)}"
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
@@ -1296,31 +1289,28 @@ def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]
         frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_invoice_accepted failed")
 
 
-def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
     tokens = _get_tokens_for_users(recipients)
     if not tokens:
-        try:
-            frappe.logger().info(
-                f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}"
-            )
-        except Exception:
-            pass
-        return
+        _log_fcm_info(f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}")
+        result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+        result["ok"] = True
+        return result
 
     data = _prepare_invoice_data_payload("new_invoice", payload)
-    try:
-        msg = f"FCM send: new_invoice; recipients={len(recipients)}; tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
-        frappe.logger().info(msg)
-        frappe.log_error(msg, "FCM Send Debug")
-    except Exception:
-        pass
-    _send_fcm_notifications(tokens, data)
+    _log_fcm_info(
+        f"FCM send: new_invoice; recipients={len(recipients)}; "
+        f"tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
+    )
+    return _send_fcm_notifications(tokens, data)
 
 
-def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
     tokens = _get_tokens_for_users(recipients)
     if not tokens:
-        return
+        result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+        result["ok"] = True
+        return result
 
     data = {
         "type": "invoice_accepted",
@@ -1328,13 +1318,10 @@ def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -
         "accepted_by": payload.get("accepted_by", ""),
         "accepted_on": payload.get("accepted_on", ""),
     }
-    try:
-        frappe.logger().info(
-            f"FCM send: invoice_accepted; recipients={len(recipients)}; tokens={len(tokens)}"
-        )
-    except Exception:
-        pass
-    _send_fcm_notifications(tokens, data)
+    _log_fcm_info(
+        f"FCM send: invoice_accepted; recipients={len(recipients)}; tokens={len(tokens)}"
+    )
+    return _send_fcm_notifications(tokens, data)
 
 
 def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
@@ -1379,14 +1366,10 @@ def _is_invalid_token_error(exc: Exception) -> bool:
     3. Case-insensitive substring match against known error strings.
     """
     if FIREBASE_AVAILABLE:
-        try:
-            from firebase_admin import messaging as fb_messaging  # noqa: PLC0415
-            if isinstance(exc, getattr(fb_messaging, "UnregisteredError", ())):
+        for error_class_name in ("UnregisteredError", "SenderIdMismatchError"):
+            error_class = getattr(messaging, error_class_name, None)
+            if error_class and isinstance(exc, error_class):
                 return True
-            if isinstance(exc, getattr(fb_messaging, "SenderIdMismatchError", ())):
-                return True
-        except Exception:
-            pass
     code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
     if code in {"registration-token-not-registered", "invalid-argument", "NOT_FOUND"}:
         return True
@@ -1399,28 +1382,140 @@ def _is_invalid_token_error(exc: Exception) -> bool:
     ))
 
 
-def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str]) -> None:
+def _new_fcm_send_result(tokens: Sequence[str], status: str = "pending") -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "status": status,
+        "initialized": False,
+        "requested_token_count": len(list(tokens or [])),
+        "unique_token_count": 0,
+        "attempted_count": 0,
+        "success_count": 0,
+        "failure_count": 0,
+        "invalid_token_count": 0,
+        "unexpected_failure_count": 0,
+        "dropped_token_count": 0,
+        "duplicate_token_count": 0,
+    }
+
+
+def _normalise_fcm_tokens(tokens: Sequence[str]) -> Tuple[List[str], int]:
+    seen: set[str] = set()
+    normalised: List[str] = []
+    duplicate_count = 0
+
+    for token in tokens or []:
+        token_value = _safe_str(token).strip()
+        if not token_value:
+            continue
+        if token_value in seen:
+            duplicate_count += 1
+            continue
+        seen.add(token_value)
+        normalised.append(token_value)
+
+    return normalised, duplicate_count
+
+
+def _normalise_fcm_data_payload(data_payload: Dict[str, Any]) -> Dict[str, str]:
+    data: Dict[str, str] = {}
+    for key, value in (data_payload or {}).items():
+        if value is None:
+            data[str(key)] = ""
+        elif isinstance(value, bool):
+            data[str(key)] = "1" if value else "0"
+        else:
+            data[str(key)] = str(value)
+    return data
+
+
+def _log_fcm_push_skipped_once(message: str) -> None:
+    if _FIREBASE_INIT_STATE.get("push_skipped_logged"):
+        _log_fcm_info(message)
+        return
+
+    frappe.log_error(message, "FCM Push Skipped")
+    _FIREBASE_INIT_STATE["push_skipped_logged"] = True
+
+
+def _record_fcm_send_error(token: str, send_err: Exception, result: Dict[str, Any]) -> None:
+    result["failure_count"] += 1
+
+    if _is_invalid_token_error(send_err):
+        result["invalid_token_count"] += 1
+        _log_fcm_info(f"FCM invalid token (disabling): {str(send_err)}")
+        try:
+            _disable_token(token)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "FCM Token Disable Failed")
+        return
+
+    result["unexpected_failure_count"] += 1
+    if token not in _FCM_LOGGED_ERROR_TOKENS:
+        frappe.log_error(
+            f"Failed to send FCM to token: {str(send_err)}", "FCM Send Error"
+        )
+        _FCM_LOGGED_ERROR_TOKENS.add(token)
+
+
+def _finalise_fcm_send_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    if result["failure_count"] == 0:
+        result["ok"] = True
+        if result["success_count"] > 0:
+            result["status"] = "sent"
+        elif result["status"] == "pending":
+            result["status"] = "skipped_no_messages"
+        return result
+
+    result["ok"] = False
+    if result["success_count"] > 0:
+        result["status"] = "partial_failure"
+    else:
+        result["status"] = "failed"
+    return result
+
+
+def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any]) -> Dict[str, Any]:
     """Send FCM push notifications using Firebase Admin SDK (V1 API)."""
+    result = _new_fcm_send_result(tokens)
+    normalised_tokens, duplicate_count = _normalise_fcm_tokens(tokens)
+    result["unique_token_count"] = len(normalised_tokens)
+    result["duplicate_token_count"] = duplicate_count
+
+    if not normalised_tokens:
+        result["ok"] = True
+        result["status"] = "skipped_no_tokens"
+        return result
+
     if not _initialize_firebase_app():
-        frappe.log_error("Firebase not initialized. Skipping FCM push.", "FCM Push Skipped")
-        return
-    
-    if not tokens:
-        return
+        result["status"] = "skipped_init_failed"
+        _log_fcm_push_skipped_once("Firebase not initialized. Skipping FCM push.")
+        return result
+
+    result["initialized"] = True
+    batch_tokens = normalised_tokens[:MAX_FCM_TOKENS_PER_BATCH]
+    result["attempted_count"] = len(batch_tokens)
+    result["dropped_token_count"] = max(len(normalised_tokens) - len(batch_tokens), 0)
+    if result["dropped_token_count"]:
+        _log_fcm_info(
+            f"FCM token batch truncated: attempted={len(batch_tokens)} "
+            f"dropped={result['dropped_token_count']}"
+        )
     
     # Build the message
     try:
-        msg_type = data_payload.get("type", "")
+        data = _normalise_fcm_data_payload(data_payload)
+        msg_type = data.get("type", "")
         if msg_type == "new_invoice":
-            title, body = _resolve_notification_content(data_payload)
+            title, body = _resolve_notification_content(data)
             notification = messaging.Notification(title=title, body=body)
             android_notification = messaging.AndroidNotification(
                 sound='default',
                 channel_id='jarz_order_alerts',
-                tag=data_payload.get("invoice_id", "")
+                tag=data.get("invoice_id", "")
             )
         else:
-            title, body = _resolve_notification_content(data_payload)
+            title, body = _resolve_notification_content(data)
             notification = messaging.Notification(title=title, body=body)
 
             # Use shift channel for shift events, order alerts channel for everything else
@@ -1432,20 +1527,18 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
             android_notification = messaging.AndroidNotification(
                 sound='default',
                 channel_id=android_channel_id,
-                tag=data_payload.get("invoice_id", "")
+                tag=data.get("invoice_id", "")
             )
 
         android_config_kwargs = {"priority": 'high'}
         if android_notification is not None:
             android_config_kwargs["notification"] = android_notification
 
-        # Use shift channel for shift events, order alerts channel for everything else
-        # Send to each token (Firebase Admin SDK doesn't support batch sends in the same way)
-        # For better performance, we can use MulticastMessage
+        # Send to each token and keep per-token accounting for partial failures.
         messages = []
-        for token in tokens[:MAX_FCM_TOKENS_PER_BATCH]:
+        for token in batch_tokens:
             message_kwargs = {
-                "data": data_payload,
+                "data": data,
                 "android": messaging.AndroidConfig(**android_config_kwargs),
                 "token": token,
             }
@@ -1460,28 +1553,17 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, str])
             for message in messages:
                 try:
                     response = messaging.send(message)
-                    frappe.logger().info(f"FCM message sent successfully: {response}")
+                    result["success_count"] += 1
+                    _log_fcm_info(f"FCM message sent successfully: {response}")
                 except Exception as send_err:
-                    token = message.token
-                    if _is_invalid_token_error(send_err):
-                        # Expected — token is stale/unregistered; log at INFO only, then disable.
-                        frappe.logger("fcm").info(
-                            f"FCM invalid token (disabling): {str(send_err)}"
-                        )
-                        try:
-                            _disable_token(token)
-                        except Exception:
-                            frappe.log_error(frappe.get_traceback(), "FCM Token Disable Failed")
-                    else:
-                        # Unexpected failure — log to Error Log once per unique token per process.
-                        if token not in _FCM_LOGGED_ERROR_TOKENS:
-                            frappe.log_error(
-                                f"Failed to send FCM to token: {str(send_err)}", "FCM Send Error"
-                            )
-                            _FCM_LOGGED_ERROR_TOKENS.add(token)
-                    
+                    _record_fcm_send_error(message.token, send_err, result)
+
+        return _finalise_fcm_send_result(result)
     except Exception:
+        result["status"] = "failed_exception"
+        result["failure_count"] = result["failure_count"] or result["attempted_count"]
         frappe.log_error(frappe.get_traceback(), "FCM push failed")
+        return result
 
 
 def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:

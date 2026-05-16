@@ -44,6 +44,38 @@ class TestNotificationPayloadContract(unittest.TestCase):
         self.assertEqual(result["path_source"], "bench_path")
         self.assertTrue(result["file_exists"])
 
+    def test_health_check_warns_for_non_shared_absolute_service_account_path(self):
+        from jarz_pos.api import notifications
+
+        site_root = os.path.normpath("/home/frappe/frappe-bench/sites/frontend")
+        configured_path = os.path.normpath(
+            "/home/frappe/frappe-bench/jarz-pos-firebase-adminsdk-fbsvc-5842596d09.json"
+        )
+
+        def fake_get_site_path(*parts):
+            return os.path.join(site_root, *parts) if parts else site_root
+
+        def fake_exists(path):
+            return os.path.normpath(path) == configured_path
+
+        local_stub = SimpleNamespace(conf={"fcm_service_account_path": configured_path})
+        notifications._FIREBASE_INIT_STATE["path_warning"] = None
+
+        with patch.object(notifications, "FIREBASE_AVAILABLE", True), patch.object(
+            notifications.frappe, "local", local_stub
+        ), patch.object(
+            notifications.frappe, "get_site_path", side_effect=fake_get_site_path
+        ), patch.object(
+            notifications.os.path, "exists", side_effect=fake_exists
+        ), patch.object(
+            notifications.firebase_admin, "get_app", return_value=object()
+        ):
+            result = notifications.health_check_firebase()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["path_source"], "configured_path")
+        self.assertIn("outside the site private files", result["warning"])
+
     def test_initialize_firebase_app_uses_bench_root_fallback_for_relative_path(self):
         from jarz_pos.api import notifications
 
@@ -207,9 +239,12 @@ class TestNotificationPayloadContract(unittest.TestCase):
         ), patch.object(notifications.frappe, "logger", return_value=logger), patch.object(
             notifications.frappe, "log_error"
         ):
-            notifications._send_fcm_notifications(["token-1"], data_payload)
+            result = notifications._send_fcm_notifications(["token-1"], data_payload)
 
         message_kwargs = fake_messaging.Message.call_args.kwargs
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "sent")
+        self.assertEqual(result["success_count"], 1)
         self.assertEqual(message_kwargs["data"], data_payload)
         self.assertEqual(message_kwargs["android"].priority, "high")
         self.assertIn("notification", message_kwargs)
@@ -250,9 +285,12 @@ class TestNotificationPayloadContract(unittest.TestCase):
         ), patch.object(notifications, "_resolve_notification_content", return_value=("Shift Started", "Open shift")), patch.object(
             notifications.frappe, "logger", return_value=logger
         ), patch.object(notifications.frappe, "log_error"):
-            notifications._send_fcm_notifications(["token-2"], data_payload)
+            result = notifications._send_fcm_notifications(["token-2"], data_payload)
 
         message_kwargs = fake_messaging.Message.call_args.kwargs
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "sent")
+        self.assertEqual(result["success_count"], 1)
         self.assertIn("notification", message_kwargs)
         self.assertEqual(message_kwargs["notification"].title, "Shift Started")
         self.assertEqual(message_kwargs["notification"].body, "Open shift")

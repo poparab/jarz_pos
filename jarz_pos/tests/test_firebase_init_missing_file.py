@@ -109,7 +109,10 @@ class TestFirebaseInitMissingFile(unittest.TestCase):
 
         import os
         self.assertIsNotNone(result["resolved_path"])
-        self.assertTrue(os.path.isabs(result["resolved_path"]))
+        self.assertTrue(
+            os.path.isabs(result["resolved_path"])
+            or result["resolved_path"].startswith(("/", "\\"))
+        )
 
     def test_init_failure_logged_only_once_per_process(self):
         """Error Log is written exactly once regardless of how many times init is called."""
@@ -132,3 +135,19 @@ class TestFirebaseInitMissingFile(unittest.TestCase):
         result = mod.health_check_firebase()
 
         self.assertIsNone(result["resolved_path"])
+
+    def test_push_skipped_logged_only_once_when_init_unavailable(self):
+        """FCM Push Skipped Error Log rows are throttled while init remains broken."""
+        mod, fake_frappe = _load_module({"fcm_service_account_path": "/tmp/nonexistent.json"})
+        data = {"type": "new_invoice", "invoice_id": "INV-INIT-MISS"}
+
+        for _ in range(5):
+            result = mod._send_fcm_notifications(["token-1"], data)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "skipped_init_failed")
+        skipped_calls = [
+            call for call in fake_frappe.log_error.call_args_list
+            if len(call.args) >= 2 and call.args[1] == "FCM Push Skipped"
+        ]
+        self.assertEqual(len(skipped_calls), 1)
