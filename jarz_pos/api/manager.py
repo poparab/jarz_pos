@@ -280,6 +280,20 @@ def _find_sales_partner_transactions(invoice_name: str) -> List[str]:
     return sorted({row for row in rows if row})
 
 
+def _find_active_custom_shipping_requests(invoice_name: str) -> List[str]:
+    """Return active (not cancelled) Custom Shipping Requests linked to the Sales Invoice."""
+    try:
+        rows = frappe.get_all(
+            "Custom Shipping Request",
+            filters={"invoice": invoice_name, "docstatus": ["!=", 2]},
+            pluck="name",
+            limit_page_length=20,
+        ) or []
+    except Exception:
+        rows = []
+    return sorted({row for row in rows if row})
+
+
 def _find_submitted_journal_entries(invoice_name: str) -> List[str]:
     """Return submitted Journal Entries that already settled against the invoice."""
     journal_entry_names = set()
@@ -404,6 +418,14 @@ def get_invoice_hard_mutation_blocker(inv: Any) -> Optional[Dict[str, Any]]:
             "mutation_block_code": "journal_entry_exists",
             "mutation_block_reason": _("This invoice already has settlement journal entries and cannot be changed from this workflow."),
             "journal_entries": journal_entries,
+        }
+
+    custom_shipping_requests = _find_active_custom_shipping_requests(invoice_name)
+    if custom_shipping_requests:
+        return {
+            "mutation_block_code": "custom_shipping_request_exists",
+            "mutation_block_reason": _("This invoice is linked to an active shipping request and cannot be changed from this workflow."),
+            "custom_shipping_requests": custom_shipping_requests,
         }
 
     return None
@@ -644,6 +666,8 @@ def _run_invoice_amendment_job(
     pos_profile_override: Union[bool, int, str, None] = None,
     suppress_shipping_income: Union[bool, int, None] = None,
     suppress_legacy_delivery_charges: Union[bool, int, None] = None,
+    expected_source_grand_total: Optional[float] = None,
+    expected_source_item_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
     if _create_amendment_invoice is None:
@@ -717,6 +741,91 @@ def _run_invoice_amendment_job(
             }
     except Exception:
         inv_lock_acquired = False
+
+    # B2: Re-verify eligibility *after* acquiring the lock to catch races
+    # (e.g. CSR created after the Flutter card was opened).
+    source_invoice.reload()
+    fresh_eligibility = get_invoice_amendment_eligibility(source_invoice)
+    if not fresh_eligibility.get("can_amend"):
+        if inv_lock_acquired:
+            try:
+                frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
+            except Exception:
+                pass
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": fresh_eligibility.get("amendment_block_reason") or _("Invoice amendment is blocked."),
+            "amendment_block_code": fresh_eligibility.get("amendment_block_code"),
+        }
+
+    # B5: Parity checks — validate submitted cart against source invoice.
+    try:
+        parsed_cart = frappe.parse_json(cart_json) if isinstance(cart_json, str) else (cart_json or [])
+    except Exception:
+        parsed_cart = []
+
+    submitted_item_count = len(parsed_cart) if isinstance(parsed_cart, list) else 0
+    if submitted_item_count == 0:
+        if inv_lock_acquired:
+            try:
+                frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
+            except Exception:
+                pass
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": _("The submitted cart is empty. Please reload the order and try again."),
+            "amendment_block_code": "empty_cart",
+        }
+
+    source_grand_total = float(source_invoice.get("grand_total") or 0)
+    if expected_source_grand_total is not None and source_grand_total > 0:
+        drift = abs(float(expected_source_grand_total) - source_grand_total) / source_grand_total
+        if drift > 0.005:
+            if inv_lock_acquired:
+                try:
+                    frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
+                except Exception:
+                    pass
+            return {
+                "success": False,
+                "request_id": request_id,
+                "error": _(
+                    f"The source invoice total changed since you opened the draft "
+                    f"(expected {expected_source_grand_total}, actual {source_grand_total}). "
+                    f"Please reload and retry."
+                ),
+                "amendment_block_code": "stale_source",
+                "source_grand_total": source_grand_total,
+            }
+
+    # Compute submitted total (best-effort: multiply rate × qty for each row).
+    submitted_total = 0.0
+    if isinstance(parsed_cart, list):
+        for row in parsed_cart:
+            if isinstance(row, dict):
+                row_rate = float(row.get("rate") or 0)
+                row_qty = float(row.get("qty") or row.get("quantity") or 1)
+                submitted_total += row_rate * row_qty
+
+    if source_grand_total > 0 and submitted_total < 0.5 * source_grand_total:
+        if inv_lock_acquired:
+            try:
+                frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
+            except Exception:
+                pass
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": _(
+                f"Submitted cart total ({submitted_total:.2f}) is less than 50% of the source invoice total "
+                f"({source_grand_total:.2f}). If intentional, contact your manager."
+            ),
+            "amendment_block_code": "suspicious_diff",
+            "source_grand_total": source_grand_total,
+            "submitted_total": submitted_total,
+        }
 
     save_point = f"invoice_amendment_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:10]}"
     try:
@@ -841,6 +950,8 @@ def submit_invoice_amendment(
     pos_profile_override: Union[bool, int, str, None] = None,
     suppress_shipping_income: Union[bool, int, None] = None,
     suppress_legacy_delivery_charges: Union[bool, int, None] = None,
+    expected_source_grand_total: Optional[float] = None,
+    expected_source_item_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload."""
     invoice_id = (invoice_id or "").strip()
@@ -914,6 +1025,8 @@ def submit_invoice_amendment(
         pos_profile_override=pos_profile_override,
         suppress_shipping_income=suppress_shipping_income,
         suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+        expected_source_grand_total=float(expected_source_grand_total) if expected_source_grand_total is not None else None,
+        expected_source_item_count=int(expected_source_item_count) if expected_source_item_count is not None else None,
     )
 
 
