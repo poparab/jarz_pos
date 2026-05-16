@@ -271,8 +271,9 @@ def _pos_profile_accounts(company: str, profiles: Sequence[str]) -> List[Payment
     return result
 
 
-def _cashlike_accounts(company: str) -> List[PaymentSource]:
+def _cashlike_accounts(company: str, excluded_accounts: Optional[Iterable[str]] = None) -> List[PaymentSource]:
     accounts: List[PaymentSource] = []
+    excluded = {str(account).strip() for account in (excluded_accounts or []) if str(account).strip()}
     rows = frappe.get_all(
         "Account",
         filters={"company": company, "is_group": 0, "account_type": ["in", ["Cash", "Bank"]]},
@@ -280,6 +281,8 @@ def _cashlike_accounts(company: str) -> List[PaymentSource]:
         order_by="account_name asc",
     )
     for row in rows:
+        if row["name"] in excluded:
+            continue
         category = "cash" if (row.get("account_type") or "").lower() == "cash" else "bank"
         accounts.append(
             PaymentSource(
@@ -301,6 +304,7 @@ def _cashlike_accounts(company: str) -> List[PaymentSource]:
         fields=["name", "account_name"],
     )
     seen_accounts = {ps.account for ps in accounts}
+    seen_accounts.update(excluded)
     for row in mobile_rows:
         if row["name"] in seen_accounts:
             continue
@@ -539,7 +543,8 @@ def get_expense_bootstrap(filters: Optional[str] = None):
         payment_sources.extend(_pos_profile_accounts(company, source_profiles))
 
     if is_manager:
-        payment_sources.extend(_cashlike_accounts(company))
+        excluded_accounts = {source.account for source in payment_sources if source.account}
+        payment_sources.extend(_cashlike_accounts(company, excluded_accounts=excluded_accounts))
 
     serialized_sources = _serialize_payment_sources(payment_sources)
 
