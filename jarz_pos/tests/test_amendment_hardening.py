@@ -12,6 +12,8 @@ They test:
   7. H3: WooCommerce Order Map is repointed to replacement after successful amendment (H3 / C-test-7)
   8. H4: woo-order lock is acquired when source invoice has woo_order_id (H4 / C-test-8)
   9. H5: publish_realtime is called with the correct event and payload (H5 / C-test-9)
+  --- Phase-3 additions ---
+  10. P3: format_invoice_data always emits customer + bundle_code keys (even when empty) (P3 / C-test-10)
 """
 
 import json
@@ -755,6 +757,142 @@ class TestAmendmentPublishRealtime(unittest.TestCase):
         self.assertEqual(event, "jarz_pos_invoice_amended")
         self.assertEqual(payload.get("source_invoice_id"), "ACC-SINV-RT-001")
         self.assertEqual(payload.get("replacement_invoice_id"), "ACC-SINV-RT-002")
+
+
+# ---------------------------------------------------------------------------
+# Test 10 – P3: format_invoice_data payload shape
+# ---------------------------------------------------------------------------
+
+class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
+    """format_invoice_data must always emit 'customer' and per-item 'bundle_code'
+    and 'is_bundle_parent'/'is_bundle_child'/'parent_bundle' keys, even when the
+    values are falsy (empty string / False).  The amendment client must never
+    receive a payload where these keys are absent.
+    """
+
+    def _make_item(self, **kwargs):
+        """Return a minimal invoice item namespace."""
+        item = SimpleNamespace(
+            item_code="ITEM-TEST",
+            item_name="Test Item",
+            qty=1.0,
+            rate=50.0,
+            amount=50.0,
+            price_list_rate=None,
+            discount_percentage=None,
+            discount_amount=None,
+            is_bundle_parent=0,
+            is_bundle_child=0,
+            bundle_code=None,
+            parent_bundle=None,
+        )
+        item.__dict__.update(kwargs)
+        return item
+
+    def _make_invoice_ns(self, items, customer="Test Customer"):
+        inv = SimpleNamespace(
+            name="ACC-SINV-SHAPE-001",
+            docstatus=1,
+            grand_total=50.0,
+            net_total=50.0,
+            total_taxes_and_charges=0.0,
+            customer=customer,
+            customer_name="Test Customer",
+            territory="Cairo",
+            posting_date="2026-05-16",
+            status="Received",
+            is_return=0,
+            outstanding_amount=0.0,
+            items=items,
+            shipping_address_name=None,
+            customer_address=None,
+            sales_partner=None,
+        )
+
+        def _get(key, default=None):
+            return inv.__dict__.get(key, default)
+
+        inv.get = _get
+        return inv
+
+    def test_customer_key_always_present(self):
+        from unittest.mock import patch, MagicMock
+        mf = MagicMock()
+        mf.get_doc.side_effect = Exception("no address")
+        mf.log_error = MagicMock()
+
+        inv = self._make_invoice_ns(items=[], customer="CUST-001")
+        with patch("jarz_pos.utils.invoice_utils.frappe", mf):
+            from jarz_pos.utils.invoice_utils import format_invoice_data
+            data = format_invoice_data(inv)
+
+        self.assertIn("customer", data, "'customer' key must always be present in format_invoice_data output")
+        self.assertEqual(data["customer"], "CUST-001")
+
+    def test_empty_customer_still_emits_key(self):
+        """When invoice.customer is empty, the key must still be present (with empty value)."""
+        from unittest.mock import patch, MagicMock
+        mf = MagicMock()
+        mf.get_doc.side_effect = Exception("no address")
+        mf.log_error = MagicMock()
+
+        inv = self._make_invoice_ns(items=[], customer="")
+        with patch("jarz_pos.utils.invoice_utils.frappe", mf):
+            from jarz_pos.utils.invoice_utils import format_invoice_data
+            data = format_invoice_data(inv)
+
+        self.assertIn("customer", data, "'customer' key must always be present even when empty")
+
+    def test_bundle_code_always_in_each_item(self):
+        """Every item in the output must carry a 'bundle_code' key."""
+        from unittest.mock import patch, MagicMock
+        mf = MagicMock()
+        mf.get_doc.side_effect = Exception("no address")
+        mf.log_error = MagicMock()
+
+        # Mix: a regular item (no bundle_code) and a bundle parent item.
+        regular_item = self._make_item(item_code="ITEM-REG", bundle_code=None)
+        bundle_parent = self._make_item(
+            item_code="BDL-PARENT",
+            is_bundle_parent=1,
+            bundle_code="BDL-123",
+        )
+        inv = self._make_invoice_ns(items=[regular_item, bundle_parent])
+        with patch("jarz_pos.utils.invoice_utils.frappe", mf):
+            from jarz_pos.utils.invoice_utils import format_invoice_data
+            data = format_invoice_data(inv)
+
+        for item_payload in data["items"]:
+            self.assertIn("bundle_code", item_payload,
+                          f"'bundle_code' key missing from item {item_payload.get('item_code')}")
+            self.assertIn("is_bundle_parent", item_payload,
+                          f"'is_bundle_parent' key missing from item {item_payload.get('item_code')}")
+            self.assertIn("is_bundle_child", item_payload,
+                          f"'is_bundle_child' key missing from item {item_payload.get('item_code')}")
+            self.assertIn("parent_bundle", item_payload,
+                          f"'parent_bundle' key missing from item {item_payload.get('item_code')}")
+
+    def test_bundle_parent_missing_bundle_code_logs_error(self):
+        """When a bundle-parent item has empty bundle_code, log_error must be called."""
+        from unittest.mock import patch, MagicMock
+        mf = MagicMock()
+        mf.get_doc.side_effect = Exception("no address")
+        mf.log_error = MagicMock()
+
+        bundle_parent_no_code = self._make_item(
+            item_code="BDL-ORPHAN",
+            is_bundle_parent=1,
+            bundle_code=None,  # missing bundle_code — drift scenario
+        )
+        inv = self._make_invoice_ns(items=[bundle_parent_no_code])
+        with patch("jarz_pos.utils.invoice_utils.frappe", mf):
+            from jarz_pos.utils.invoice_utils import format_invoice_data
+            format_invoice_data(inv)
+
+        mf.log_error.assert_called()
+        call_args = str(mf.log_error.call_args_list)
+        self.assertIn("Amendment Payload Drift", call_args,
+                      "log_error must use 'Amendment Payload Drift' title for bundle drift")
 
 
 if __name__ == "__main__":

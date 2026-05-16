@@ -244,28 +244,57 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     
     # Get items
     items = []
+    _has_bundle_parent_missing_code = False
     for item in invoice.items:
+        bundle_code_val = getattr(item, "bundle_code", None)
+        if bundle_code_val is None:
+            bundle_code_val = ""
+        else:
+            bundle_code_val = str(bundle_code_val).strip()
+        is_bundle_parent_val = getattr(item, "is_bundle_parent", None)
+        is_bundle_parent_flag = bool(is_bundle_parent_val) if is_bundle_parent_val not in (None, "") else False
+        if is_bundle_parent_flag and not bundle_code_val:
+            _has_bundle_parent_missing_code = True
         item_payload = {
             "item_code": item.item_code,
             "item_name": sanitize_printable_text(item.item_name),
             "qty": float(item.qty),
             "rate": float(item.rate),
             "amount": float(item.amount),
+            # Always emit bundle_code + is_bundle_parent/child so amendment client
+            # can reconstruct bundles even when value is falsy.
+            "bundle_code": bundle_code_val,
+            "is_bundle_parent": is_bundle_parent_flag,
+            "is_bundle_child": bool(getattr(item, "is_bundle_child", None)),
+            "parent_bundle": str(getattr(item, "parent_bundle", None) or "").strip(),
         }
         for fieldname in [
             "price_list_rate",
             "discount_percentage",
             "discount_amount",
-            "is_bundle_parent",
-            "is_bundle_child",
-            "bundle_code",
-            "parent_bundle",
         ]:
             value = getattr(item, fieldname, None)
             if value not in (None, ""):
                 item_payload[fieldname] = value
         items.append(item_payload)
+    if _has_bundle_parent_missing_code:
+        frappe.log_error(
+            f"Invoice {invoice.name} has bundle-parent rows with empty bundle_code — "
+            "amendment reconstruction may fail (catalog miss). "
+            "Check item rows for missing bundle_code field.",
+            "Amendment Payload Drift",
+        )
     
+    # Validate customer field — should never be empty on a submitted POS invoice.
+    _customer_val = str(invoice.customer or "").strip()
+    if not _customer_val:
+        frappe.log_error(
+            f"Invoice {invoice.name} has empty customer field — "
+            "amendment load will fail (customer will be missing). "
+            "Raw invoice.customer: {!r}".format(invoice.customer),
+            "Amendment Payload Missing Customer",
+        )
+
     # Create formatted invoice data
     data = {
         "name": invoice.name,
