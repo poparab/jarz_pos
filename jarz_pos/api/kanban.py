@@ -286,11 +286,11 @@ def _ensure_invoice_detail_access(invoice: frappe.Document) -> None:
     """Restrict invoice details to the current user's assigned POS Profiles."""
     allowed_profiles = _get_current_user_pos_profiles()
     if not allowed_profiles:
-        frappe.throw(_("Not permitted: no POS Profiles assigned"), frappe.PermissionError)
+        frappe.throw(frappe._("Not permitted: no POS Profiles assigned"), frappe.PermissionError)
 
     invoice_profile = str(invoice.get("custom_kanban_profile") or invoice.get("pos_profile") or "").strip()
     if invoice_profile not in allowed_profiles:
-        frappe.throw(_("Not permitted for this invoice branch"), frappe.PermissionError)
+        frappe.throw(frappe._("Not permitted for this invoice branch"), frappe.PermissionError)
 
 
 def _get_territory_shipping_values(territory_name: str) -> Dict[str, float]:
