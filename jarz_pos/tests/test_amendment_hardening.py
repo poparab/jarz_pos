@@ -986,6 +986,36 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
         self.assertIn("Amendment Payload Drift", call_args,
                       "log_error must use 'Amendment Payload Drift' title for bundle drift")
 
+    def test_bundle_parent_missing_bundle_code_is_derived_from_erpnext_item(self):
+        """Legacy parent rows can recover bundle_code from Jarz Bundle.erpnext_item."""
+        from unittest.mock import patch, MagicMock
+        mf = MagicMock()
+        mf.get_doc.side_effect = Exception("no address")
+        mf.log_error = MagicMock()
+
+        def get_all_side_effect(doctype, filters=None, fields=None, limit=None, **kwargs):
+            if doctype == "Jarz Bundle":
+                self.assertEqual(filters, {"erpnext_item": "BDL-PARENT-ITEM"})
+                self.assertEqual(fields, ["name"])
+                self.assertEqual(limit, 1)
+                return [{"name": "BDL-RECOVERED"}]
+            return []
+
+        mf.get_all.side_effect = get_all_side_effect
+
+        bundle_parent_no_code = self._make_item(
+            item_code="BDL-PARENT-ITEM",
+            is_bundle_parent=1,
+            bundle_code=None,
+        )
+        inv = self._make_invoice_ns(items=[bundle_parent_no_code])
+        with patch("jarz_pos.utils.invoice_utils.frappe", mf):
+            from jarz_pos.utils.invoice_utils import format_invoice_data
+            data = format_invoice_data(inv)
+
+        self.assertEqual(data["items"][0]["bundle_code"], "BDL-RECOVERED")
+        self.assertFalse(mf.log_error.called)
+
 
 if __name__ == "__main__":
     unittest.main()

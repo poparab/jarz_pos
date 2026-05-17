@@ -153,7 +153,8 @@ class TestPOSCatalogFilters(unittest.TestCase):
 		mock_assert_profile.assert_called_once_with('POS-1')
 		self.assertEqual([bundle['id'] for bundle in result], ['BUNDLE-VALID'])
 		self.assertEqual(result[0]['free_shipping'], 1)
-		self.assertNotIn('erpnext_item', result[0])
+		self.assertEqual(result[0]['erpnext_item'], 'ERP-VALID')
+		self.assertEqual(result[0]['parent_item_code'], 'ERP-VALID')
 		self.assertEqual(
 			result[0]['item_groups'],
 			[

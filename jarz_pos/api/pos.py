@@ -166,7 +166,7 @@ def get_profile_bundles(profile: str):
             continue
 
         b['item_groups'] = processed_groups
-        b.pop('erpnext_item', None)
+        b['parent_item_code'] = b.get('erpnext_item')
         # Normalize flag for clients
         try:
             b['free_shipping'] = 1 if int(b.get('free_shipping') or 0) else 0

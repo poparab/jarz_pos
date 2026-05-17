@@ -283,6 +283,35 @@ def _derive_bundle_group_metadata(
     return "", ""
 
 
+def _derive_bundle_code_from_parent_item(
+    item_code: str,
+    cache: Dict[str, str],
+) -> str:
+    """Return Jarz Bundle name linked to a bundle parent ERPNext item."""
+    item_code = str(item_code or "").strip()
+    if not item_code:
+        return ""
+    if item_code not in cache:
+        bundle_code = ""
+        try:
+            rows = frappe.get_all(
+                "Jarz Bundle",
+                filters={"erpnext_item": item_code},
+                fields=["name"],
+                limit=1,
+            )
+            if isinstance(rows, (list, tuple)) and rows:
+                first = rows[0]
+                if isinstance(first, dict):
+                    bundle_code = str(first.get("name") or "").strip()
+                else:
+                    bundle_code = str(getattr(first, "name", "") or "").strip()
+        except Exception:
+            bundle_code = ""
+        cache[item_code] = bundle_code
+    return cache[item_code]
+
+
 def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     """Format a Sales Invoice document into a standardized dictionary format.
     
@@ -300,6 +329,7 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     items = []
     _has_bundle_parent_missing_code = False
     _bundle_group_derivation_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+    _bundle_parent_derivation_cache: Dict[str, str] = {}
     for item in invoice.items:
         bundle_code_val = getattr(item, "bundle_code", None)
         if bundle_code_val is None:
@@ -309,7 +339,11 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         is_bundle_parent_val = getattr(item, "is_bundle_parent", None)
         is_bundle_parent_flag = bool(is_bundle_parent_val) if is_bundle_parent_val not in (None, "") else False
         if is_bundle_parent_flag and not bundle_code_val:
-            _has_bundle_parent_missing_code = True
+            bundle_code_val = _derive_bundle_code_from_parent_item(
+                item.item_code, _bundle_parent_derivation_cache
+            )
+            if not bundle_code_val:
+                _has_bundle_parent_missing_code = True
 
         # Read persisted group metadata; derive on-the-fly for legacy / unfilled rows
         is_bundle_child_flag = bool(getattr(item, "is_bundle_child", None))
