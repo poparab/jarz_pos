@@ -113,7 +113,10 @@ def add_items_to_invoice(invoice_doc, processed_items, logger):
                         total_planned_discount += discount_amt_per_unit * invoice_item.qty
 
             # Custom bundle flags (only set if fields exist)
-            for flag_field in ["is_bundle_parent", "is_bundle_child", "bundle_code", "parent_bundle"]:
+            for flag_field in [
+                "is_bundle_parent", "is_bundle_child", "bundle_code", "parent_bundle",
+                "bundle_group_key", "bundle_group_name",
+            ]:
                 if flag_field in item_data:
                     try:
                         setattr(invoice_item, flag_field, item_data[flag_field])
@@ -229,6 +232,57 @@ def get_address_details(address_name: str) -> str:
         return ""
 
 
+def _safe_float(value, fallback: float = 0.0) -> float:
+    """Convert value to float; return fallback on None / empty / unparseable."""
+    try:
+        if value is None or value == "":
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _derive_bundle_group_metadata(
+    bundle_code: str,
+    item_code: str,
+    cache: Dict[str, Dict[str, Dict[str, str]]],
+) -> tuple:
+    """Return (group_key, group_name) for a bundle child item.
+
+    Looks up the Jarz Bundle document by bundle_code, walks its Jarz Bundle
+    Item Group rows, and finds which group contains item_code.  Results are
+    cached per bundle_code within a single request so repeated child rows for
+    the same bundle do not re-query.  Returns ('', '') when the bundle or item
+    cannot be resolved.
+    """
+    if bundle_code not in cache:
+        bundle_map: Dict[str, Dict[str, str]] = {}
+        try:
+            bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
+            for group_row in bundle_doc.items:
+                group_key = str(getattr(group_row, "name", "") or "")
+                group_name = str(group_row.item_group or "")
+                items_in_group = frappe.get_all(
+                    "Item",
+                    filters={"item_group": group_name, "disabled": 0, "has_variants": 0},
+                    fields=["name"],
+                    limit=0,
+                )
+                for item_row in items_in_group:
+                    bundle_map[item_row["name"]] = {
+                        "key": group_key,
+                        "name": group_name,
+                    }
+        except Exception:
+            pass  # Bundle not found or DB error — leave entry empty so caller gets ""
+        cache[bundle_code] = bundle_map
+
+    entry = cache.get(bundle_code, {}).get(item_code)
+    if entry:
+        return entry["key"], entry["name"]
+    return "", ""
+
+
 def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     """Format a Sales Invoice document into a standardized dictionary format.
     
@@ -245,6 +299,7 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     # Get items
     items = []
     _has_bundle_parent_missing_code = False
+    _bundle_group_derivation_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
     for item in invoice.items:
         bundle_code_val = getattr(item, "bundle_code", None)
         if bundle_code_val is None:
@@ -255,20 +310,36 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         is_bundle_parent_flag = bool(is_bundle_parent_val) if is_bundle_parent_val not in (None, "") else False
         if is_bundle_parent_flag and not bundle_code_val:
             _has_bundle_parent_missing_code = True
+
+        # Read persisted group metadata; derive on-the-fly for legacy / unfilled rows
+        is_bundle_child_flag = bool(getattr(item, "is_bundle_child", None))
+        bundle_group_key = str(getattr(item, "bundle_group_key", None) or "").strip()
+        bundle_group_name = str(getattr(item, "bundle_group_name", None) or "").strip()
+        if is_bundle_child_flag and (not bundle_group_key or not bundle_group_name):
+            parent_bundle_code = str(getattr(item, "parent_bundle", None) or "").strip()
+            if parent_bundle_code:
+                derived_key, derived_name = _derive_bundle_group_metadata(
+                    parent_bundle_code, item.item_code, _bundle_group_derivation_cache
+                )
+                if derived_key and not bundle_group_key:
+                    bundle_group_key = derived_key
+                if derived_name and not bundle_group_name:
+                    bundle_group_name = derived_name
+
         item_payload = {
             "item_code": item.item_code,
             "item_name": sanitize_printable_text(item.item_name),
-            "qty": float(item.qty),
-            "rate": float(item.rate),
-            "amount": float(item.amount),
+            "qty": _safe_float(item.qty),
+            "rate": _safe_float(item.rate),
+            "amount": _safe_float(item.amount),
             # Always emit bundle_code + is_bundle_parent/child so amendment client
             # can reconstruct bundles even when value is falsy.
             "bundle_code": bundle_code_val,
             "is_bundle_parent": is_bundle_parent_flag,
-            "is_bundle_child": bool(getattr(item, "is_bundle_child", None)),
+            "is_bundle_child": is_bundle_child_flag,
             "parent_bundle": str(getattr(item, "parent_bundle", None) or "").strip(),
-            "bundle_group_key": str(getattr(item, "bundle_group_key", None) or "").strip(),
-            "bundle_group_name": str(getattr(item, "bundle_group_name", None) or "").strip(),
+            "bundle_group_key": bundle_group_key,
+            "bundle_group_name": bundle_group_name,
         }
         for fieldname in [
             "price_list_rate",
