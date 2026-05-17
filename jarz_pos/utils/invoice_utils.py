@@ -267,6 +267,8 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
             "is_bundle_parent": is_bundle_parent_flag,
             "is_bundle_child": bool(getattr(item, "is_bundle_child", None)),
             "parent_bundle": str(getattr(item, "parent_bundle", None) or "").strip(),
+            "bundle_group_key": str(getattr(item, "bundle_group_key", None) or "").strip(),
+            "bundle_group_name": str(getattr(item, "bundle_group_name", None) or "").strip(),
         }
         for fieldname in [
             "price_list_rate",

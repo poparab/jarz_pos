@@ -18,3 +18,4 @@ jarz_pos.Patches.v1_1.ensure_employee_shift_field
 jarz_pos.Patches.v1_2.migrate_shift_field_to_user
 jarz_pos.Patches.v1_3.set_default_receipt_config
 jarz_pos.Patches.v1_4.seed_default_delivery_promotion_rule
+jarz_pos.Patches.v1_5.ensure_sales_invoice_item_bundle_fields

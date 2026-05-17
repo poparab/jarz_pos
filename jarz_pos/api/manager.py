@@ -809,18 +809,53 @@ def _run_invoice_amendment_job(
         parsed_cart = []
 
     submitted_item_count = len(parsed_cart) if isinstance(parsed_cart, list) else 0
-    if submitted_item_count == 0:
+
+    def _release_invoice_lock_if_needed():
         if inv_lock_acquired:
             try:
                 frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
             except Exception:
                 pass
+
+    if submitted_item_count == 0:
+        _release_invoice_lock_if_needed()
         return {
             "success": False,
             "request_id": request_id,
             "error": _("The submitted cart is empty. Please reload the order and try again."),
             "amendment_block_code": "empty_cart",
         }
+
+    if isinstance(parsed_cart, list):
+        malformed_bundle_rows = []
+        for row in parsed_cart:
+            if not isinstance(row, dict) or row.get("is_bundle") is not True:
+                continue
+            selected_items = row.get("selected_items")
+            has_selected_children = isinstance(selected_items, dict) and any(
+                isinstance(entries, list) and len(entries) > 0
+                for entries in selected_items.values()
+            )
+            if not has_selected_children:
+                malformed_bundle_rows.append(str(row.get("item_code") or "bundle"))
+
+        if malformed_bundle_rows:
+            _release_invoice_lock_if_needed()
+            frappe.log_error(
+                f"Invoice amendment {invoice_id} submitted bundle rows without selected children: "
+                f"{', '.join(malformed_bundle_rows)}",
+                "Invoice Amendment Bundle Guard",
+            )
+            return {
+                "success": False,
+                "request_id": request_id,
+                "error": _(
+                    "One or more bundles were submitted without their selected items. "
+                    "Please reload the order and try again."
+                ),
+                "amendment_block_code": "bundle_selection_missing",
+                "malformed_bundles": malformed_bundle_rows,
+            }
 
     source_grand_total = float(source_invoice.get("grand_total") or 0)
     if expected_source_grand_total is not None and source_grand_total > 0:

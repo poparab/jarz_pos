@@ -4,6 +4,8 @@ This module tests the business logic for bundle expansion and pricing.
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
 class TestBundleProcessing(unittest.TestCase):
@@ -122,6 +124,44 @@ class TestBundleProcessing(unittest.TestCase):
 		result = processor._aggregate_selected_items("ROW-LARGE-1", "Large", 1)
 
 		self.assertEqual(result, {"ITEM-A": {"qty": 1, "rate": None}})
+
+	def test_get_invoice_items_stamps_bundle_group_metadata_on_children(self):
+		"""Child invoice rows should carry the bundle group identity needed by amendments."""
+		from jarz_pos.services.bundle_processing import BundleProcessor
+
+		processor = BundleProcessor("BDL-1", quantity=2)
+		processor.bundle_doc = SimpleNamespace(bundle_price=200.0)
+		processor.parent_item = SimpleNamespace(
+			name="BUNDLE-ITEM",
+			item_name="Bundle Item",
+			description="Bundle Item",
+		)
+		processor.bundle_items = [
+			{
+				"item": SimpleNamespace(
+					name="ITEM-A",
+					item_name="Item A",
+					description="Item A",
+				),
+				"qty": 1,
+				"rate": 120.0,
+				"item_group": "Flavor",
+				"item_group_key": "ROW-FLAVOR-1",
+			}
+		]
+		processor.get_item_rate = lambda _item_code: 200.0
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_precision.return_value = 2
+		mock_frappe.logger.return_value = MagicMock()
+
+		with patch("jarz_pos.services.bundle_processing.frappe", mock_frappe):
+			rows = processor.get_invoice_items()
+
+		child = next(row for row in rows if row.get("is_bundle_child"))
+		self.assertEqual(child["parent_bundle"], "BDL-1")
+		self.assertEqual(child["bundle_group_key"], "ROW-FLAVOR-1")
+		self.assertEqual(child["bundle_group_name"], "Flavor")
 
 	def test_process_bundle_item_structure(self):
 		"""Test that process_bundle_item returns correct structure."""

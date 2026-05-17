@@ -705,8 +705,7 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
         error_msg = f"Error processing bundle with ERPNext item {item_code}: {str(bundle_error)}"
         logger.error(error_msg)
         print(f"      ❌ {error_msg}")
-        # Continue with other items instead of failing the entire invoice
-        return []
+        frappe.throw(error_msg)
 
 
 def _process_regular_item(item_code, qty, rate, logger):

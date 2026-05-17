@@ -13,7 +13,7 @@ They test:
   8. H4: woo-order lock is acquired when source invoice has woo_order_id (H4 / C-test-8)
   9. H5: publish_realtime is called with the correct event and payload (H5 / C-test-9)
   --- Phase-3 additions ---
-  10. P3: format_invoice_data always emits customer + bundle_code keys (even when empty) (P3 / C-test-10)
+    10. P3: format_invoice_data always emits customer + bundle metadata keys (even when empty) (P3 / C-test-10)
 """
 
 import json
@@ -156,6 +156,69 @@ class TestAmendmentRejectsEmptyCart(unittest.TestCase):
 
         self.assertFalse(result.get("success"), f"Expected failure, got: {result}")
         self.assertEqual(result.get("amendment_block_code"), "empty_cart")
+
+
+class TestAmendmentRejectsMalformedBundleCart(unittest.TestCase):
+    """_run_invoice_amendment_job must reject bundle rows without selected children."""
+
+    def _build_mock_frappe(self):
+        mf = MagicMock()
+        mf._ = lambda x: x
+        mf.parse_json.side_effect = json.loads
+        mf.db.sql.return_value = [[1]]
+        mf.session.user = "test@example.com"
+        mf.db.savepoint.return_value = None
+        mf.local.site = "frontend"
+        mf.logger.return_value = MagicMock()
+        return mf
+
+    def test_rejects_bundle_row_without_selected_items(self):
+        inv = _make_invoice(
+            items=[
+                SimpleNamespace(
+                    item_code="BDL-1",
+                    is_bundle_parent=1,
+                    bundle_code="BDL-1",
+                ),
+                SimpleNamespace(
+                    item_code="ITEM-A",
+                    is_bundle_child=1,
+                    parent_bundle="BDL-1",
+                ),
+            ]
+        )
+        cart = _make_cart_json(
+            [
+                {
+                    "item_code": "BDL-1",
+                    "qty": 1,
+                    "rate": 120,
+                    "is_bundle": True,
+                    "selected_items": {},
+                }
+            ]
+        )
+
+        with (
+            patch("jarz_pos.api.manager.frappe", self._build_mock_frappe()) as mf,
+            patch("jarz_pos.api.manager._create_amendment_invoice", MagicMock()),
+            patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+            patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+            patch("jarz_pos.api.manager.frappe.get_doc", return_value=inv),
+            patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+        ):
+            from jarz_pos.api.manager import _run_invoice_amendment_job
+
+            result = _run_invoice_amendment_job(
+                invoice_id="ACC-SINV-TEST-001",
+                request_id="test-req-bundle-missing",
+                cart_json=cart,
+                pos_profile_name="Nasr city",
+            )
+
+        self.assertFalse(result.get("success"), f"Expected failure, got: {result}")
+        self.assertEqual(result.get("amendment_block_code"), "bundle_selection_missing")
+        self.assertEqual(result.get("malformed_bundles"), ["BDL-1"])
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +848,8 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
             is_bundle_child=0,
             bundle_code=None,
             parent_bundle=None,
+            bundle_group_key=None,
+            bundle_group_name=None,
         )
         item.__dict__.update(kwargs)
         return item
@@ -871,6 +936,33 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
                           f"'is_bundle_child' key missing from item {item_payload.get('item_code')}")
             self.assertIn("parent_bundle", item_payload,
                           f"'parent_bundle' key missing from item {item_payload.get('item_code')}")
+            self.assertIn("bundle_group_key", item_payload,
+                          f"'bundle_group_key' key missing from item {item_payload.get('item_code')}")
+            self.assertIn("bundle_group_name", item_payload,
+                          f"'bundle_group_name' key missing from item {item_payload.get('item_code')}")
+
+    def test_bundle_group_fields_are_emitted_when_present(self):
+        """Bundle child group metadata must be exposed for amendment reconstruction."""
+        from unittest.mock import patch, MagicMock
+        mf = MagicMock()
+        mf.get_doc.side_effect = Exception("no address")
+        mf.log_error = MagicMock()
+
+        child_item = self._make_item(
+            item_code="ITEM-A",
+            is_bundle_child=1,
+            parent_bundle="BDL-123",
+            bundle_group_key="ROW-FLAVOR-1",
+            bundle_group_name="Flavor",
+        )
+        inv = self._make_invoice_ns(items=[child_item])
+        with patch("jarz_pos.utils.invoice_utils.frappe", mf):
+            from jarz_pos.utils.invoice_utils import format_invoice_data
+            data = format_invoice_data(inv)
+
+        item_payload = data["items"][0]
+        self.assertEqual(item_payload["bundle_group_key"], "ROW-FLAVOR-1")
+        self.assertEqual(item_payload["bundle_group_name"], "Flavor")
 
     def test_bundle_parent_missing_bundle_code_logs_error(self):
         """When a bundle-parent item has empty bundle_code, log_error must be called."""

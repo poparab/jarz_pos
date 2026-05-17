@@ -143,6 +143,7 @@ class BundleProcessor:
                             'qty': data["qty"],
                             'rate': rate,
                             'item_group': item_group_name,
+                            'item_group_key': item_group_key,
                         })
 
                     # Skip fallback when selections were provided
@@ -157,6 +158,7 @@ class BundleProcessor:
                     'qty': item_quantity,
                     'rate': self.get_item_rate(item_doc.name),
                     'item_group': item_group_name,
+                    'item_group_key': item_group_key,
                 })
                 
             frappe.log_error(f"Bundle loaded: {self.bundle_code}, ERPNext Item: {self.parent_item.name}, Child Items: {len(self.bundle_items)}", "Bundle Processing")
@@ -375,6 +377,8 @@ class BundleProcessor:
                 'discount_percentage': uniform_pct,  # CRITICAL: Let ERPNext compute rate and discount_amount
                 'is_bundle_child': 1,
                 'parent_bundle': self.bundle_code,
+                'bundle_group_key': bi.get('item_group_key') or '',
+                'bundle_group_name': bi.get('item_group') or '',
                 '_unit_rate': unit_rate,
                 '_qty_total': qty_total,
                 '_expected_line_total': line_discounted_total
