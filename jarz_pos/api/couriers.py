@@ -20,6 +20,7 @@ from jarz_pos.services.delivery_handling import (
     handle_out_for_delivery_transition as _handle_out_for_delivery_transition,
     settle_single_invoice_paid as _settle_single_invoice_paid,
     settle_courier_collected_payment as _settle_courier_collected_payment,
+    change_payment_collection_method as _change_payment_collection_method,
 )
 from jarz_pos.services.delivery_party import create_delivery_party as _create_delivery_party
 from jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
@@ -31,7 +32,7 @@ from jarz_pos.utils.account_utils import (
     validate_account_exists,
 )
 from frappe.utils import now_datetime, get_datetime
-from jarz_pos.constants import DELIVERY_GROUPS
+from jarz_pos.constants import DELIVERY_GROUPS, ROLES
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +213,53 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
     """
     frappe.logger().info(f"API settle_courier_collected_payment CALLED: invoice={invoice_name}, pos_profile={pos_profile}, party_type={party_type}, party={party}")
     return _settle_courier_collected_payment(invoice_name, pos_profile, party_type, party)
+
+
+def _ensure_collection_change_access() -> None:
+    roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
+    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, ROLES.JARZ_LINE_MANAGER, "JARZ line manager"}
+    if not roles.intersection(allowed):
+        frappe.throw("Not permitted: Manager access required", frappe.PermissionError)
+
+
+@frappe.whitelist(allow_guest=False)
+def change_payment_collection_method(
+    invoice_name: str,
+    new_method: str,
+    pos_profile: str,
+    party_type: str | None = None,
+    party: str | None = None,
+    reference_no: str | None = None,
+    reference_date: str | None = None,
+    receipt_name: str | None = None,
+    notes: str | None = None,
+    idempotency_token: str | None = None,
+):
+    """Manager-only collection-method switch for customer-unpaid courier orders."""
+    try:
+        _ensure_collection_change_access()
+        inv = frappe.get_doc("Sales Invoice", (invoice_name or "").strip())
+        frappe.has_permission("Sales Invoice", "write", doc=inv, throw=True)
+        result = _change_payment_collection_method(
+            invoice_name=invoice_name,
+            new_method=new_method,
+            pos_profile=pos_profile,
+            party_type=party_type,
+            party=party,
+            reference_no=reference_no,
+            reference_date=reference_date,
+            receipt_name=receipt_name,
+            notes=notes,
+            idempotency_token=idempotency_token,
+        )
+        return {"success": True, "data": result}
+    except frappe.PermissionError:
+        raise
+    except frappe.ValidationError:
+        raise
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "change_payment_collection_method failed")
+        raise
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]

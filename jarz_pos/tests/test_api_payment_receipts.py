@@ -1,7 +1,22 @@
 import unittest
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
-from frappe.exceptions import PermissionError as FrappePermissionError
+try:
+	from frappe.exceptions import PermissionError as FrappePermissionError
+except ModuleNotFoundError:
+	class FrappePermissionError(Exception):
+		pass
+
+	frappe_module = types.ModuleType("frappe")
+	exceptions_module = types.ModuleType("frappe.exceptions")
+	exceptions_module.PermissionError = FrappePermissionError
+	frappe_module.exceptions = exceptions_module
+	frappe_module._ = lambda message: message
+	frappe_module.whitelist = lambda *args, **kwargs: (lambda fn: fn)
+	sys.modules.setdefault("frappe", frappe_module)
+	sys.modules.setdefault("frappe.exceptions", exceptions_module)
 
 
 def _raise_frappe(message, exc=None, title=None):
@@ -11,10 +26,15 @@ def _raise_frappe(message, exc=None, title=None):
 
 
 class _FakeReceiptDoc:
-	def __init__(self, *, status="Unconfirmed", pos_profile="Dokki"):
+	def __init__(self, *, status="Unconfirmed", pos_profile="Dokki", sales_invoice="ACC-SINV-0001", payment_method="InstaPay", amount=120.0, receipt_image_url="/files/receipt.png"):
 		self.name = "PPR-0001"
 		self.status = status
 		self.pos_profile = pos_profile
+		self.sales_invoice = sales_invoice
+		self.payment_method = payment_method
+		self.amount = amount
+		self.receipt_image = receipt_image_url
+		self.receipt_image_url = receipt_image_url
 		self.confirmed_by = None
 		self.confirmed_date = None
 		self.save = MagicMock()
@@ -91,3 +111,74 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		self.assertEqual(len(result), 1)
 		self.assertFalse(result[0]["can_confirm"])
 		self.assertEqual(result[0]["customer_name"], "Jarz Test Customer")
+		self.assertEqual(
+			mock_frappe.get_all.call_args_list[0].kwargs["filters"]["status"],
+			["!=", "Changed"],
+		)
+
+	def test_mark_payment_receipts_changed_for_invoice_updates_active_receipts(self):
+		from jarz_pos.api.payment_receipts import mark_payment_receipts_changed_for_invoice
+
+		mock_frappe = MagicMock()
+		receipt_doc = _FakeReceiptDoc(status="Unconfirmed")
+		mock_frappe.get_all.return_value = [{
+			"name": "PPR-0001",
+			"payment_method": "InstaPay",
+		}]
+		mock_frappe.get_doc.return_value = receipt_doc
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			result = mark_payment_receipts_changed_for_invoice(
+				"ACC-SINV-0001",
+				payment_methods=["Instapay"],
+			)
+
+		self.assertEqual(result, ["PPR-0001"])
+		self.assertEqual(receipt_doc.status, "Changed")
+		receipt_doc.save.assert_called_once_with(ignore_permissions=True)
+
+	def test_create_payment_receipt_ignores_changed_receipts(self):
+		from jarz_pos.api.payment_receipts import create_payment_receipt
+
+		mock_frappe = MagicMock()
+		new_receipt = MagicMock()
+		new_receipt.name = "PPR-0002"
+		mock_frappe.get_all.return_value = []
+		mock_frappe.get_doc.return_value = new_receipt
+		mock_frappe.session.user = "manager@example.com"
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			result = create_payment_receipt(
+				sales_invoice="ACC-SINV-0001",
+				payment_method="Instapay",
+				amount=120.0,
+				pos_profile="Dokki",
+			)
+
+		self.assertTrue(result["success"])
+		self.assertEqual(result["receipt_name"], "PPR-0002")
+		self.assertEqual(
+			mock_frappe.get_all.call_args.kwargs["filters"]["status"],
+			["!=", "Changed"],
+		)
+
+	def test_ensure_uploaded_payment_receipt_requires_image_and_matching_invoice(self):
+		from jarz_pos.api.payment_receipts import ensure_uploaded_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_doc.return_value = _FakeReceiptDoc(
+			receipt_image_url="",
+		)
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			with self.assertRaises(Exception) as exc:
+				ensure_uploaded_payment_receipt(
+					"PPR-0001",
+					sales_invoice="ACC-SINV-0001",
+					payment_method="Instapay",
+					amount=120.0,
+				)
+
+		self.assertIn("uploaded image", str(exc.exception))

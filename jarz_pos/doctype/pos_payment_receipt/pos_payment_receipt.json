@@ -74,7 +74,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Unconfirmed\nConfirmed",
+    "options": "Unconfirmed\nConfirmed\nChanged",
    "reqd": 1,
    "default": "Unconfirmed"
   },

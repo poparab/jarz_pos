@@ -11,6 +11,110 @@ from frappe.exceptions import PermissionError as FrappePermissionError
 from jarz_pos.constants import ROLES
 
 
+RECEIPT_STATUS_UNCONFIRMED = "Unconfirmed"
+RECEIPT_STATUS_CONFIRMED = "Confirmed"
+RECEIPT_STATUS_CHANGED = "Changed"
+
+
+def _normalize_receipt_method(method: str | None) -> str:
+    normalized = str(method or "").strip().lower().replace(" ", "").replace("_", "")
+    if normalized in {"instapay", "insta", "bank", "bankaccount"}:
+        return "instapay"
+    if normalized in {"wallet", "mobilewallet"}:
+        return "wallet"
+    if normalized in {"paymentgateway", "gateway", "card"}:
+        return "payment_gateway"
+    if normalized in {"cash", "cod", "cashondelivery"}:
+        return "cash"
+    return normalized
+
+
+def mark_payment_receipts_changed_for_invoice(
+    sales_invoice: str,
+    *,
+    payment_methods: list[str] | tuple[str, ...] | set[str] | None = None,
+    receipt_name: str | None = None,
+) -> list[str]:
+    invoice_name = str(sales_invoice or "").strip()
+    if not invoice_name:
+        return []
+
+    filters: dict[str, object] = {
+        "sales_invoice": invoice_name,
+        "status": ["!=", RECEIPT_STATUS_CHANGED],
+    }
+    if receipt_name:
+        filters["name"] = str(receipt_name).strip()
+
+    rows = frappe.get_all(
+        "POS Payment Receipt",
+        filters=filters,
+        fields=["name", "payment_method"],
+        order_by="creation desc",
+    )
+    if payment_methods:
+        allowed_methods = {
+            _normalize_receipt_method(method)
+            for method in payment_methods
+            if str(method or "").strip()
+        }
+        rows = [
+            row for row in rows
+            if _normalize_receipt_method(row.get("payment_method")) in allowed_methods
+        ]
+
+    changed_receipts: list[str] = []
+    for row in rows:
+        receipt = frappe.get_doc("POS Payment Receipt", row.get("name"))
+        receipt.status = RECEIPT_STATUS_CHANGED
+        receipt.save(ignore_permissions=True)
+        changed_receipts.append(receipt.name)
+
+    return changed_receipts
+
+
+def ensure_uploaded_payment_receipt(
+    receipt_name: str,
+    *,
+    sales_invoice: str,
+    payment_method: str,
+    amount: float,
+) -> dict[str, Any]:
+    normalized_name = str(receipt_name or "").strip()
+    if not normalized_name:
+        frappe.throw("Payment receipt is required")
+    if not frappe.db.exists("POS Payment Receipt", normalized_name):
+        frappe.throw("Payment receipt was not found")
+
+    receipt = frappe.get_doc("POS Payment Receipt", normalized_name)
+    if str(getattr(receipt, "sales_invoice", "") or "").strip() != str(sales_invoice or "").strip():
+        frappe.throw("Payment receipt does not belong to this invoice")
+    if str(getattr(receipt, "status", "") or "").strip() == RECEIPT_STATUS_CHANGED:
+        frappe.throw("Changed payment receipts cannot be used")
+    if _normalize_receipt_method(getattr(receipt, "payment_method", None)) != _normalize_receipt_method(payment_method):
+        frappe.throw("Payment receipt method does not match the selected collection method")
+    receipt_amount = float(getattr(receipt, "amount", 0) or 0)
+    if abs(receipt_amount - float(amount or 0)) > 0.01:
+        frappe.throw("Payment receipt amount does not match the order amount")
+
+    image_url = str(
+        getattr(receipt, "receipt_image_url", None)
+        or getattr(receipt, "receipt_image", None)
+        or ""
+    ).strip()
+    if not image_url:
+        frappe.throw("Payment receipt must have an uploaded image")
+
+    return {
+        "name": receipt.name,
+        "sales_invoice": str(getattr(receipt, "sales_invoice", "") or "").strip(),
+        "payment_method": str(getattr(receipt, "payment_method", "") or "").strip(),
+        "amount": receipt_amount,
+        "status": str(getattr(receipt, "status", "") or "").strip(),
+        "receipt_image_url": image_url,
+    }
+
+
 def _current_user_roles() -> set[str]:
     return {
         str(role or "").strip()
@@ -60,7 +164,7 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
     
     Args:
         pos_profile: Filter by POS profile (optional)
-        status: Filter by status: Unconfirmed/Confirmed (optional)
+        status: Filter by status: Unconfirmed/Confirmed/Changed (optional)
     
     Returns:
         list: List of payment receipt records
@@ -73,6 +177,8 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
         
         if status:
             filters['status'] = status
+        else:
+            filters['status'] = ['!=', RECEIPT_STATUS_CHANGED]
         
         # Get accessible POS profiles for the current user
         from jarz_pos.api.manager import _current_user_allowed_profiles
@@ -143,17 +249,31 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
     try:
         frappe.logger().info(f"Creating payment receipt for invoice {sales_invoice}")
         
-        # Check if receipt already exists for this invoice and payment method
-        existing = frappe.db.exists('POS Payment Receipt', {
-            'sales_invoice': sales_invoice,
-            'payment_method': payment_method
-        })
-        
-        if existing:
-            frappe.logger().info(f"Receipt already exists: {existing}")
+        # Reuse only active receipts; changed receipts are audit history and should not block recreation.
+        existing = frappe.get_all(
+            'POS Payment Receipt',
+            filters={
+                'sales_invoice': sales_invoice,
+                'status': ['!=', RECEIPT_STATUS_CHANGED],
+            },
+            fields=['name', 'payment_method'],
+            order_by='creation desc',
+            limit_page_length=20,
+        )
+        existing_name = next(
+            (
+                row.get('name')
+                for row in existing
+                if _normalize_receipt_method(row.get('payment_method')) == _normalize_receipt_method(payment_method)
+            ),
+            None,
+        )
+
+        if existing_name:
+            frappe.logger().info(f"Receipt already exists: {existing_name}")
             return {
                 'success': True,
-                'receipt_name': existing,
+                'receipt_name': existing_name,
                 'message': 'Receipt already exists'
             }
         
@@ -164,7 +284,7 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
             'payment_method': payment_method,
             'amount': amount,
             'pos_profile': pos_profile,
-            'status': 'Unconfirmed',
+            'status': RECEIPT_STATUS_UNCONFIRMED,
             'uploaded_by': frappe.session.user
         })
         
@@ -258,14 +378,17 @@ def confirm_receipt(receipt_name: str):
         
         receipt = frappe.get_doc('POS Payment Receipt', receipt_name)
         _ensure_payment_receipt_confirm_access(getattr(receipt, 'pos_profile', None))
+
+        if receipt.status == RECEIPT_STATUS_CHANGED:
+            frappe.throw('Changed payment receipts cannot be confirmed')
         
-        if receipt.status == 'Confirmed':
+        if receipt.status == RECEIPT_STATUS_CONFIRMED:
             return {
                 'success': True,
                 'message': 'Receipt already confirmed'
             }
         
-        receipt.status = 'Confirmed'
+        receipt.status = RECEIPT_STATUS_CONFIRMED
         receipt.confirmed_by = frappe.session.user
         receipt.confirmed_date = frappe.utils.now()
         receipt.save()

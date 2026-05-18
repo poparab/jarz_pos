@@ -9,6 +9,10 @@ from contextlib import contextmanager
 
 import frappe
 from frappe import _
+from jarz_pos.api.payment_receipts import (
+    ensure_uploaded_payment_receipt,
+    mark_payment_receipts_changed_for_invoice,
+)
 from jarz_pos.constants import ACCOUNTS, WS_EVENTS
 from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
@@ -2075,6 +2079,160 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
     return {"success": True, **payload}
 
 
+def change_payment_collection_method(
+    invoice_name: str,
+    new_method: str,
+    pos_profile: str,
+    party_type: str | None = None,
+    party: str | None = None,
+    reference_no: str | None = None,
+    reference_date: str | None = None,
+    receipt_name: str | None = None,
+    notes: str | None = None,
+    idempotency_token: str | None = None,
+):
+    """Change how a customer-unpaid courier order will be collected before settlement."""
+
+    invoice_name = (invoice_name or "").strip()
+    new_method = _normalize_collection_method(new_method)
+    pos_profile = (pos_profile or "").strip()
+    party_type = (party_type or "").strip() or None
+    party = (party or "").strip() or None
+    reference_no = (reference_no or "").strip() or None
+    reference_date = (reference_date or "").strip() or None
+    receipt_name = (receipt_name or "").strip() or None
+    notes = (notes or "").strip() or None
+    idempotency_token = (idempotency_token or "").strip() or frappe.generate_hash(length=16)
+
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+    if not new_method:
+        frappe.throw("new_method required")
+    if not pos_profile:
+        frappe.throw("pos_profile required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+    if int(getattr(inv, "is_return", 0) or 0):
+        frappe.throw("Return invoices are not supported for collection method changes")
+    if getattr(inv, "sales_partner", None):
+        frappe.throw("Sales partner orders are not supported for this collection method workflow yet")
+
+    state = str(inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "").strip().lower()
+    if state not in {"out for delivery", "out_for_delivery", "delivered"}:
+        frappe.throw("Collection method can only be changed for Out for Delivery or Delivered orders")
+
+    try:
+        frappe.db.sql("SELECT name FROM `tabSales Invoice` WHERE name=%s FOR UPDATE", (inv.name,))
+    except Exception:
+        pass
+
+    source_ct = _get_collection_change_source_ct(inv.name, party_type, party)
+    if not source_ct:
+        frappe.throw("No unsettled courier transaction was found for this invoice")
+
+    party_type = source_ct.get("party_type")
+    party = source_ct.get("party")
+    if not (party_type and party):
+        frappe.throw("Courier party is required for collection method change")
+
+    if source_ct.get("is_partner_order") or source_ct.get("delivery_partner") or source_ct.get("partner_invoice_ref"):
+        frappe.throw("Delivery partner orders are not supported for this collection method workflow yet")
+
+    if source_ct.get("idempotency_token") == idempotency_token:
+        shipping_amount = float(source_ct.get("shipping_amount") or 0)
+        if shipping_amount <= 0.0001:
+            stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+            shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+        return {
+            "mode": "cod_to_online" if _is_online_collection_method(new_method) else "online_intent_to_cash",
+            "invoice": inv.name,
+            "courier_transaction": source_ct.get("name"),
+            "journal_entry": source_ct.get("journal_entry"),
+            "order_amount": float(inv.grand_total or 0),
+            "shipping_amount": shipping_amount,
+            "reference_no": reference_no,
+            "reference_date": reference_date,
+            "receipt_name": receipt_name,
+            "idempotency_token": idempotency_token,
+        }
+
+    order_amount = float(source_ct.get("amount") or 0)
+    if order_amount <= 0.0001:
+        frappe.throw("Courier transaction has no customer amount to change")
+
+    shipping_amount = float(source_ct.get("shipping_amount") or 0)
+    if shipping_amount <= 0.0001:
+        stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+        shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+
+    existing_real_payment = _get_real_customer_payment_entry(inv.name, inv.company)
+    if existing_real_payment:
+        frappe.throw(
+            "This order already has a real customer payment ({0}); payment method change is not allowed.".format(
+                existing_real_payment.get("name")
+            )
+        )
+
+    receipt_data = None
+    if _is_online_collection_method(new_method):
+        if not receipt_name:
+            frappe.throw("Online collection requires an uploaded payment receipt")
+        receipt_data = _validate_collection_receipt(receipt_name, inv.name, new_method, order_amount)
+
+    try:
+        frappe.db.savepoint("change_payment_collection_method")
+        if _is_cash_collection_method(new_method):
+            result = _apply_collection_change_to_cash(
+                inv=inv,
+                ct=source_ct,
+                new_method=new_method,
+                order_amount=order_amount,
+                shipping_amount=shipping_amount,
+                notes=notes,
+                idempotency_token=idempotency_token,
+            )
+        else:
+            result = _apply_collection_change_to_online(
+                inv=inv,
+                ct=source_ct,
+                new_method=new_method,
+                order_amount=order_amount,
+                shipping_amount=shipping_amount,
+                reference_no=reference_no,
+                reference_date=reference_date,
+                receipt_name=receipt_name,
+                receipt_data=receipt_data,
+                notes=notes,
+                idempotency_token=idempotency_token,
+            )
+
+        payload = {
+            "event": WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION,
+            "invoice": inv.name,
+            "mode": "payment_collection_changed",
+            "payment_changed": True,
+            "new_method": new_method,
+            "actual_payment_method": new_method,
+            "courier_transaction": result.get("courier_transaction"),
+            "journal_entry": result.get("journal_entry"),
+            "order_amount": order_amount,
+            "shipping_amount": shipping_amount,
+            "party_type": party_type,
+            "party": party,
+            "receipt_name": result.get("receipt_name"),
+            "receipt_image_url": result.get("receipt_image_url"),
+            "receipt_status": result.get("receipt_status"),
+            "changed_receipts": result.get("changed_receipts") or [],
+        }
+        frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload, user="*")
+        return {"success": True, **result, **payload}
+    except Exception:
+        frappe.db.rollback(save_point="change_payment_collection_method")
+        raise
+
+
 # Helper functions
 
 def _get_courier_outstanding_account(company: str) -> str:
@@ -2112,6 +2270,298 @@ def _get_receivable_account(company):
     if not paid_from_account:
         frappe.throw(f"No receivable account found for company {company}.")
     return paid_from_account
+
+
+def _normalize_collection_method(method: str | None) -> str:
+    raw = str(method or "").strip()
+    normalized = raw.lower().replace(" ", "").replace("_", "")
+    if normalized in {"cash", "cod", "cashondelivery"}:
+        return "Cash"
+    if normalized in {"instapay", "insta", "bank", "bankaccount"}:
+        return ACCOUNTS.INSTAPAY
+    if normalized in {"mobilewallet", "wallet"}:
+        return ACCOUNTS.MOBILE_WALLET
+    if normalized in {"paymentgateway", "gateway", "card"}:
+        return ACCOUNTS.PAYMENT_GATEWAY
+    frappe.throw("Invalid collection method. Choose Cash, Instapay, Mobile Wallet, or Payment Gateway.")
+
+
+def _is_cash_collection_method(method: str) -> bool:
+    return (method or "").strip().lower() == "cash"
+
+
+def _is_online_collection_method(method: str) -> bool:
+    return not _is_cash_collection_method(method)
+
+
+def _get_collection_change_source_ct(invoice_name: str, party_type: str | None, party: str | None):
+    filters = {
+        "reference_invoice": invoice_name,
+        "status": ["!=", "Settled"],
+    }
+    if party_type:
+        filters["party_type"] = party_type
+    if party:
+        filters["party"] = party
+
+    rows = frappe.get_all(
+        "Courier Transaction",
+        filters=filters,
+        fields=[
+            "name",
+            "party_type",
+            "party",
+            "amount",
+            "shipping_amount",
+            "payment_mode",
+            "journal_entry",
+            "idempotency_token",
+            "delivery_partner",
+            "is_partner_order",
+            "partner_invoice_ref",
+            "notes",
+        ],
+        order_by="amount desc, creation desc",
+        limit=1,
+    )
+    if not rows:
+        return None
+    try:
+        frappe.db.sql("SELECT name FROM `tabCourier Transaction` WHERE name=%s FOR UPDATE", (rows[0].get("name"),))
+    except Exception:
+        pass
+    return rows[0]
+
+
+def _get_real_customer_payment_entry(invoice_name: str, company: str):
+    ref_parents = frappe.get_all(
+        "Payment Entry Reference",
+        filters={"reference_doctype": "Sales Invoice", "reference_name": invoice_name},
+        pluck="parent",
+    )
+    if not ref_parents:
+        return None
+
+    courier_outstanding_acc = _get_courier_outstanding_account(company)
+    rows = frappe.get_all(
+        "Payment Entry",
+        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+        fields=["name", "paid_to", "mode_of_payment"],
+        order_by="creation desc",
+    )
+    for row in rows:
+        paid_to = str(row.get("paid_to") or "").strip()
+        if paid_to and paid_to != courier_outstanding_acc and not paid_to.startswith(ACCOUNTS.COURIER_OUTSTANDING):
+            return row
+    return None
+
+
+def _validate_collection_receipt(receipt_name: str | None, invoice_name: str, new_method: str, order_amount: float) -> dict | None:
+    if not receipt_name:
+        return None
+    return ensure_uploaded_payment_receipt(
+        receipt_name,
+        sales_invoice=invoice_name,
+        payment_method=new_method,
+        amount=order_amount,
+    )
+
+
+def _get_online_collection_account(method: str, company: str) -> str:
+    if method in {ACCOUNTS.INSTAPAY, ACCOUNTS.PAYMENT_GATEWAY}:
+        account = frappe.db.get_value(
+            "Account",
+            {
+                "company": company,
+                "parent_account": ["like", f"%{ACCOUNTS.BANK_ACCOUNTS}%"],
+                "is_group": 0,
+            },
+            "name",
+        )
+    elif method == ACCOUNTS.MOBILE_WALLET:
+        account = frappe.db.get_value(
+            "Account",
+            {
+                "company": company,
+                "account_name": ["like", f"{ACCOUNTS.MOBILE_WALLET}%"],
+                "is_group": 0,
+            },
+            "name",
+        )
+    else:
+        account = None
+
+    if not account:
+        frappe.throw(f"No suitable account found for {method}")
+    validate_account_exists(account)
+    return account
+
+
+def _append_collection_change_note(existing_notes: str | None, *, old_method: str | None, new_method: str, order_amount: float, shipping_amount: float, journal_entry: str | None, receipt_name: str | None, reference_no: str | None, notes: str | None, idempotency_token: str, changed_receipts: list[str] | None = None) -> str:
+    parts = [
+        f"Payment collection changed on {frappe.utils.now()} by {frappe.session.user}",
+        f"old={old_method or 'Unspecified'}",
+        f"new={new_method}",
+        f"order={order_amount:.2f}",
+        f"shipping={shipping_amount:.2f}",
+        f"token={idempotency_token}",
+    ]
+    if journal_entry:
+        parts.append(f"journal_entry={journal_entry}")
+    if receipt_name:
+        parts.append(f"receipt={receipt_name}")
+    if reference_no:
+        parts.append(f"reference={reference_no}")
+    if changed_receipts:
+        parts.append(f"changed_receipts={','.join(changed_receipts)}")
+    if notes:
+        parts.append(f"notes={notes}")
+    line = "; ".join(parts)
+    current = str(existing_notes or "").strip()
+    return f"{current}\n{line}" if current else line
+
+
+def _apply_collection_change_to_cash(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, notes: str | None, idempotency_token: str):
+    ct_name = ct.get("name")
+    if ct.get("idempotency_token") == idempotency_token:
+        return {
+            "mode": "online_intent_to_cash",
+            "invoice": inv.name,
+            "courier_transaction": ct_name,
+            "journal_entry": None,
+            "order_amount": order_amount,
+            "shipping_amount": shipping_amount,
+            "changed_receipts": [],
+            "idempotency_token": idempotency_token,
+        }
+
+    changed_receipts = mark_payment_receipts_changed_for_invoice(inv.name)
+
+    frappe.db.set_value(
+        "Courier Transaction",
+        ct_name,
+        {
+            "payment_mode": new_method,
+            "shipping_amount": shipping_amount,
+            "idempotency_token": idempotency_token,
+            "notes": _append_collection_change_note(
+                ct.get("notes"),
+                old_method=ct.get("payment_mode"),
+                new_method=new_method,
+                order_amount=order_amount,
+                shipping_amount=shipping_amount,
+                journal_entry=None,
+                receipt_name=None,
+                reference_no=None,
+                notes=notes,
+                idempotency_token=idempotency_token,
+                changed_receipts=changed_receipts,
+            ),
+        },
+    )
+    return {
+        "mode": "online_intent_to_cash",
+        "invoice": inv.name,
+        "courier_transaction": ct_name,
+        "journal_entry": None,
+        "order_amount": order_amount,
+        "shipping_amount": shipping_amount,
+        "changed_receipts": changed_receipts,
+        "idempotency_token": idempotency_token,
+    }
+
+
+def _apply_collection_change_to_online(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, reference_no: str | None, reference_date: str | None, receipt_name: str | None, receipt_data: dict | None, notes: str | None, idempotency_token: str):
+    ct_name = ct.get("name")
+    existing_je = None
+    if ct.get("idempotency_token") == idempotency_token and ct.get("journal_entry"):
+        existing_je = ct.get("journal_entry")
+    if not existing_je:
+        existing = frappe.get_all(
+            "Journal Entry",
+            filters={
+                "company": inv.company,
+                "title": f"Payment Collection Change - {inv.name} - {idempotency_token}",
+                "docstatus": 1,
+            },
+            pluck="name",
+            limit_page_length=1,
+        )
+        existing_je = existing[0] if existing else None
+
+    online_account = _get_online_collection_account(new_method, inv.company)
+    courier_outstanding_acc = _get_courier_outstanding_account(inv.company)
+    validate_account_exists(courier_outstanding_acc)
+
+    je_name = existing_je
+    if not je_name:
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.posting_date = frappe.utils.nowdate()
+        je.company = inv.company
+        je.title = f"Payment Collection Change - {inv.name} - {idempotency_token}"
+        je.user_remark = (
+            f"Payment collection changed to {new_method} for {inv.name}. "
+            f"Reference: {reference_no or receipt_name or idempotency_token}"
+        )
+        je.append("accounts", {
+            "account": online_account,
+            "debit_in_account_currency": order_amount,
+            "credit_in_account_currency": 0,
+        })
+        je.append("accounts", {
+            "account": courier_outstanding_acc,
+            "debit_in_account_currency": 0,
+            "credit_in_account_currency": order_amount,
+        })
+        je.save(ignore_permissions=True)
+        je.submit()
+        je_name = je.name
+
+    resolved_receipt_name = (receipt_data or {}).get("name") or receipt_name
+    resolved_receipt_image_url = (receipt_data or {}).get("receipt_image_url")
+    resolved_receipt_status = (receipt_data or {}).get("status")
+    resolved_receipt_method = (receipt_data or {}).get("payment_method") or new_method
+
+    frappe.db.set_value(
+        "Courier Transaction",
+        ct_name,
+        {
+            "amount": 0,
+            "shipping_amount": shipping_amount,
+            "payment_mode": new_method,
+            "journal_entry": je_name,
+            "idempotency_token": idempotency_token,
+            "notes": _append_collection_change_note(
+                ct.get("notes"),
+                old_method=ct.get("payment_mode"),
+                new_method=new_method,
+                order_amount=order_amount,
+                shipping_amount=shipping_amount,
+                journal_entry=je_name,
+                receipt_name=resolved_receipt_name,
+                reference_no=reference_no,
+                notes=notes,
+                idempotency_token=idempotency_token,
+            ),
+        },
+    )
+    return {
+        "mode": "cod_to_online",
+        "invoice": inv.name,
+        "courier_transaction": ct_name,
+        "journal_entry": je_name,
+        "online_account": online_account,
+        "order_amount": order_amount,
+        "shipping_amount": shipping_amount,
+        "reference_no": reference_no,
+        "reference_date": reference_date,
+        "receipt_name": resolved_receipt_name,
+        "receipt_image_url": resolved_receipt_image_url,
+        "receipt_status": resolved_receipt_status,
+        "receipt_method": resolved_receipt_method,
+        "idempotency_token": idempotency_token,
+    }
 
 
 def _get_delivery_expense_amount(inv):

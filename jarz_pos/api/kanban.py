@@ -282,6 +282,53 @@ def _resolve_customer_phone(customer: str) -> str:
         return ""
 
 
+
+def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[str, Any]]:
+    cleaned_names = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
+    if not cleaned_names:
+        return {}
+
+    receipt_map: Dict[str, Dict[str, Any]] = {}
+    try:
+        receipt_rows = frappe.get_all(
+            "POS Payment Receipt",
+            filters={
+                "sales_invoice": ["in", cleaned_names],
+                "status": ["!=", "Changed"],
+            },
+            fields=[
+                "name",
+                "sales_invoice",
+                "payment_method",
+                "status",
+                "receipt_image_url",
+                "receipt_image",
+                "amount",
+                "modified",
+            ],
+            order_by="modified desc",
+            limit=QUERY_LIMITS.KANBAN_INVOICES * 3,
+        )
+        for row in receipt_rows:
+            invoice_name = str(row.get("sales_invoice") or "").strip()
+            if not invoice_name or invoice_name in receipt_map:
+                continue
+            image_url = sanitize_printable_text(
+                row.get("receipt_image_url") or row.get("receipt_image") or ""
+            )
+            receipt_map[invoice_name] = {
+                "payment_receipt_name": sanitize_printable_text(row.get("name")),
+                "payment_receipt_method": sanitize_printable_text(row.get("payment_method")),
+                "payment_receipt_status": sanitize_printable_text(row.get("status")),
+                "payment_receipt_image_url": image_url,
+                "payment_receipt_amount": float(row.get("amount") or 0.0),
+            }
+    except Exception:
+        return {}
+
+    return receipt_map
+
+
 def _ensure_invoice_detail_access(invoice: frappe.Document) -> None:
     """Restrict invoice details to the current user's assigned POS Profiles."""
     allowed_profiles = _get_current_user_pos_profiles()
@@ -729,6 +776,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
         # Batch fetch actual payment method for paid invoices
         actual_payment_methods: Dict[str, str] = {}
+        payment_receipts_by_invoice = _get_active_payment_receipt_map([inv.name for inv in invoices])
         try:
             paid_inv_names = [
                 inv.name for inv in invoices
@@ -760,6 +808,28 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                             actual_payment_methods[ref.reference_name] = "Instapay"
                         elif account:
                             actual_payment_methods[ref.reference_name] = "Cash"
+        except Exception:
+            pass
+
+        try:
+            invoice_names = [inv.name for inv in invoices]
+            if invoice_names:
+                ct_rows = frappe.get_all(
+                    "Courier Transaction",
+                    filters={
+                        "reference_invoice": ["in", invoice_names],
+                        "status": ["!=", "Settled"],
+                        "payment_mode": ["not in", [None, ""]],
+                        "notes": ["like", "%Payment collection changed on%"],
+                    },
+                    fields=["reference_invoice", "payment_mode", "modified"],
+                    order_by="modified desc",
+                    limit=QUERY_LIMITS.KANBAN_INVOICES,
+                )
+                for row in ct_rows:
+                    invoice_name = row.get("reference_invoice")
+                    if invoice_name and invoice_name not in actual_payment_methods:
+                        actual_payment_methods[invoice_name] = sanitize_printable_text(row.get("payment_mode"))
         except Exception:
             pass
 
@@ -845,6 +915,10 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "accepted_on": str(inv.get("custom_accepted_on")) if inv.get("custom_accepted_on") else None,
                 "payment_method": sanitize_printable_text(inv.get("custom_payment_method")),
                 "actual_payment_method": sanitize_printable_text(actual_payment_methods.get(inv.name)),
+                "payment_receipt_name": sanitize_printable_text(payment_receipts_by_invoice.get(inv.name, {}).get("payment_receipt_name")),
+                "payment_receipt_method": sanitize_printable_text(payment_receipts_by_invoice.get(inv.name, {}).get("payment_receipt_method")),
+                "payment_receipt_status": sanitize_printable_text(payment_receipts_by_invoice.get(inv.name, {}).get("payment_receipt_status")),
+                "payment_receipt_image_url": sanitize_printable_text(payment_receipts_by_invoice.get(inv.name, {}).get("payment_receipt_image_url")),
                 "pos_profile": sanitize_printable_text(inv.get("custom_kanban_profile")),
                 "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
                 "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
@@ -1577,6 +1651,11 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
             )
         except Exception:
             data["has_unsettled_courier_txn"] = False
+        try:
+            receipt_data = _get_active_payment_receipt_map([invoice.name]).get(invoice.name, {})
+            data.update(receipt_data)
+        except Exception:
+            pass
         data.update(get_invoice_amendment_eligibility(invoice))
         return _success(data=data)
     except Exception as e:
