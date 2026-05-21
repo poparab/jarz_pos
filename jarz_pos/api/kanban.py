@@ -209,6 +209,129 @@ def _get_current_user_pos_profiles() -> List[str]:
         frappe.logger().warning(f"KANBAN API: Failed to resolve user POS profiles: {e}")
         return []
 
+def _parse_filter_payload(filters: Optional[Union[str, Dict[str, Any]]]) -> Dict[str, Any]:
+    if isinstance(filters, dict):
+        return dict(filters)
+    if isinstance(filters, str):
+        try:
+            parsed = json.loads(filters)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+def _find_customer_search_matches(search_term: str) -> List[str]:
+    search = sanitize_printable_text(search_term)
+    if not search:
+        return []
+
+    like = f"%{search}%"
+    customer_ids = set()
+
+    try:
+        customer_or_filters: List[Dict[str, Any]] = [
+            {"name": ["like", like]},
+            {"customer_name": ["like", like]},
+        ]
+        try:
+            if frappe.db.has_column("Customer", "mobile_no"):
+                customer_or_filters.append({"mobile_no": ["like", like]})
+        except Exception:
+            pass
+
+        customer_ids.update(
+            frappe.get_all(
+                "Customer",
+                or_filters=customer_or_filters,
+                pluck="name",
+                limit=50,
+            ) or []
+        )
+    except Exception:
+        pass
+
+    if not any(ch.isdigit() for ch in search):
+        return sorted(str(customer_id) for customer_id in customer_ids if str(customer_id).strip())
+
+    try:
+        contacts = frappe.get_all(
+            "Contact",
+            or_filters=[
+                {"mobile_no": ["like", like]},
+                {"phone": ["like", like]},
+            ],
+            pluck="name",
+            limit=50,
+        ) or []
+        if contacts:
+            customer_ids.update(
+                frappe.get_all(
+                    "Dynamic Link",
+                    filters={
+                        "parenttype": "Contact",
+                        "parent": ["in", contacts],
+                        "link_doctype": "Customer",
+                    },
+                    pluck="link_name",
+                    limit=100,
+                ) or []
+            )
+    except Exception:
+        pass
+
+    try:
+        address_fields = []
+        for fieldname in ("phone", "phone_number", "phone_no", "mobile_no"):
+            try:
+                if frappe.db.has_column("Address", fieldname):
+                    address_fields.append(fieldname)
+            except Exception:
+                continue
+        if address_fields:
+            addresses = frappe.get_all(
+                "Address",
+                or_filters=[{fieldname: ["like", like]} for fieldname in address_fields],
+                pluck="name",
+                limit=50,
+            ) or []
+            if addresses:
+                customer_ids.update(
+                    frappe.get_all(
+                        "Dynamic Link",
+                        filters={
+                            "parenttype": "Address",
+                            "parent": ["in", addresses],
+                            "link_doctype": "Customer",
+                        },
+                        pluck="link_name",
+                        limit=100,
+                    ) or []
+                )
+    except Exception:
+        pass
+
+    return sorted(str(customer_id) for customer_id in customer_ids if str(customer_id).strip())
+
+def _build_invoice_search_or_filters(
+    search_term: str,
+    customer_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    search = sanitize_printable_text(search_term)
+    if not search:
+        return []
+
+    like = f"%{search}%"
+    or_filters: List[Dict[str, Any]] = [
+        {"name": ["like", like]},
+        {"customer_name": ["like", like]},
+        {"customer": ["like", like]},
+    ]
+
+    if customer_ids:
+        or_filters.append({"customer": ["in", customer_ids]})
+
+    return or_filters
+
 def _resolve_customer_phone(customer: str) -> str:
     """Resolve customer phone from Customer -> primary Contact -> primary Address -> any Contact."""
     if not customer:
@@ -577,9 +700,18 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
     try:
         frappe.logger().debug("KANBAN API: get_kanban_invoices called with filters: {0}".format(filters))
 
-        filter_conditions = apply_invoice_filters(filters)
-        # Include both submitted (1) and cancelled (2) invoices to show cancelled orders in the Cancelled column
-        filter_conditions["docstatus"] = ["in", [1, 2]]
+        raw_filters = _parse_filter_payload(filters)
+        filter_conditions = apply_invoice_filters(raw_filters)
+        search_term = sanitize_printable_text(raw_filters.get("searchTerm") or "")
+        search_customer_ids = _find_customer_search_matches(search_term) if search_term else []
+        search_or_filters = _build_invoice_search_or_filters(
+            search_term,
+            customer_ids=search_customer_ids,
+        )
+
+        # Include both submitted (1) and cancelled (2) invoices by default so the Cancelled column stays populated.
+        if not str(raw_filters.get("status") or "").strip():
+            filter_conditions["docstatus"] = ["in", [1, 2]]
 
         # Performance guardrails:
         # - Default to POS invoices and a recent date window when client doesn't specify
@@ -612,19 +744,9 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
         # Optional client-provided branches list (subset of allowed profiles)
         client_selected_branches: List[str] = []
-        try:
-            raw = filters
-            if isinstance(raw, str):
-                try:
-                    raw = json.loads(raw)
-                except Exception:
-                    raw = {}
-            if isinstance(raw, dict):
-                maybe = raw.get("branches")
-                if isinstance(maybe, list):
-                    client_selected_branches = [str(x) for x in maybe if str(x).strip()]
-        except Exception:
-            client_selected_branches = []
+        maybe = raw_filters.get("branches")
+        if isinstance(maybe, list):
+            client_selected_branches = [str(x) for x in maybe if str(x).strip()]
 
         # Compute enforced branch list = intersection(allowed, client_selected) if client provided any; otherwise allowed only
         enforced_branches = allowed_profiles
@@ -681,6 +803,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         invoices = frappe.get_all(
             "Sales Invoice",
             filters=filter_conditions,
+            or_filters=search_or_filters or None,
             fields=fields,
             order_by="posting_date desc, posting_time desc",
             limit=QUERY_LIMITS.TERRITORIES,

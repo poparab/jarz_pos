@@ -312,6 +312,7 @@ MAX_FCM_TOKENS_PER_BATCH = 500
 DEFAULT_WALK_IN_CUSTOMER = "Walk-in"
 DEFAULT_NEW_ORDER_TITLE = "New Order"
 DEFAULT_ITEM_LABEL = "Item"
+ANDROID_ORDER_ALERT_SOUND = "jarz_order_alert_notification"
 
 
 def _get_fcm_logger() -> Any:
@@ -1510,7 +1511,7 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
             title, body = _resolve_notification_content(data)
             notification = messaging.Notification(title=title, body=body)
             android_notification = messaging.AndroidNotification(
-                sound='default',
+                sound=ANDROID_ORDER_ALERT_SOUND,
                 channel_id='jarz_order_alerts',
                 tag=data.get("invoice_id", "")
             )

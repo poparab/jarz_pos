@@ -3,8 +3,10 @@ This module contains tests for the kanban API endpoints.
 """
 
 import unittest
+from unittest.mock import patch
 import frappe
 from jarz_pos.api.kanban import (
+	_build_invoice_search_or_filters,
 	get_kanban_columns,
 	get_kanban_invoices,
 	get_invoice_details,
@@ -67,6 +69,67 @@ class TestKanbanAPI(unittest.TestCase):
 		result = apply_invoice_filters({"dateFrom": "2025-01-01"})
 		self.assertEqual(result["posting_date"][0], ">=", "Should have >= operator")
 		self.assertEqual(result["posting_date"][1], "2025-01-01", "Should have correct date")
+
+	def test_build_invoice_search_or_filters(self):
+		"""Search helper should cover invoice identifiers and matched customer ids."""
+		result = _build_invoice_search_or_filters("Ali", customer_ids=["CUST-1"])
+
+		self.assertIn({"name": ["like", "%Ali%"]}, result)
+		self.assertIn({"customer_name": ["like", "%Ali%"]}, result)
+		self.assertIn({"customer": ["like", "%Ali%"]}, result)
+		self.assertIn({"customer": ["in", ["CUST-1"]]}, result)
+
+	@patch("jarz_pos.api.kanban._sort_kanban_columns", side_effect=lambda data: data)
+	@patch("jarz_pos.api.kanban._get_active_payment_receipt_map", return_value={})
+	@patch("jarz_pos.api.kanban._find_customer_search_matches", return_value=["CUST-1"])
+	@patch("jarz_pos.api.kanban._get_state_field_options", return_value=["Received"])
+	@patch("jarz_pos.api.kanban._get_current_user_pos_profiles", return_value=["Main"])
+	@patch("jarz_pos.api.kanban.frappe.get_meta")
+	@patch("jarz_pos.api.kanban.frappe.get_all")
+	def test_get_kanban_invoices_combines_branch_scope_with_search(
+		self,
+		mock_get_all,
+		mock_get_meta,
+		_mock_profiles,
+		_mock_states,
+		_mock_customer_matches,
+		_mock_receipts,
+		_mock_sort,
+	):
+		"""Kanban invoice query should combine enforced branches with search OR filters."""
+
+		class _MetaStub:
+			def get_field(self, fieldname):
+				return fieldname == "custom_kanban_profile"
+
+		captured = {}
+
+		def _fake_get_all(doctype, **kwargs):
+			if doctype == "Sales Invoice":
+				captured.update(kwargs)
+			return []
+
+		mock_get_all.side_effect = _fake_get_all
+		mock_get_meta.return_value = _MetaStub()
+
+		result = get_kanban_invoices({"searchTerm": "Ali", "branches": ["Main"]})
+
+		self.assertTrue(result.get("success"), "Should return success=True")
+		self.assertEqual(
+			captured["filters"]["custom_kanban_profile"],
+			["in", ["Main"]],
+			"Search should still respect enforced branch scope",
+		)
+		self.assertIn(
+			{"name": ["like", "%Ali%"]},
+			captured["or_filters"],
+			"Search should include invoice name matching",
+		)
+		self.assertIn(
+			{"customer": ["in", ["CUST-1"]]},
+			captured["or_filters"],
+			"Search should include matched customer ids",
+		)
 
 	def test_get_address_details(self):
 		"""Test the get_address_details utility function."""

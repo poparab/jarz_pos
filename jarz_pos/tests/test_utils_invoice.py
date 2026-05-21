@@ -90,6 +90,45 @@ class TestInvoiceUtils(unittest.TestCase):
 		self.assertNotIn("pos_profile", result, "POS profile filter applied later")
 		self.assertIn("docstatus", result, "Base filters should remain intact")
 
+	def test_apply_invoice_filters_normalises_iso_dates(self):
+		"""Test apply_invoice_filters trims ISO timestamps down to posting dates."""
+		from jarz_pos.utils.invoice_utils import apply_invoice_filters
+
+		filters = {
+			"dateFrom": "2025-01-01T00:00:00.000",
+			"dateTo": "2025-01-31T23:59:59.999",
+		}
+		result = apply_invoice_filters(filters)
+
+		self.assertEqual(result["posting_date"], ["between", ["2025-01-01", "2025-01-31"]])
+
+	def test_apply_invoice_filters_status_unpaid_includes_overdue(self):
+		"""Test unpaid filter includes overdue invoices."""
+		from jarz_pos.utils.invoice_utils import apply_invoice_filters
+
+		result = apply_invoice_filters({"status": "Unpaid"})
+
+		self.assertEqual(result["status"], ["in", ["Unpaid", "Overdue"]])
+		self.assertEqual(result["docstatus"], 1)
+
+	def test_apply_invoice_filters_status_cancelled_uses_docstatus(self):
+		"""Test cancelled filter scopes to cancelled documents."""
+		from jarz_pos.utils.invoice_utils import apply_invoice_filters
+
+		result = apply_invoice_filters({"status": "Cancelled"})
+
+		self.assertEqual(result["docstatus"], 2)
+		self.assertNotIn("status", result)
+
+	def test_apply_invoice_filters_status_return_uses_is_return(self):
+		"""Test return filter scopes to return invoices."""
+		from jarz_pos.utils.invoice_utils import apply_invoice_filters
+
+		result = apply_invoice_filters({"status": "Return"})
+
+		self.assertEqual(result["is_return"], 1)
+		self.assertEqual(result["docstatus"], 1)
+
 	def test_format_invoice_data_basic(self):
 		"""Test format_invoice_data with basic invoice."""
 

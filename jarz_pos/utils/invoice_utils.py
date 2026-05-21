@@ -461,20 +461,50 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
         except json.JSONDecodeError:
             frappe.log_error(f"Invalid JSON in filters: {filters}", "Filter Processing")
             return filter_conditions
+
+    def _normalise_date(value: Any) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return text.split("T", 1)[0]
+
+    date_from = _normalise_date(filters.get('dateFrom'))
+    date_to = _normalise_date(filters.get('dateTo'))
+    customer = str(filters.get('customer') or '').strip()
+    status = str(filters.get('status') or '').strip().lower()
     
     # Apply date filters
-    if filters.get('dateFrom'):
-        filter_conditions["posting_date"] = [">=", filters['dateFrom']]
+    if date_from:
+        filter_conditions["posting_date"] = [">=", date_from]
         
-    if filters.get('dateTo'):
+    if date_to:
         if "posting_date" in filter_conditions:
-            filter_conditions["posting_date"] = ["between", [filters['dateFrom'], filters['dateTo']]]
+            filter_conditions["posting_date"] = ["between", [date_from, date_to]]
         else:
-            filter_conditions["posting_date"] = ["<=", filters['dateTo']]
+            filter_conditions["posting_date"] = ["<=", date_to]
             
     # Apply customer filter
-    if filters.get('customer'):
-        filter_conditions["customer"] = filters['customer']
+    if customer:
+        filter_conditions["customer"] = customer
+
+    if status:
+        if status == 'paid':
+            filter_conditions["status"] = "Paid"
+            filter_conditions["docstatus"] = 1
+        elif status in {'unpaid', 'overdue'}:
+            filter_conditions["status"] = ["in", ["Unpaid", "Overdue"]]
+            filter_conditions["docstatus"] = 1
+        elif status in {'cancelled', 'canceled'}:
+            filter_conditions["docstatus"] = 2
+            filter_conditions.pop("status", None)
+        elif status == 'return':
+            filter_conditions["is_return"] = 1
+            filter_conditions["docstatus"] = 1
+        elif status == 'draft':
+            filter_conditions["docstatus"] = 0
+            filter_conditions.pop("status", None)
         
     # Apply amount filters
     if filters.get('amountFrom'):
