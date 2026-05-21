@@ -216,6 +216,57 @@ class TestNotificationPayloadContract(unittest.TestCase):
         self.assertEqual(title, "New Order: Walk-in")
         self.assertEqual(body, "Maadi | Total: 80.00 | 2 items")
 
+    def test_prepare_invoice_status_data_payload_for_accepted_includes_customer_territory_and_pos(self):
+        from jarz_pos.api.notifications import _prepare_invoice_status_data_payload
+
+        data = _prepare_invoice_status_data_payload(
+            "invoice_accepted",
+            {
+                "invoice_id": "SINV-0004",
+                "customer_name": "Ahmed Ali",
+                "territory": "Cairo",
+                "pos_profile": "Nasr City",
+                "accepted_by": "manager@example.com",
+                "accepted_on": "2026-05-03T10:06:00",
+                "sales_invoice_state": "Accepted",
+                "timestamp": "2026-05-03T10:06:00",
+            },
+        )
+
+        self.assertEqual(data["customer_name"], "Ahmed Ali")
+        self.assertEqual(data["territory"], "Cairo")
+        self.assertEqual(data["pos_profile"], "Nasr City")
+        self.assertEqual(data["title"], "Order Accepted: Ahmed Ali")
+        self.assertEqual(
+            data["body"],
+            "Territory: Cairo | POS Profile: Nasr City | By: manager@example.com",
+        )
+
+    def test_prepare_invoice_status_data_payload_for_cancelled_keeps_reason_with_context(self):
+        from jarz_pos.api.notifications import _prepare_invoice_status_data_payload
+
+        data = _prepare_invoice_status_data_payload(
+            "invoice_cancelled",
+            {
+                "invoice_id": "SINV-0005",
+                "customer_name": "Mona Hassan",
+                "territory": "Alexandria",
+                "pos_profile": "Smouha",
+                "reason": "Customer requested cancellation",
+                "sales_invoice_state": "Cancelled",
+                "timestamp": "2026-05-03T10:07:00",
+            },
+        )
+
+        self.assertEqual(data["customer_name"], "Mona Hassan")
+        self.assertEqual(data["territory"], "Alexandria")
+        self.assertEqual(data["pos_profile"], "Smouha")
+        self.assertEqual(data["title"], "Order Cancelled: Mona Hassan")
+        self.assertEqual(
+            data["body"],
+            "Territory: Alexandria | POS Profile: Smouha | Reason: Customer requested cancellation",
+        )
+
     def test_send_fcm_notifications_sends_new_invoice_with_notification_and_data(self):
         from jarz_pos.api import notifications
 

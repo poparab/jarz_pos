@@ -313,6 +313,10 @@ DEFAULT_WALK_IN_CUSTOMER = "Walk-in"
 DEFAULT_NEW_ORDER_TITLE = "New Order"
 DEFAULT_ITEM_LABEL = "Item"
 ANDROID_ORDER_ALERT_SOUND = "jarz_order_alert_notification"
+INVOICE_STATUS_NOTIFICATION_TITLES = {
+    "invoice_accepted": "Order Accepted",
+    "invoice_cancelled": "Order Cancelled",
+}
 
 
 def _get_fcm_logger() -> Any:
@@ -827,6 +831,7 @@ def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
         "requires_acceptance": False,
         "accepted_by": user,
         "accepted_on": accepted_on.isoformat(),
+        "territory": _pick_display_text(getattr(doc, "territory", None)),
     })
 
     recipients = _resolve_recipients_for_payload(payload)
@@ -1000,23 +1005,14 @@ def notify_invoice_cancellation(
             payload["pos_profile"] = getattr(doc, "pos_profile", None)
         if not payload.get("kanban_profile"):
             payload["kanban_profile"] = getattr(doc, "custom_kanban_profile", None)
+        if not payload.get("territory"):
+            payload["territory"] = _pick_display_text(getattr(doc, "territory", None))
 
         recipients = _resolve_recipients_for_payload(payload)
         target = recipients if recipients else "*"
         frappe.publish_realtime(WS_EVENTS.INVOICE_CANCELLED, payload, user=target)
 
-        data_payload: Dict[str, str] = {
-            "type": "invoice_cancelled",
-            "invoice_id": payload.get("invoice_id", ""),
-            "reason": reason,
-            "pos_profile": payload.get("pos_profile", "") or "",
-            "timestamp": payload.get("timestamp", frappe.utils.now_datetime().isoformat()),
-            "sales_invoice_state": payload.get("sales_invoice_state", STATUS.CANCELLED),
-        }
-        if notes:
-            data_payload["notes"] = notes
-        if credit_note:
-            data_payload["credit_note"] = credit_note
+        data_payload = _prepare_invoice_status_data_payload("invoice_cancelled", payload)
 
         tokens = _get_tokens_for_users(recipients)
         if tokens:
@@ -1306,6 +1302,65 @@ def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dic
     return _send_fcm_notifications(tokens, data)
 
 
+def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
+    customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
+    territory = _pick_display_text(payload.get("territory"))
+    pos_profile = _pick_display_text(payload.get("pos_profile"), payload.get("kanban_profile"))
+    title_prefix = INVOICE_STATUS_NOTIFICATION_TITLES.get(
+        event_type,
+        _safe_str(event_type).replace("_", " ").title(),
+    )
+
+    body_parts: List[str] = []
+    if territory:
+        body_parts.append(f"Territory: {territory}")
+    if pos_profile:
+        body_parts.append(f"POS Profile: {pos_profile}")
+
+    if event_type == "invoice_accepted":
+        accepted_by = _pick_display_text(payload.get("accepted_by"))
+        if accepted_by:
+            body_parts.append(f"By: {accepted_by}")
+    elif event_type == "invoice_cancelled":
+        reason = _pick_display_text(payload.get("reason"))
+        if reason:
+            body_parts.append(f"Reason: {reason}")
+
+    data: Dict[str, str] = {
+        "type": event_type,
+        "invoice_id": _safe_str(payload.get("invoice_id")),
+        "notification_id": _safe_str(
+            payload.get("notification_id") or payload.get("invoice_id")
+        ),
+        "customer_name": customer_name,
+        "territory": territory,
+        "pos_profile": pos_profile,
+        "timestamp": _pick_display_text(
+            payload.get("timestamp"),
+            fallback=frappe.utils.now_datetime().isoformat(),
+        ),
+        "sales_invoice_state": _pick_display_text(payload.get("sales_invoice_state")),
+        "title": _pick_display_text(
+            payload.get("title"),
+            fallback=f"{title_prefix}: {customer_name}",
+        ),
+        "body": _pick_display_text(
+            payload.get("body"),
+            fallback=" | ".join(body_parts),
+        ),
+    }
+
+    if event_type == "invoice_accepted":
+        data["accepted_by"] = _pick_display_text(payload.get("accepted_by"))
+        data["accepted_on"] = _pick_display_text(payload.get("accepted_on"))
+    elif event_type == "invoice_cancelled":
+        data["reason"] = _pick_display_text(payload.get("reason"))
+        data["notes"] = _pick_display_text(payload.get("notes"))
+        data["credit_note"] = _pick_display_text(payload.get("credit_note"))
+
+    return data
+
+
 def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
     tokens = _get_tokens_for_users(recipients)
     if not tokens:
@@ -1313,12 +1368,7 @@ def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -
         result["ok"] = True
         return result
 
-    data = {
-        "type": "invoice_accepted",
-        "invoice_id": payload.get("invoice_id", ""),
-        "accepted_by": payload.get("accepted_by", ""),
-        "accepted_on": payload.get("accepted_on", ""),
-    }
+    data = _prepare_invoice_status_data_payload("invoice_accepted", payload)
     _log_fcm_info(
         f"FCM send: invoice_accepted; recipients={len(recipients)}; tokens={len(tokens)}"
     )
