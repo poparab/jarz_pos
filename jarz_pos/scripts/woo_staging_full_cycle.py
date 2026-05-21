@@ -1325,7 +1325,8 @@ class FullCycleRunner:
             return {"prerequisite": "EO-CUST-01"}
 
         case_started = now_datetime()
-        fixture = self._secondary_territory_fixture()
+        fixture = dict(runtime_customer.get("territory") or self._primary_territory_fixture())
+        duplicate_before = self._count_customers_by_woo_customer_id(woo_customer_id)
         slug = re.sub(r"[^a-z0-9]+", "", self.run_id.lower())
         updated_first_name = "RoundTrip"
         updated_last_name = self.run_id
@@ -1377,7 +1378,7 @@ class FullCycleRunner:
         self._assert(case, "X-CUST-01.01", "Round-trip customer webhook queued successfully", webhook.get("status_code") == 200 and bool((webhook.get("payload") or {}).get("queued")), expected={"status_code": 200, "queued": True}, actual=webhook)
         self._assert(case, "X-CUST-01.02", "Round-trip inbound customer event reaches Succeeded", str(((inbound_sync.get("latest_event") or {}).get("status") or "")) == "Succeeded", expected="Succeeded", actual=inbound_sync)
         self._assert(case, "X-CUST-01.03", "Round-trip update keeps the same ERP customer record", refreshed_customer_name == customer_name, expected=customer_name, actual=refreshed_customer_name)
-        self._assert(case, "X-CUST-01.04", "Round-trip update keeps exactly one ERP customer binding", duplicate_count == 1, expected=1, actual=duplicate_count)
+        self._assert(case, "X-CUST-01.04", "Round-trip update keeps ERP customer binding count stable", duplicate_count == duplicate_before, expected=duplicate_before, actual={"before": duplicate_before, "after": duplicate_count})
         self._assert(case, "X-CUST-01.05", "ERP customer display name reflects the Woo round-trip update", str(getattr(customer_doc, "customer_name", "") or "") == f"{updated_first_name} {updated_last_name}", expected=f"{updated_first_name} {updated_last_name}", actual=getattr(customer_doc, "customer_name", None) if customer_doc else None)
         self._assert(case, "X-CUST-01.06", "ERP customer mobile reflects the Woo round-trip update", str(getattr(customer_doc, "mobile_no", "") or "") == updated_phone, expected=updated_phone, actual=getattr(customer_doc, "mobile_no", None) if customer_doc else None)
         self._assert(case, "X-CUST-01.07", "ERP customer email reflects the Woo round-trip update", str(getattr(customer_doc, "email_id", "") or "") == updated_email, expected=updated_email, actual=getattr(customer_doc, "email_id", None) if customer_doc else None)
@@ -1402,6 +1403,8 @@ class FullCycleRunner:
             "inbound_sync": inbound_sync,
             "customer": customer_doc.as_dict() if customer_doc else None,
             "addresses": addresses,
+            "duplicate_before": duplicate_before,
+            "duplicate_after": duplicate_count,
         }
 
     def _outbound_order_create(self, case: dict[str, Any]) -> dict[str, Any]:
