@@ -14,6 +14,7 @@ invoice type variant:
 import unittest
 import json
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, PropertyMock
 
 
@@ -48,6 +49,7 @@ class _InvoiceDocCapture:
         self.taxes = []
         self.payments = []
         self.name = "TEST-INV-001"
+        self.status = "Draft"
         self.docstatus = 0
         self.net_total = 0.0
         self.grand_total = 0.0
@@ -56,7 +58,7 @@ class _InvoiceDocCapture:
     def append(self, child_table, row_or_empty=None):
         if row_or_empty is None:
             row_or_empty = {}
-        item = MagicMock()
+        item = SimpleNamespace()
         # Copy fields from row dict
         for k, v in (row_or_empty if isinstance(row_or_empty, dict) else {}).items():
             setattr(item, k, v)
@@ -560,6 +562,132 @@ class TestDeliveryPromotionInvoiceIntegration(unittest.TestCase):
 
         self.assertEqual(tax_calls, [], "Matched free-delivery promotion should suppress shipping tax rows")
         apply_audit.assert_called_once()
+
+
+# ===========================================================================
+# TEST: Manager pricing support
+# ===========================================================================
+
+class TestManagerPricingSupport(unittest.TestCase):
+    """Verify selected price list, manager guard, and regular-line pricing overrides."""
+
+    def test_process_regular_item_uses_selected_price_list_and_custom_rate_override(self):
+        with patch("jarz_pos.services.invoice_creation.frappe") as mf, \
+             patch("jarz_pos.services.invoice_creation.get_item_price", return_value=140.0):
+            item_doc = MagicMock()
+            item_doc.item_name = "Test Item"
+            item_doc.stock_uom = "Unit"
+            mf.db.exists.return_value = True
+            mf.db.get_value.return_value = None
+            mf.get_doc.return_value = item_doc
+
+            from jarz_pos.services.invoice_creation import _process_regular_item
+            result = _process_regular_item(
+                {
+                    "item_code": "ITEM-1",
+                    "qty": 2,
+                    "rate": 90.0,
+                    "custom_rate_override": 110.0,
+                    "discount_percentage": 5.0,
+                },
+                MagicMock(),
+                price_list="B2B A",
+            )
+
+        self.assertEqual(result["price_list_rate"], 110.0)
+        self.assertEqual(result["rate"], 110.0)
+        self.assertEqual(result["original_price_list_rate"], 140.0)
+        self.assertEqual(result["discount_percentage"], 5.0)
+
+    def test_create_pos_invoice_rejects_non_manager_pricing_override(self):
+        customer = _mock_customer()
+        pos_profile = _mock_pos_profile(selling_price_list="Retail Default")
+
+        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1", "custom_rate_override": 95.0}]), \
+             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
+             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
+             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
+             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
+             patch("jarz_pos.services.invoice_creation.frappe") as mf:
+            mf.local.site = "test-site"
+            mf.logger.return_value = MagicMock()
+            mf.utils.now.return_value = "2026-05-05 12:00:00"
+            mf.db.exists.return_value = True
+            mf.get_roles.return_value = ["POS User"]
+            mf.session.user = "cashier@example.com"
+            mf.throw.side_effect = PermissionError("manager pricing access required")
+
+            from jarz_pos.services.invoice_creation import create_pos_invoice
+            with self.assertRaises(PermissionError):
+                create_pos_invoice(cart_json="[]", customer_name=customer.name, pos_profile_name=pos_profile.name)
+
+    def test_create_pos_invoice_stamps_selected_price_list_and_audit_markers(self):
+        inv = _InvoiceDocCapture()
+        customer = _mock_customer()
+        pos_profile = _mock_pos_profile(selling_price_list="Retail Default")
+        processed_items = [
+            {
+                "item_code": "ITEM-1",
+                "qty": 1,
+                "rate": 110.0,
+                "price_list_rate": 110.0,
+                "custom_rate_override": 110.0,
+                "discount_percentage": 10.0,
+            }
+        ]
+
+        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1", "custom_rate_override": 110.0, "discount_percentage": 10.0}]), \
+             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
+             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
+             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
+             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
+             patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items), \
+             patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv), \
+             patch("jarz_pos.services.invoice_creation.set_invoice_fields"), \
+             patch("jarz_pos.services.invoice_creation.add_items_to_invoice"), \
+             patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"), \
+             patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"), \
+             patch("jarz_pos.services.invoice_creation._save_document"), \
+             patch("jarz_pos.services.invoice_creation._submit_document"), \
+             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
+             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
+             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"), \
+             patch("jarz_pos.services.invoice_creation.frappe") as mf:
+            from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
+
+            resolve_promo.return_value = DeliveryPromotionDecision(
+                matched=False,
+                rule_name=None,
+                rule_type=None,
+                merchandise_subtotal=0.0,
+                item_qty=0.0,
+                suppress_shipping_income=False,
+                suppress_legacy_delivery_charges=False,
+            )
+
+            mf.local.site = "test-site"
+            mf.logger.return_value = MagicMock()
+            mf.utils.now.return_value = "2026-05-05 12:00:00"
+            mf.db.exists.return_value = True
+            mf.get_roles.return_value = ["JARZ Manager"]
+            mf.session.user = "manager@example.com"
+            mf.get_all.return_value = []
+
+            from jarz_pos.services.invoice_creation import create_pos_invoice
+
+            create_pos_invoice(
+                cart_json="[]",
+                customer_name=customer.name,
+                pos_profile_name=pos_profile.name,
+                price_list="B2B A",
+                suppress_shipping_income=True,
+            )
+
+        self.assertEqual(inv.selling_price_list, "B2B A")
+        self.assertIn("[PRICE LIST OVERRIDE] B2B A", inv.remarks)
+        self.assertIn("[ZERO SHIPPING OVERRIDE]", inv.remarks)
+        self.assertIn("[CUSTOM LINE PRICING]", inv.remarks)
+        self.assertIn("[LINE DISCOUNTS]", inv.remarks)
 
 
 # ===========================================================================

@@ -19,6 +19,14 @@ from jarz_pos.constants import ACCOUNTS
 # ---------------------------------------------------------------------------
 
 
+def _is_truthy_flag(value) -> bool:
+    if isinstance(value, (int, float)):
+        return int(value) == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 @frappe.whitelist()
 def create_pos_invoice():
     """
@@ -42,24 +50,10 @@ def create_pos_invoice():
     payment_type = frappe.form_dict.get('payment_type')  # 'cash' | 'online' (optional)
     # New: pickup flag (no delivery fee)
     raw_pickup = frappe.form_dict.get('pickup')
-    is_pickup = False
-    try:
-        if isinstance(raw_pickup, (int, float)):
-            is_pickup = int(raw_pickup) == 1
-        elif isinstance(raw_pickup, str):
-            is_pickup = raw_pickup.strip().lower() in {"1", "true", "yes", "on"}
-    except Exception:
-        is_pickup = False
+    is_pickup = _is_truthy_flag(raw_pickup)
     # New: pos_profile_override flag — caller has already confirmed mismatch
     raw_pos_profile_override = frappe.form_dict.get('pos_profile_override')
-    is_pos_profile_override = False
-    try:
-        if isinstance(raw_pos_profile_override, (int, float)):
-            is_pos_profile_override = int(raw_pos_profile_override) == 1
-        elif isinstance(raw_pos_profile_override, str):
-            is_pos_profile_override = raw_pos_profile_override.strip().lower() in {"1", "true", "yes", "on"}
-    except Exception:
-        is_pos_profile_override = False
+    is_pos_profile_override = _is_truthy_flag(raw_pos_profile_override)
     # New delivery slot fields (optional; preferred)
     delivery_date = frappe.form_dict.get('delivery_date')
     delivery_time_from = frappe.form_dict.get('delivery_time_from')
@@ -67,6 +61,17 @@ def create_pos_invoice():
     
     # New: payment method (Cash | Instapay | Mobile Wallet)
     payment_method = frappe.form_dict.get('payment_method')
+    price_list = frappe.form_dict.get('price_list')
+    raw_zero_shipping_override = frappe.form_dict.get('zero_shipping_override')
+    zero_shipping_override = _is_truthy_flag(raw_zero_shipping_override)
+    raw_suppress_shipping_income = frappe.form_dict.get('suppress_shipping_income')
+    raw_suppress_legacy_delivery_charges = frappe.form_dict.get('suppress_legacy_delivery_charges')
+    suppress_shipping_income = _is_truthy_flag(raw_suppress_shipping_income)
+    suppress_legacy_delivery_charges = _is_truthy_flag(raw_suppress_legacy_delivery_charges)
+
+    if zero_shipping_override:
+        suppress_shipping_income = True
+        suppress_legacy_delivery_charges = True
     
     # Frappe best practice: Use frappe.logger() for structured logging
     logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
@@ -112,6 +117,10 @@ RAW PARAMETERS:
     print(f"   delivery_date: {delivery_date} | delivery_time_from: {delivery_time_from} | delivery_duration: {delivery_duration}")
     print(f"   pickup: {is_pickup}")
     print(f"   payment_method: {payment_method}")
+    print(f"   price_list: {price_list}")
+    print(f"   zero_shipping_override: {zero_shipping_override}")
+    print(f"   suppress_shipping_income: {suppress_shipping_income}")
+    print(f"   suppress_legacy_delivery_charges: {suppress_legacy_delivery_charges}")
     
     try:
         # Validate parameters before calling legacy function
@@ -151,16 +160,19 @@ RAW PARAMETERS:
 
         # Call the refactored service function
         result = _create_invoice(
-            cart_json,
-            customer_name,
-            pos_profile_name,
-            delivery_charges_json,
-            required_delivery_datetime,
-            shipping_address_name,
-            sales_partner,
-            payment_type,
-            is_pickup,
-            payment_method,
+            cart_json=cart_json,
+            customer_name=customer_name,
+            pos_profile_name=pos_profile_name,
+            delivery_charges_json=delivery_charges_json,
+            required_delivery_datetime=required_delivery_datetime,
+            shipping_address_name=shipping_address_name,
+            sales_partner=sales_partner,
+            payment_type=payment_type,
+            pickup=is_pickup,
+            payment_method=payment_method,
+            price_list=price_list,
+            suppress_shipping_income=suppress_shipping_income,
+            suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
         )
         
         # Log successful response

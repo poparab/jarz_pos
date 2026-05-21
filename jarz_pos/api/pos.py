@@ -1,8 +1,66 @@
 import frappe
+from frappe import _
 from frappe.utils import flt
 from typing import Optional
 
+from jarz_pos.constants import QUERY_LIMITS, ROLES
 from jarz_pos.utils.invoice_utils import sanitize_printable_text
+
+
+_MANAGER_PRICING_ROLES = {
+    ROLES.JARZ_MANAGER,
+    "JARZ line manager",
+    ROLES.JARZ_LINE_MANAGER,
+}
+
+
+def _has_manager_pricing_access() -> bool:
+    roles = {
+        str(role or "").strip()
+        for role in (frappe.get_roles(frappe.session.user) or [])
+        if str(role or "").strip()
+    }
+    return bool(roles.intersection(_MANAGER_PRICING_ROLES))
+
+
+def _ensure_manager_pricing_access() -> None:
+    if not _has_manager_pricing_access():
+        frappe.throw(_("Not permitted: manager pricing access required"), frappe.PermissionError)
+
+
+def _normalize_price_list_name(value: Optional[str]) -> Optional[str]:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def _resolve_effective_price_list(profile: str, requested_price_list: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    default_price_list = _normalize_price_list_name(
+        frappe.db.get_value("POS Profile", profile, "selling_price_list")
+    )
+    requested = _normalize_price_list_name(requested_price_list)
+
+    if requested and requested != default_price_list:
+        _ensure_manager_pricing_access()
+
+    effective_price_list = requested or default_price_list
+    if effective_price_list and not frappe.db.exists("Price List", effective_price_list):
+        frappe.throw(_("Price List {0} was not found").format(effective_price_list))
+
+    return effective_price_list, default_price_list
+
+
+def _get_item_price_from_price_list(item_code: str, price_list: Optional[str]) -> Optional[float]:
+    if not price_list:
+        return None
+
+    rate = frappe.db.get_value(
+        "Item Price",
+        {"price_list": price_list, "item_code": item_code},
+        "price_list_rate",
+    )
+    if rate is None:
+        return None
+    return flt(rate)
 
 
 def _get_valid_sales_item_codes(item_codes):
@@ -65,11 +123,94 @@ def get_pos_profiles():
             result.append(row)
     return result
 
+
 @frappe.whitelist(allow_guest=False)
-def get_profile_bundles(profile: str):
+def get_pos_price_lists(profile: str):
+    """Return POS-selectable selling price lists for manager pricing flows."""
+    from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
+
+    assert_pos_profile_enabled(profile)
+    _ensure_manager_pricing_access()
+
+    default_price_list = _normalize_price_list_name(
+        frappe.db.get_value("POS Profile", profile, "selling_price_list")
+    )
+    profile_currency = _normalize_price_list_name(
+        frappe.db.get_value("POS Profile", profile, "currency")
+    )
+
+    rows = frappe.get_all(
+        "Price List",
+        filters={"enabled": 1, "selling": 1},
+        fields=["name", "currency"],
+        limit_page_length=QUERY_LIMITS.DEFAULT_LIST,
+        order_by="name asc",
+    )
+
+    has_zero_shipping_flag = False
+    has_display_label = False
+    try:
+        has_zero_shipping_flag = bool(frappe.db.has_column("Price List", "custom_jarz_zero_shipping_default"))
+    except Exception:
+        has_zero_shipping_flag = False
+    try:
+        has_display_label = bool(frappe.db.has_column("Price List", "custom_jarz_price_override_label"))
+    except Exception:
+        has_display_label = False
+
+    results = []
+    seen = set()
+    for row in rows:
+        name = _normalize_price_list_name(row.get("name"))
+        if not name or name in seen:
+            continue
+        if profile_currency and row.get("currency") and row.get("currency") != profile_currency:
+            continue
+
+        payload = {
+            "name": name,
+            "currency": row.get("currency") or profile_currency,
+            "is_default": name == default_price_list,
+            "zero_shipping_default": False,
+            "display_label": name,
+        }
+        if has_zero_shipping_flag:
+            payload["zero_shipping_default"] = bool(
+                frappe.db.get_value("Price List", name, "custom_jarz_zero_shipping_default")
+            )
+        if has_display_label:
+            payload["display_label"] = (
+                frappe.db.get_value("Price List", name, "custom_jarz_price_override_label")
+                or name
+            )
+
+        results.append(payload)
+        seen.add(name)
+
+    if default_price_list and default_price_list not in seen:
+        results.insert(
+            0,
+            {
+                "name": default_price_list,
+                "currency": profile_currency,
+                "is_default": True,
+                "zero_shipping_default": False,
+                "display_label": default_price_list,
+            },
+        )
+
+    return results
+
+@frappe.whitelist(allow_guest=False)
+def get_profile_bundles(profile: str, price_list: Optional[str] = None):
     """Return bundles with items available to the given POS profile."""
     from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
     assert_pos_profile_enabled(profile)
+
+    effective_price_list, _default_price_list = _resolve_effective_price_list(
+        profile,
+        requested_price_list=price_list,
+    )
 
     # For now, just get all available bundles
     # Future: filter by POS profile permissions
@@ -122,19 +263,9 @@ def get_profile_bundles(profile: str):
             # except Exception:
             #     wh = None
 
-            # Use selling price list linked to POS profile when available
-            try:
-                price_list = frappe.db.get_value('POS Profile', profile, 'selling_price_list')
-            except Exception:
-                price_list = None
-
-            if price_list:
+            if effective_price_list:
                 for item in items_in_group:
-                    rate = frappe.db.get_value(
-                        'Item Price',
-                        {'price_list': price_list, 'item_code': item['id']},
-                        'price_list_rate'
-                    )
+                    rate = _get_item_price_from_price_list(item['id'], effective_price_list)
                     if rate is not None:
                         item['price'] = rate
 
@@ -165,8 +296,14 @@ def get_profile_bundles(profile: str):
         if bundle_has_empty_required_group:
             continue
 
+        if effective_price_list:
+            bundle_rate = _get_item_price_from_price_list(b['erpnext_item'], effective_price_list)
+            if bundle_rate is not None:
+                b['price'] = bundle_rate
+
         b['item_groups'] = processed_groups
         b['parent_item_code'] = b.get('erpnext_item')
+        b['price_list'] = effective_price_list
         # Normalize flag for clients
         try:
             b['free_shipping'] = 1 if int(b.get('free_shipping') or 0) else 0
@@ -178,8 +315,13 @@ def get_profile_bundles(profile: str):
     return filtered_bundles
 
 @frappe.whitelist(allow_guest=False)
-def get_profile_products(profile: str):
+def get_profile_products(profile: str, price_list: Optional[str] = None):
     """Return items whose item_group is allowed for the given POS profile."""
+    effective_price_list, _default_price_list = _resolve_effective_price_list(
+        profile,
+        requested_price_list=price_list,
+    )
+
     # ERPNext v14+: child DocType exists; earlier/forked instances may not
     try:
         item_groups = frappe.get_all(
@@ -209,20 +351,12 @@ def get_profile_products(profile: str):
         ],
     )
 
-    # Use selling price list linked to POS profile when available
-    try:
-        price_list = frappe.db.get_value('POS Profile', profile, 'selling_price_list')
-    except Exception:
-        price_list = None
-
-    if price_list:
+    if effective_price_list:
         for itm in items:
-            rate = frappe.db.get_value('Item Price', {
-                'price_list': price_list,
-                'item_code': itm['id'],
-            }, 'price_list_rate') or 0
-            if rate:
+            rate = _get_item_price_from_price_list(itm['id'], effective_price_list)
+            if rate is not None:
                 itm['price'] = rate
+            itm['price_list'] = effective_price_list
 
     # attach stock qty per POS profile warehouse if defined
     try:

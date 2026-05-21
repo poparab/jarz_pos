@@ -19,7 +19,7 @@ class BundleProcessor:
     Handles bundle expansion and pricing logic for POS invoices
     """
     
-    def __init__(self, bundle_code, quantity=1, selected_items=None):
+    def __init__(self, bundle_code, quantity=1, selected_items=None, price_list=None, target_bundle_price=None):
         self.bundle_code = bundle_code
         self.quantity = quantity
         self.bundle_doc = None
@@ -27,12 +27,23 @@ class BundleProcessor:
         self.bundle_items = []
         # Expected shape: { group_key_or_group_name: [ {id: item_code, ...}, ... ] }
         self.selected_items = selected_items or {}
+        self.price_list = price_list
+        self.target_bundle_price = flt(target_bundle_price) if target_bundle_price not in (None, "") else None
 
     def get_item_rate(self, item_code):
         """
         Get the selling rate for an item from price list or standard selling rate
         """
         try:
+            if self.price_list:
+                selected_rate = frappe.db.get_value(
+                    "Item Price",
+                    {"item_code": item_code, "price_list": self.price_list},
+                    "price_list_rate",
+                )
+                if selected_rate not in (None, ""):
+                    return flt(selected_rate)
+
             # First try to get item document and check standard selling rate
             item_doc = frappe.get_doc("Item", item_code)
             if item_doc.standard_rate and flt(item_doc.standard_rate) > 0:
@@ -258,7 +269,9 @@ class BundleProcessor:
         """Return uniform discount percentage for child items ensuring bundle price match.
         Raises if bundle_price > total child gross (cannot inflate price when parent is 100% discounted).
         """
-        bundle_price = flt(self.bundle_doc.bundle_price)
+        bundle_price = self.target_bundle_price
+        if bundle_price in (None, ""):
+            bundle_price = flt(self.bundle_doc.bundle_price)
         if bundle_price <= 0:
             frappe.throw(_(f"Bundle {self.bundle_code} price is not set or invalid"))
 
@@ -429,7 +442,7 @@ class BundleProcessor:
         return invoice_items
 
 
-def process_bundle_for_invoice(bundle_identifier, quantity=1, selected_items=None):
+def process_bundle_for_invoice(bundle_identifier, quantity=1, selected_items=None, price_list=None, target_bundle_price=None):
     """
     Main function to process bundle for invoice
     
@@ -468,7 +481,13 @@ def process_bundle_for_invoice(bundle_identifier, quantity=1, selected_items=Non
                 frappe.throw(f"No Jarz Bundle found for identifier '{bundle_identifier}'. Checked both erpnext_item field and bundle record ID.")
         
         # Process the bundle using the bundle record ID
-        processor = BundleProcessor(bundle_code, quantity, selected_items=selected_items)
+        processor = BundleProcessor(
+            bundle_code,
+            quantity,
+            selected_items=selected_items,
+            price_list=price_list,
+            target_bundle_price=target_bundle_price,
+        )
         result = processor.get_invoice_items()
         
         frappe.log_error(f"✅ Bundle processing complete: {len(result)} items generated", "Bundle Processing")

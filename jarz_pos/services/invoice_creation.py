@@ -8,6 +8,7 @@ including validation, document creation, and submission.
 import frappe
 import traceback
 from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
+from jarz_pos.constants import ROLES
 from jarz_pos.services import delivery_promotions as _delivery_promotions
 from jarz_pos.utils.validation_utils import (
     validate_cart_data, 
@@ -27,10 +28,121 @@ from jarz_pos.utils.customer_address_utils import (
 from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 from jarz_pos.utils.account_utils import (
+    get_item_price,
     get_company_receivable_account,
     ensure_partner_receivable_subaccount,
     resolve_online_partner_paid_to,
 )
+
+
+_MANAGER_PRICING_ROLES = {
+    ROLES.JARZ_MANAGER,
+    "JARZ line manager",
+    ROLES.JARZ_LINE_MANAGER,
+}
+
+
+def _has_manager_pricing_access() -> bool:
+    roles = {
+        str(role or "").strip()
+        for role in (frappe.get_roles(frappe.session.user) or [])
+        if str(role or "").strip()
+    }
+    return bool(roles.intersection(_MANAGER_PRICING_ROLES))
+
+
+def _ensure_manager_pricing_access() -> None:
+    if not _has_manager_pricing_access():
+        frappe.throw("Not permitted: manager pricing access required")
+
+
+def _normalize_price_list_name(value) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def _append_unique_remark(invoice_doc, marker: str) -> None:
+    marker = (marker or "").strip()
+    if not marker:
+        return
+
+    existing = (getattr(invoice_doc, "remarks", "") or "").strip()
+    if marker in existing:
+        return
+
+    invoice_doc.remarks = (existing + "\n" if existing else "") + marker
+
+
+def _pricing_action_requires_manager(
+    cart_items,
+    *,
+    requested_price_list: str | None,
+    default_price_list: str | None,
+    suppress_shipping_income: bool | None,
+    suppress_legacy_delivery_charges: bool | None,
+) -> bool:
+    requested = _normalize_price_list_name(requested_price_list)
+    default = _normalize_price_list_name(default_price_list)
+    if requested and requested != default:
+        return True
+    if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
+        return True
+
+    for item in cart_items or []:
+        if not isinstance(item, dict):
+            continue
+        for field in ("custom_rate_override", "discount_amount", "discount_percentage"):
+            value = item.get(field)
+            if value not in (None, "", 0, 0.0):
+                return True
+
+    return False
+
+
+def _resolve_effective_price_list(
+    pos_profile,
+    cart_items,
+    *,
+    requested_price_list: str | None,
+    suppress_shipping_income: bool | None,
+    suppress_legacy_delivery_charges: bool | None,
+    logger,
+) -> str | None:
+    default_price_list = _normalize_price_list_name(
+        getattr(pos_profile, "selling_price_list", None)
+    )
+    requested = _normalize_price_list_name(requested_price_list)
+
+    if _pricing_action_requires_manager(
+        cart_items,
+        requested_price_list=requested,
+        default_price_list=default_price_list,
+        suppress_shipping_income=suppress_shipping_income,
+        suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+    ):
+        _ensure_manager_pricing_access()
+
+    effective_price_list = requested or default_price_list
+    if effective_price_list and not frappe.db.exists("Price List", effective_price_list):
+        frappe.throw(f"Price List '{effective_price_list}' does not exist")
+
+    logger.info(
+        f"pricing_context resolved: requested={requested or ''}, default={default_price_list or ''}, effective={effective_price_list or ''}"
+    )
+    return effective_price_list
+
+
+def _resolve_item_rate(item_code, price_list, fallback_rate=0.0) -> float:
+    if price_list:
+        rate = frappe.db.get_value(
+            "Item Price",
+            {"item_code": item_code, "price_list": price_list},
+            "price_list_rate",
+        )
+        if rate not in (None, ""):
+            return float(rate)
+
+    return float(get_item_price(item_code, price_list) or fallback_rate or 0.0)
 
 
 def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
@@ -213,6 +325,7 @@ def create_pos_invoice(
     payment_type: str | None = None,
     pickup: bool | None = None,
     payment_method: str | None = None,
+    price_list: str | None = None,
     amended_from: str | None = None,
     woo_order_id: int | None = None,
     suppress_shipping_income: bool | None = None,
@@ -279,7 +392,20 @@ def create_pos_invoice(
 
         # STEP 4: Item and Bundle Processing
         print("\n4️⃣ ITEM AND BUNDLE PROCESSING:")
-        processed_items = _process_cart_items(cart_items, pos_profile, logger)
+        effective_price_list = _resolve_effective_price_list(
+            pos_profile,
+            cart_items,
+            requested_price_list=price_list,
+            suppress_shipping_income=suppress_shipping_income,
+            suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+            logger=logger,
+        )
+        processed_items = _process_cart_items(
+            cart_items,
+            pos_profile,
+            logger,
+            price_list=effective_price_list,
+        )
 
         # STEP 5: Create Sales Invoice Document
         print("\n5️⃣ CREATING SALES INVOICE:")
@@ -288,6 +414,25 @@ def create_pos_invoice(
         # STEP 6: Set Document Fields
         print("\n6️⃣ SETTING DOCUMENT FIELDS:")
         set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
+        if effective_price_list:
+            invoice_doc.selling_price_list = effective_price_list
+            print(f"   🏷️ Selling Price List set: {effective_price_list}")
+            if effective_price_list != getattr(pos_profile, "selling_price_list", None):
+                _append_unique_remark(invoice_doc, f"[PRICE LIST OVERRIDE] {effective_price_list}")
+        if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
+            _append_unique_remark(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
+        if any(item.get("custom_rate_override") not in (None, "", 0, 0.0) for item in processed_items):
+            _append_unique_remark(invoice_doc, "[CUSTOM LINE PRICING]")
+        if any(
+            (
+                item.get("discount_amount") not in (None, "", 0, 0.0)
+                or item.get("discount_percentage") not in (None, "", 0, 0.0)
+            )
+            and not item.get("is_bundle_parent")
+            and not item.get("is_bundle_child")
+            for item in processed_items
+        ):
+            _append_unique_remark(invoice_doc, "[LINE DISCOUNTS]")
 
         # STEP 6.A: Resolve and stamp the shipping address explicitly.
         resolved_shipping_address = resolve_customer_shipping_address(
@@ -591,7 +736,7 @@ def _parse_delivery_charges(delivery_charges_json, logger):
     return delivery_charges
 
 
-def _process_cart_items(cart_items, pos_profile, logger):
+def _process_cart_items(cart_items, pos_profile, logger, price_list=None):
     """Process all cart items including bundles."""
     logger.debug(f"Processing {len(cart_items)} cart items")
     processed_items = []  # Will contain both regular items and bundle items
@@ -660,11 +805,13 @@ def _process_cart_items(cart_items, pos_profile, logger):
                 pos_profile,
                 logger,
                 selected_items=selected_items,
+                price_list=price_list,
+                item_data=item_data,
             )
             processed_items.extend(bundle_items)
         else:
             # Process regular item
-            regular_item = _process_regular_item(item_code, qty, rate, logger)
+            regular_item = _process_regular_item(item_data, logger, price_list=price_list)
             processed_items.append(regular_item)
     
     if not processed_items:
@@ -677,7 +824,7 @@ def _process_cart_items(cart_items, pos_profile, logger):
     return processed_items
 
 
-def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_items=None):
+def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_items=None, price_list=None, item_data=None):
     """Process a bundle item."""
     print(f"      🎁 BUNDLE DETECTED: {item_code}")
     print(f"      🔌 Processing bundle using ERPNext item: {item_code}")
@@ -692,12 +839,22 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
             frappe.throw(error_msg)
         
         print(f"      ✅ Found bundle: {bundle_code} for ERPNext item: {item_code}")
+
+        target_bundle_price = None
+        if isinstance(item_data, dict):
+            target_bundle_price = item_data.get("custom_rate_override")
+            if target_bundle_price in (None, ""):
+                target_bundle_price = item_data.get("price_list_rate")
+        if target_bundle_price in (None, ""):
+            target_bundle_price = rate
         
         # Process bundle using ERPNext item code (not bundle record ID)
         bundle_items = process_bundle_for_invoice(
             item_code,
             qty,
             selected_items=selected_items,
+            price_list=price_list,
+            target_bundle_price=target_bundle_price,
         )
         print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
         return bundle_items
@@ -708,8 +865,11 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
         frappe.throw(error_msg)
 
 
-def _process_regular_item(item_code, qty, rate, logger):
+def _process_regular_item(item_data, logger, price_list=None):
     """Process a regular item."""
+    item_code = item_data.get("item_code")
+    qty = item_data.get("qty", 1)
+    rate = item_data.get("rate", item_data.get("price_list_rate", 0))
     print(f"      📦 REGULAR ITEM: {item_code}")
     
     # Validate regular item exists
@@ -724,14 +884,49 @@ def _process_regular_item(item_code, qty, rate, logger):
         item_doc = frappe.get_doc("Item", item_code)
         logger.debug(f"Item validated: {item_doc.item_name}")
         print(f"         ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
+
+        catalog_rate = _resolve_item_rate(item_code, price_list, fallback_rate=rate)
+        custom_rate_override = item_data.get("custom_rate_override")
+        effective_price_list_rate = float(catalog_rate)
+        if custom_rate_override not in (None, ""):
+            custom_rate_override = float(custom_rate_override)
+            if custom_rate_override < 0:
+                frappe.throw(f"Custom rate override for item '{item_code}' must be non-negative")
+            effective_price_list_rate = custom_rate_override
+
+        discount_percentage = item_data.get("discount_percentage")
+        if discount_percentage not in (None, ""):
+            discount_percentage = float(discount_percentage)
+            if discount_percentage < 0 or discount_percentage > 100:
+                frappe.throw(f"Discount percentage for item '{item_code}' must be between 0 and 100")
+
+        discount_amount = item_data.get("discount_amount")
+        if discount_amount not in (None, ""):
+            discount_amount = float(discount_amount)
+            if discount_amount < 0:
+                frappe.throw(f"Discount amount for item '{item_code}' must be non-negative")
+            if effective_price_list_rate > 0 and discount_amount > effective_price_list_rate:
+                frappe.throw(
+                    f"Discount amount for item '{item_code}' cannot exceed the effective unit price"
+                )
         
-        return {
+        result = {
             "item_code": item_code,
             "qty": float(qty),
-            "rate": float(rate),
-            "uom": item_doc.stock_uom,
-            "is_bundle_item": False
+            "rate": float(effective_price_list_rate),
+            "price_list_rate": float(effective_price_list_rate),
+            "uom": item_data.get("uom") or item_doc.stock_uom,
+            "is_bundle_item": False,
         }
+        if custom_rate_override not in (None, ""):
+            result["custom_rate_override"] = float(custom_rate_override)
+            result["original_price_list_rate"] = float(catalog_rate)
+        if discount_percentage not in (None, ""):
+            result["discount_percentage"] = float(discount_percentage)
+        if discount_amount not in (None, ""):
+            result["discount_amount"] = float(discount_amount)
+
+        return result
     except Exception as e:
         error_msg = f"Error loading item '{item_code}': {str(e)}"
         logger.error(error_msg)
