@@ -1310,6 +1310,7 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
         event_type,
         _safe_str(event_type).replace("_", " ").title(),
     )
+    title = f"{title_prefix}: {customer_name}"
 
     body_parts: List[str] = []
     if territory:
@@ -1326,6 +1327,8 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
         if reason:
             body_parts.append(f"Reason: {reason}")
 
+    body = " | ".join(body_parts)
+
     data: Dict[str, str] = {
         "type": event_type,
         "invoice_id": _safe_str(payload.get("invoice_id")),
@@ -1340,14 +1343,8 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
             fallback=frappe.utils.now_datetime().isoformat(),
         ),
         "sales_invoice_state": _pick_display_text(payload.get("sales_invoice_state")),
-        "title": _pick_display_text(
-            payload.get("title"),
-            fallback=f"{title_prefix}: {customer_name}",
-        ),
-        "body": _pick_display_text(
-            payload.get("body"),
-            fallback=" | ".join(body_parts),
-        ),
+        "title": title,
+        "body": body,
     }
 
     if event_type == "invoice_accepted":

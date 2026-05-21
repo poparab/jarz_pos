@@ -267,6 +267,30 @@ class TestNotificationPayloadContract(unittest.TestCase):
             "Territory: Alexandria | POS Profile: Smouha | Reason: Customer requested cancellation",
         )
 
+    def test_prepare_invoice_status_data_payload_overrides_inherited_new_order_title_and_body(self):
+        from jarz_pos.api.notifications import _prepare_invoice_status_data_payload
+
+        data = _prepare_invoice_status_data_payload(
+            "invoice_cancelled",
+            {
+                "invoice_id": "SINV-0006",
+                "customer_name": "Sara Nabil",
+                "territory": "Giza",
+                "pos_profile": "Dokki",
+                "reason": "Customer requested cancellation",
+                "title": "New Order: Sara Nabil",
+                "body": "Dokki | Total: 100.00 | Latte x 1",
+                "sales_invoice_state": "Cancelled",
+                "timestamp": "2026-05-03T10:08:00",
+            },
+        )
+
+        self.assertEqual(data["title"], "Order Cancelled: Sara Nabil")
+        self.assertEqual(
+            data["body"],
+            "Territory: Giza | POS Profile: Dokki | Reason: Customer requested cancellation",
+        )
+
     def test_send_fcm_notifications_sends_new_invoice_with_notification_and_data(self):
         from jarz_pos.api import notifications
 
