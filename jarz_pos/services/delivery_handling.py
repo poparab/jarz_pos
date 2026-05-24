@@ -46,17 +46,36 @@ def update_submitted_sales_invoice_state(
     if not target_state:
         return False
 
+    return update_submitted_sales_invoice_fields(
+        inv,
+        {field_name: target_state for field_name in resolved_fields},
+    )
+
+
+def update_submitted_sales_invoice_fields(inv, field_values: dict[str, object] | None) -> bool:
+    """Persist submitted Sales Invoice field changes via save() so hooks can run."""
+    resolved_values = {
+        str(field_name).strip(): value
+        for field_name, value in (field_values or {}).items()
+        if str(field_name).strip()
+    }
+    if not resolved_values:
+        return False
+
     inv_name = str(getattr(inv, "name", "") or "").strip()
 
     try:
         meta = frappe.get_meta("Sales Invoice")
-        existing_fields = [field_name for field_name in resolved_fields if meta.get_field(field_name)]
+        existing_fields = [field_name for field_name in resolved_values if meta.get_field(field_name)]
         if existing_fields:
-            resolved_fields = tuple(existing_fields)
+            resolved_values = {
+                field_name: resolved_values[field_name]
+                for field_name in existing_fields
+            }
     except Exception:
         pass
 
-    if not resolved_fields:
+    if not resolved_values:
         return False
 
     def _load_working_invoice():
@@ -70,7 +89,7 @@ def update_submitted_sales_invoice_state(
     def _sync_original_invoice(stateful_inv) -> None:
         if stateful_inv is inv:
             return
-        for field_name in resolved_fields:
+        for field_name in resolved_values:
             try:
                 inv.set(field_name, stateful_inv.get(field_name))
             except Exception:
@@ -82,12 +101,12 @@ def update_submitted_sales_invoice_state(
     for attempt in range(2):
         working_inv = _load_working_invoice()
 
-        if all((str(working_inv.get(field_name) or "").strip() == target_state) for field_name in resolved_fields):
+        if all(working_inv.get(field_name) == expected_value for field_name, expected_value in resolved_values.items()):
             _sync_original_invoice(working_inv)
             return False
 
-        for field_name in resolved_fields:
-            working_inv.set(field_name, target_state)
+        for field_name, expected_value in resolved_values.items():
+            working_inv.set(field_name, expected_value)
 
         if getattr(working_inv, "docstatus", 0) == 1:
             working_inv.flags.ignore_validate_update_after_submit = True
@@ -2141,12 +2160,14 @@ def change_payment_collection_method(
         frappe.throw("Delivery partner orders are not supported for this collection method workflow yet")
 
     if source_ct.get("idempotency_token") == idempotency_token:
+        effective_method = _normalize_collection_method(source_ct.get("payment_mode") or new_method)
+        update_submitted_sales_invoice_fields(inv, {"custom_payment_method": effective_method})
         shipping_amount = float(source_ct.get("shipping_amount") or 0)
         if shipping_amount <= 0.0001:
             stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
             shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
         return {
-            "mode": "cod_to_online" if _is_online_collection_method(new_method) else "online_intent_to_cash",
+            "mode": "cod_to_online" if _is_online_collection_method(effective_method) else "online_intent_to_cash",
             "invoice": inv.name,
             "courier_transaction": source_ct.get("name"),
             "journal_entry": source_ct.get("journal_entry"),
@@ -2424,6 +2445,7 @@ def _append_collection_change_note(existing_notes: str | None, *, old_method: st
 def _apply_collection_change_to_cash(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, notes: str | None, idempotency_token: str):
     ct_name = ct.get("name")
     if ct.get("idempotency_token") == idempotency_token:
+        update_submitted_sales_invoice_fields(inv, {"custom_payment_method": new_method})
         return {
             "mode": "online_intent_to_cash",
             "invoice": inv.name,
@@ -2459,6 +2481,7 @@ def _apply_collection_change_to_cash(*, inv, ct, new_method: str, order_amount: 
             ),
         },
     )
+    update_submitted_sales_invoice_fields(inv, {"custom_payment_method": new_method})
     return {
         "mode": "online_intent_to_cash",
         "invoice": inv.name,
@@ -2546,6 +2569,7 @@ def _apply_collection_change_to_online(*, inv, ct, new_method: str, order_amount
             ),
         },
     )
+    update_submitted_sales_invoice_fields(inv, {"custom_payment_method": new_method})
     return {
         "mode": "cod_to_online",
         "invoice": inv.name,

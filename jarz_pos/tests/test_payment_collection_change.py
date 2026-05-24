@@ -24,6 +24,8 @@ class _FakeInvoice:
             "is_return": 0,
             **data,
         }
+        self.flags = SimpleNamespace()
+        self._save_calls = []
 
     def __getattr__(self, key):
         if key in self._data:
@@ -32,6 +34,13 @@ class _FakeInvoice:
 
     def get(self, key, default=None):
         return self._data.get(key, default)
+
+    def set(self, key, value):
+        self._data[key] = value
+
+    def save(self, **kwargs):
+        self._save_calls.append(kwargs)
+        return self
 
 
 class _JournalEntryCapture:
@@ -137,7 +146,8 @@ def _import_delivery_handling(invoice=None):
 
 class TestPaymentCollectionChangeHelpers(unittest.TestCase):
     def test_apply_collection_change_to_cash_updates_ct_without_journal_entry(self):
-        module, stub_frappe = _import_delivery_handling(_FakeInvoice(name="INV-CASH-001"))
+        invoice = _FakeInvoice(name="INV-CASH-001", custom_payment_method="Instapay")
+        module, stub_frappe = _import_delivery_handling(invoice)
         module.mark_payment_receipts_changed_for_invoice = MagicMock(return_value=["PPR-0001"])
 
         ct = {
@@ -148,7 +158,7 @@ class TestPaymentCollectionChangeHelpers(unittest.TestCase):
         }
 
         result = module._apply_collection_change_to_cash(
-            inv=_FakeInvoice(name="INV-CASH-001"),
+            inv=invoice,
             ct=ct,
             new_method="Cash",
             order_amount=150.0,
@@ -168,9 +178,13 @@ class TestPaymentCollectionChangeHelpers(unittest.TestCase):
         self.assertEqual(values["idempotency_token"], "TOKEN-1")
         self.assertIn("Payment collection changed on", values["notes"])
         self.assertIn("changed_receipts=PPR-0001", values["notes"])
+        self.assertEqual(invoice.custom_payment_method, "Cash")
+        self.assertTrue(invoice.flags.ignore_validate_update_after_submit)
+        self.assertEqual(len(invoice._save_calls), 1)
 
     def test_apply_collection_change_to_online_creates_je_and_shipping_only_ct(self):
-        module, stub_frappe = _import_delivery_handling(_FakeInvoice(name="INV-ONLINE-001"))
+        invoice = _FakeInvoice(name="INV-ONLINE-001", custom_payment_method="Cash")
+        module, stub_frappe = _import_delivery_handling(invoice)
         module._get_online_collection_account = MagicMock(return_value="Bank Account - TC")
         module._get_courier_outstanding_account = MagicMock(return_value="Courier Outstanding - TC")
         module.validate_account_exists = MagicMock()
@@ -187,7 +201,7 @@ class TestPaymentCollectionChangeHelpers(unittest.TestCase):
         }
 
         result = module._apply_collection_change_to_online(
-            inv=_FakeInvoice(name="INV-ONLINE-001"),
+            inv=invoice,
             ct=ct,
             new_method="Instapay",
             order_amount=150.0,
@@ -220,6 +234,9 @@ class TestPaymentCollectionChangeHelpers(unittest.TestCase):
         self.assertIn("receipt=PR-001", values["notes"])
         self.assertEqual(result["receipt_image_url"], "/files/receipt.png")
         self.assertEqual(result["receipt_status"], "Unconfirmed")
+        self.assertEqual(invoice.custom_payment_method, "Instapay")
+        self.assertTrue(invoice.flags.ignore_validate_update_after_submit)
+        self.assertEqual(len(invoice._save_calls), 1)
 
 
 class TestPaymentCollectionChangeService(unittest.TestCase):
@@ -310,13 +327,15 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
         self.assertIn("requires an uploaded payment receipt", str(exc.exception))
 
     def test_replayed_token_returns_existing_result(self):
-        module, stub_frappe = _import_delivery_handling(_FakeInvoice(name="INV-ONLINE-REPLAY"))
+        invoice = _FakeInvoice(name="INV-ONLINE-REPLAY", custom_payment_method="Cash")
+        module, stub_frappe = _import_delivery_handling(invoice)
         module._get_collection_change_source_ct = MagicMock(return_value={
             "name": "CT-REPLAY-1",
             "party_type": "Employee",
             "party": "EMP-004",
             "amount": 0.0,
             "shipping_amount": 15.0,
+            "payment_mode": "Instapay",
             "journal_entry": "JE-EXISTING",
             "idempotency_token": "TOKEN-REPLAY",
             "is_partner_order": 0,
@@ -336,3 +355,6 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
         self.assertEqual(result["mode"], "cod_to_online")
         stub_frappe.db.savepoint.assert_not_called()
         stub_frappe.publish_realtime.assert_not_called()
+        self.assertEqual(invoice.custom_payment_method, "Instapay")
+        self.assertTrue(invoice.flags.ignore_validate_update_after_submit)
+        self.assertEqual(len(invoice._save_calls), 1)
