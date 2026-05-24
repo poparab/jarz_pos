@@ -138,6 +138,64 @@ class TestManufacturingPrecheck(unittest.TestCase):
         inserted_doc.insert.assert_called_once()
         inserted_doc.submit.assert_called_once()
 
+    def test_make_and_submit_se_raises_original_insert_submit_error(self):
+        from jarz_pos.api import manufacturing
+
+        scheduled_dt = datetime(2026, 5, 8, 14, 30, 0)
+        inserted_doc = MagicMock()
+        inserted_doc.insert.side_effect = Exception("insufficient stock")
+
+        with patch(
+            "jarz_pos.api.manufacturing._resolve_make_stock_entry",
+            return_value=MagicMock(return_value={"doctype": "Stock Entry"}),
+        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.get_doc.return_value = inserted_doc
+
+            with self.assertRaisesRegex(Exception, "insufficient stock"):
+                manufacturing._make_and_submit_se(
+                    "WO-0001",
+                    "Material Transfer for Manufacture",
+                    3,
+                    scheduled_dt,
+                )
+
+        mock_frappe.get_attr.assert_not_called()
+
+    def test_submit_work_orders_rolls_back_failed_line_and_preserves_original_error(self):
+        from jarz_pos.api import manufacturing
+
+        line = {
+            "item_code": "PIST-CAKE",
+            "bom_name": "BOM-PIST-CAKE",
+            "item_qty": 5,
+            "scheduled_at": "2026-05-08 14:30:00",
+        }
+        scheduled_dt = datetime(2026, 5, 8, 14, 30, 0)
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.api.manufacturing._assert_material_availability"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_mfg_defaults", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_scheduled_datetime", return_value=scheduled_dt
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order", return_value="WO-0001"
+        ), patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se", side_effect=Exception("insufficient stock")
+        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.db.savepoint.return_value = None
+
+            result = manufacturing.submit_work_orders([line])
+
+        mock_frappe.db.savepoint.assert_called_once()
+        mock_frappe.db.rollback.assert_called_once()
+        mock_frappe.db.commit.assert_not_called()
+        self.assertEqual(1, len(result["results"]))
+        self.assertFalse(result["results"][0]["ok"])
+        self.assertEqual("insufficient stock", result["results"][0]["error"])
+
     def test_submit_work_orders_propagates_scheduled_datetime_to_follow_up_documents(self):
         from jarz_pos.api import manufacturing
 

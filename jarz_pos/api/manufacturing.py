@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, List
 
@@ -492,7 +493,6 @@ def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, s
     wo.insert()
     wo.flags.ignore_permissions = True
     wo.submit()
-    frappe.db.commit()
     return wo.name
 
 
@@ -562,9 +562,7 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt:
                 se["fg_completed_qty"] = qty
     except Exception:
         pass
-    # Try standard insert/submit, then fallback to client API path if needed
     try:
-            
         if is_document:
             se.flags.ignore_permissions = True
             se.set_posting_time = 1
@@ -584,36 +582,40 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt:
             doc.flags.ignore_permissions = True
             doc.submit()
             name = doc.name
-        frappe.db.commit()
     except Exception as e1:
-        # Log and fallback to frappe.client methods (REST-like controller)
         try:
-            frappe.log_error(title="JARZ – SE insert/submit failed, trying client API", message=f"WO: {work_order}\nPurpose: {purpose}\nError: {e1}")
+            tb = frappe.get_traceback()
+        except Exception:
+            tb = None
+        try:
+            frappe.log_error(
+                title="JARZ – SE insert/submit failed",
+                message=f"WO: {work_order}\nPurpose: {purpose}\nError: {e1}\nTraceback:\n{tb}",
+            )
         except Exception:
             pass
-        d = se.as_dict() if is_document else (se if is_mapping else None)  # type: ignore
-        if d is None:
-            frappe.throw(_("Unexpected Stock Entry return type; cannot fallback insert"))
-        try:
-            client_insert = frappe.get_attr("frappe.client.insert")
-            client_submit = frappe.get_attr("frappe.client.submit")
-            inserted = client_insert(doc=d)  # type: ignore
-            name = inserted.get("name") if isinstance(inserted, dict) else None
-            if not name:
-                frappe.throw(_("Client insert did not return name"))
-            client_submit(doctype="Stock Entry", name=name)  # type: ignore
-            frappe.db.commit()
-        except Exception as e2:
-            try:
-                frappe.log_error(title="JARZ – SE client API failed", message=f"WO: {work_order}\nPurpose: {purpose}\nError: {e2}")
-            except Exception:
-                pass
-            raise
+        raise
     try:
         frappe.logger().info(f"JARZ Manufacturing: Submitted SE {name} for WO {work_order} ({purpose})")
     except Exception:
         pass
     return name
+
+
+def _build_submit_savepoint_name(index: int, line: Dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "index": index,
+            "item_code": line.get("item_code"),
+            "bom_name": line.get("bom_name"),
+            "item_qty": line.get("item_qty"),
+            "scheduled_at": line.get("scheduled_at"),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    token = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"mfg_submit_{token}"
 
 
 def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
@@ -648,7 +650,10 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
     _ensure_manager_access()
     lines = _coerce_lines(lines)
     results: List[Dict[str, Any]] = []
-    for ln in lines:
+    release_savepoint = getattr(frappe.db, "release_savepoint", None)
+    for index, ln in enumerate(lines):
+        save_point = _build_submit_savepoint_name(index, ln)
+        frappe.db.savepoint(save_point)
         try:
             try:
                 frappe.log_error(title="JARZ – MFG start line", message=f"Line: {ln}")
@@ -704,7 +709,14 @@ def submit_work_orders(lines: Any) -> Dict[str, Any]:
                 "fg_warehouse": getattr(wo_doc, "fg_warehouse", None) or resolved_defaults.get("fg_warehouse"),
                 "wo_status": (wo_doc.status if 'wo_doc' in locals() else None),
             })
+            if callable(release_savepoint):
+                release_savepoint(save_point)
+            frappe.db.commit()
         except Exception as e:
+            try:
+                frappe.db.rollback(save_point=save_point)
+            except Exception:
+                frappe.db.rollback()
             # Avoid exceeding title length by using a short title and detailed message
             try:
                 frappe.log_error(
