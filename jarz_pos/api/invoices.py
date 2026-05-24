@@ -147,8 +147,17 @@ RAW PARAMETERS:
         print(f"\n🔄 Calling core function...")
 
         # Territory → POS profile safety check (before any DB writes)
-        from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory
-        assert_pos_profile_matches_territory(customer_name, pos_profile_name, override=is_pos_profile_override)
+        from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory, resolve_order_territory
+        effective_order_territory = resolve_order_territory(
+            customer_name,
+            shipping_address_name=shipping_address_name,
+        )
+        assert_pos_profile_matches_territory(
+            customer_name,
+            pos_profile_name,
+            override=is_pos_profile_override,
+            territory_name=effective_order_territory,
+        )
 
         # Prefer new delivery slot fields; if provided, synthesize a delivery_datetime for service layer
         if delivery_date and delivery_time_from:

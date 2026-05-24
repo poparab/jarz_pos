@@ -19,7 +19,8 @@ from jarz_pos.utils.validation_utils import (
 from jarz_pos.utils.invoice_utils import (
     set_invoice_fields,
     add_items_to_invoice,
-    verify_invoice_totals
+    verify_invoice_totals,
+    resolve_order_territory,
 )
 from jarz_pos.utils.customer_address_utils import (
     ensure_shipping_address,
@@ -443,6 +444,7 @@ def create_pos_invoice(
             not resolved_shipping_address or resolved_shipping_address.get("name") != shipping_address_name
         ):
             frappe.throw("Selected shipping address is no longer available for this customer")
+        resolved_shipping_address_name = None
         if resolved_shipping_address:
             resolved_shipping_address_name = str(resolved_shipping_address.get("name") or "").strip()
             if resolved_shipping_address_name:
@@ -450,6 +452,15 @@ def create_pos_invoice(
                 invoice_doc.shipping_address_name = resolved_shipping_address_name
                 invoice_doc.customer_address = resolved_shipping_address_name
                 print(f"   📍 Shipping address set: {resolved_shipping_address_name}")
+
+        effective_order_territory = resolve_order_territory(
+            customer_doc.name,
+            shipping_address_name=resolved_shipping_address_name or shipping_address_name,
+            resolved_shipping_address=resolved_shipping_address,
+        )
+        if effective_order_territory:
+            invoice_doc.territory = effective_order_territory
+            print(f"   🧭 Order territory set: {effective_order_territory}")
 
         # STEP 6.0: Mark pickup flag if provided
         is_pickup = bool(pickup)
@@ -607,7 +618,7 @@ def create_pos_invoice(
             # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
             print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
             try:
-                territory_name = getattr(customer_doc, "territory", None)
+                territory_name = effective_order_territory or getattr(invoice_doc, "territory", None)
                 if territory_name and frappe.db.exists("Territory", territory_name):
                     territory_doc = frappe.get_doc("Territory", territory_name)
                     shipping_income = getattr(territory_doc, "delivery_income", 0) or 0

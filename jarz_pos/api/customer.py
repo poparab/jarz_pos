@@ -169,6 +169,7 @@ def save_customer_shipping_address(
     invoice=None,
     address_name=None,
     address=None,
+    territory=None,
     set_as_primary=1,
 ):
     """Select an existing shipping address or create a new one for a customer."""
@@ -179,6 +180,7 @@ def save_customer_shipping_address(
         customer_doc = frappe.get_doc("Customer", customer)
         normalized_address_name = str(address_name or "").strip()
         normalized_address = str(address or "").strip()
+        normalized_territory = str(territory or "").strip()
         use_as_primary = str(set_as_primary or "1").strip().lower() not in {"0", "false", "no", "off"}
 
         if normalized_address_name:
@@ -203,7 +205,7 @@ def save_customer_shipping_address(
                     "address_title": customer_doc.customer_name,
                     "address_type": "Shipping",
                     "address_line1": normalized_address,
-                    "city": customer_doc.territory or "Unknown",
+                    "city": normalized_territory or customer_doc.territory or "Unknown",
                     "is_primary_address": 1 if use_as_primary else 0,
                     "is_shipping_address": 1,
                     "links": [{
@@ -239,6 +241,7 @@ def save_customer_shipping_address(
             "selected_address_name": address_doc.name,
             "selected_address": {
                 "name": address_doc.name,
+                "city": str(address_doc.city or "").strip(),
                 "full_address": format_address_text(address_doc.as_dict()),
                 "phone": _address_phone(address_doc.as_dict(), str(phone or "").strip()),
             },

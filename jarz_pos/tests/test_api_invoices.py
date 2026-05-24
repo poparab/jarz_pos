@@ -10,6 +10,7 @@ from unittest.mock import patch
 class TestInvoiceAPI(unittest.TestCase):
 	"""Test class for Invoice API functionality."""
 
+	@patch("jarz_pos.utils.invoice_utils.resolve_order_territory", return_value=None)
 	@patch("jarz_pos.utils.invoice_utils.assert_pos_profile_matches_territory")
 	@patch("jarz_pos.api.invoices._create_invoice")
 	@patch("jarz_pos.api.invoices.frappe")
@@ -18,6 +19,7 @@ class TestInvoiceAPI(unittest.TestCase):
 		mock_frappe,
 		mock_create_invoice,
 		mock_assert_profile,
+		mock_resolve_order_territory,
 	):
 		"""Public API wrapper should forward price list and shipping suppression flags."""
 		from jarz_pos.api.invoices import create_pos_invoice
@@ -38,7 +40,8 @@ class TestInvoiceAPI(unittest.TestCase):
 		result = create_pos_invoice()
 
 		self.assertEqual(result, {"success": True, "invoice_name": "INV-0001"})
-		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False)
+		mock_resolve_order_territory.assert_called_once_with("Test Customer", shipping_address_name=None)
+		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False, territory_name=None)
 		mock_create_invoice.assert_called_once_with(
 			cart_json='[{"item_code":"ITEM-001","qty":1,"rate":100}]',
 			customer_name="Test Customer",
@@ -55,6 +58,7 @@ class TestInvoiceAPI(unittest.TestCase):
 			suppress_legacy_delivery_charges=True,
 		)
 
+	@patch("jarz_pos.utils.invoice_utils.resolve_order_territory", return_value=None)
 	@patch("jarz_pos.utils.invoice_utils.assert_pos_profile_matches_territory")
 	@patch("jarz_pos.api.invoices._create_invoice")
 	@patch("jarz_pos.api.invoices.frappe")
@@ -63,6 +67,7 @@ class TestInvoiceAPI(unittest.TestCase):
 		mock_frappe,
 		mock_create_invoice,
 		mock_assert_profile,
+		mock_resolve_order_territory,
 	):
 		"""Explicit suppression flags should be forwarded even without zero_shipping_override."""
 		from jarz_pos.api.invoices import create_pos_invoice
@@ -81,7 +86,8 @@ class TestInvoiceAPI(unittest.TestCase):
 
 		create_pos_invoice()
 
-		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False)
+		mock_resolve_order_territory.assert_called_once_with("Test Customer", shipping_address_name=None)
+		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False, territory_name=None)
 		mock_create_invoice.assert_called_once_with(
 			cart_json='[{"item_code":"ITEM-001","qty":1,"rate":100}]',
 			customer_name="Test Customer",

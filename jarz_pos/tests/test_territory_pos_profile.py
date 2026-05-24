@@ -47,6 +47,7 @@ import frappe  # noqa: E402  (after stub registration)
 # Re-import helpers fresh each test class (patch objects replace frappe.db / frappe.get_meta)
 from jarz_pos.utils.invoice_utils import (  # noqa: E402
     assert_pos_profile_matches_territory,
+    resolve_order_territory,
     resolve_territory_pos_profile,
 )
 
@@ -103,6 +104,40 @@ class TestResolveTerritoryPosProfile(unittest.TestCase):
                 result = resolve_territory_pos_profile("CUST-001")
         self.assertEqual(result, "Maadi-POS")
 
+    def test_explicit_territory_wins_over_customer_territory(self):
+        def _db_get(doctype, name, field):
+            if doctype == "Customer":
+                return "Customer Territory"
+            if doctype == "Territory" and name == "Address Territory":
+                return "Address-POS"
+            if doctype == "Territory" and name == "Customer Territory":
+                return "Customer-POS"
+            return None
+
+        with patch.object(frappe.db, "exists", side_effect=lambda doctype, name=None: doctype == "Territory"), \
+             patch.object(frappe.db, "get_value", side_effect=_db_get), \
+             patch.object(frappe, "get_meta", return_value=self._meta_with_field()):
+            result = resolve_territory_pos_profile("CUST-001", territory_name="Address Territory")
+
+        self.assertEqual(result, "Address-POS")
+
+    def test_order_territory_prefers_selected_address_city(self):
+        def _db_get(doctype, name, fieldname=None, as_dict=False):
+            if doctype == "Customer":
+                return "EGHADAYEQAH"
+            if doctype == "Address" and as_dict:
+                return {"city": "EGNASRCITY", "state": "EGNASRCITY"}
+            return None
+
+        with patch.object(
+            frappe.db,
+            "exists",
+            side_effect=lambda doctype, name=None: doctype == "Territory" and name in {"EGNASRCITY", "EGHADAYEQAH"},
+        ), patch.object(frappe.db, "get_value", side_effect=_db_get):
+            result = resolve_order_territory("CUST-001", shipping_address_name="ADDR-001")
+
+        self.assertEqual(result, "EGNASRCITY")
+
 
 class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
     """Unit tests for assert_pos_profile_matches_territory()."""
@@ -156,6 +191,26 @@ class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
         self.assertEqual(payload["selected_profile"], "Downtown-POS")
         self.assertEqual(payload["territory_profile"], "Maadi-POS")
         self.assertEqual(payload["customer_territory"], "Maadi")
+
+    def test_address_territory_profile_match_passes_even_when_customer_differs(self):
+        def _db_get(doctype, name, field):
+            if doctype == "Customer":
+                return "EGHADAYEQAH"
+            if doctype == "Territory" and name == "EGNASRCITY":
+                return "Nasr city"
+            if doctype == "Territory" and name == "EGHADAYEQAH":
+                return "6th of october"
+            return None
+
+        with patch.object(frappe.db, "exists", side_effect=lambda doctype, name=None: doctype == "Territory"), \
+             patch.object(frappe.db, "get_value", side_effect=_db_get), \
+             patch.object(frappe, "get_meta", return_value=self._meta_with_field()):
+            assert_pos_profile_matches_territory(
+                "CUST-001",
+                "Nasr city",
+                override=False,
+                territory_name="EGNASRCITY",
+            )
 
     def test_mismatch_override_true_passes(self):
         def _db_get(doctype, name, field):

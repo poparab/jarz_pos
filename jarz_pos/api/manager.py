@@ -761,11 +761,16 @@ def _run_invoice_amendment_job(
     initiated_by = (initiated_by or frappe.session.user or "Unknown User").strip()
 
     # Territory → POS profile safety check (before any DB writes)
-    from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory
+    from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory, resolve_order_territory
+    effective_order_territory = resolve_order_territory(
+        effective_customer_name,
+        shipping_address_name=effective_shipping_address_name,
+    )
     assert_pos_profile_matches_territory(
         effective_customer_name,
         effective_pos_profile,
         override=_is_truthy_flag(pos_profile_override),
+        territory_name=effective_order_territory,
     )
 
     # Advisory lock shared with the Woo amendment path (order_amendment.py).

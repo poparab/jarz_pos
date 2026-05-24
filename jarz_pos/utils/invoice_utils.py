@@ -523,7 +523,101 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
 # Territory → POS Profile helpers
 # ---------------------------------------------------------------------------
 
-def resolve_territory_pos_profile(customer_name: str) -> Optional[str]:
+def resolve_territory_name(territory_value: Any) -> Optional[str]:
+    """Return the canonical Territory name for a code/display value, if known."""
+    raw_value = str(territory_value or "").strip()
+    if not raw_value:
+        return None
+
+    if frappe.db.exists("Territory", raw_value):
+        return raw_value
+
+    try:
+        if frappe.db.has_column("Territory", "territory_name"):
+            territory_name = frappe.db.get_value("Territory", {"territory_name": raw_value}, "name")
+            if territory_name:
+                return territory_name
+
+        for fieldname in ("custom_woo_code", "woo_code"):
+            if frappe.db.has_column("Territory", fieldname):
+                territory_name = frappe.db.get_value("Territory", {fieldname: raw_value}, "name")
+                if territory_name:
+                    return territory_name
+    except Exception:
+        return None
+
+    return None
+
+
+def _territory_from_address_row(address_row: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not address_row:
+        return None
+
+    for fieldname in ("city", "state"):
+        territory_name = resolve_territory_name(address_row.get(fieldname))
+        if territory_name:
+            return territory_name
+    return None
+
+
+def resolve_address_territory(address_name: str | None) -> Optional[str]:
+    """Resolve a selected Address to a Territory using Jarz's Address.city convention."""
+    address_name = str(address_name or "").strip()
+    if not address_name:
+        return None
+
+    try:
+        address_row = frappe.db.get_value("Address", address_name, ["city", "state"], as_dict=True)
+    except Exception:
+        address_row = None
+    return _territory_from_address_row(address_row)
+
+
+def resolve_order_territory(
+    customer_name: str | None,
+    *,
+    shipping_address_name: str | None = None,
+    resolved_shipping_address: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve the territory that should control a POS order.
+
+    A selected shipping address wins over the customer's stored territory so
+    older/default customer state cannot contaminate invoice totals.
+    """
+    territory_name = _territory_from_address_row(resolved_shipping_address)
+    if territory_name:
+        return territory_name
+
+    territory_name = resolve_address_territory(shipping_address_name)
+    if territory_name:
+        return territory_name
+
+    customer_name = str(customer_name or "").strip()
+    if not customer_name:
+        return None
+
+    try:
+        customer_territory = frappe.db.get_value("Customer", customer_name, "territory")
+    except Exception:
+        customer_territory = None
+    return resolve_territory_name(customer_territory)
+
+
+def resolve_pos_profile_for_territory(territory_name: str | None) -> Optional[str]:
+    territory_name = resolve_territory_name(territory_name)
+    if not territory_name:
+        return None
+
+    try:
+        if not frappe.get_meta("Territory").get_field("pos_profile"):
+            return None
+    except Exception:
+        return None
+
+    return frappe.db.get_value("Territory", territory_name, "pos_profile") or None
+
+
+def resolve_territory_pos_profile(customer_name: str, territory_name: str | None = None) -> Optional[str]:
     """Return the POS Profile configured on the customer's territory, or None if not set.
 
     Returns None when:
@@ -532,24 +626,20 @@ def resolve_territory_pos_profile(customer_name: str) -> Optional[str]:
     - the Territory doctype has no pos_profile field (app not installed)
     - the territory has no POS profile assigned
     """
+    if territory_name:
+        return resolve_pos_profile_for_territory(territory_name)
+
     if not customer_name:
         return None
     territory = frappe.db.get_value("Customer", customer_name, "territory")
-    if not territory:
-        return None
-    # Defensive: field exists only when jarz_woocommerce_integration is installed
-    try:
-        if not frappe.get_meta("Territory").get_field("pos_profile"):
-            return None
-    except Exception:
-        return None
-    return frappe.db.get_value("Territory", territory, "pos_profile") or None
+    return resolve_pos_profile_for_territory(territory)
 
 
 def assert_pos_profile_matches_territory(
     customer_name: str,
     pos_profile_name: str,
     override: bool = False,
+    territory_name: str | None = None,
 ) -> None:
     """Raise a ValidationError with code POS_PROFILE_TERRITORY_MISMATCH when the
     selected POS profile does not match the customer's territory profile and the
@@ -563,7 +653,8 @@ def assert_pos_profile_matches_territory(
     if override:
         return
 
-    territory_profile = resolve_territory_pos_profile(customer_name)
+    effective_territory = resolve_territory_name(territory_name) if territory_name else None
+    territory_profile = resolve_territory_pos_profile(customer_name, territory_name=effective_territory)
     selected = (pos_profile_name or "").strip()
     territory = (territory_profile or "").strip()
 
@@ -577,6 +668,7 @@ def assert_pos_profile_matches_territory(
             "selected_profile": selected,
             "territory_profile": territory,
             "customer_territory": customer_territory,
+            "effective_territory": effective_territory or customer_territory,
         }),
         frappe.ValidationError,
         title="POS_PROFILE_TERRITORY_MISMATCH",
