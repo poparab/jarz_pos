@@ -319,6 +319,84 @@ INVOICE_STATUS_NOTIFICATION_TITLES = {
 }
 
 
+def _get_effective_profile_for_doc(doc: Any) -> str:
+    return _pick_display_text(
+        getattr(doc, "custom_kanban_profile", None),
+        getattr(doc, "pos_profile", None),
+    )
+
+
+def _get_original_pos_profile_for_doc(doc: Any) -> str:
+    return _pick_display_text(getattr(doc, "pos_profile", None))
+
+
+def _get_effective_profile_for_payload(payload: Dict[str, Any]) -> str:
+    return _pick_display_text(
+        payload.get("effective_pos_profile"),
+        payload.get("kanban_profile"),
+        payload.get("custom_kanban_profile"),
+        payload.get("pos_profile"),
+    )
+
+
+def _get_pending_alert_rows_for_profiles(
+    profiles: Sequence[str],
+    cutoff: Any,
+) -> List[Dict[str, Any]]:
+    filtered_profiles = [profile for profile in profiles if profile]
+    if not filtered_profiles:
+        return []
+
+    base_filters = {
+        "docstatus": 1,
+        "status": ["!=", "Cancelled"],
+        "custom_acceptance_status": ["in", [None, "", "Pending"]],
+        "custom_sales_invoice_state": ["!=", "Cancelled"],
+        "creation": [">", cutoff],
+    }
+
+    effective_rows = frappe.get_all(
+        "Sales Invoice",
+        filters={
+            **base_filters,
+            "custom_kanban_profile": ["in", filtered_profiles],
+        },
+        fields=["name", "creation"],
+        order_by="creation asc",
+        limit=QUERY_LIMITS.NOTIFICATIONS,
+    )
+
+    legacy_rows = frappe.get_all(
+        "Sales Invoice",
+        filters={
+            **base_filters,
+            "pos_profile": ["in", filtered_profiles],
+        },
+        fields=["name", "creation", "custom_kanban_profile"],
+        order_by="creation asc",
+        limit=QUERY_LIMITS.NOTIFICATIONS,
+    )
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+
+    for row in effective_rows:
+        name = _safe_str(row.get("name"))
+        if name and name not in deduped:
+            deduped[name] = row
+
+    for row in legacy_rows:
+        if _pick_display_text(row.get("custom_kanban_profile")):
+            continue
+        name = _safe_str(row.get("name"))
+        if name and name not in deduped:
+            deduped[name] = row
+
+    return sorted(
+        deduped.values(),
+        key=lambda row: _safe_str(row.get("creation")),
+    )[: QUERY_LIMITS.NOTIFICATIONS]
+
+
 def _get_fcm_logger() -> Any:
     try:
         return frappe.logger("fcm")
@@ -855,20 +933,7 @@ def get_pending_alerts() -> Dict[str, Any]:
         return {"success": True, "alerts": []}
 
     cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-12)
-    rows = frappe.get_all(
-        "Sales Invoice",
-        filters={
-            "docstatus": 1,
-            "status": ["!=", "Cancelled"],
-            "pos_profile": ["in", profiles],
-            "custom_acceptance_status": ["in", [None, "", "Pending"]],
-            "custom_sales_invoice_state": ["!=", "Cancelled"],
-            "creation": [">", cutoff],
-        },
-        fields=["name"],
-        order_by="creation asc",
-        limit=QUERY_LIMITS.NOTIFICATIONS,
-    )
+    rows = _get_pending_alert_rows_for_profiles(profiles, cutoff)
 
     alerts: List[Dict[str, Any]] = []
     for row in rows:
@@ -886,14 +951,20 @@ def get_pending_alerts() -> Dict[str, Any]:
 def handle_invoice_submission(doc: Any) -> None:
     """Emit realtime and push notifications for a newly submitted invoice."""
 
-    # Skip invoices without a POS profile (e.g. WooCommerce orders) —
-    # they have no push-notification recipients.
-    if not getattr(doc, "pos_profile", None):
+    effective_profile = _get_effective_profile_for_doc(doc)
+
+    # Skip invoices without a branch identifier (e.g. WooCommerce orders)
+    # because they have no profile-scoped recipients.
+    if not effective_profile:
         return
 
     try:
         frappe.logger().info(
-            f"Invoice submit hook triggered for {getattr(doc, 'name', '?')} pos_profile={getattr(doc, 'pos_profile', None)}"
+            "Invoice submit hook triggered for "
+            f"{getattr(doc, 'name', '?')} "
+            f"pos_profile={getattr(doc, 'pos_profile', None)} "
+            f"custom_kanban_profile={getattr(doc, 'custom_kanban_profile', None)} "
+            f"effective_profile={effective_profile}"
         )
         payload = _build_invoice_alert_payload(doc)
         if not payload:
@@ -945,24 +1016,18 @@ def notify_invoice_reassignment(invoice: Union[str, Any], new_kanban_profile: st
         if not doc:
             return
 
-        original_profile = getattr(doc, "pos_profile", None)
-        try:
-            # Build the compatibility payload as if the invoice belongs to the new
-            # branch, without mutating the persisted submitted POS Profile.
-            setattr(doc, "pos_profile", new_kanban_profile)
-            payload = _build_invoice_alert_payload(doc)
-        finally:
-            setattr(doc, "pos_profile", original_profile)
-
+        payload = _build_invoice_alert_payload(doc)
         if not payload:
             return
 
-        payload["pos_profile"] = new_kanban_profile
         payload["kanban_profile"] = new_kanban_profile
+        payload["custom_kanban_profile"] = new_kanban_profile
+        payload["effective_pos_profile"] = new_kanban_profile
         payload["acceptance_status"] = "Pending"
         payload["requires_acceptance"] = True
+        payload = _enrich_invoice_display_fields(payload)
 
-        recipients = _get_users_for_pos_profiles([new_kanban_profile])
+        recipients = _resolve_recipients_for_payload(payload)
         _publish_invoice_alert(payload, recipients)
         _push_new_invoice(payload, recipients)
     except Exception:
@@ -1092,8 +1157,10 @@ def _enrich_invoice_display_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
     branch_display = _pick_display_text(
         payload.get("branch_display"),
-        payload.get("pos_profile"),
+        payload.get("effective_pos_profile"),
         payload.get("kanban_profile"),
+        payload.get("custom_kanban_profile"),
+        payload.get("pos_profile"),
     )
     total_display = _pick_display_text(
         payload.get("total_display"),
@@ -1157,9 +1224,6 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
         return {}
 
     invoice_id = getattr(doc, "name", "")
-    pos_profile = getattr(doc, "pos_profile", None)
-    if not pos_profile:
-        return {}
 
     # Ensure acceptance fields are set BEFORE building payload
     _ensure_acceptance_defaults(doc)
@@ -1169,6 +1233,12 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
         doc = frappe.get_doc("Sales Invoice", invoice_id)
     except Exception:
         pass  # Use the doc we have if reload fails
+
+    pos_profile = _get_original_pos_profile_for_doc(doc)
+    custom_kanban_profile = _pick_display_text(getattr(doc, "custom_kanban_profile", None))
+    effective_profile = _get_effective_profile_for_doc(doc)
+    if not effective_profile:
+        return {}
 
     customer = _pick_display_text(
         getattr(doc, "customer_name", None),
@@ -1212,7 +1282,9 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
         "posting_date": str(getattr(doc, "posting_date", "")),
         "posting_time": str(getattr(doc, "posting_time", "")),
         "pos_profile": pos_profile,
-        "kanban_profile": getattr(doc, "custom_kanban_profile", None),
+        "kanban_profile": effective_profile,
+        "custom_kanban_profile": custom_kanban_profile or None,
+        "effective_pos_profile": effective_profile,
         "custom_is_pickup": bool(getattr(doc, "custom_is_pickup", 0)),
         "delivery_date": _safe_str(getattr(doc, "custom_delivery_date", None)),
         "delivery_time_from": _safe_str(getattr(doc, "custom_delivery_time_from", None)),
@@ -1226,13 +1298,11 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
 
 
 def _resolve_recipients_for_payload(payload: Dict[str, Any]) -> List[str]:
-    profiles: List[str] = []
-    for key in ("pos_profile", "kanban_profile"):
-        value = payload.get(key)
-        if value and value not in profiles:
-            profiles.append(value)
+    effective_profile = _get_effective_profile_for_payload(payload)
+    if not effective_profile:
+        return []
 
-    return _get_users_for_pos_profiles(profiles)
+    return _get_users_for_pos_profiles([effective_profile])
 
 
 def _ensure_acceptance_defaults(doc: Any) -> None:
@@ -1305,7 +1375,8 @@ def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dic
 def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
     customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
     territory = _pick_display_text(payload.get("territory"))
-    pos_profile = _pick_display_text(payload.get("pos_profile"), payload.get("kanban_profile"))
+    pos_profile = _pick_display_text(payload.get("pos_profile"))
+    effective_profile = _get_effective_profile_for_payload(payload)
     title_prefix = INVOICE_STATUS_NOTIFICATION_TITLES.get(
         event_type,
         _safe_str(event_type).replace("_", " ").title(),
@@ -1315,8 +1386,8 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
     body_parts: List[str] = []
     if territory:
         body_parts.append(f"Territory: {territory}")
-    if pos_profile:
-        body_parts.append(f"POS Profile: {pos_profile}")
+    if effective_profile:
+        body_parts.append(f"POS Profile: {effective_profile}")
 
     if event_type == "invoice_accepted":
         accepted_by = _pick_display_text(payload.get("accepted_by"))
@@ -1338,6 +1409,9 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
         "customer_name": customer_name,
         "territory": territory,
         "pos_profile": pos_profile,
+        "kanban_profile": _pick_display_text(payload.get("kanban_profile")),
+        "custom_kanban_profile": _pick_display_text(payload.get("custom_kanban_profile")),
+        "effective_pos_profile": effective_profile,
         "timestamp": _pick_display_text(
             payload.get("timestamp"),
             fallback=frappe.utils.now_datetime().isoformat(),
@@ -1381,6 +1455,9 @@ def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> D
         "notification_id": display_payload.get("invoice_id", ""),
         "customer_name": display_payload.get("customer_name", ""),
         "pos_profile": display_payload.get("pos_profile", "") or "",
+        "kanban_profile": _pick_display_text(display_payload.get("kanban_profile")),
+        "custom_kanban_profile": _pick_display_text(display_payload.get("custom_kanban_profile")),
+        "effective_pos_profile": _get_effective_profile_for_payload(display_payload),
         "grand_total": str(display_payload.get("grand_total", 0)),
         "sales_invoice_state": display_payload.get("sales_invoice_state", ""),
         "timestamp": timestamp,
@@ -1688,9 +1765,8 @@ def _ensure_user_can_accept(doc: Any, user: str) -> None:
     if user in {ROLES.ADMINISTRATOR, ROLES.SYSTEM_MANAGER}:
         return
 
-    authorised_users = _get_users_for_pos_profiles(
-        [getattr(doc, "pos_profile", None), getattr(doc, "custom_kanban_profile", None)]
-    )
+    effective_profile = _get_effective_profile_for_doc(doc)
+    authorised_users = _get_users_for_pos_profiles([effective_profile] if effective_profile else [])
     if user not in authorised_users:
         frappe.throw("You are not allowed to accept orders for this POS profile", frappe.PermissionError)
 

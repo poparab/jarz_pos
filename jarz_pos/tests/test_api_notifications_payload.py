@@ -169,6 +169,46 @@ class TestNotificationPayloadContract(unittest.TestCase):
             "Nasr City | Total: 125.00 | Item x 2, LATTE x 1",
         )
 
+    def test_build_invoice_alert_payload_preserves_original_pos_profile_and_sets_effective_branch(self):
+        from jarz_pos.api.notifications import _build_invoice_alert_payload
+
+        invoice = SimpleNamespace(
+            name="SINV-0099",
+            pos_profile="Dokki",
+            customer_name="",
+            grand_total=75,
+            net_total=60,
+            outstanding_amount=0,
+            custom_sales_invoice_state="Received",
+            posting_date="2026-05-03",
+            posting_time="10:10:00",
+            custom_kanban_profile="Nasr City",
+            custom_is_pickup=0,
+            custom_delivery_date=None,
+            custom_delivery_time_from=None,
+            custom_acceptance_status="Pending",
+            items=[SimpleNamespace(item_code="LATTE", item_name=None, qty=1)],
+        )
+
+        with patch("jarz_pos.api.notifications._ensure_acceptance_defaults"), patch(
+            "jarz_pos.api.notifications.frappe.get_doc",
+            return_value=invoice,
+        ), patch(
+            "jarz_pos.api.notifications.frappe.utils.now_datetime",
+            return_value=datetime(2026, 5, 3, 10, 10, 0),
+        ):
+            payload = _build_invoice_alert_payload(invoice)
+
+        self.assertEqual(payload["pos_profile"], "Dokki")
+        self.assertEqual(payload["kanban_profile"], "Nasr City")
+        self.assertEqual(payload["custom_kanban_profile"], "Nasr City")
+        self.assertEqual(payload["effective_pos_profile"], "Nasr City")
+        self.assertEqual(payload["branch_display"], "Nasr City")
+        self.assertEqual(
+            payload["body"],
+            "Nasr City | Total: 75.00 | LATTE x 1",
+        )
+
     def test_prepare_invoice_data_payload_includes_android_display_contract(self):
         from jarz_pos.api.notifications import _prepare_invoice_data_payload
 
@@ -197,6 +237,33 @@ class TestNotificationPayloadContract(unittest.TestCase):
         self.assertEqual(data["body"], "Heliopolis | Total: 50.00 | Mocha x 1")
         self.assertIn("grand_total", data)
         self.assertIn("items", data)
+
+    def test_prepare_invoice_data_payload_keeps_original_pos_profile_and_sends_effective_branch(self):
+        from jarz_pos.api.notifications import _prepare_invoice_data_payload
+
+        payload = {
+            "invoice_id": "SINV-0200",
+            "customer_name": "",
+            "pos_profile": "Dokki",
+            "kanban_profile": "Nasr City",
+            "custom_kanban_profile": "Nasr City",
+            "effective_pos_profile": "Nasr City",
+            "grand_total": 50,
+            "sales_invoice_state": "Received",
+            "timestamp": "2026-05-03T10:05:00",
+            "requires_acceptance": True,
+            "item_summary": "",
+            "items": [{"item_name": "Mocha", "qty": 1}],
+        }
+
+        data = _prepare_invoice_data_payload("new_invoice", payload)
+
+        self.assertEqual(data["pos_profile"], "Dokki")
+        self.assertEqual(data["kanban_profile"], "Nasr City")
+        self.assertEqual(data["custom_kanban_profile"], "Nasr City")
+        self.assertEqual(data["effective_pos_profile"], "Nasr City")
+        self.assertEqual(data["branch_display"], "Nasr City")
+        self.assertEqual(data["body"], "Nasr City | Total: 50.00 | Mocha x 1")
 
     def test_resolve_notification_content_falls_back_when_title_and_body_are_blank(self):
         from jarz_pos.api.notifications import _resolve_notification_content
@@ -237,6 +304,35 @@ class TestNotificationPayloadContract(unittest.TestCase):
         self.assertEqual(data["territory"], "Cairo")
         self.assertEqual(data["pos_profile"], "Nasr City")
         self.assertEqual(data["title"], "Order Accepted: Ahmed Ali")
+        self.assertEqual(
+            data["body"],
+            "Territory: Cairo | POS Profile: Nasr City | By: manager@example.com",
+        )
+
+    def test_prepare_invoice_status_data_payload_uses_effective_branch_but_keeps_original_pos(self):
+        from jarz_pos.api.notifications import _prepare_invoice_status_data_payload
+
+        data = _prepare_invoice_status_data_payload(
+            "invoice_accepted",
+            {
+                "invoice_id": "SINV-0004",
+                "customer_name": "Ahmed Ali",
+                "territory": "Cairo",
+                "pos_profile": "Dokki",
+                "kanban_profile": "Nasr City",
+                "custom_kanban_profile": "Nasr City",
+                "effective_pos_profile": "Nasr City",
+                "accepted_by": "manager@example.com",
+                "accepted_on": "2026-05-03T10:06:00",
+                "sales_invoice_state": "Accepted",
+                "timestamp": "2026-05-03T10:06:00",
+            },
+        )
+
+        self.assertEqual(data["pos_profile"], "Dokki")
+        self.assertEqual(data["kanban_profile"], "Nasr City")
+        self.assertEqual(data["custom_kanban_profile"], "Nasr City")
+        self.assertEqual(data["effective_pos_profile"], "Nasr City")
         self.assertEqual(
             data["body"],
             "Territory: Cairo | POS Profile: Nasr City | By: manager@example.com",
@@ -290,6 +386,83 @@ class TestNotificationPayloadContract(unittest.TestCase):
             data["body"],
             "Territory: Giza | POS Profile: Dokki | Reason: Customer requested cancellation",
         )
+
+    def test_resolve_recipients_for_payload_uses_effective_branch_only(self):
+        from jarz_pos.api import notifications
+
+        payload = {
+            "pos_profile": "Dokki",
+            "kanban_profile": "Nasr City",
+            "custom_kanban_profile": "Nasr City",
+            "effective_pos_profile": "Nasr City",
+        }
+
+        with patch.object(notifications, "_get_users_for_pos_profiles", return_value=["branchb@example.com"]) as users_mock:
+            recipients = notifications._resolve_recipients_for_payload(payload)
+
+        users_mock.assert_called_once_with(["Nasr City"])
+        self.assertEqual(recipients, ["branchb@example.com"])
+
+    def test_get_pending_alert_rows_for_profiles_excludes_transferred_rows_from_old_branch(self):
+        from jarz_pos.api import notifications
+
+        with patch.object(
+            notifications.frappe,
+            "get_all",
+            side_effect=[
+                [],
+                [
+                    {
+                        "name": "SINV-TRANSFERRED",
+                        "creation": "2026-05-03 10:00:00",
+                        "custom_kanban_profile": "Nasr City",
+                    },
+                    {
+                        "name": "SINV-LEGACY",
+                        "creation": "2026-05-03 10:01:00",
+                        "custom_kanban_profile": None,
+                    },
+                ],
+            ],
+        ):
+            rows = notifications._get_pending_alert_rows_for_profiles(
+                ["Dokki"],
+                "2026-05-03 09:00:00",
+            )
+
+        self.assertEqual([row["name"] for row in rows], ["SINV-LEGACY"])
+
+    def test_get_pending_alert_rows_for_profiles_includes_transferred_rows_for_new_branch(self):
+        from jarz_pos.api import notifications
+
+        with patch.object(
+            notifications.frappe,
+            "get_all",
+            side_effect=[
+                [{"name": "SINV-TRANSFERRED", "creation": "2026-05-03 10:00:00"}],
+                [],
+            ],
+        ):
+            rows = notifications._get_pending_alert_rows_for_profiles(
+                ["Nasr City"],
+                "2026-05-03 09:00:00",
+            )
+
+        self.assertEqual([row["name"] for row in rows], ["SINV-TRANSFERRED"])
+
+    def test_ensure_user_can_accept_checks_effective_branch_only(self):
+        from jarz_pos.api import notifications
+
+        doc = SimpleNamespace(pos_profile="Dokki", custom_kanban_profile="Nasr City")
+
+        with patch.object(
+            notifications,
+            "_get_users_for_pos_profiles",
+            return_value=["branchb@example.com"],
+        ) as users_mock:
+            notifications._ensure_user_can_accept(doc, "branchb@example.com")
+
+        users_mock.assert_called_once_with(["Nasr City"])
 
     def test_send_fcm_notifications_sends_new_invoice_with_notification_and_data(self):
         from jarz_pos.api import notifications
