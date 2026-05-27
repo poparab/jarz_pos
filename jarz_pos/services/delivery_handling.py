@@ -21,6 +21,11 @@ from jarz_pos.utils.account_utils import (
     validate_account_exists,
     get_creditors_account,
 )
+from jarz_pos.utils.courier_visibility import (
+    assert_courier_matches_pos_profile,
+    resolve_assignment_pos_profile,
+    resolve_courier_delivery_partner,
+)
 
 # ---------------------------------------------------------------------------
 # Delivery Note Auto-Creation Helper
@@ -32,6 +37,36 @@ DN_LOGIC_VERSION = "2026-05-04a"
 
 # Constant VAT rate on partner fees
 PARTNER_FEES_VAT_RATE = 0.14  # 14%
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return float(default)
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return float(default)
+        return float(text)
+    except Exception:
+        return float(default)
+
+
+def _child_row_amount(row, fieldname: str) -> float:
+    if isinstance(row, dict):
+        return _safe_float(row.get(fieldname))
+
+    try:
+        return _safe_float(getattr(row, fieldname))
+    except Exception:
+        getter = getattr(row, "get", None)
+        if callable(getter):
+            try:
+                return _safe_float(getter(fieldname))
+            except Exception:
+                return 0.0
+    return 0.0
 
 
 def update_submitted_sales_invoice_state(
@@ -121,6 +156,28 @@ def update_submitted_sales_invoice_fields(inv, field_values: dict[str, object] |
             raise
 
     return False
+
+
+def _persist_invoice_courier_assignment(
+    inv,
+    *,
+    party_type: str | None = None,
+    party: str | None = None,
+    delivery_partner: str | None = None,
+    delivery_trip: str | None = None,
+) -> bool:
+    field_values: dict[str, object] = {}
+    if party_type is not None:
+        field_values["custom_courier_party_type"] = (party_type or "").strip() or None
+    if party is not None:
+        field_values["custom_courier_party"] = (party or "").strip() or None
+    if delivery_partner is not None:
+        field_values["custom_delivery_partner"] = (delivery_partner or "").strip() or None
+    if delivery_trip is not None:
+        field_values["custom_delivery_trip"] = (delivery_trip or "").strip() or None
+    if not field_values:
+        return False
+    return update_submitted_sales_invoice_fields(inv, field_values)
 
 
 @contextmanager
@@ -473,6 +530,8 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     if is_pickup:
         frappe.throw("Cannot assign courier to pickup orders. Pickup orders do not require courier delivery.")
     
+    derived_existing_party = False
+
     # Derive party if omitted
     if not (party_type and party):
         existing_party = frappe.get_all(
@@ -489,8 +548,16 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         if existing_party:
             party_type = existing_party[0].party_type
             party = existing_party[0].party
+            derived_existing_party = True
         else:
             frappe.throw("party_type & party are required (courier must be an Employee or Supplier)")
+
+    resolved_pos_profile = resolve_assignment_pos_profile(inv)
+    courier_details = {
+        "delivery_partner": resolve_courier_delivery_partner(party_type or "", party or ""),
+    }
+    if party_type and party and not derived_existing_party:
+        courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
     
     # Store party info for JE creation
     courier_party_type = party_type
@@ -516,7 +583,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     if shipping_override is not None and shipping_override > 0:
         shipping_exp = float(shipping_override)
     else:
-        stored = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+        stored = _safe_float(getattr(inv, "custom_shipping_expense", 0))
         if stored > 0:
             shipping_exp = stored
         else:
@@ -525,7 +592,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     # Only persist if the field was previously empty (avoid overwriting custom values)
     if shipping_exp > 0:
         try:
-            current = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+            current = _safe_float(getattr(inv, "custom_shipping_expense", 0))
             if current <= 0:
                 inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
         except Exception:
@@ -607,6 +674,13 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
 
     # Update state (defer state commit to end of request)
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
+    _persist_invoice_courier_assignment(
+        inv,
+        party_type=party_type,
+        party=party,
+        delivery_partner=courier_details.get("delivery_partner"),
+        delivery_trip=delivery_trip,
+    )
 
     # Mandatory Delivery Note creation (enforced across all flows)
     dn_result = ensure_delivery_note_for_invoice(inv.name)
@@ -983,7 +1057,7 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     
     # Read shipping from the stored SI value first, fallback to territory calculation
-    stored = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    stored = _safe_float(getattr(inv, "custom_shipping_expense", 0))
     amount = stored if stored > 0 else (_get_delivery_expense_amount(inv) or 0.0)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
@@ -1057,7 +1131,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     
     # Read shipping from the stored SI value first, fallback to territory calculation
-    stored_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    stored_exp = _safe_float(getattr(inv, "custom_shipping_expense", 0))
     amount = stored_exp if stored_exp > 0 else (_get_delivery_expense_amount(inv) or 0.0)
     if amount <= 0:
         frappe.throw("No delivery expense configured for the invoice territory.")
@@ -1369,6 +1443,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         frappe.throw("invoice_name required")
     if not courier:
         frappe.throw("courier required (legacy label)")
+    derived_existing_party = False
     if not (party_type and party):
         fallback = frappe.get_all(
             "Courier Transaction",
@@ -1384,6 +1459,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         if fallback:
             party_type = fallback[0].get("party_type")
             party = fallback[0].get("party")
+            derived_existing_party = True
         else:
             frappe.throw("party_type & party required (must pass Employee/Supplier courier)")
     if settlement not in {"cash_now", "later"}:
@@ -1397,6 +1473,13 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
     # Ensure already paid (allow tiny residual rounding)
     if float(inv.outstanding_amount or 0) > 0.01:
         frappe.throw("Invoice is not fully paid yet")
+
+    resolved_pos_profile = resolve_assignment_pos_profile(inv, requested_pos_profile=pos_profile)
+    courier_details = {
+        "delivery_partner": resolve_courier_delivery_partner(party_type or "", party or ""),
+    }
+    if party_type and party and not derived_existing_party:
+        courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
 
     company = inv.company
     shipping_exp = _get_delivery_expense_amount(inv) or 0.0
@@ -1415,10 +1498,16 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
 
     # Update operational state idempotently
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
+    _persist_invoice_courier_assignment(
+        inv,
+        party_type=party_type,
+        party=party,
+        delivery_partner=courier_details.get("delivery_partner"),
+    )
 
     freight_acc = get_freight_expense_account(company)
     courier_outstanding_acc = get_courier_outstanding_account(company)
-    cash_acc = get_pos_cash_account(pos_profile, company)
+    cash_acc = get_pos_cash_account(resolved_pos_profile, company)
     creditors_acc = get_creditors_account(company)
     for acc in (freight_acc, courier_outstanding_acc, cash_acc, creditors_acc):
         validate_account_exists(acc)
@@ -1621,6 +1710,13 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
             party = None
             courier = None
 
+        resolved_pos_profile = resolve_assignment_pos_profile(inv, requested_pos_profile=pos_profile)
+        courier_details = {
+            "delivery_partner": resolve_courier_delivery_partner(party_type or "", party or ""),
+        }
+        if not is_pickup and party_type and party:
+            courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
+
         # Determine outstanding (fresh from DB)
         try:
             outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
@@ -1639,11 +1735,18 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
             return mark_courier_outstanding(invoice_name, courier, party_type, party)
 
         # PAID invoice flow: just update state and create DN (no payment needed)
-        cash_acc = get_pos_cash_account(pos_profile, company)
+        cash_acc = get_pos_cash_account(resolved_pos_profile, company)
         validate_account_exists(cash_acc)
 
         # Update operational state idempotently
         update_submitted_sales_invoice_state(inv, "Out for Delivery")
+        if party_type and party:
+            _persist_invoice_courier_assignment(
+                inv,
+                party_type=party_type,
+                party=party,
+                delivery_partner=courier_details.get("delivery_partner"),
+            )
 
         # Ensure Delivery Note exists (reuse/create)
         dn_result = ensure_delivery_note_for_invoice(inv.name)
@@ -1736,7 +1839,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
 
     company = inv.company
     # Read shipping from the stored SI value first, fallback to territory calculation
-    stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
     shipping_exp = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
 
     frappe.logger().info(f"DEBUG settle_single_invoice_paid: BEFORE get_pos_cash_account - pos_profile='{pos_profile}', company='{company}'")
@@ -1769,8 +1872,8 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
         limit=1,
     )
     has_outstanding_mode = bool(outstanding_ct)
-    order_amount = float(outstanding_ct[0].amount) if outstanding_ct else 0.0
-    ct_shipping = float(outstanding_ct[0].shipping_amount or 0) if outstanding_ct else 0.0
+    order_amount = _child_row_amount(outstanding_ct[0], "amount") if outstanding_ct else 0.0
+    ct_shipping = _child_row_amount(outstanding_ct[0], "shipping_amount") if outstanding_ct else 0.0
 
     if ct_shipping > 0.0001 and abs(ct_shipping - shipping_exp) > 0.0001:
         frappe.logger().info(
@@ -1792,7 +1895,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             limit=1,
         )
         if other_ct:
-            alt_shipping = float(other_ct[0].get("shipping_amount") or 0)
+            alt_shipping = _child_row_amount(other_ct[0], "shipping_amount")
             if alt_shipping > 0.0001:
                 frappe.logger().info(
                     f"DEBUG settle_single_invoice_paid: fallback courier transaction shipping {alt_shipping}"
@@ -2005,7 +2108,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
     company = inv.company
     order_amount = float(inv.grand_total or 0)
     # Read shipping from the stored SI value first, fallback to territory calculation
-    stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+    stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
     shipping_exp = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
 
     pending_ct = frappe.get_all(
@@ -2164,7 +2267,7 @@ def change_payment_collection_method(
         update_submitted_sales_invoice_fields(inv, {"custom_payment_method": effective_method})
         shipping_amount = float(source_ct.get("shipping_amount") or 0)
         if shipping_amount <= 0.0001:
-            stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+            stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
             shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
         return {
             "mode": "cod_to_online" if _is_online_collection_method(effective_method) else "online_intent_to_cash",
@@ -2185,7 +2288,7 @@ def change_payment_collection_method(
 
     shipping_amount = float(source_ct.get("shipping_amount") or 0)
     if shipping_amount <= 0.0001:
-        stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+        stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
         shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
 
     existing_real_payment = _get_real_customer_payment_entry(inv.name, inv.company)
@@ -3185,8 +3288,8 @@ def _create_settlement_journal_entry(
             },
         )
 
-    total_debit = sum(frappe.utils.flt(acc.debit_in_account_currency or 0, 2) for acc in je.accounts)
-    total_credit = sum(frappe.utils.flt(acc.credit_in_account_currency or 0, 2) for acc in je.accounts)
+    total_debit = sum(frappe.utils.flt(_child_row_amount(acc, "debit_in_account_currency"), 2) for acc in je.accounts)
+    total_credit = sum(frappe.utils.flt(_child_row_amount(acc, "credit_in_account_currency"), 2) for acc in je.accounts)
 
     if abs(total_debit - total_credit) > tolerance:
         frappe.throw(

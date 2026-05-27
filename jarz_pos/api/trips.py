@@ -15,6 +15,11 @@ from jarz_pos.services.delivery_handling import (
     _create_shipping_expense_to_creditors_je,
     get_creditors_account,
     update_submitted_sales_invoice_state,
+    update_submitted_sales_invoice_fields,
+)
+from jarz_pos.utils.courier_visibility import (
+    assert_courier_matches_pos_profile,
+    assert_invoices_share_pos_profile,
 )
 
 
@@ -23,7 +28,7 @@ from jarz_pos.services.delivery_handling import (
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist(allow_guest=False)
-def create_delivery_trip(invoice_names, party_type: str, party: str):
+def create_delivery_trip(invoice_names, party_type: str, party: str, pos_profile: str | None = None):
     """Create a Delivery Trip grouping the given invoices.
 
     Args:
@@ -34,6 +39,8 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
     Returns:
         dict with trip details
     """
+    frappe.has_permission("Delivery Trip", ptype="create", throw=True)
+
     if isinstance(invoice_names, str):
         invoice_names = frappe.parse_json(invoice_names)
     if not invoice_names:
@@ -44,8 +51,10 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
         frappe.throw(_("{0} '{1}' not found").format(party_type, party))
 
     # Validate all invoices
+    invoice_docs = []
     for inv_name in invoice_names:
         inv = frappe.get_doc("Sales Invoice", inv_name)
+        invoice_docs.append(inv)
         if inv.docstatus != 1:
             frappe.throw(_("Invoice {0} is not submitted").format(inv_name))
 
@@ -87,6 +96,12 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
                 )
             )
 
+    resolved_pos_profile = assert_invoices_share_pos_profile(
+        invoice_docs,
+        requested_pos_profile=pos_profile,
+    )
+    courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
+
     # Create Delivery Trip document
     trip = frappe.new_doc("Delivery Trip")
     trip.trip_date = frappe.utils.today()
@@ -94,8 +109,8 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
     trip.courier_party = party
     trip.status = "Created"
 
-    for inv_name in invoice_names:
-        inv = frappe.get_doc("Sales Invoice", inv_name)
+    for inv in invoice_docs:
+        inv_name = inv.name
         # Prefer persisted SI value, fall back to territory computation
         shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
         if shipping_exp <= 0:
@@ -124,10 +139,15 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
     trip.insert(ignore_permissions=True)
 
     # Link trip back to each Sales Invoice
-    for inv_name in invoice_names:
-        frappe.db.set_value(
-            "Sales Invoice", inv_name, "custom_delivery_trip", trip.name,
-            update_modified=True,
+    for inv in invoice_docs:
+        update_submitted_sales_invoice_fields(
+            inv,
+            {
+                "custom_delivery_trip": trip.name,
+                "custom_courier_party_type": party_type,
+                "custom_courier_party": party,
+                "custom_delivery_partner": courier_details.get("delivery_partner") or None,
+            },
         )
 
     frappe.db.commit()
@@ -139,6 +159,7 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
         "courier_party_type": trip.courier_party_type,
         "courier_party": trip.courier_party,
         "courier_display_name": trip.courier_display_name,
+        "pos_profile": resolved_pos_profile,
         "total_orders": trip.total_orders,
         "total_amount": float(trip.total_amount or 0),
         "total_shipping_expense": float(trip.total_shipping_expense or 0),
@@ -155,6 +176,7 @@ def create_delivery_trip(invoice_names, party_type: str, party: str):
         "courier_party_type": trip.courier_party_type,
         "courier_party": trip.courier_party,
         "courier_display_name": trip.courier_display_name,
+        "pos_profile": resolved_pos_profile,
         "total_orders": trip.total_orders,
         "total_amount": float(trip.total_amount or 0),
         "total_shipping_expense": float(trip.total_shipping_expense or 0),

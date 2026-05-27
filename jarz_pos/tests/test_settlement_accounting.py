@@ -272,6 +272,8 @@ class TestOFDPaidJournalEntry(unittest.TestCase):
             mf.get_doc.return_value = inv
 
             with patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=shipping_exp), \
+                  patch("jarz_pos.services.delivery_handling.resolve_assignment_pos_profile", return_value="POS-001"), \
+                  patch("jarz_pos.services.delivery_handling.assert_courier_matches_pos_profile", return_value={"branch": "POS-001", "delivery_partner": "DP-001"}), \
                  patch("jarz_pos.services.delivery_handling.ensure_delivery_note_for_invoice", return_value={"delivery_note": "DN-001", "reused": False, "error": None}), \
                  patch("jarz_pos.services.delivery_handling.get_freight_expense_account", return_value=FREIGHT_ACC), \
                  patch("jarz_pos.services.delivery_handling.get_courier_outstanding_account", return_value=COURIER_OUTSTANDING_ACC), \
@@ -700,6 +702,8 @@ class TestMarkCourierOutstanding(unittest.TestCase):
             mf.get_all.return_value = []
 
             with patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=shipping_exp), \
+                  patch("jarz_pos.services.delivery_handling.resolve_assignment_pos_profile", return_value="POS-001"), \
+                  patch("jarz_pos.services.delivery_handling.assert_courier_matches_pos_profile", return_value={"branch": "POS-001", "delivery_partner": "DP-001"}), \
                  patch("jarz_pos.services.delivery_handling._get_courier_outstanding_account", return_value=COURIER_OUTSTANDING_ACC), \
                  patch("jarz_pos.services.delivery_handling._get_receivable_account", return_value=RECEIVABLE_ACC), \
                  patch("jarz_pos.services.delivery_handling.get_creditors_account", return_value=CREDITORS_ACC), \
@@ -760,6 +764,35 @@ class TestMarkCourierOutstanding(unittest.TestCase):
         args = je_fn.call_args
         # Second positional arg is shipping_exp
         self.assertAlmostEqual(float(args[0][1]), shipping, places=2)
+
+    def test_rejects_cross_branch_courier_assignment(self):
+        """Branch guard failures should stop courier assignment before payment entry creation."""
+        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+            mf.utils.nowdate.return_value = "2026-03-14"
+            mf.utils.now_datetime.return_value = "2026-03-14 12:00:00"
+            mf.throw.side_effect = Exception
+            mf.flags = MagicMock()
+            mf.flags.in_test = True
+
+            inv = _mock_invoice(grand_total=500.0, outstanding=500.0)
+            mf.get_doc.return_value = inv
+            mf.db.get_value.return_value = 500.0
+            mf.get_all.return_value = []
+
+            with patch("jarz_pos.services.delivery_handling.resolve_assignment_pos_profile", return_value="POS-001"), \
+                 patch("jarz_pos.services.delivery_handling.assert_courier_matches_pos_profile", side_effect=Exception("Courier EMP-001 belongs to POS Profile Dokki, not POS-001.")), \
+                 patch("jarz_pos.services.delivery_handling._create_payment_entry") as mock_pe_fn:
+                from jarz_pos.services.delivery_handling import mark_courier_outstanding
+
+                with self.assertRaisesRegex(Exception, "belongs to POS Profile"):
+                    mark_courier_outstanding(
+                        invoice_name=inv.name,
+                        courier=None,
+                        party_type="Employee",
+                        party="EMP-001",
+                    )
+
+            mock_pe_fn.assert_not_called()
 
     def test_result_contains_net_to_collect(self):
         """Result should contain net_to_collect = order_amount - shipping."""

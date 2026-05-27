@@ -31,6 +31,10 @@ from jarz_pos.utils.account_utils import (
     get_pos_cash_account,
     validate_account_exists,
 )
+from jarz_pos.utils.courier_visibility import (
+    filter_available_couriers,
+    get_visible_pos_profiles,
+)
 from frappe.utils import now_datetime, get_datetime
 from jarz_pos.constants import DELIVERY_GROUPS, ROLES
 
@@ -61,9 +65,9 @@ def get_courier_balances():
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def get_couriers():
-    """Get list of all active couriers (delivery parties)"""
-    return get_active_couriers()
+def get_couriers(pos_profile: str | None = None):
+    """Get list of active couriers visible for the requested POS profile."""
+    return get_active_couriers(pos_profile=pos_profile)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
@@ -91,13 +95,23 @@ def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def get_active_couriers():
-    """Return unified list of delivery parties from Employee and Supplier groups named 'Delivery'.
+def get_active_couriers(pos_profile: str | None = None):
+    """Return active delivery parties visible for the current user's POS profiles.
 
     Output rows have shape:
       {"party_type": "Employee"|"Supplier", "party": name, "display_name": label}
     """
+    visible_profiles = get_visible_pos_profiles(requested_pos_profile=pos_profile)
+    if not visible_profiles:
+        return []
+
     out = []
+
+    def _row_value(row, fieldname: str):
+        if isinstance(row, dict):
+            return row.get(fieldname)
+        return getattr(row, fieldname, None)
+
     # Utility: check if a DocType has a given column in DB
     def _has_column(doctype: str, column: str) -> bool:
         try:
@@ -150,8 +164,13 @@ def get_active_couriers():
                         found_any = True
                         break
             if employee_names:
-                emp_fields = ["name", "employee_name"] + (["branch"] if _has_column("Employee", "branch") else [])
-                emp_fields = ["name", "employee_name"] + (["branch"] if _has_column("Employee", "branch") else []) + (["custom_delivery_partner"] if _has_column("Employee", "custom_delivery_partner") else [])
+                emp_fields = ["name", "employee_name"]
+                if _has_column("Employee", "branch"):
+                    emp_fields.append("branch")
+                if _has_column("Employee", "status"):
+                    emp_fields.append("status")
+                if _has_column("Employee", "custom_delivery_partner"):
+                    emp_fields.append("custom_delivery_partner")
                 emps = frappe.get_all(
                     "Employee",
                     fields=emp_fields,
@@ -159,26 +178,34 @@ def get_active_couriers():
                 )
                 out.extend({
                     "party_type": "Employee",
-                    "party": e.name,
-                    "display_name": (e.employee_name or e.name),
-                    "branch": getattr(e, "branch", None) if hasattr(e, "branch") else (e.get("branch") if isinstance(e, dict) else None),
-                    "delivery_partner": (e.get("custom_delivery_partner") if isinstance(e, dict) else getattr(e, "custom_delivery_partner", None)) or None,
+                    "party": _row_value(e, "name"),
+                    "display_name": (_row_value(e, "employee_name") or _row_value(e, "name")),
+                    "branch": _row_value(e, "branch"),
+                    "delivery_partner": _row_value(e, "custom_delivery_partner") or None,
+                    "status": _row_value(e, "status"),
                 } for e in emps)
         except Exception as err:
             frappe.log_error(f"Failed to read Employee Group members: {err}", "Jarz POS get_active_couriers")
     # Suppliers in Supplier Group
     sup_group = frappe.db.get_value("Supplier Group", {"supplier_group_name": _sup_grp_name}, "name")
     if sup_group:
-        sup_fields = ["name", "supplier_name"] + (["branch"] if _has_column("Supplier", "branch") else []) + (["custom_delivery_partner"] if _has_column("Supplier", "custom_delivery_partner") else [])
+        sup_fields = ["name", "supplier_name"]
+        if _has_column("Supplier", "branch"):
+            sup_fields.append("branch")
+        if _has_column("Supplier", "disabled"):
+            sup_fields.append("disabled")
+        if _has_column("Supplier", "custom_delivery_partner"):
+            sup_fields.append("custom_delivery_partner")
         sups = frappe.get_all("Supplier", fields=sup_fields, filters={"supplier_group": sup_group})
         out.extend({
             "party_type": "Supplier",
-            "party": s.name,
-            "display_name": (s.supplier_name or s.name),
-            "branch": getattr(s, "branch", None) if hasattr(s, "branch") else (s.get("branch") if isinstance(s, dict) else None),
-            "delivery_partner": (s.get("custom_delivery_partner") if isinstance(s, dict) else getattr(s, "custom_delivery_partner", None)) or None,
+            "party": _row_value(s, "name"),
+            "display_name": (_row_value(s, "supplier_name") or _row_value(s, "name")),
+            "branch": _row_value(s, "branch"),
+            "delivery_partner": _row_value(s, "custom_delivery_partner") or None,
+            "disabled": _row_value(s, "disabled"),
         } for s in sups)
-    return out
+    return filter_available_couriers(out, visible_profiles=visible_profiles)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]

@@ -54,7 +54,15 @@ class TestTripsNewFeatures(unittest.TestCase):
 
         mock_frappe.db.exists.return_value = True
         mock_frappe.get_doc.return_value = trip
-        mock_frappe.db.get_value.return_value = 'Ready'
+
+        def fake_db_get_value(doctype, name, field=None, as_dict=False):
+            if doctype == 'Sales Invoice' and as_dict:
+                return {'custom_sales_invoice_state': 'Ready'}
+            if doctype == 'Territory' and as_dict:
+                return {'territory_name': 'Main', 'custom_territory_name_ar': None}
+            return 'Ready'
+
+        mock_frappe.db.get_value.side_effect = fake_db_get_value
 
         result = get_trip_details('TRIP-2')
         self.assertTrue(result['success'])
@@ -210,3 +218,67 @@ class TestTripsNewFeatures(unittest.TestCase):
         invoice.db_set.assert_not_called()
         courier_txn.insert.assert_called_once_with(ignore_permissions=True)
         trip.save.assert_called_once_with(ignore_permissions=True)
+
+    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
+    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_fields')
+    @patch('jarz_pos.api.trips.assert_courier_matches_pos_profile', return_value={'branch': 'POS-001', 'delivery_partner': 'DP-001'})
+    @patch('jarz_pos.api.trips.assert_invoices_share_pos_profile', return_value='POS-001')
+    @patch('jarz_pos.api.trips.frappe')
+    def test_create_delivery_trip_persists_assignment_fields(
+        self,
+        mock_frappe,
+        mock_trip_profile,
+        mock_courier_guard,
+        mock_update_invoice_fields,
+        mock_has_children,
+    ):
+        from jarz_pos.api.trips import create_delivery_trip
+
+        invoice = MagicMock()
+        invoice.name = 'SINV-30'
+        invoice.docstatus = 1
+        invoice.customer_name = 'Customer A'
+        invoice.territory = 'Main'
+        invoice.custom_sub_territory = 'Sub A'
+        invoice.grand_total = 80
+        invoice.custom_shipping_expense = 0
+        invoice.get.side_effect = lambda field: {
+            'custom_sales_invoice_state': 'Ready',
+            'sales_invoice_state': 'Ready',
+        }.get(field)
+
+        trip = MagicMock()
+        trip.name = 'TRIP-30'
+        trip.status = 'Created'
+        trip.courier_party_type = 'Employee'
+        trip.courier_party = 'EMP-1'
+        trip.courier_display_name = 'Courier A'
+        trip.total_orders = 1
+        trip.total_amount = 80
+        trip.total_shipping_expense = 0
+        trip.is_double_shipping = 0
+        trip.double_shipping_territory = None
+
+        mock_frappe.has_permission.return_value = True
+        mock_frappe.db.exists.return_value = True
+        mock_frappe.utils.today.return_value = '2026-05-05'
+        mock_frappe.new_doc.return_value = trip
+        mock_frappe.get_doc.return_value = invoice
+        mock_frappe.db.get_value.return_value = None
+        mock_frappe.db.commit.return_value = None
+        mock_frappe.publish_realtime.return_value = None
+
+        result = create_delivery_trip(['SINV-30'], 'Employee', 'EMP-1', pos_profile='POS-001')
+
+        self.assertTrue(result['success'])
+        mock_trip_profile.assert_called_once_with([invoice], requested_pos_profile='POS-001')
+        mock_courier_guard.assert_called_once_with('Employee', 'EMP-1', 'POS-001')
+        mock_update_invoice_fields.assert_called_once_with(
+            invoice,
+            {
+                'custom_delivery_trip': 'TRIP-30',
+                'custom_courier_party_type': 'Employee',
+                'custom_courier_party': 'EMP-1',
+                'custom_delivery_partner': 'DP-001',
+            },
+        )
