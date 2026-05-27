@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from html import unescape
 from typing import Any
 
@@ -216,6 +217,60 @@ def _normalize_closing_balances_payload(
     return normalized
 
 
+def _normalize_opening_balances_payload(
+    opening_balances: list[dict[str, Any]] | dict[str, Any] | str | None,
+) -> list[dict[str, Any]]:
+    if opening_balances is None:
+        return []
+
+    payload = opening_balances
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except Exception:
+            frappe.throw(_("Invalid opening balances payload."))
+
+    if isinstance(payload, dict):
+        payload = [payload]
+
+    if not isinstance(payload, list):
+        frappe.throw(_("Invalid opening balances payload."))
+
+    normalized: list[dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            frappe.throw(_("Invalid opening balances row."))
+        normalized.append(row)
+
+    return normalized
+
+
+def _get_required_cash_count(row: dict[str, Any], fieldname: str, label: str) -> float:
+    mode = (row.get("mode_of_payment") or _("this payment method")).strip()
+    if fieldname not in row or row.get(fieldname) is None:
+        frappe.throw(_("{0} is required for {1}.").format(label, mode))
+
+    raw_value = row.get(fieldname)
+    if isinstance(raw_value, str) and not raw_value.strip():
+        frappe.throw(_("{0} is required for {1}.").format(label, mode))
+
+    try:
+        amount = Decimal(str(raw_value).strip())
+    except (InvalidOperation, ValueError):
+        frappe.throw(_("{0} must be a valid number for {1}.").format(label, mode))
+
+    if not amount.is_finite():
+        frappe.throw(_("{0} must be a valid number for {1}.").format(label, mode))
+
+    if amount < 0:
+        frappe.throw(_("{0} cannot be negative for {1}.").format(label, mode))
+
+    return flt(str(amount))
+
+
 def _resolve_pos_profile_account(company: str, pos_profile: str, branch: str | None, mode_of_payment: str | None) -> str | None:
     # Required by business flow: use the account named after the POS Profile.
     if frappe.db.exists("Account", {"company": company, "is_group": 0, "account_name": pos_profile}):
@@ -260,7 +315,6 @@ def _serialize_opening_entry(opening) -> dict[str, Any]:
         "balance_details": [
             {
                 "mode_of_payment": row.mode_of_payment,
-                "opening_amount": flt(row.opening_amount),
             }
             for row in (opening.balance_details or [])
         ],
@@ -350,16 +404,13 @@ def get_shift_payment_methods(pos_profile: str):
             "jarz_pos.shift.ensure_mode_of_payment_account",
         )
 
-    current_balance = _get_account_balance(account, company)
     return [
         {
             "mode_of_payment": mode,
-            "default_amount": current_balance,
             "account": account,
             "company": company,
             "branch": branch,
-            "current_balance": current_balance,
-            "suggested_opening_amount": current_balance,
+            "amounts_hidden": 1,
         }
     ]
 
@@ -404,8 +455,6 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
             _("No account named as POS Profile {0} was found in company {1}.").format(pos_profile, company)
         )
 
-    live_system_balance = _get_account_balance(profile_account, company)
-
     opening_doc = frappe.new_doc("POS Opening Entry")
     opening_doc.user = user
     opening_doc.company = company
@@ -413,26 +462,18 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
     opening_doc.period_start_date = now_datetime()
     opening_doc.posting_date = nowdate()
 
-    rows = opening_balances or []
+    rows = _normalize_opening_balances_payload(opening_balances)
     if not rows:
-        for method in get_shift_payment_methods(pos_profile):
-            rows.append(
-                {
-                    "mode_of_payment": method["mode_of_payment"],
-                    "opening_amount": flt(live_system_balance),
-                    "system_balance": flt(live_system_balance),
-                    "account": profile_account,
-                }
-            )
+        frappe.throw(_("At least one opening balance row is required"))
 
     opening_differences: list[dict[str, Any]] = []
     captured_one = False
     for row in rows:
         if captured_one:
             break
-        mode = (row or {}).get("mode_of_payment")
+        mode = ((row or {}).get("mode_of_payment") or "").strip()
         if not mode:
-            continue
+            frappe.throw(_("Mode of Payment is required for opening balance row."))
 
         row_account = (row or {}).get("account") or profile_account
         if row_account:
@@ -445,9 +486,11 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
                 )
 
         system_balance = flt(_get_account_balance(row_account, company))
-        # Use user-confirmed opening amount if provided; fall back to system balance.
-        user_opening = (row or {}).get("opening_amount")
-        confirmed_opening = flt(user_opening) if user_opening is not None else system_balance
+        confirmed_opening = _get_required_cash_count(
+            row,
+            "opening_amount",
+            _("Opening cash count"),
+        )
         difference = flt(confirmed_opening - system_balance, 2)
 
         opening_doc.append(
@@ -461,7 +504,7 @@ def start_shift(pos_profile: str, opening_balances: list[dict[str, Any]] | None 
         opening_differences.append(
             {
                 "mode_of_payment": mode,
-                "account": (row or {}).get("account"),
+                "account": row_account,
                 "system_balance": system_balance,
                 "confirmed_opening_amount": confirmed_opening,
                 "difference": difference,
@@ -596,13 +639,9 @@ def get_shift_summary(pos_opening_entry: str):
 
     closing_draft = make_closing_entry_from_opening(opening)
 
-    # Current account balance for the branch account
     account = _resolve_pos_profile_account(
         opening.company, opening.pos_profile, None, None
     )
-    account_balance = _get_account_balance(account, opening.company)
-
-    system_expected = flt(account_balance)
 
     account_movements = _get_shift_account_movements(
         account=account,
@@ -610,10 +649,7 @@ def get_shift_summary(pos_opening_entry: str):
         start_date=opening.period_start_date,
         end_date=now_datetime(),
     )
-
-    total_inflows = sum(flt(row.get("debit")) for row in account_movements)
-    total_outflows = sum(flt(row.get("credit")) for row in account_movements)
-    net_movement = flt(total_inflows - total_outflows)
+    courier_close_block = _get_shift_courier_close_block(opening.pos_profile)
 
     sales_vouchers = {
         row.get("voucher_no")
@@ -630,29 +666,159 @@ def get_shift_summary(pos_opening_entry: str):
         "period_start_date": opening.period_start_date,
         "period_end_date": opening.period_end_date,
         "invoice_count": len(sales_vouchers),
-        "grand_total": flt(total_inflows),
-        "net_total": flt(closing_draft.net_total),
+        "amounts_hidden": 1,
+        "variance_visible": 0,
         "total_quantity": flt(closing_draft.total_quantity),
         "account": account,
-        "account_balance": flt(account_balance),
-        "total_sales": flt(total_inflows),
-        "total_outflows": flt(total_outflows),
-        "net_movement": net_movement,
-        "account_movements": account_movements,
+        "courier_close_block": courier_close_block,
         "sales_invoices": [],
         "payment_reconciliation": [
             {
                 "mode_of_payment": row.mode_of_payment,
-                "opening_amount": flt(row.opening_amount),
-                "expected_amount": system_expected,
-                "closing_amount": flt(getattr(row, "closing_amount", 0) or 0),
-                "difference": flt(
-                    flt(getattr(row, "closing_amount", 0) or 0) - system_expected
-                ),
             }
             for row in (closing_draft.payment_reconciliation or [])
         ],
     }
+
+
+def _get_shift_courier_profile_expr() -> str:
+    try:
+        if frappe.db.has_column("Sales Invoice", "custom_kanban_profile"):
+            return "COALESCE(NULLIF(si.custom_kanban_profile, ''), si.pos_profile)"
+    except Exception:
+        pass
+    return "si.pos_profile"
+
+
+def _get_shift_close_party_label(party_type: str, party: str) -> str:
+    if not party:
+        return _("Unknown courier")
+
+    try:
+        if party_type == "Employee":
+            return frappe.db.get_value("Employee", party, "employee_name") or party
+        if party_type == "Supplier":
+            return frappe.db.get_value("Supplier", party, "supplier_name") or party
+    except Exception:
+        pass
+    return party
+
+
+def _get_shift_courier_close_block(pos_profile: str, detail_limit: int = 5) -> dict[str, Any]:
+    payload = {
+        "blocked": False,
+        "pos_profile": pos_profile,
+        "transaction_count": 0,
+        "invoice_count": 0,
+        "party_count": 0,
+        "net_balance": 0.0,
+        "parties": [],
+    }
+    pos_profile = (pos_profile or "").strip()
+    if not pos_profile:
+        return payload
+
+    profile_expr = _get_shift_courier_profile_expr()
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            ct.name AS courier_transaction,
+            ct.reference_invoice,
+            COALESCE(ct.amount, 0) AS amount,
+            COALESCE(ct.shipping_amount, 0) AS shipping_amount,
+            COALESCE(ct.party_type, '') AS party_type,
+            COALESCE(ct.party, '') AS party
+        FROM `tabCourier Transaction` ct
+        INNER JOIN `tabSales Invoice` si ON si.name = ct.reference_invoice
+        WHERE ct.status != %s
+          AND ct.reference_invoice IS NOT NULL
+          AND COALESCE({profile_expr}, '') = %s
+        ORDER BY ct.modified DESC, ct.creation DESC
+        """,
+        ("Settled", pos_profile),
+        as_dict=True,
+    )
+
+    if not isinstance(rows, list) or not rows:
+        return payload
+
+    parties: dict[tuple[str, str], dict[str, Any]] = {}
+    invoice_names: set[str] = set()
+    net_balance = 0.0
+
+    for row in rows:
+        party_type = str(row.get("party_type") or "").strip()
+        party = str(row.get("party") or "").strip()
+        invoice_name = str(row.get("reference_invoice") or "").strip()
+        amount = flt(row.get("amount"))
+        shipping_amount = flt(row.get("shipping_amount"))
+        net_amount = flt(amount - shipping_amount)
+        key = (party_type, party)
+
+        if invoice_name:
+            invoice_names.add(invoice_name)
+        net_balance += net_amount
+
+        if key not in parties:
+            parties[key] = {
+                "party_type": party_type,
+                "party": party,
+                "display_name": _get_shift_close_party_label(party_type, party),
+                "transaction_count": 0,
+                "invoice_count": 0,
+                "net_balance": 0.0,
+                "invoices": [],
+            }
+
+        group = parties[key]
+        group["transaction_count"] = int(group["transaction_count"]) + 1
+        group["net_balance"] = flt(group["net_balance"] + net_amount)
+
+        invoices = group["invoices"]
+        if invoice_name and invoice_name not in invoices:
+            if len(invoices) < detail_limit:
+                invoices.append(invoice_name)
+            group["invoice_count"] = int(group["invoice_count"]) + 1
+
+    sorted_parties = sorted(
+        parties.values(),
+        key=lambda row: (
+            -abs(flt(row.get("net_balance"))),
+            -(int(row.get("transaction_count") or 0)),
+            str(row.get("display_name") or ""),
+        ),
+    )
+
+    payload.update(
+        {
+            "blocked": True,
+            "transaction_count": len(rows),
+            "invoice_count": len(invoice_names),
+            "party_count": len(sorted_parties),
+            "net_balance": flt(net_balance),
+            "parties": sorted_parties[:detail_limit],
+        }
+    )
+    return payload
+
+
+def _throw_if_shift_has_unsettled_courier_transactions(pos_profile: str) -> dict[str, Any]:
+    block = _get_shift_courier_close_block(pos_profile)
+    if not block.get("blocked"):
+        return block
+
+    frappe.throw(
+        _(
+            "You still have {0} unsettled courier transaction(s) for {1} courier(s) across {2} invoice(s) on POS Profile {3}. Settle courier balances before closing the shift."
+        ).format(
+            block.get("transaction_count", 0),
+            block.get("party_count", 0),
+            block.get("invoice_count", 0),
+            pos_profile,
+        ),
+        title=_("Unsettled Courier Transactions"),
+    )
+    return block
 
 
 def _get_or_create_cash_over_short_account(company: str) -> str:
@@ -771,6 +937,8 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         frappe.throw(_("POS Opening Entry is required"))
 
     closing_balances = _normalize_closing_balances_payload(closing_balances)
+    if not closing_balances:
+        frappe.throw(_("At least one closing balance row is required"))
 
     opening = frappe.get_doc("POS Opening Entry", pos_opening_entry)
 
@@ -779,6 +947,8 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
 
     if opening.status != "Open" or opening.docstatus != 1:
         frappe.throw(_("Selected POS Opening Entry should be open."), title=_("Invalid Opening Entry"))
+
+    _throw_if_shift_has_unsettled_courier_transactions(opening.pos_profile)
 
     closing = make_closing_entry_from_opening(opening)
 
@@ -789,14 +959,20 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
 
     closing_map: dict[str, float] = {}
     for row in (closing_balances or []):
-        mode = (row or {}).get("mode_of_payment")
+        mode = ((row or {}).get("mode_of_payment") or "").strip()
         if not mode:
-            continue
-        closing_map[mode] = flt((row or {}).get("closing_amount") or 0)
+            frappe.throw(_("Mode of Payment is required for closing balance row."))
+        closing_map[mode] = _get_required_cash_count(
+            row,
+            "closing_amount",
+            _("Closing cash count"),
+        )
 
     for row in (closing.payment_reconciliation or []):
+        if row.mode_of_payment not in closing_map:
+            frappe.throw(_("Closing cash count is required for {0}.").format(row.mode_of_payment))
         row.expected_amount = system_expected
-        row.closing_amount = flt(closing_map.get(row.mode_of_payment, system_expected))
+        row.closing_amount = flt(closing_map[row.mode_of_payment])
 
     try:
         closing.insert(ignore_permissions=True)
@@ -856,13 +1032,15 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         "journal_entry": journal_entry,
         "account": account,
         "account_balance": flt(account_balance),
+        "amounts_hidden": 0,
+        "variance_visible": 1,
         "payment_reconciliation": [
             {
                 "mode_of_payment": row.mode_of_payment,
                 "opening_amount": flt(row.opening_amount),
                 "expected_amount": flt(row.expected_amount),
                 "closing_amount": flt(row.closing_amount),
-                "difference": flt(row.difference),
+                "difference": flt(row.closing_amount - row.expected_amount, 2),
             }
             for row in (closing.payment_reconciliation or [])
         ],
