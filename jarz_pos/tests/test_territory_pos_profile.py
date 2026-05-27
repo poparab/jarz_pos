@@ -74,7 +74,7 @@ class TestResolveTerritoryPosProfile(unittest.TestCase):
             self.assertIsNone(resolve_territory_pos_profile("CUST-001"))
 
     def test_territory_field_absent_returns_none(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Maadi"
             return "JARZ-Profile"
@@ -84,7 +84,7 @@ class TestResolveTerritoryPosProfile(unittest.TestCase):
                 self.assertIsNone(resolve_territory_pos_profile("CUST-001"))
 
     def test_territory_field_present_but_unset_returns_none(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Maadi"
             return None  # Territory has no POS profile set
@@ -94,7 +94,7 @@ class TestResolveTerritoryPosProfile(unittest.TestCase):
                 self.assertIsNone(resolve_territory_pos_profile("CUST-001"))
 
     def test_returns_territory_pos_profile(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Maadi"
             return "Maadi-POS"
@@ -105,7 +105,7 @@ class TestResolveTerritoryPosProfile(unittest.TestCase):
         self.assertEqual(result, "Maadi-POS")
 
     def test_explicit_territory_wins_over_customer_territory(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Customer Territory"
             if doctype == "Territory" and name == "Address Territory":
@@ -149,7 +149,7 @@ class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
 
     def _setup_match(self, customer_territory="Maadi", territory_profile="Maadi-POS"):
         """Return a db.get_value side_effect where selected == territory."""
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return customer_territory
             return territory_profile
@@ -175,7 +175,7 @@ class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_mismatch_raises_without_override(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Maadi"
             return "Maadi-POS"
@@ -193,7 +193,7 @@ class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
         self.assertEqual(payload["customer_territory"], "Maadi")
 
     def test_address_territory_profile_match_passes_even_when_customer_differs(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "EGHADAYEQAH"
             if doctype == "Territory" and name == "EGNASRCITY":
@@ -213,7 +213,7 @@ class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
             )
 
     def test_mismatch_override_true_passes(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Maadi"
             return "Maadi-POS"
@@ -230,7 +230,7 @@ class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_no_territory_profile_raises_without_override(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Maadi"
             return None  # Territory has no POS profile
@@ -246,7 +246,7 @@ class TestAssertPosProfileMatchesTerritory(unittest.TestCase):
         self.assertEqual(payload["territory_profile"], "")
 
     def test_no_territory_profile_override_true_passes(self):
-        def _db_get(doctype, name, field):
+        def _db_get(doctype, name=None, field=None, **kwargs):
             if doctype == "Customer":
                 return "Maadi"
             return None

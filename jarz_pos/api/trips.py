@@ -13,8 +13,9 @@ from jarz_pos.services.delivery_handling import (
     ensure_delivery_note_for_invoice,
     _get_delivery_expense_amount,
     _create_shipping_expense_to_creditors_je,
+    build_ofd_shortage_field_values,
+    get_ofd_shortage_preview,
     get_creditors_account,
-    update_submitted_sales_invoice_state,
     update_submitted_sales_invoice_fields,
 )
 from jarz_pos.utils.courier_visibility import (
@@ -189,8 +190,133 @@ def create_delivery_trip(invoice_names, party_type: str, party: str, pos_profile
 # Send trip for delivery (bulk OFD)
 # ---------------------------------------------------------------------------
 
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value) != 0.0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _format_qty(value) -> str:
+    qty = flt(value)
+    if abs(qty - round(qty)) < 0.0001:
+        return str(int(round(qty)))
+    return f"{qty:.3f}".rstrip("0").rstrip(".")
+
+
+def _collect_trip_ofd_candidates(trip):
+    from jarz_pos.api.territories import territory_has_children
+
+    blocking_errors = []
+    to_process = []
+
+    for row in trip.invoices:
+        inv = frappe.get_doc("Sales Invoice", row.invoice)
+        current_state = (
+            inv.get("custom_sales_invoice_state")
+            or inv.get("sales_invoice_state")
+            or ""
+        ).strip().lower()
+
+        if current_state in ("out for delivery", "out_for_delivery", "delivered"):
+            continue
+
+        inv_territory = (inv.territory or "").strip()
+        inv_sub = (getattr(inv, "custom_sub_territory", None) or "").strip()
+        if inv_territory and territory_has_children(inv_territory) and not inv_sub:
+            blocking_errors.append(
+                _("Invoice {0}: please select a sub-territory for '{1}' before sending").format(
+                    row.invoice, inv_territory
+                )
+            )
+
+        override_status = (
+            getattr(inv, "custom_shipping_override_status", None)
+            or frappe.db.get_value("Sales Invoice", row.invoice, "custom_shipping_override_status")
+            or ""
+        )
+        if str(override_status).strip() == "Pending":
+            blocking_errors.append(
+                _("Invoice {0}: custom shipping request is pending approval").format(row.invoice)
+            )
+
+        to_process.append(row)
+
+    return blocking_errors, to_process
+
+
+def _build_ofd_preview_errors(preview: dict) -> list[str]:
+    errors = list(preview.get("validation_errors") or [])
+
+    for mismatch in preview.get("warehouse_mismatches") or []:
+        errors.append(
+            _(
+                "Invoice {0}: item {1} still points to warehouse {2} instead of {3}."
+            ).format(
+                mismatch.get("invoice_name") or "?",
+                mismatch.get("item_code") or "?",
+                mismatch.get("warehouse") or _("blank"),
+                mismatch.get("expected_warehouse") or "?",
+            )
+        )
+
+    for shortage in preview.get("blocking_shortages") or []:
+        errors.append(
+            _(
+                "Invoice(s) {0}: item {1} needs {2} in {3}, only {4} available, and negative stock is disabled."
+            ).format(
+                ", ".join(shortage.get("invoice_names") or []) or "?",
+                shortage.get("item_code") or "?",
+                _format_qty(shortage.get("required_qty")),
+                shortage.get("warehouse") or "?",
+                _format_qty(shortage.get("available_qty")),
+            )
+        )
+
+    return errors
+
+
 @frappe.whitelist(allow_guest=False)
-def send_trip_for_delivery(trip_name: str):
+def preview_trip_for_delivery(trip_name: str):
+    """Return OFD blockers and shortage preview for a delivery trip without mutating data."""
+    frappe.has_permission("Delivery Trip", ptype="read", throw=True)
+
+    trip = frappe.get_doc("Delivery Trip", trip_name)
+    if trip.status == "Completed":
+        frappe.throw(_("Trip {0} is already completed").format(trip_name))
+
+    if trip.status == "Out for Delivery":
+        return {
+            "success": True,
+            "trip": trip.name,
+            "status": trip.status,
+            "preview": get_ofd_shortage_preview([]),
+            "blocking_errors": [],
+            "requires_shortage_reason": False,
+            "already_ofd": True,
+        }
+
+    blocking_errors, to_process = _collect_trip_ofd_candidates(trip)
+    preview = get_ofd_shortage_preview([row.invoice for row in to_process])
+    blocking_errors.extend(_build_ofd_preview_errors(preview))
+
+    return {
+        "success": True,
+        "trip": trip.name,
+        "status": trip.status,
+        "preview": preview,
+        "blocking_errors": blocking_errors,
+        "requires_shortage_reason": bool(preview.get("requires_reason")) and not bool(preview.get("blocking")),
+        "already_ofd": False,
+    }
+
+@frappe.whitelist(allow_guest=False)
+def send_trip_for_delivery(
+    trip_name: str,
+    shortage_approved: bool | int = False,
+    shortage_reason: str | None = None,
+):
     """Bulk OFD transition for all invoices in a trip.
 
     Atomic: ALL invoices must succeed or NONE are transitioned.  A validation
@@ -204,9 +330,14 @@ def send_trip_for_delivery(trip_name: str):
     Returns:
         dict with processed invoices and trip status
     """
+    frappe.has_permission("Delivery Trip", ptype="write", throw=True)
+
     trip = frappe.get_doc("Delivery Trip", trip_name)
     if trip.status == "Completed":
         frappe.throw(_("Trip {0} is already completed").format(trip_name))
+
+    shortage_approved = _coerce_bool(shortage_approved)
+    shortage_reason = str(shortage_reason or "").strip() or None
 
     # Idempotent: already OFD → return current state
     if trip.status == "Out for Delivery":
@@ -220,48 +351,18 @@ def send_trip_for_delivery(trip_name: str):
         }
 
     # ── Phase 1: Pre-validate ALL invoices ───────────────────────────────
-    from jarz_pos.api.territories import territory_has_children
-
-    blocking_errors = []
-    to_process = []  # rows that need OFD transition
-
-    for row in trip.invoices:
-        inv = frappe.get_doc("Sales Invoice", row.invoice)
-        current_state = (
-            inv.get("custom_sales_invoice_state")
-            or inv.get("sales_invoice_state")
-            or ""
-        ).strip().lower()
-
-        # Already OFD or beyond — nothing to do
-        if current_state in ("out for delivery", "out_for_delivery", "delivered"):
-            continue
-
-        # Sub-territory requirement
-        inv_territory = (inv.territory or "").strip()
-        inv_sub = (getattr(inv, "custom_sub_territory", None) or "").strip()
-        if inv_territory and territory_has_children(inv_territory) and not inv_sub:
-            blocking_errors.append(
-                _("Invoice {0}: please select a sub-territory for '{1}' before sending").format(
-                    row.invoice, inv_territory
-                )
-            )
-
-        # Pending custom shipping override
-        override_status = (
-            getattr(inv, "custom_shipping_override_status", None)
-            or frappe.db.get_value("Sales Invoice", row.invoice, "custom_shipping_override_status")
-            or ""
-        )
-        if str(override_status).strip() == "Pending":
-            blocking_errors.append(
-                _("Invoice {0}: custom shipping request is pending approval").format(row.invoice)
-            )
-
-        to_process.append(row)
+    blocking_errors, to_process = _collect_trip_ofd_candidates(trip)
+    preview = get_ofd_shortage_preview([row.invoice for row in to_process])
+    blocking_errors.extend(_build_ofd_preview_errors(preview))
 
     if blocking_errors:
         frappe.throw("<br>".join(blocking_errors), title=_("Cannot send trip for delivery"))
+
+    if preview.get("requires_reason") and (not shortage_approved or not shortage_reason):
+        frappe.throw(
+            _("Stock shortage approval reason is required before sending this trip Out for Delivery."),
+            title=_("Shortage approval required"),
+        )
 
     if not to_process:
         # All invoices were already OFD
@@ -281,6 +382,7 @@ def send_trip_for_delivery(trip_name: str):
     sp_name = f"trip_ofd_{trip_name.replace('-', '_')}"
     frappe.db.savepoint(sp_name)
     processed = []
+    invoice_previews = preview.get("invoice_previews") or {}
 
     try:
         for row in to_process:
@@ -340,10 +442,17 @@ def send_trip_for_delivery(trip_name: str):
                 ct.insert(ignore_permissions=True)
 
             # Persist submitted SI state via save() so update-after-submit hooks can observe the OFD move.
-            update_submitted_sales_invoice_state(
+            update_submitted_sales_invoice_fields(
                 inv,
-                "Out for Delivery",
-                field_names=("custom_sales_invoice_state", "sales_invoice_state"),
+                {
+                    "custom_sales_invoice_state": "Out for Delivery",
+                    "sales_invoice_state": "Out for Delivery",
+                    **build_ofd_shortage_field_values(
+                        invoice_previews.get(row.invoice),
+                        shortage_reason=shortage_reason,
+                        shortage_approved=shortage_approved,
+                    ),
+                },
             )
 
             # Persist child row changes

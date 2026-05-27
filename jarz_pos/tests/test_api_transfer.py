@@ -21,16 +21,14 @@ class TestTransferAPI(unittest.TestCase):
 		) as sql:
 			result = transfer._get_singleton_value("Manufacturing Settings", "default_fg_warehouse")
 
-		sql.assert_called_once_with(
-			"""
-		SELECT value
-		FROM `tabSingles`
-		WHERE doctype = %s AND field = %s
-		LIMIT 1
-		""",
-			("Manufacturing Settings", "default_fg_warehouse"),
-			as_dict=True,
+		sql.assert_called_once()
+		query, params = sql.call_args.args
+		self.assertEqual(
+			" ".join(query.split()),
+			"SELECT value FROM `tabSingles` WHERE doctype = %s AND field = %s LIMIT 1",
 		)
+		self.assertEqual(params, ("Manufacturing Settings", "default_fg_warehouse"))
+		self.assertTrue(sql.call_args.kwargs.get("as_dict"))
 		self.assertEqual(result, "Finished Goods - J")
 
 	def test_transfer_module_imports(self):

@@ -72,6 +72,7 @@ class TestPOSCatalogFilters(unittest.TestCase):
 				'name': 'Valid Product',
 				'price': 35,
 				'item_group': 'Hot Drinks',
+				'allow_negative_stock': False,
 			}
 		]
 
@@ -138,6 +139,7 @@ class TestPOSCatalogFilters(unittest.TestCase):
 
 		self.assertEqual(result[0]['price'], 55.0)
 		self.assertEqual(result[0]['price_list'], 'B2B A')
+		self.assertIs(result[0]['allow_negative_stock'], False)
 
 	def test_get_profile_bundles_filters_invalid_bundles_and_empty_required_groups(self):
 		from jarz_pos.api.pos import get_profile_bundles
@@ -192,7 +194,12 @@ class TestPOSCatalogFilters(unittest.TestCase):
 
 		group_items = {
 			'Hot Drinks': [
-				{'id': 'ITEM-VALID', 'name': 'Valid Product', 'price': 35},
+				{
+					'id': 'ITEM-VALID',
+					'name': 'Valid Product',
+					'price': 35,
+					'allow_negative_stock': False,
+				},
 			],
 			'Pastries': [],
 		}
@@ -264,7 +271,12 @@ class TestPOSCatalogFilters(unittest.TestCase):
 					'group_index': 1,
 					'quantity': 1,
 					'items': [
-						{'id': 'ITEM-VALID', 'name': 'Valid Product', 'price': 35},
+						{
+							'id': 'ITEM-VALID',
+							'name': 'Valid Product',
+							'price': 35,
+							'allow_negative_stock': False,
+						},
 					],
 				}
 			],
@@ -296,7 +308,14 @@ class TestPOSCatalogFilters(unittest.TestCase):
 					return [{'name': 'ROW-HOT-1', 'idx': 1, 'item_group': 'Hot Drinks', 'quantity': 1}]
 
 				if doctype == 'Item':
-					return [{'id': 'ITEM-VALID', 'name': 'Valid Product', 'price': 35}]
+					return [
+						{
+							'id': 'ITEM-VALID',
+							'name': 'Valid Product',
+							'price': 35,
+							'allow_negative_stock': 1,
+						}
+					]
 
 				raise AssertionError(f'Unexpected get_all call for {doctype}')
 
@@ -327,3 +346,4 @@ class TestPOSCatalogFilters(unittest.TestCase):
 		self.assertEqual(result[0]['price'], 150.0)
 		self.assertEqual(result[0]['price_list'], 'B2B A')
 		self.assertEqual(result[0]['item_groups'][0]['items'][0]['price'], 44.0)
+		self.assertIs(result[0]['item_groups'][0]['items'][0]['allow_negative_stock'], True)

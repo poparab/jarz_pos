@@ -130,6 +130,9 @@ def _import_delivery_handling(invoice=None):
     stub_account_utils = _build_stub_account_utils()
     stub_payment_receipts = _build_stub_payment_receipts()
     previous_payment_receipts = sys.modules.get("jarz_pos.api.payment_receipts")
+    previous_frappe = sys.modules.get("frappe")
+    previous_account_utils = sys.modules.get("jarz_pos.utils.account_utils")
+    previous_delivery_handling = sys.modules.get("jarz_pos.services.delivery_handling")
     sys.modules.pop("jarz_pos.services.delivery_handling", None)
     sys.modules["frappe"] = stub_frappe
     sys.modules["jarz_pos.utils.account_utils"] = stub_account_utils
@@ -137,6 +140,18 @@ def _import_delivery_handling(invoice=None):
     try:
         module = importlib.import_module("jarz_pos.services.delivery_handling")
     finally:
+        if previous_delivery_handling is not None:
+            sys.modules["jarz_pos.services.delivery_handling"] = previous_delivery_handling
+        else:
+            sys.modules.pop("jarz_pos.services.delivery_handling", None)
+        if previous_frappe is not None:
+            sys.modules["frappe"] = previous_frappe
+        else:
+            sys.modules.pop("frappe", None)
+        if previous_account_utils is not None:
+            sys.modules["jarz_pos.utils.account_utils"] = previous_account_utils
+        else:
+            sys.modules.pop("jarz_pos.utils.account_utils", None)
         if previous_payment_receipts is not None:
             sys.modules["jarz_pos.api.payment_receipts"] = previous_payment_receipts
         else:

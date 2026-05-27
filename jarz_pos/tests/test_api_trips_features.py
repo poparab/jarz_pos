@@ -145,7 +145,8 @@ class TestTripsNewFeatures(unittest.TestCase):
         trip.save.assert_called_once_with(ignore_permissions=True)
 
     @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
-    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_state')
+    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_fields')
+    @patch('jarz_pos.api.trips.get_ofd_shortage_preview')
     @patch('jarz_pos.api.trips._get_delivery_expense_amount', return_value=0.0)
     @patch('jarz_pos.api.trips.ensure_delivery_note_for_invoice')
     @patch('jarz_pos.api.trips.frappe')
@@ -154,7 +155,8 @@ class TestTripsNewFeatures(unittest.TestCase):
         mock_frappe,
         mock_dn,
         mock_shipping,
-        mock_update_state,
+        mock_preview,
+        mock_update_fields,
         mock_has_children,
     ):
         from jarz_pos.api.trips import send_trip_for_delivery
@@ -206,16 +208,176 @@ class TestTripsNewFeatures(unittest.TestCase):
         mock_frappe.db.set_value.return_value = None
         mock_frappe.publish_realtime.return_value = None
         mock_dn.return_value = {'delivery_note': 'DN-020'}
+        mock_preview.return_value = {
+            'blocking': False,
+            'requires_reason': False,
+            'invoice_previews': {
+                'SINV-20': {
+                    'shortages': [],
+                },
+            },
+        }
 
         result = send_trip_for_delivery('TRIP-5')
 
         self.assertTrue(result['success'])
-        mock_update_state.assert_called_once_with(
-            invoice,
+        mock_update_fields.assert_called_once()
+        self.assertEqual(
+            mock_update_fields.call_args.args[1]['custom_sales_invoice_state'],
             'Out for Delivery',
-            field_names=('custom_sales_invoice_state', 'sales_invoice_state'),
         )
-        invoice.db_set.assert_not_called()
+        self.assertEqual(
+            mock_update_fields.call_args.args[1]['sales_invoice_state'],
+            'Out for Delivery',
+        )
+        self.assertEqual(
+            mock_update_fields.call_args.args[1]['custom_ofd_shortage_approved'],
+            0,
+        )
+        self.assertIsNone(
+            mock_update_fields.call_args.args[1]['custom_ofd_shortage_reason'],
+        )
+        courier_txn.insert.assert_called_once_with(ignore_permissions=True)
+        trip.save.assert_called_once_with(ignore_permissions=True)
+
+    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
+    @patch('jarz_pos.api.trips.get_ofd_shortage_preview')
+    @patch('jarz_pos.api.trips.ensure_delivery_note_for_invoice')
+    @patch('jarz_pos.api.trips.frappe')
+    def test_send_trip_for_delivery_requires_shortage_reason(
+        self,
+        mock_frappe,
+        mock_dn,
+        mock_preview,
+        mock_has_children,
+    ):
+        from jarz_pos.api.trips import send_trip_for_delivery
+
+        trip = MagicMock()
+        trip.name = 'TRIP-6'
+        trip.status = 'Created'
+        trip.is_double_shipping = 0
+        trip.invoices = [SimpleNamespace(invoice='SINV-21', name='TRIPINV-21')]
+
+        invoice = MagicMock()
+        invoice.name = 'SINV-21'
+        invoice.company = 'Test Co'
+        invoice.territory = ''
+        invoice.custom_sub_territory = ''
+        invoice.custom_shipping_expense = 0
+        invoice.get.side_effect = lambda field: {
+            'custom_sales_invoice_state': 'Ready',
+            'sales_invoice_state': 'Ready',
+        }.get(field)
+
+        mock_frappe.get_doc.side_effect = lambda doctype, name: trip if doctype == 'Delivery Trip' else invoice
+        mock_frappe.db.get_value.side_effect = lambda doctype, name, field=None: 0 if field == 'outstanding_amount' else None
+        mock_frappe.throw.side_effect = Exception('Shortage approval required')
+        mock_preview.return_value = {
+            'blocking': False,
+            'requires_reason': True,
+            'invoice_previews': {
+                'SINV-21': {
+                    'shortages': [
+                        {
+                            'item_code': 'ITEM-001',
+                            'required_qty': 2,
+                            'available_qty': 0,
+                            'warehouse': 'Main WH',
+                        }
+                    ],
+                },
+            },
+        }
+
+        with self.assertRaises(Exception):
+            send_trip_for_delivery('TRIP-6')
+
+        mock_dn.assert_not_called()
+
+    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
+    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_fields')
+    @patch('jarz_pos.api.trips.get_ofd_shortage_preview')
+    @patch('jarz_pos.api.trips._get_delivery_expense_amount', return_value=0.0)
+    @patch('jarz_pos.api.trips.ensure_delivery_note_for_invoice')
+    @patch('jarz_pos.api.trips.frappe')
+    def test_send_trip_for_delivery_persists_shortage_audit_fields(
+        self,
+        mock_frappe,
+        mock_dn,
+        mock_shipping,
+        mock_preview,
+        mock_update_fields,
+        mock_has_children,
+    ):
+        from jarz_pos.api.trips import send_trip_for_delivery
+
+        trip = MagicMock()
+        trip.name = 'TRIP-7'
+        trip.status = 'Created'
+        trip.is_double_shipping = 0
+        trip.courier_party_type = 'Employee'
+        trip.courier_party = 'EMP-1'
+        trip.invoices = [SimpleNamespace(invoice='SINV-22', name='TRIPINV-22')]
+
+        invoice = MagicMock()
+        invoice.name = 'SINV-22'
+        invoice.company = 'Test Co'
+        invoice.territory = ''
+        invoice.custom_sub_territory = ''
+        invoice.custom_shipping_expense = 0
+        invoice.get.side_effect = lambda field: {
+            'custom_sales_invoice_state': 'Ready',
+            'sales_invoice_state': 'Ready',
+        }.get(field)
+
+        courier_txn = MagicMock()
+        mock_frappe.get_doc.side_effect = lambda doctype, name: trip if doctype == 'Delivery Trip' else invoice
+        mock_frappe.db.get_value.side_effect = lambda doctype, name, field=None: 0 if field == 'outstanding_amount' else None
+        mock_frappe.new_doc.return_value = courier_txn
+        mock_frappe.db.savepoint.return_value = None
+        mock_frappe.db.commit.return_value = None
+        mock_frappe.db.set_value.return_value = None
+        mock_frappe.publish_realtime.return_value = None
+        mock_dn.return_value = {'delivery_note': 'DN-022'}
+        mock_preview.return_value = {
+            'blocking': False,
+            'requires_reason': True,
+            'invoice_previews': {
+                'SINV-22': {
+                    'shortages': [
+                        {
+                            'item_code': 'ITEM-001',
+                            'required_qty': 2,
+                            'available_qty': 0,
+                            'shortage_qty': 2,
+                            'warehouse': 'Main WH',
+                            'invoice_names': ['SINV-22'],
+                        }
+                    ],
+                },
+            },
+        }
+
+        result = send_trip_for_delivery(
+            'TRIP-7',
+            shortage_approved=1,
+            shortage_reason='Stock is being transferred from production',
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(
+            mock_update_fields.call_args.args[1]['custom_ofd_shortage_approved'],
+            1,
+        )
+        self.assertEqual(
+            mock_update_fields.call_args.args[1]['custom_ofd_shortage_reason'],
+            'Stock is being transferred from production',
+        )
+        self.assertIn(
+            'ITEM-001',
+            mock_update_fields.call_args.args[1]['custom_ofd_shortage_details'],
+        )
         courier_txn.insert.assert_called_once_with(ignore_permissions=True)
         trip.save.assert_called_once_with(ignore_permissions=True)
 

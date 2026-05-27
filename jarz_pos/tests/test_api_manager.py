@@ -415,13 +415,16 @@ class TestManagerAPI(unittest.TestCase):
 		}[(doctype, name)]
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.get_meta.return_value = meta
+		mock_frappe.parse_json.return_value = [{"item_code": "ITEM-001", "qty": 1, "rate": 10}]
 		mock_frappe.db.savepoint = MagicMock()
 		mock_frappe.db.rollback = MagicMock()
+		mock_frappe.db.sql.return_value = [[1]]
 		mock_frappe.db.set_value = MagicMock()
 
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
 			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
 			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}), \
+			 patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None), \
 			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-001"]), \
 			 patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()), \
 			 patch("jarz_pos.api.manager._create_amendment_invoice", return_value={"invoice_name": "INV-AMD-003-1"}) as mock_create_invoice, \
@@ -429,7 +432,7 @@ class TestManagerAPI(unittest.TestCase):
 			result = _run_invoice_amendment_job(
 				invoice_id="INV-AMD-003",
 				request_id="amd-INV-AMD-003-1234",
-				cart_json="[]",
+				cart_json='[{"item_code":"ITEM-001","qty":1,"rate":10}]',
 			)
 
 		self.assertTrue(result.get("success"))

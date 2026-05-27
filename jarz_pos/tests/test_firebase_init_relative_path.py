@@ -67,7 +67,7 @@ def _build_fake_firebase() -> tuple:
     return fake_firebase, fake_creds
 
 
-def _load_module(conf: dict):
+def _load_module(conf: dict, *, path_exists: bool = True):
     fake_frappe = _build_fake_frappe(conf)
     fake_firebase, fake_creds = _build_fake_firebase()
 
@@ -85,6 +85,7 @@ def _load_module(conf: dict):
     # Reset module-level state after load
     mod._FIREBASE_INIT_STATE["failed_logged"] = False
     mod._FIREBASE_INIT_STATE["ok"] = False
+    mod.os.path.exists = MagicMock(return_value=path_exists)
     return mod, fake_frappe, fake_creds
 
 

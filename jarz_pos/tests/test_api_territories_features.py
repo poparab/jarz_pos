@@ -14,6 +14,7 @@ class TestTerritoriesNewFeatures(unittest.TestCase):
             SimpleNamespace(
                 name='T-SUB-1',
                 territory_name='Sub Territory 1',
+                custom_territory_name_ar='',
                 delivery_income=30,
                 delivery_expense=20,
             )
@@ -52,18 +53,25 @@ class TestTerritoriesNewFeatures(unittest.TestCase):
 
         mock_frappe.db.exists.side_effect = exists_side_effect
         mock_frappe.get_doc.return_value = inv
-        mock_frappe.db.get_value.side_effect = [
-            'Main Territory',  # parent_territory for selected sub territory
-            20,                # delivery_expense
-            30,                # delivery_income
-        ]
+        def get_value_side_effect(doctype, name, fieldname):
+            if (doctype, name, fieldname) == ('Territory', 'Sub Territory 1', 'parent_territory'):
+                return 'Main Territory'
+            if (doctype, name, fieldname) == ('Territory', 'Sub Territory 1', 'delivery_expense'):
+                return 20
+            if (doctype, name, fieldname) == ('Territory', 'Sub Territory 1', 'delivery_income'):
+                return 30
+            if (doctype, name, fieldname) == ('Sales Invoice', 'SINV-1', 'custom_shipping_override_status'):
+                return ''
+            return None
+
+        mock_frappe.db.get_value.side_effect = get_value_side_effect
 
         result = set_invoice_sub_territory('SINV-1', 'Sub Territory 1')
 
         self.assertTrue(result['success'])
         self.assertEqual(result['sub_territory'], 'Sub Territory 1')
         self.assertEqual(result['delivery_expense'], 20.0)
-        mock_frappe.db.set_value.assert_called_once()
+        self.assertEqual(mock_frappe.db.set_value.call_count, 2)
         mock_frappe.db.commit.assert_called_once()
 
     @patch('jarz_pos.api.territories.frappe')

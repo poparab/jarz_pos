@@ -20,7 +20,23 @@ def sanitize_printable_text(value: Any) -> str:
     if value is None:
         return ""
 
-    text = frappe.as_unicode(value)
+    text = value
+    as_unicode = getattr(frappe, "as_unicode", None)
+    if callable(as_unicode):
+        try:
+            candidate = as_unicode(value)
+            if isinstance(candidate, bytes):
+                text = candidate.decode(errors="ignore")
+            elif isinstance(candidate, str):
+                text = candidate
+            else:
+                text = value
+        except Exception:
+            text = value
+
+    if not isinstance(text, str):
+        text = str(text)
+
     text = _HTML_TAG_PATTERN.sub(" ", text)
     text = _PRINT_CONTROL_PATTERN.sub(" ", text)
     return re.sub(r"\s+", " ", text).strip()

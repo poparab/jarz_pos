@@ -250,7 +250,7 @@ def get_profile_bundles(profile: str, price_list: Optional[str] = None):
             items_in_group = frappe.get_all(
                 'Item',
                 filters={'item_group': group_info['item_group'], 'disabled': 0, 'is_sales_item': 1},
-                fields=['name as id', 'item_name as name', 'standard_rate as price'],
+                fields=['name as id', 'item_name as name', 'standard_rate as price', 'allow_negative_stock'],
             )
 
             if not items_in_group:
@@ -284,6 +284,9 @@ def get_profile_bundles(profile: str, price_list: Optional[str] = None):
                     print(f"Bundle item {item['name']} (ID: {item['id']}) - Warehouse: {wh} - Stock: {qty}")
                     item['qty'] = qty
                     item['actual_qty'] = qty  # Add both fields for consistency
+
+            for item in items_in_group:
+                item['allow_negative_stock'] = bool(int(item.get('allow_negative_stock') or 0))
 
             processed_groups.append({
                 'group_name': group_info['item_group'],
@@ -348,6 +351,7 @@ def get_profile_products(profile: str, price_list: Optional[str] = None):
             'item_name as name',
             'standard_rate as price',  # fallback
             'item_group',
+            'allow_negative_stock',
         ],
     )
 
@@ -372,6 +376,9 @@ def get_profile_products(profile: str, price_list: Optional[str] = None):
             # Debug: Log the stock fetching for comparison
             print(f"Main item {itm['name']} (ID: {itm['id']}) - Warehouse: {wh} - Stock: {qty}")
             itm['qty'] = qty
+
+    for itm in items:
+        itm['allow_negative_stock'] = bool(int(itm.get('allow_negative_stock') or 0))
 
     return items 
 

@@ -5,9 +5,11 @@ This module handles all delivery and courier-related operations,
 including outstanding management, expense tracking, and settlement.
 """
 
+import json
 from contextlib import contextmanager
 
 import frappe
+from erpnext.stock.stock_ledger import is_negative_stock_allowed
 from frappe import _
 from jarz_pos.api.payment_receipts import (
     ensure_uploaded_payment_receipt,
@@ -276,6 +278,254 @@ def _get_invoice_warehouse_mismatches(si, expected_warehouse: str):
             })
     return mismatches
 
+
+def _find_existing_delivery_note_for_invoice(si) -> str | None:
+    """Return an existing submitted Delivery Note already linked to the invoice, if any."""
+    try:
+        dn_link_field = None
+        dn_meta = frappe.get_meta("Delivery Note")
+        for candidate in ["sales_invoice", "against_sales_invoice", "reference_invoice", "jarz_sales_invoice_ref"]:
+            if dn_meta.get_field(candidate):
+                dn_link_field = candidate
+                break
+
+        existing = []
+        if dn_link_field:
+            existing = frappe.get_all(
+                "Delivery Note",
+                filters={dn_link_field: si.name, "docstatus": 1},
+                pluck="name",
+                limit_page_length=1,
+            )
+
+        if not existing:
+            existing = frappe.get_all(
+                "Delivery Note",
+                filters={"docstatus": 1, "remarks": ["like", f"%{si.name}%"]},
+                pluck="name",
+                limit_page_length=1,
+            )
+
+        if not existing:
+            try:
+                total_qty = sum(float(it.qty or 0) for it in si.items)
+            except Exception:
+                total_qty = None
+
+            heuristics = frappe.get_all(
+                "Delivery Note",
+                filters={
+                    "docstatus": 1,
+                    "customer": si.customer,
+                    "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -3)],
+                    "remarks": ["like", "%Auto-created from Sales Invoice%"],
+                },
+                fields=["name"],
+                limit_page_length=5,
+            )
+            for cand in heuristics:
+                try:
+                    dn_doc = frappe.get_doc("Delivery Note", cand.name)
+                    if abs(float(dn_doc.get("total_qty") or 0) - (total_qty or 0)) < 0.0001:
+                        existing = [cand.name]
+                        break
+                except Exception:
+                    continue
+
+        return existing[0] if existing else None
+    except Exception as reuse_err:
+        frappe.logger().warning(
+            f"AUTO_DN reuse lookup failed for {si.name}: {reuse_err}"
+        )
+        return None
+
+
+def get_ofd_shortage_preview(invoices) -> dict:
+    """Preview warehouse mismatches and stock shortages for one or more OFD invoice moves."""
+    preview = {
+        "invoices": [],
+        "shortages": [],
+        "approvable_shortages": [],
+        "blocking_shortages": [],
+        "warehouse_mismatches": [],
+        "validation_errors": [],
+        "invoice_previews": {},
+        "requires_reason": False,
+        "blocking": False,
+    }
+
+    def _invoice_bucket(invoice_name: str) -> dict:
+        bucket = preview["invoice_previews"].setdefault(
+            invoice_name,
+            {
+                "invoice_name": invoice_name,
+                "existing_delivery_note": None,
+                "shortages": [],
+                "approvable_shortages": [],
+                "blocking_shortages": [],
+                "warehouse_mismatches": [],
+                "validation_errors": [],
+                "requires_reason": False,
+                "blocking": False,
+            },
+        )
+        return bucket
+
+    demand_by_item = {}
+
+    for invoice_ref in list(invoices or []):
+        si = invoice_ref
+        if not hasattr(si, "items"):
+            si = frappe.get_doc("Sales Invoice", invoice_ref)
+
+        invoice_name = str(getattr(si, "name", "") or "").strip()
+        if not invoice_name:
+            continue
+        preview["invoices"].append(invoice_name)
+        bucket = _invoice_bucket(invoice_name)
+
+        if int(getattr(si, "docstatus", 0) or 0) != 1:
+            message = _("Invoice {0} must be submitted before moving Out for Delivery.").format(invoice_name)
+            preview["validation_errors"].append(message)
+            bucket["validation_errors"].append(message)
+            bucket["blocking"] = True
+            continue
+
+        existing_dn = _find_existing_delivery_note_for_invoice(si)
+        if existing_dn:
+            bucket["existing_delivery_note"] = existing_dn
+            continue
+
+        try:
+            expected_warehouse = _resolve_invoice_operational_warehouse(si)
+        except Exception as validation_error:
+            message = str(validation_error)
+            preview["validation_errors"].append(message)
+            bucket["validation_errors"].append(message)
+            bucket["blocking"] = True
+            continue
+
+        mismatches = _get_invoice_warehouse_mismatches(si, expected_warehouse)
+        if mismatches:
+            for mismatch in mismatches:
+                entry = {
+                    "invoice_name": invoice_name,
+                    "row_name": mismatch.get("row_name"),
+                    "item_code": mismatch.get("item_code"),
+                    "warehouse": mismatch.get("warehouse"),
+                    "expected_warehouse": expected_warehouse,
+                }
+                preview["warehouse_mismatches"].append(entry)
+                bucket["warehouse_mismatches"].append(entry)
+            bucket["blocking"] = True
+            continue
+
+        for row in _get_invoice_stock_rows(si):
+            required_qty = _child_row_amount(row, "qty")
+            if required_qty <= 0:
+                continue
+
+            item_code = str(getattr(row, "item_code", "") or "").strip()
+            if not item_code:
+                continue
+
+            group_key = (expected_warehouse, item_code)
+            group = demand_by_item.setdefault(
+                group_key,
+                {
+                    "item_code": item_code,
+                    "item_name": str(getattr(row, "item_name", "") or item_code).strip() or item_code,
+                    "warehouse": expected_warehouse,
+                    "required_qty": 0.0,
+                    "invoice_names": set(),
+                    "row_names": set(),
+                },
+            )
+            group["required_qty"] += required_qty
+            group["invoice_names"].add(invoice_name)
+            row_name = str(getattr(row, "name", "") or "").strip()
+            if row_name:
+                group["row_names"].add(row_name)
+
+    for (warehouse, item_code), group in demand_by_item.items():
+        available_qty = _safe_float(
+            frappe.db.get_value(
+                "Bin",
+                {"warehouse": warehouse, "item_code": item_code},
+                "actual_qty",
+            )
+            or 0
+        )
+        required_qty = _safe_float(group["required_qty"])
+        shortage_qty = max(required_qty - max(available_qty, 0.0), 0.0)
+        if shortage_qty <= 0.0001:
+            continue
+
+        can_override = bool(is_negative_stock_allowed(item_code=item_code))
+        entry = {
+            "item_code": item_code,
+            "item_name": group["item_name"],
+            "warehouse": warehouse,
+            "required_qty": round(required_qty, 3),
+            "available_qty": round(available_qty, 3),
+            "shortage_qty": round(shortage_qty, 3),
+            "allow_negative_stock": can_override,
+            "can_override": can_override,
+            "invoice_names": sorted(group["invoice_names"]),
+            "row_names": sorted(group["row_names"]),
+        }
+        preview["shortages"].append(entry)
+        target_key = "approvable_shortages" if can_override else "blocking_shortages"
+        preview[target_key].append(entry)
+
+        for invoice_name in entry["invoice_names"]:
+            bucket = _invoice_bucket(invoice_name)
+            bucket["shortages"].append(entry)
+            bucket[target_key].append(entry)
+            if not can_override:
+                bucket["blocking"] = True
+
+    preview["requires_reason"] = bool(preview["approvable_shortages"])
+    preview["blocking"] = bool(
+        preview["validation_errors"] or
+        preview["warehouse_mismatches"] or
+        preview["blocking_shortages"]
+    )
+
+    for bucket in preview["invoice_previews"].values():
+        bucket["requires_reason"] = bool(bucket["approvable_shortages"])
+        bucket["blocking"] = bool(
+            bucket["blocking"] or
+            bucket["validation_errors"] or
+            bucket["warehouse_mismatches"] or
+            bucket["blocking_shortages"]
+        )
+
+    return preview
+
+
+def build_ofd_shortage_field_values(
+    invoice_preview: dict | None,
+    *,
+    shortage_reason: str | None = None,
+    shortage_approved: bool = False,
+) -> dict[str, object]:
+    """Build Sales Invoice audit field values for OFD shortage handling."""
+    shortages = list((invoice_preview or {}).get("shortages") or [])
+    if not shortages:
+        return {
+            "custom_ofd_shortage_approved": 0,
+            "custom_ofd_shortage_reason": None,
+            "custom_ofd_shortage_details": None,
+        }
+
+    cleaned_reason = str(shortage_reason or "").strip() or None
+    return {
+        "custom_ofd_shortage_approved": 1 if shortage_approved else 0,
+        "custom_ofd_shortage_reason": cleaned_reason,
+        "custom_ofd_shortage_details": json.dumps(shortages, ensure_ascii=True, sort_keys=True),
+    }
+
 def _compute_sales_partner_fees(inv, sales_partner: str, online: bool) -> dict:
     """Compute partner fees (commission + optional online fee) plus VAT.
 
@@ -353,82 +603,26 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
             out["error"] = "Invoice must be submitted before creating Delivery Note"
             return out
 
-        # Idempotency / reuse search sequence (broadened to avoid duplicate DN creation):
-        #   a) Custom link field (if any of known candidates exists)
-        #   b) Remarks contains invoice name (legacy pattern)
-        #   c) Heuristic match: submitted DN for same customer, same total qty & amount (within recent 3 days)
-        #      that already has 'Auto-created from Sales Invoice' in remarks (covers earlier creation path)
-        try:
-            # Try custom field first (if admin later adds one, this code adapts automatically)
-            dn_link_field = None
-            dn_meta = frappe.get_meta("Delivery Note")
-            for candidate in ["sales_invoice", "against_sales_invoice", "reference_invoice", "jarz_sales_invoice_ref"]:
-                if dn_meta.get_field(candidate):
-                    dn_link_field = candidate
-                    break
-            existing = []
-            if dn_link_field:
-                existing = frappe.get_all(
-                    "Delivery Note",
-                    filters={dn_link_field: invoice_name, "docstatus": 1},
-                    pluck="name",
-                    limit_page_length=1,
-                )
-            if not existing:
-                existing = frappe.get_all(
-                    "Delivery Note",
-                    filters={"docstatus": 1, "remarks": ["like", f"%{invoice_name}%"]},
-                    pluck="name",
-                    limit_page_length=1,
-                )
-            # Heuristic fallback (recent auto-created for same customer & qty/amount)
-            if not existing:
-                try:
-                    total_qty = sum([float(it.qty or 0) for it in si.items])
-                except Exception:
-                    total_qty = None
-                heuristics = frappe.get_all(
-                    "Delivery Note",
-                    filters={
-                        "docstatus": 1,
-                        "customer": si.customer,
-                        "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -3)],
-                        "remarks": ["like", "%Auto-created from Sales Invoice%"],
-                    },
-                    fields=["name"],
-                    limit_page_length=5,
-                )
-                for cand in heuristics:
-                    # Light check: ensure not already matched by remarks but amounts align
+        existing_delivery_note = _find_existing_delivery_note_for_invoice(si)
+        if existing_delivery_note:
+            out["delivery_note"] = existing_delivery_note
+            out["reused"] = True
+            try:
+                # Force completed state (order already shipped)
+                dn_doc = frappe.get_doc("Delivery Note", existing_delivery_note)
+                if int(getattr(dn_doc, "docstatus", 0) or 0) == 1:
                     try:
-                        dn_doc = frappe.get_doc("Delivery Note", cand.name)
-                        if abs(float(dn_doc.get("total_qty") or 0) - (total_qty or 0)) < 0.0001:
-                            existing = [cand.name]
-                            break
+                        dn_doc.db_set("per_billed", 100, update_modified=False)
                     except Exception:
-                        continue
-            if existing:
-                out["delivery_note"] = existing[0]
-                out["reused"] = True
-                try:
-                    # Force completed state (order already shipped)
-                    dn_doc = frappe.get_doc("Delivery Note", existing[0])
-                    if int(getattr(dn_doc, "docstatus", 0) or 0) == 1:
-                        try:
-                            dn_doc.db_set("per_billed", 100, update_modified=False)
-                        except Exception:
-                            pass
-                        try:
-                            dn_doc.db_set("status", "Completed", update_modified=False)
-                        except Exception:
-                            pass
-                except Exception as _mark_err:
-                    frappe.logger().warning(f"AUTO_DN reuse mark-completed failed for {existing[0]}: {_mark_err}")
-                frappe.logger().info(f"AUTO_DN reuse Delivery Note {existing[0]} for {invoice_name}")
-                return out
-        except Exception as reuse_err:
-            # Non-fatal – continue to creation path
-            frappe.logger().warning(f"AUTO_DN reuse lookup failed for {invoice_name}: {reuse_err}")
+                        pass
+                    try:
+                        dn_doc.db_set("status", "Completed", update_modified=False)
+                    except Exception:
+                        pass
+            except Exception as _mark_err:
+                frappe.logger().warning(f"AUTO_DN reuse mark-completed failed for {existing_delivery_note}: {_mark_err}")
+            frappe.logger().info(f"AUTO_DN reuse Delivery Note {existing_delivery_note} for {invoice_name}")
+            return out
 
         try:
             expected_warehouse = _resolve_invoice_operational_warehouse(si)

@@ -9,6 +9,12 @@ import traceback
 import datetime
 from typing import Dict, List, Any, Optional, Union, Tuple
 from jarz_pos.constants import PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
+from jarz_pos.services.delivery_handling import (
+    DN_LOGIC_VERSION,
+    build_ofd_shortage_field_values,
+    ensure_delivery_note_for_invoice,
+    get_ofd_shortage_preview,
+)
 
 # Accounting helpers
 try:
@@ -167,18 +173,16 @@ def _coerce_bool(val: Any) -> bool:
         return False
 
 def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
-    """Detect pickup flag on a Sales Invoice using the standardized custom_is_pickup field.
-    Also checks remarks for [PICKUP] marker as fallback for legacy orders.
-    """
+    """Detect pickup flags across the standardized and legacy Sales Invoice fields."""
     try:
         getter = inv.get if isinstance(inv, dict) else getattr
-        # Primary field: custom_is_pickup
-        try:
-            val = getter(inv, "custom_is_pickup") if getter is getattr else getter("custom_is_pickup")
-            if _coerce_bool(val):
-                return True
-        except Exception:
-            pass
+        for fieldname in ("custom_is_pickup", "is_pickup", "pickup", "custom_pickup"):
+            try:
+                val = getter(inv, fieldname) if getter is getattr else getter(fieldname)
+                if _coerce_bool(val):
+                    return True
+            except Exception:
+                pass
         
         # Fallback: Check remarks marker for legacy orders
         try:
@@ -647,9 +651,103 @@ def _success(**kwargs):
 def _failure(msg: str):
     return {"success": False, "error": msg}
 
+
+def _format_qty(value: Any) -> str:
+    try:
+        qty = float(value or 0)
+    except Exception:
+        qty = 0.0
+    if abs(qty - round(qty)) < 0.0001:
+        return str(int(round(qty)))
+    return f"{qty:.3f}".rstrip("0").rstrip(".")
+
+
+def _build_ofd_preview_errors(preview: Dict[str, Any]) -> List[str]:
+    errors = list(preview.get("validation_errors") or [])
+
+    for mismatch in preview.get("warehouse_mismatches") or []:
+        errors.append(
+            (
+                "Invoice {invoice}: item {item} still points to warehouse {warehouse} instead of {expected}."
+            ).format(
+                invoice=mismatch.get("invoice_name") or "?",
+                item=mismatch.get("item_code") or "?",
+                warehouse=mismatch.get("warehouse") or "blank",
+                expected=mismatch.get("expected_warehouse") or "?",
+            )
+        )
+
+    for shortage in preview.get("blocking_shortages") or []:
+        errors.append(
+            (
+                "Invoice(s) {invoices}: item {item} needs {required} in {warehouse}, only {available} available, and negative stock is disabled."
+            ).format(
+                invoices=", ".join(shortage.get("invoice_names") or []) or "?",
+                item=shortage.get("item_code") or "?",
+                required=_format_qty(shortage.get("required_qty")),
+                warehouse=shortage.get("warehouse") or "?",
+                available=_format_qty(shortage.get("available_qty")),
+            )
+        )
+
+    return errors
+
 # ---------------------------------------------------------------------------
 # Public, whitelisted functions
 # ---------------------------------------------------------------------------
+
+@frappe.whitelist(allow_guest=False)
+def preview_invoice_out_for_delivery(invoice_id: str) -> Dict[str, Any]:
+    """Return OFD blockers and shortage preview for a single invoice without mutating data."""
+    frappe.has_permission("Sales Invoice", ptype="read", throw=True)
+
+    invoice_id = (invoice_id or "").strip()
+    if not invoice_id:
+        return _failure("invoice_id is required")
+
+    invoice = frappe.get_doc("Sales Invoice", invoice_id)
+    if invoice.docstatus != 1:
+        return _failure("Only submitted (docstatus=1) Sales Invoices can move Out for Delivery")
+
+    blocking_errors: List[str] = []
+
+    try:
+        from jarz_pos.api.territories import territory_has_children
+        inv_territory = (invoice.get("territory") or "").strip()
+        inv_sub_territory = (
+            getattr(invoice, "custom_sub_territory", None)
+            or invoice.get("custom_sub_territory")
+            or ""
+        )
+        if inv_territory and territory_has_children(inv_territory) and not inv_sub_territory:
+            blocking_errors.append(
+                "Please select a sub-territory before sending out for delivery"
+            )
+    except ImportError:
+        pass
+
+    try:
+        override_status = (
+            getattr(invoice, "custom_shipping_override_status", None)
+            or invoice.get("custom_shipping_override_status")
+            or ""
+        )
+        if str(override_status).strip() == "Pending":
+            blocking_errors.append(
+                "Custom shipping request is pending manager approval. Cannot proceed to Out for Delivery."
+            )
+    except Exception:
+        pass
+
+    preview = get_ofd_shortage_preview([invoice])
+    blocking_errors.extend(_build_ofd_preview_errors(preview))
+
+    return _success(
+        invoice_id=invoice_id,
+        preview=preview,
+        blocking_errors=blocking_errors,
+        requires_shortage_reason=bool(preview.get("requires_reason")) and not bool(preview.get("blocking")),
+    )
 
 @frappe.whitelist(allow_guest=False)
 def get_kanban_columns() -> Dict[str, Any]:
@@ -1111,7 +1209,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         return _failure(error_msg)
 
 @frappe.whitelist(allow_guest=False)
-def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
+def update_invoice_state(
+    invoice_id: str,
+    new_state: str,
+    shortage_approved: bool | int = False,
+    shortage_reason: Optional[str] = None,
+) -> Dict[str, Any]:
     """Update the custom_sales_invoice_state of a Sales Invoice (legacy field kept for backward compatibility).
     
     Args:
@@ -1122,6 +1225,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         Dict with success status and message
     """
     try:
+        frappe.has_permission("Sales Invoice", ptype="write", throw=True)
         frappe.logger().debug(f"KANBAN API: update_invoice_state - Invoice: {invoice_id}, New state: {new_state}")
         print("\n" + "-"*90)
         print("KANBAN STATE CHANGE API CALL")
@@ -1160,7 +1264,9 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
 
         normalized_target = (new_state or "").strip().lower()
         create_dn = normalized_target in {"out for delivery", "out_for_delivery"}
-        dn_logic_version = "2025-09-11a"
+        dn_logic_version = DN_LOGIC_VERSION
+        shortage_approved = _coerce_bool(shortage_approved)
+        shortage_reason = (shortage_reason or "").strip() or None
         frappe.logger().info(
             f"KANBAN API: State change requested -> {invoice_id} to '{new_state}' (normalized='{normalized_target}'), create_dn={create_dn}, logic_version={dn_logic_version}"
         )
@@ -1169,6 +1275,7 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
         created_delivery_note: Optional[str] = None
         created_cash_payment_entry: Optional[str] = None
         created_partner_txn: Optional[str] = None
+        audit_field_values: Dict[str, Any] = {}
 
         # ------------------------------------------------------------------
         # Helper: Ensure CASH Payment Entry for Sales Partner invoices when
@@ -1384,9 +1491,35 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
+            preview = get_ofd_shortage_preview([invoice])
+            preview_errors = _build_ofd_preview_errors(preview)
+            if preview_errors:
+                fail_resp = _failure(" ".join(preview_errors))
+                fail_resp["dn_logic_version"] = dn_logic_version
+                fail_resp["ofd_preview"] = preview
+                return fail_resp
+
+            if preview.get("requires_reason") and (not shortage_approved or not shortage_reason):
+                fail_resp = _failure(
+                    "Stock shortage approval reason is required before moving this invoice Out for Delivery."
+                )
+                fail_resp["dn_logic_version"] = dn_logic_version
+                fail_resp["ofd_preview"] = preview
+                fail_resp["requires_shortage_reason"] = True
+                return fail_resp
+
+            audit_field_values = build_ofd_shortage_field_values(
+                (preview.get("invoice_previews") or {}).get(invoice_id),
+                shortage_reason=shortage_reason,
+                shortage_approved=shortage_approved,
+            )
+
             try:
                 print(f"Attempting Delivery Note creation for invoice {invoice_id}")
-                created_delivery_note = _create_delivery_note_from_invoice(invoice)
+                dn_result = ensure_delivery_note_for_invoice(invoice_id)
+                if dn_result.get("error"):
+                    raise Exception(dn_result["error"])
+                created_delivery_note = dn_result.get("delivery_note")
                 print(f"Delivery Note created: {created_delivery_note}")
                 frappe.logger().info(
                     f"KANBAN API: Delivery Note created '{created_delivery_note}' for invoice {invoice_id}"
@@ -1459,6 +1592,17 @@ def update_invoice_state(invoice_id: str, new_state: str) -> Dict[str, Any]:
 
         if not updated_fields:
             return _failure(f"Failed updating invoice state for {invoice_id}")
+
+        for field_name, field_value in audit_field_values.items():
+            if not meta.get_field(field_name):
+                continue
+            try:
+                invoice.set(field_name, field_value)
+                updated_fields.append(field_name)
+                print(f"set success for field {field_name}")
+            except Exception as inner_ex:
+                print(f"Failed setting field {field_name}: {inner_ex}")
+                frappe.logger().error(f"Failed setting field {field_name} on {invoice_id}: {inner_ex}")
 
         try:
             invoice.flags.ignore_validate_update_after_submit = True

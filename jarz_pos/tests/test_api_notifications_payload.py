@@ -26,9 +26,9 @@ class TestNotificationPayloadContract(unittest.TestCase):
         )
 
         with patch.object(notifications, "FIREBASE_AVAILABLE", True), patch.object(
-            notifications.frappe, "local", local_stub
+            notifications.frappe, "local", local_stub, create=True
         ), patch.object(
-            notifications.frappe, "get_site_path", side_effect=fake_get_site_path
+            notifications.frappe, "get_site_path", side_effect=fake_get_site_path, create=True
         ), patch.object(
             notifications.os.path, "exists", side_effect=fake_exists
         ), patch.object(
@@ -62,9 +62,9 @@ class TestNotificationPayloadContract(unittest.TestCase):
         notifications._FIREBASE_INIT_STATE["path_warning"] = None
 
         with patch.object(notifications, "FIREBASE_AVAILABLE", True), patch.object(
-            notifications.frappe, "local", local_stub
+            notifications.frappe, "local", local_stub, create=True
         ), patch.object(
-            notifications.frappe, "get_site_path", side_effect=fake_get_site_path
+            notifications.frappe, "get_site_path", side_effect=fake_get_site_path, create=True
         ), patch.object(
             notifications.os.path, "exists", side_effect=fake_exists
         ), patch.object(
@@ -96,9 +96,9 @@ class TestNotificationPayloadContract(unittest.TestCase):
         fake_credentials = SimpleNamespace(Certificate=Mock(return_value="cred"))
 
         with patch.object(notifications, "FIREBASE_AVAILABLE", True), patch.object(
-            notifications.frappe, "local", local_stub
+            notifications.frappe, "local", local_stub, create=True
         ), patch.object(
-            notifications.frappe, "get_site_path", side_effect=fake_get_site_path
+            notifications.frappe, "get_site_path", side_effect=fake_get_site_path, create=True
         ), patch.object(
             notifications.os.path, "exists", side_effect=fake_exists
         ), patch.object(
@@ -554,3 +554,56 @@ class TestNotificationPayloadContract(unittest.TestCase):
             tag='',
         )
         fake_messaging.send.assert_called_once()
+
+    def test_send_fcm_notifications_adds_webpush_config_when_supported(self):
+        from jarz_pos.api import notifications
+
+        fake_messaging = SimpleNamespace(
+            Message=Mock(side_effect=lambda **kwargs: SimpleNamespace(token=kwargs["token"], kwargs=kwargs)),
+            AndroidConfig=Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+            AndroidNotification=Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+            Notification=Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+            WebpushNotification=Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+            WebpushConfig=Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+            WebpushFCMOptions=Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+            send=Mock(return_value="message-id"),
+        )
+        logger = SimpleNamespace(info=Mock())
+        data_payload = {
+            "type": "new_invoice",
+            "invoice_id": "SINV-0003",
+            "title": "New Order: Walk-in",
+            "body": "Nasr City | Total: 100.00 | Latte x 1",
+        }
+
+        with patch.object(notifications, "_initialize_firebase_app", return_value=True), patch.object(
+            notifications, "messaging", fake_messaging, create=True
+        ), patch.object(notifications.frappe, "logger", return_value=logger), patch.object(
+            notifications.frappe, "log_error"
+        ), patch.object(
+            notifications.frappe.utils, "get_url", return_value="https://erpstg.orderjarz.com", create=True
+        ):
+            result = notifications._send_fcm_notifications(["token-1"], data_payload)
+
+        message_kwargs = fake_messaging.Message.call_args.kwargs
+        self.assertTrue(result["ok"])
+        self.assertEqual(message_kwargs["webpush"].headers, {"Urgency": "high"})
+        self.assertEqual(message_kwargs["webpush"].notification.tag, "SINV-0003")
+        self.assertTrue(message_kwargs["webpush"].notification.require_interaction)
+        self.assertEqual(message_kwargs["webpush"].fcm_options.link, "https://erpstg.orderjarz.com")
+        fake_messaging.WebpushNotification.assert_called_once_with(
+            title="New Order: Walk-in",
+            body="Nasr City | Total: 100.00 | Latte x 1",
+            icon=notifications.WEBPUSH_NOTIFICATION_ICON,
+            badge=notifications.WEBPUSH_NOTIFICATION_BADGE,
+            tag="SINV-0003",
+            require_interaction=True,
+        )
+        fake_messaging.WebpushFCMOptions.assert_called_once_with(
+            link="https://erpstg.orderjarz.com"
+        )
+        fake_messaging.WebpushConfig.assert_called_once_with(
+            headers={"Urgency": "high"},
+            notification=message_kwargs["webpush"].notification,
+            fcm_options=message_kwargs["webpush"].fcm_options,
+        )

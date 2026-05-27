@@ -40,14 +40,11 @@ class TestPOSAPI(unittest.TestCase):
 		self.assertIsInstance(result, list, "Should return a list even with empty profile")
 
 	def test_get_profile_bundles_structure(self):
-		"""Test that get_profile_bundles returns correct structure."""
+		"""Test that get_profile_bundles validates the required profile parameter."""
 		from jarz_pos.api.pos import get_profile_bundles
 
-		# Test with empty profile
-		result = get_profile_bundles(profile="")
-
-		# Should return a list
-		self.assertIsInstance(result, list, "Should return a list")
+		with self.assertRaises(frappe.ValidationError):
+			get_profile_bundles(profile="")
 
 	def test_get_sales_partners_default_limit(self):
 		"""Test that get_sales_partners respects default limit."""

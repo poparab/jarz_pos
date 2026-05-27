@@ -45,10 +45,20 @@ except Exception:
         return None
 
 try:
-    from jarz_pos.utils.invoice_utils import format_invoice_data
+    from jarz_pos.utils.invoice_utils import (
+        assert_pos_profile_matches_territory,
+        format_invoice_data,
+        resolve_order_territory,
+    )
 except Exception:
     def format_invoice_data(invoice_doc):  # type: ignore
         return {"name": getattr(invoice_doc, "name", None)}
+
+    def assert_pos_profile_matches_territory(*args, **kwargs):  # type: ignore
+        return None
+
+    def resolve_order_territory(*args, **kwargs):  # type: ignore
+        return None
 
 try:
     from jarz_pos.services.invoice_creation import create_pos_invoice as _create_amendment_invoice
@@ -761,7 +771,6 @@ def _run_invoice_amendment_job(
     initiated_by = (initiated_by or frappe.session.user or "Unknown User").strip()
 
     # Territory → POS profile safety check (before any DB writes)
-    from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory, resolve_order_territory
     effective_order_territory = resolve_order_territory(
         effective_customer_name,
         shipping_address_name=effective_shipping_address_name,
@@ -792,7 +801,14 @@ def _run_invoice_amendment_job(
 
     # B2: Re-verify eligibility *after* acquiring the lock to catch races
     # (e.g. CSR created after the Flutter card was opened).
-    source_invoice.reload()
+    reload_invoice = getattr(source_invoice, "reload", None)
+    if callable(reload_invoice):
+        reload_invoice()
+    else:
+        try:
+            source_invoice = frappe.get_doc("Sales Invoice", invoice_id)
+        except Exception:
+            pass
     fresh_eligibility = get_invoice_amendment_eligibility(source_invoice)
     if not fresh_eligibility.get("can_amend"):
         if inv_lock_acquired:

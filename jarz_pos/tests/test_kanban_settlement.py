@@ -194,6 +194,213 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_inv.set.assert_any_call("custom_sales_invoice_state", "Delivered")
 		mock_inv.set.assert_any_call("sales_invoice_state", "Delivered")
 
+	@patch('jarz_pos.services.delivery_handling.is_negative_stock_allowed', return_value=False)
+	@patch('jarz_pos.services.delivery_handling.frappe')
+	def test_get_ofd_shortage_preview_reports_blocking_shortage(self, mock_frappe, mock_allow_negative):
+		"""OFD shortage preview should report stock shortages separately from warehouse mismatch checks."""
+		from jarz_pos.services.delivery_handling import get_ofd_shortage_preview
+
+		mock_item = MagicMock()
+		mock_item.name = "SII-100"
+		mock_item.item_code = "ITEM-001"
+		mock_item.item_name = "Kunafa"
+		mock_item.qty = 3
+		mock_item.warehouse = "Main WH"
+		mock_item.get.side_effect = lambda key, default=None: getattr(mock_item, key, default)
+
+		mock_invoice = MagicMock()
+		mock_invoice.name = "INV-100"
+		mock_invoice.docstatus = 1
+		mock_invoice.customer = "Customer"
+		mock_invoice.company = "Jarz"
+		mock_invoice.pos_profile = "Nasr city"
+		mock_invoice.custom_kanban_profile = "Nasr city"
+		mock_invoice.items = [mock_item]
+		mock_invoice.get.side_effect = lambda key, default=None: getattr(mock_invoice, key, default)
+
+		mock_meta = MagicMock()
+		mock_meta.get_field.return_value = None
+
+		def fake_get_doc(doctype, name=None):
+			if doctype == "Sales Invoice":
+				return mock_invoice
+			return MagicMock()
+
+		def fake_db_get_value(doctype, name=None, field=None, **kwargs):
+			if doctype == "POS Profile" and name == "Nasr city" and field == "warehouse":
+				return "Main WH"
+			if doctype == "Warehouse" and name == "Main WH" and field == "company":
+				return "Jarz"
+			if doctype == "Item" and name == "ITEM-001" and field == "is_stock_item":
+				return 1
+			if doctype == "Bin" and isinstance(name, dict) and field == "actual_qty":
+				return 1
+			return None
+
+		mock_frappe.get_doc.side_effect = fake_get_doc
+		mock_frappe.get_meta.return_value = mock_meta
+		mock_frappe.get_all.return_value = []
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.db.get_value.side_effect = fake_db_get_value
+		mock_frappe.utils.today.return_value = "2026-05-27"
+		mock_frappe.utils.add_days.return_value = "2026-05-24"
+
+		preview = get_ofd_shortage_preview([mock_invoice])
+
+		self.assertTrue(preview["blocking"])
+		self.assertEqual(len(preview["shortages"]), 1)
+		self.assertEqual(preview["shortages"][0]["item_code"], "ITEM-001")
+		self.assertEqual(preview["shortages"][0]["shortage_qty"], 2.0)
+		self.assertEqual(preview["invoice_previews"]["INV-100"]["blocking_shortages"][0]["item_code"], "ITEM-001")
+
+	@patch('jarz_pos.api.kanban._get_allowed_states')
+	@patch('jarz_pos.api.kanban.get_ofd_shortage_preview')
+	@patch('jarz_pos.api.kanban.ensure_delivery_note_for_invoice')
+	@patch('jarz_pos.api.kanban.frappe')
+	def test_update_invoice_state_requires_shortage_reason_before_ofd(
+		self,
+		mock_frappe,
+		mock_ensure_dn,
+		mock_preview,
+		mock_allowed_states,
+	):
+		"""Kanban OFD should stop when shortage approval is required but no reason is supplied."""
+		from jarz_pos.api.kanban import update_invoice_state
+
+		mock_allowed_states.return_value = ["Ready", "Out for Delivery"]
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-200"
+		mock_inv.docstatus = 1
+		mock_inv.flags = MagicMock()
+		mock_inv.get.side_effect = lambda fieldname: {
+			"custom_sales_invoice_state": "Ready",
+			"sales_invoice_state": "Ready",
+			"custom_state": None,
+			"state": None,
+			"territory": "",
+			"custom_sub_territory": "",
+			"custom_shipping_override_status": "",
+		}.get(fieldname)
+
+		mock_meta = MagicMock()
+		mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {"custom_sales_invoice_state", "sales_invoice_state"} else None
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.get_meta.return_value = mock_meta
+		mock_frappe.utils.now.return_value = "2026-05-27 08:00:00"
+		mock_preview.return_value = {
+			"blocking": False,
+			"requires_reason": True,
+			"validation_errors": [],
+			"warehouse_mismatches": [],
+			"blocking_shortages": [],
+			"invoice_previews": {
+				"INV-200": {
+					"shortages": [
+						{
+							"item_code": "ITEM-001",
+							"required_qty": 2,
+							"available_qty": 0,
+							"warehouse": "Main WH",
+						}
+					],
+				},
+			},
+		}
+
+		result = update_invoice_state("INV-200", "Out for Delivery")
+
+		self.assertFalse(result.get("success"))
+		self.assertTrue(result.get("requires_shortage_reason"))
+		self.assertIn("ofd_preview", result)
+		mock_ensure_dn.assert_not_called()
+
+	@patch('jarz_pos.api.kanban._get_allowed_states')
+	@patch('jarz_pos.api.kanban.get_ofd_shortage_preview')
+	@patch('jarz_pos.api.kanban.ensure_delivery_note_for_invoice')
+	@patch('jarz_pos.api.kanban.frappe')
+	def test_update_invoice_state_uses_shared_dn_helper_and_captures_shortage_audit(
+		self,
+		mock_frappe,
+		mock_ensure_dn,
+		mock_preview,
+		mock_allowed_states,
+	):
+		"""Approved OFD shortage should persist audit fields and use the shared Delivery Note helper."""
+		from jarz_pos.api.kanban import update_invoice_state
+
+		mock_allowed_states.return_value = ["Ready", "Out for Delivery"]
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-201"
+		mock_inv.docstatus = 1
+		mock_inv.flags = MagicMock()
+		mock_inv.get.side_effect = lambda fieldname: {
+			"custom_sales_invoice_state": "Ready",
+			"sales_invoice_state": "Ready",
+			"custom_state": None,
+			"state": None,
+			"territory": "",
+			"custom_sub_territory": "",
+			"custom_shipping_override_status": "",
+		}.get(fieldname)
+
+		tracked_fields = {
+			"custom_sales_invoice_state",
+			"sales_invoice_state",
+			"custom_ofd_shortage_approved",
+			"custom_ofd_shortage_reason",
+			"custom_ofd_shortage_details",
+		}
+		mock_meta = MagicMock()
+		mock_meta.get_field.side_effect = lambda name: MagicMock() if name in tracked_fields else None
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.get_meta.return_value = mock_meta
+		mock_frappe.utils.now.return_value = "2026-05-27 08:05:00"
+		mock_frappe.db.commit = MagicMock()
+		mock_frappe.publish_realtime = MagicMock()
+		mock_frappe.session.user = "tester@example.com"
+		mock_ensure_dn.return_value = {"delivery_note": "DN-201", "error": None}
+		mock_preview.return_value = {
+			"blocking": False,
+			"requires_reason": True,
+			"validation_errors": [],
+			"warehouse_mismatches": [],
+			"blocking_shortages": [],
+			"invoice_previews": {
+				"INV-201": {
+					"shortages": [
+						{
+							"item_code": "ITEM-001",
+							"required_qty": 2,
+							"available_qty": 0,
+							"shortage_qty": 2,
+							"warehouse": "Main WH",
+							"invoice_names": ["INV-201"],
+						}
+					],
+				},
+			},
+		}
+
+		result = update_invoice_state(
+			"INV-201",
+			"Out for Delivery",
+			shortage_approved=1,
+			shortage_reason="Stock transfer in progress",
+		)
+
+		self.assertTrue(result.get("success"))
+		mock_ensure_dn.assert_called_once_with("INV-201")
+		mock_inv.set.assert_any_call("custom_ofd_shortage_approved", 1)
+		mock_inv.set.assert_any_call("custom_ofd_shortage_reason", "Stock transfer in progress")
+		detail_calls = [call.args[1] for call in mock_inv.set.call_args_list if call.args[0] == "custom_ofd_shortage_details"]
+		self.assertTrue(detail_calls)
+		self.assertIn("ITEM-001", detail_calls[0])
+
 	def test_delivery_note_creation_trigger(self):
 		"""Test that moving to 'Out for Delivery' triggers DN creation."""
 		from jarz_pos.api.kanban import update_invoice_state

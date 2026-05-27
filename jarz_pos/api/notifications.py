@@ -313,6 +313,8 @@ DEFAULT_WALK_IN_CUSTOMER = "Walk-in"
 DEFAULT_NEW_ORDER_TITLE = "New Order"
 DEFAULT_ITEM_LABEL = "Item"
 ANDROID_ORDER_ALERT_SOUND = "jarz_order_alert_notification"
+WEBPUSH_NOTIFICATION_ICON = "/icons/Icon-192.png"
+WEBPUSH_NOTIFICATION_BADGE = "/icons/Icon-192.png"
 INVOICE_STATUS_NOTIFICATION_TITLES = {
     "invoice_accepted": "Order Accepted",
     "invoice_cancelled": "Order Cancelled",
@@ -1219,6 +1221,52 @@ def _resolve_notification_content(data_payload: Dict[str, str]) -> Tuple[str, st
     return title or fallback_title, body or fallback_body
 
 
+def _get_webpush_link() -> str:
+    get_url = getattr(frappe.utils, "get_url", None)
+    if callable(get_url):
+        try:
+            return get_url()
+        except Exception:
+            pass
+
+    return "/"
+
+
+def _build_webpush_config(data_payload: Dict[str, str], title: str, body: str) -> Optional[Any]:
+    webpush_config_cls = getattr(messaging, "WebpushConfig", None)
+    webpush_notification_cls = getattr(messaging, "WebpushNotification", None)
+    webpush_fcm_options_cls = getattr(messaging, "WebpushFCMOptions", None)
+
+    if not webpush_config_cls or not webpush_notification_cls:
+        return None
+
+    notification_tag = _pick_display_text(
+        data_payload.get("invoice_id"),
+        data_payload.get("type"),
+        fallback="jarz_pos",
+    )
+    webpush_notification = webpush_notification_cls(
+        title=title,
+        body=body,
+        icon=WEBPUSH_NOTIFICATION_ICON,
+        badge=WEBPUSH_NOTIFICATION_BADGE,
+        tag=notification_tag,
+        require_interaction=data_payload.get("type") == "new_invoice",
+    )
+
+    webpush_kwargs: Dict[str, Any] = {
+        "headers": {
+            "Urgency": "high" if data_payload.get("type") == "new_invoice" else "normal"
+        },
+        "notification": webpush_notification,
+    }
+
+    if webpush_fcm_options_cls:
+        webpush_kwargs["fcm_options"] = webpush_fcm_options_cls(link=_get_webpush_link())
+
+    return webpush_config_cls(**webpush_kwargs)
+
+
 def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
     if not doc or not getattr(doc, "name", None):
         return {}
@@ -1631,8 +1679,8 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
     try:
         data = _normalise_fcm_data_payload(data_payload)
         msg_type = data.get("type", "")
+        title, body = _resolve_notification_content(data)
         if msg_type == "new_invoice":
-            title, body = _resolve_notification_content(data)
             notification = messaging.Notification(title=title, body=body)
             android_notification = messaging.AndroidNotification(
                 sound=ANDROID_ORDER_ALERT_SOUND,
@@ -1640,7 +1688,6 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
                 tag=data.get("invoice_id", "")
             )
         else:
-            title, body = _resolve_notification_content(data)
             notification = messaging.Notification(title=title, body=body)
 
             # Use shift channel for shift events, order alerts channel for everything else
@@ -1659,6 +1706,8 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
         if android_notification is not None:
             android_config_kwargs["notification"] = android_notification
 
+        webpush_config = _build_webpush_config(data, title, body)
+
         # Send to each token and keep per-token accounting for partial failures.
         messages = []
         for token in batch_tokens:
@@ -1669,6 +1718,8 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
             }
             if notification is not None:
                 message_kwargs["notification"] = notification
+            if webpush_config is not None:
+                message_kwargs["webpush"] = webpush_config
             message = messaging.Message(**message_kwargs)
             messages.append(message)
         
