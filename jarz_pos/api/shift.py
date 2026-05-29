@@ -4,6 +4,7 @@ import json
 import re
 from decimal import Decimal, InvalidOperation
 from html import unescape
+from types import SimpleNamespace
 from typing import Any
 
 import frappe
@@ -628,6 +629,66 @@ def _get_shift_account_movements(account: str, company: str, start_date, end_dat
     return movements
 
 
+def _build_shift_payment_reconciliation_rows(rows: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen_modes: set[str] = set()
+
+    for row in rows or []:
+        if isinstance(row, dict):
+            mode = str(row.get("mode_of_payment") or "").strip()
+            opening_amount = flt(row.get("opening_amount"))
+        else:
+            mode = str(getattr(row, "mode_of_payment", "") or "").strip()
+            opening_amount = flt(getattr(row, "opening_amount", 0))
+
+        if not mode or mode in seen_modes:
+            continue
+
+        normalized.append(
+            {
+                "mode_of_payment": mode,
+                "opening_amount": opening_amount,
+                "expected_amount": opening_amount,
+                "closing_amount": 0.0,
+                "difference": 0.0,
+            }
+        )
+        seen_modes.add(mode)
+
+    return normalized
+
+
+def _get_shift_payment_reconciliation_rows(opening, closing=None) -> list[dict[str, Any]]:
+    closing_rows = _build_shift_payment_reconciliation_rows(
+        getattr(closing, "payment_reconciliation", None) if closing else None
+    )
+    if closing_rows:
+        return closing_rows
+
+    opening_rows = _build_shift_payment_reconciliation_rows(
+        getattr(opening, "balance_details", None)
+    )
+    if opening_rows:
+        return opening_rows
+
+    opening_name = getattr(opening, "name", None) or _("this shift")
+    frappe.throw(
+        _(
+            "No payment method is available to close shift {0}. Restart the shift or contact support."
+        ).format(opening_name)
+    )
+
+
+def _sync_shift_payment_reconciliation_rows(closing, rows: list[dict[str, Any]]) -> None:
+    if isinstance(getattr(closing, "doctype", None), str):
+        closing.set("payment_reconciliation", [])
+        for row in rows:
+            closing.append("payment_reconciliation", row)
+        return
+
+    closing.payment_reconciliation = [SimpleNamespace(**row) for row in rows]
+
+
 @frappe.whitelist(allow_guest=False)
 def get_shift_summary(pos_opening_entry: str):
     if not pos_opening_entry:
@@ -638,6 +699,7 @@ def get_shift_summary(pos_opening_entry: str):
         frappe.throw(_("You are not allowed to access this shift"), frappe.PermissionError)
 
     closing_draft = make_closing_entry_from_opening(opening)
+    payment_reconciliation_rows = _get_shift_payment_reconciliation_rows(opening, closing_draft)
 
     account = _resolve_pos_profile_account(
         opening.company, opening.pos_profile, None, None
@@ -674,9 +736,9 @@ def get_shift_summary(pos_opening_entry: str):
         "sales_invoices": [],
         "payment_reconciliation": [
             {
-                "mode_of_payment": row.mode_of_payment,
+                "mode_of_payment": row["mode_of_payment"],
             }
-            for row in (closing_draft.payment_reconciliation or [])
+            for row in payment_reconciliation_rows
         ],
     }
 
@@ -951,6 +1013,11 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
     _throw_if_shift_has_unsettled_courier_transactions(opening.pos_profile)
 
     closing = make_closing_entry_from_opening(opening)
+    closing_payment_reconciliation = getattr(closing, "payment_reconciliation", None) or []
+    normalized_closing_rows = _build_shift_payment_reconciliation_rows(closing_payment_reconciliation)
+    payment_reconciliation_rows = _get_shift_payment_reconciliation_rows(opening, closing)
+    if not normalized_closing_rows or len(normalized_closing_rows) != len(closing_payment_reconciliation):
+        _sync_shift_payment_reconciliation_rows(closing, payment_reconciliation_rows)
 
     account = _resolve_pos_profile_account(
         opening.company, opening.pos_profile, None, None

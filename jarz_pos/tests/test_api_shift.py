@@ -166,6 +166,67 @@ class TestShiftAPI(unittest.TestCase):
 		self.assertFalse(result["courier_close_block"]["blocked"])
 		self.assertEqual(result["payment_reconciliation"], [{"mode_of_payment": "Cash"}])
 
+	def test_get_shift_summary_falls_back_to_opening_balance_details_when_draft_rows_are_blank(self):
+		from jarz_pos.api.shift import get_shift_summary
+
+		mock_frappe = _make_mock_frappe()
+		opening = MagicMock()
+		opening.user = "staff@example.com"
+		opening.name = "POS-OPE-2026-00001"
+		opening.status = "Open"
+		opening.company = "JARZ"
+		opening.pos_profile = "Dokki"
+		opening.period_start_date = "2026-05-27 08:00:00"
+		opening.period_end_date = None
+		opening.balance_details = [
+			MagicMock(mode_of_payment="Cash", opening_amount=500),
+		]
+		mock_frappe.get_doc.return_value = opening
+
+		closing_draft = MagicMock()
+		closing_draft.total_quantity = 0
+		closing_draft.payment_reconciliation = [
+			MagicMock(mode_of_payment="", opening_amount=0),
+		]
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
+				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft), \
+				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
+				 patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]), \
+				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value={"blocked": False, "pos_profile": "Dokki", "transaction_count": 0, "invoice_count": 0, "party_count": 0, "net_balance": 0.0, "parties": []}):
+			result = get_shift_summary("POS-OPE-2026-00001")
+
+		self.assertEqual(result["payment_reconciliation"], [{"mode_of_payment": "Cash"}])
+
+	def test_get_shift_summary_throws_when_no_payment_mode_is_available(self):
+		from jarz_pos.api.shift import get_shift_summary
+
+		mock_frappe = _make_mock_frappe()
+		opening = MagicMock()
+		opening.user = "staff@example.com"
+		opening.name = "POS-OPE-2026-00001"
+		opening.status = "Open"
+		opening.company = "JARZ"
+		opening.pos_profile = "Dokki"
+		opening.period_start_date = "2026-05-27 08:00:00"
+		opening.period_end_date = None
+		opening.balance_details = []
+		mock_frappe.get_doc.return_value = opening
+
+		closing_draft = MagicMock()
+		closing_draft.total_quantity = 0
+		closing_draft.payment_reconciliation = []
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
+				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft), \
+				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
+				 patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]), \
+				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value={"blocked": False, "pos_profile": "Dokki", "transaction_count": 0, "invoice_count": 0, "party_count": 0, "net_balance": 0.0, "parties": []}):
+			with self.assertRaises(Exception) as ctx:
+				get_shift_summary("POS-OPE-2026-00001")
+
+		self.assertIn("No payment method is available to close shift POS-OPE-2026-00001", str(ctx.exception))
+
 	def test_end_shift_requires_explicit_closing_amount(self):
 		from jarz_pos.api.shift import end_shift
 
@@ -233,6 +294,49 @@ class TestShiftAPI(unittest.TestCase):
 		self.assertEqual(result["amounts_hidden"], 0)
 		self.assertEqual(result["variance_visible"], 1)
 		self.assertEqual(result["payment_reconciliation"][0]["difference"], 0)
+
+	def test_end_shift_falls_back_to_opening_balance_details_when_closing_rows_are_missing(self):
+		from jarz_pos.api.shift import end_shift
+
+		mock_frappe = _make_mock_frappe()
+		opening = MagicMock()
+		opening.user = "staff@example.com"
+		opening.status = "Open"
+		opening.docstatus = 1
+		opening.company = "JARZ"
+		opening.pos_profile = "Dokki"
+		opening.name = "POS-OPE-2026-00001"
+		opening.balance_details = [
+			MagicMock(mode_of_payment="Cash", opening_amount=500),
+		]
+		mock_frappe.get_doc.return_value = opening
+
+		closing = MagicMock()
+		closing.payment_reconciliation = []
+		closing.name = "POS-CLO-2026-00001"
+		closing.status = "Closed"
+		closing.net_total = 0
+		closing.total_quantity = 0
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
+				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing), \
+				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
+				 patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66), \
+				 patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]), \
+				 patch("jarz_pos.api.shift._throw_if_shift_has_unsettled_courier_transactions"):
+			result = end_shift(
+				"POS-OPE-2026-00001",
+				[{"closing_amount": 25876.66, "mode_of_payment": "Cash"}],
+			)
+
+		self.assertEqual(len(closing.payment_reconciliation), 1)
+		self.assertEqual(closing.payment_reconciliation[0].mode_of_payment, "Cash")
+		self.assertEqual(closing.payment_reconciliation[0].opening_amount, 500)
+		self.assertEqual(closing.payment_reconciliation[0].expected_amount, 25876.66)
+		self.assertEqual(closing.payment_reconciliation[0].closing_amount, 25876.66)
+		closing.insert.assert_called_once_with(ignore_permissions=True)
+		closing.submit.assert_called_once_with()
+		self.assertEqual(result["payment_reconciliation"][0]["mode_of_payment"], "Cash")
 
 	def test_get_shift_courier_close_block_uses_effective_profile_and_counts_rows(self):
 		from jarz_pos.api.shift import _get_shift_courier_close_block
