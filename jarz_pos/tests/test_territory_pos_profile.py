@@ -48,6 +48,7 @@ import frappe  # noqa: E402  (after stub registration)
 from jarz_pos.utils.invoice_utils import (  # noqa: E402
     assert_pos_profile_matches_territory,
     resolve_order_territory,
+    resolve_territory_name,
     resolve_territory_pos_profile,
 )
 
@@ -137,6 +138,38 @@ class TestResolveTerritoryPosProfile(unittest.TestCase):
             result = resolve_order_territory("CUST-001", shipping_address_name="ADDR-001")
 
         self.assertEqual(result, "EGNASRCITY")
+
+    def test_territory_name_resolves_bilingual_address_label_from_arabic_alias(self):
+        def _db_get(doctype, filters=None, fieldname=None, **kwargs):
+            if doctype == "Territory" and isinstance(filters, dict):
+                if filters.get("custom_territory_name_ar") == "عين شمس":
+                    return "EGSHAMS"
+            return None
+
+        with patch.object(frappe.db, "exists", side_effect=lambda doctype, name=None: False), \
+             patch.object(frappe.db, "has_column", side_effect=lambda doctype, fieldname: fieldname in {"territory_name", "custom_woo_code", "custom_territory_name_ar"}), \
+             patch.object(frappe.db, "get_value", side_effect=_db_get):
+            result = resolve_territory_name("Ain Shams - عين شمس")
+
+        self.assertEqual(result, "EGSHAMS")
+
+    def test_order_territory_resolves_selected_address_bilingual_label(self):
+        def _db_get(doctype, name=None, fieldname=None, as_dict=False):
+            if doctype == "Customer":
+                return None
+            if doctype == "Address" and as_dict:
+                return {"city": "Ain Shams - عين شمس", "state": "Ain Shams - عين شمس"}
+            if doctype == "Territory" and isinstance(name, dict):
+                if name.get("custom_territory_name_ar") == "عين شمس":
+                    return "EGSHAMS"
+            return None
+
+        with patch.object(frappe.db, "exists", side_effect=lambda doctype, name=None: doctype == "Territory" and name == "EGSHAMS"), \
+             patch.object(frappe.db, "has_column", side_effect=lambda doctype, fieldname: fieldname in {"territory_name", "custom_woo_code", "custom_territory_name_ar"}), \
+             patch.object(frappe.db, "get_value", side_effect=_db_get):
+            result = resolve_order_territory("CUST-001", shipping_address_name="ADDR-SHAMS")
+
+        self.assertEqual(result, "EGSHAMS")
 
 
 class TestAssertPosProfileMatchesTerritory(unittest.TestCase):

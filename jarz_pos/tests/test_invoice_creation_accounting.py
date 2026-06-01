@@ -621,6 +621,73 @@ class TestDeliveryPromotionInvoiceIntegration(unittest.TestCase):
         self.assertEqual(inv.shipping_address_name, "ADDR-NSR")
         self.assertEqual(tax_calls, [(50.0, "Shipping Income (EGNASRCITY)")])
 
+    def test_unresolved_shipping_address_territory_is_loud_and_non_blocking(self):
+        inv = _InvoiceDocCapture()
+        customer = _mock_customer(territory=None)
+        pos_profile = _mock_pos_profile(name="Nasr city", company="Jarz Company")
+        processed_items = [{"item_code": "ITEM-1", "qty": 1, "price_list_rate": 600.0}]
+        tax_calls = []
+        logger = MagicMock()
+
+        def _capture_tax_call(invoice_doc, amount, delivery_description=None):
+            tax_calls.append((amount, delivery_description))
+
+        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1"}]), \
+             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
+             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
+             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
+             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
+             patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items), \
+             patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv), \
+             patch("jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields), \
+             patch(
+                 "jarz_pos.services.invoice_creation.resolve_customer_shipping_address",
+                 return_value={
+                     "name": "ADDR-SHAMS",
+                     "city": "Ain Shams - عين شمس",
+                     "state": "Ain Shams - عين شمس",
+                 },
+             ), \
+             patch("jarz_pos.services.invoice_creation.resolve_order_territory", return_value=None), \
+             patch("jarz_pos.services.invoice_creation.ensure_shipping_address"), \
+             patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items), \
+             patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"), \
+             patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"), \
+             patch("jarz_pos.services.invoice_creation._save_document"), \
+             patch("jarz_pos.services.invoice_creation._submit_document"), \
+             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
+             patch("jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes", side_effect=_capture_tax_call), \
+             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
+             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"), \
+             patch("jarz_pos.services.invoice_creation.frappe") as mf:
+            from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
+
+            resolve_promo.return_value = DeliveryPromotionDecision()
+            mf.local.site = "test-site"
+            mf.logger.return_value = logger
+            mf.utils.now.return_value = "2026-05-05 12:00:00"
+            mf.db.exists.return_value = False
+            mf.get_all.return_value = []
+
+            from jarz_pos.services.invoice_creation import create_pos_invoice
+            create_pos_invoice(
+                cart_json="[]",
+                customer_name=customer.name,
+                pos_profile_name=pos_profile.name,
+                shipping_address_name="ADDR-SHAMS",
+            )
+
+        self.assertIsNone(inv.territory)
+        self.assertEqual(tax_calls, [])
+        self.assertIn("[UNRESOLVED TERRITORY]", inv.remarks)
+        self.assertIn("city=Ain Shams - عين شمس (address ADDR-SHAMS)", inv.remarks)
+        self.assertTrue(
+            any(
+                "Order territory unresolved; shipping income skipped" in str(call.args[0])
+                for call in logger.warning.call_args_list
+            )
+        )
+
 
 # ===========================================================================
 # TEST: Manager pricing support

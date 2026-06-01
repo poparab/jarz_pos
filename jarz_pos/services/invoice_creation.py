@@ -74,6 +74,32 @@ def _append_unique_remark(invoice_doc, marker: str) -> None:
     invoice_doc.remarks = (existing + "\n" if existing else "") + marker
 
 
+def _describe_unresolved_territory_source(
+    *,
+    resolved_shipping_address=None,
+    shipping_address_name: str | None = None,
+    customer_doc=None,
+) -> str:
+    if isinstance(resolved_shipping_address, dict):
+        address_name = str(resolved_shipping_address.get("name") or shipping_address_name or "").strip()
+        for fieldname in ("city", "state"):
+            value = str(resolved_shipping_address.get(fieldname) or "").strip()
+            if value:
+                if address_name:
+                    return f"{fieldname}={value} (address {address_name})"
+                return f"{fieldname}={value}"
+
+    customer_territory = str(getattr(customer_doc, "territory", "") or "").strip()
+    if customer_territory:
+        return f"customer_territory={customer_territory}"
+
+    shipping_address_name = str(shipping_address_name or "").strip()
+    if shipping_address_name:
+        return f"shipping_address_name={shipping_address_name}"
+
+    return "no territory source"
+
+
 def _pricing_action_requires_manager(
     cart_items,
     *,
@@ -642,7 +668,20 @@ def create_pos_invoice(
                     else:
                         print("   ℹ️ No positive delivery_income on territory – nothing added")
                 else:
-                    print("   ℹ️ Customer territory not found – skipping shipping income")
+                    unresolved_source = _describe_unresolved_territory_source(
+                        resolved_shipping_address=resolved_shipping_address,
+                        shipping_address_name=resolved_shipping_address_name or shipping_address_name,
+                        customer_doc=customer_doc,
+                    )
+                    _append_unique_remark(invoice_doc, f"[UNRESOLVED TERRITORY] {unresolved_source}")
+                    logger.warning(
+                        "Order territory unresolved; shipping income skipped "
+                        f"(customer={customer_doc.name}, source={unresolved_source})"
+                    )
+                    print(
+                        "   ⚠️ Order territory unresolved – skipping shipping income "
+                        f"({unresolved_source})"
+                    )
             except Exception as ship_err:
                 print(f"   ❌ Failed adding shipping income: {ship_err}")
                 # Do not abort – continue invoice creation

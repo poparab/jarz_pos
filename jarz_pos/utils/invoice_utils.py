@@ -4,6 +4,7 @@ This module provides common helper functions that are used across different API 
 from __future__ import annotations
 import frappe
 import re
+import unicodedata
 from typing import Dict, List, Any, Optional, Union
 
 
@@ -539,28 +540,78 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
 # Territory → POS Profile helpers
 # ---------------------------------------------------------------------------
 
-def resolve_territory_name(territory_value: Any) -> Optional[str]:
-    """Return the canonical Territory name for a code/display value, if known."""
-    raw_value = str(territory_value or "").strip()
-    if not raw_value:
-        return None
+_TERRITORY_LABEL_SEPARATOR_RE = re.compile(r"\s+-\s+")
+_TERRITORY_LOOKUP_FIELDS = (
+    "territory_name",
+    "custom_woo_code",
+    "woo_code",
+    "custom_territory_name_ar",
+)
 
-    if frappe.db.exists("Territory", raw_value):
-        return raw_value
 
+def _normalize_territory_lookup_text(value: Any) -> str:
+    text = unicodedata.normalize("NFC", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    return re.sub(r"\s*-\s*", " - ", text)
+
+
+def _territory_lookup_candidates(value: Any) -> list[str]:
+    normalized = _normalize_territory_lookup_text(value)
+    candidates: list[str] = []
+    for candidate in [normalized, *_TERRITORY_LABEL_SEPARATOR_RE.split(normalized, maxsplit=1)]:
+        candidate = _normalize_territory_lookup_text(candidate)
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _territory_has_column(fieldname: str) -> bool:
     try:
-        if frappe.db.has_column("Territory", "territory_name"):
-            territory_name = frappe.db.get_value("Territory", {"territory_name": raw_value}, "name")
-            if territory_name:
-                return territory_name
+        return bool(frappe.db.has_column("Territory", fieldname))
+    except Exception:
+        try:
+            meta = frappe.get_meta("Territory")
+            return bool(meta and meta.get_field(fieldname))
+        except Exception:
+            return False
 
-        for fieldname in ("custom_woo_code", "woo_code"):
-            if frappe.db.has_column("Territory", fieldname):
-                territory_name = frappe.db.get_value("Territory", {fieldname: raw_value}, "name")
-                if territory_name:
-                    return territory_name
+
+def _lookup_territory_by_field(fieldname: str, value: str) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        if fieldname == "name":
+            if frappe.db.exists("Territory", value):
+                return value
+            return None
+
+        if not _territory_has_column(fieldname):
+            return None
+
+        return (
+            frappe.db.get_value("Territory", {fieldname: value, "is_group": 0}, "name")
+            or frappe.db.get_value("Territory", {fieldname: value}, "name")
+        )
     except Exception:
         return None
+
+
+def resolve_territory_name(territory_value: Any) -> Optional[str]:
+    """Return the canonical Territory name for a code/display value, if known."""
+    candidates = _territory_lookup_candidates(territory_value)
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        territory_name = _lookup_territory_by_field("name", candidate)
+        if territory_name:
+            return territory_name
+
+    for candidate in candidates:
+        for fieldname in _TERRITORY_LOOKUP_FIELDS:
+            territory_name = _lookup_territory_by_field(fieldname, candidate)
+            if territory_name:
+                return territory_name
 
     return None
 
