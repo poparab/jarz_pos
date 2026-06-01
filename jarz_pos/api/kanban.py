@@ -605,6 +605,10 @@ def _posting_datetime(card: Dict[str, Any]) -> Optional[datetime.datetime]:
     return _safe_datetime(f"{posting_date} {posting_time}")
 
 
+def _creation_datetime(card: Dict[str, Any]) -> Optional[datetime.datetime]:
+    return _safe_datetime(card.get("creation"))
+
+
 def _delivery_sort_key(card: Dict[str, Any]) -> datetime.datetime:
     delivery_date = card.get("delivery_date")
     if delivery_date:
@@ -628,12 +632,23 @@ def _state_transition_sort_key(card: Dict[str, Any]) -> datetime.datetime:
     return frappe.utils.get_datetime("1970-01-01 00:00:00")
 
 
+def _received_sort_key(card: Dict[str, Any]) -> Tuple[datetime.datetime, datetime.datetime, str]:
+    posting_dt = _posting_datetime(card) or frappe.utils.get_datetime("1970-01-01 00:00:00")
+    creation_dt = _creation_datetime(card) or posting_dt
+    return (
+        posting_dt,
+        creation_dt,
+        str(card.get("name") or ""),
+    )
+
+
 def _sort_kanban_columns(data: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-    PRIORITY_COLUMNS = {"received", "in_progress"}
     for state_key, cards in data.items():
         if not cards:
             continue
-        if state_key in PRIORITY_COLUMNS:
+        if state_key == "received":
+            cards.sort(key=_received_sort_key, reverse=True)
+        elif state_key == "in_progress":
             cards.sort(key=_delivery_sort_key)
         else:
             cards.sort(key=_state_transition_sort_key, reverse=True)
@@ -870,7 +885,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         # Start with a stable base set of fields that always exist (or are known fixtures)
         fields = [
             "name", "customer", "customer_name", "territory", "posting_date",
-            "posting_time", "grand_total", "net_total", "total_taxes_and_charges",
+            "posting_time", "creation", "grand_total", "net_total", "total_taxes_and_charges",
             "status", "custom_sales_invoice_state", "sales_invoice_state",
             "sales_partner", "pos_profile", "custom_kanban_profile",
             "modified", "outstanding_amount", "docstatus", "is_return",
@@ -1120,6 +1135,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "status": sanitize_printable_text(state),  # Kanban state (custom field)
                 "doc_status": sanitize_printable_text(doc_status_label),  # ERPNext doc status, with Overdue normalized to Unpaid
                 "posting_date": str(inv.posting_date),
+                "posting_time": str(getattr(inv, "posting_time", None) or inv.get("posting_time") or ""),
+                "creation": str(getattr(inv, "creation", None) or inv.get("creation") or ""),
                 "grand_total": float(inv.grand_total or 0),
                 "net_total": float(inv.net_total or 0),
                 "total_taxes_and_charges": float(inv.total_taxes_and_charges or 0),

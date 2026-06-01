@@ -7,6 +7,7 @@ from unittest.mock import patch
 import frappe
 from jarz_pos.api.kanban import (
 	_build_invoice_search_or_filters,
+	_sort_kanban_columns,
 	get_kanban_columns,
 	get_kanban_invoices,
 	get_invoice_details,
@@ -78,6 +79,38 @@ class TestKanbanAPI(unittest.TestCase):
 		self.assertIn({"customer_name": ["like", "%Ali%"]}, result)
 		self.assertIn({"customer": ["like", "%Ali%"]}, result)
 		self.assertIn({"customer": ["in", ["CUST-1"]]}, result)
+
+	def test_sort_kanban_columns_orders_received_by_posting_datetime_desc(self):
+		"""Received should use newest posting datetime first, not delivery slot ordering."""
+		data = {
+			"received": [
+				{
+					"name": "INV-EARLY",
+					"posting_date": "2026-06-01",
+					"posting_time": "09:15:00",
+					"creation": "2026-06-01 09:10:00",
+					"delivery_date": "2026-06-03",
+					"delivery_time_from": "08:00:00",
+				},
+				{
+					"name": "INV-LATE",
+					"posting_date": "2026-06-01",
+					"posting_time": "18:45:00",
+					"creation": "2026-06-01 18:40:00",
+					"delivery_date": "2026-06-01",
+					"delivery_time_from": "07:00:00",
+				},
+			],
+			"in_progress": [],
+		}
+
+		result = _sort_kanban_columns(data)
+
+		self.assertEqual(
+			[card["name"] for card in result["received"]],
+			["INV-LATE", "INV-EARLY"],
+			"Received should sort by posting datetime descending",
+		)
 
 	@patch("jarz_pos.api.kanban._sort_kanban_columns", side_effect=lambda data: data)
 	@patch("jarz_pos.api.kanban._get_active_payment_receipt_map", return_value={})
