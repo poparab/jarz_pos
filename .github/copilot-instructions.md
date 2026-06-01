@@ -6,6 +6,8 @@
 
 > **ENVIRONMENT PARITY**: Local, staging, and production must stay aligned through GitHub-tracked commits only. The only valid path is local edit -> commit -> push to GitHub -> pull/deploy on staging -> pull/deploy on production. If any environment drifts or contains local-only/server-only code, stop and reconcile through GitHub before continuing.
 
+> **AFTER-FINISH RELEASE HANDOFF**: If a task changes backend/Frappe/Python/DocType behavior, do not treat it as complete until the change is committed/pushed, deployed to staging, verified on staging, then deployed to production and verified on production. If production is blocked by backup or confirmation gates, stop there and state that production deploy is pending that gate.
+
 ## Project Overview
 This workspace contains a complete POS system with two main components:
 1. **Backend/API**: ERPNext custom app at `C:\ERPNext\frappe_docker\development\frappe-bench\apps\jarz_pos\jarz_pos`
