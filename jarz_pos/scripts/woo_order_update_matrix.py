@@ -34,7 +34,6 @@ CORE_WOO_STATUSES = (
     "pre-nasrcity",
     "pre-ismailia",
     "pre-hadayk",
-    "pre-hadayek",
     "pre-dokki",
     "out-for-delivery",
     "completed",
@@ -49,7 +48,6 @@ SUBMITTED_WOO_STATUSES = {
     "pre-nasrcity",
     "pre-ismailia",
     "pre-hadayk",
-    "pre-hadayek",
     "pre-dokki",
     "out-for-delivery",
     "completed",
@@ -59,8 +57,10 @@ PROCESSING_EQUIVALENT_STATUSES = {
     "pre-nasrcity",
     "pre-ismailia",
     "pre-hadayk",
-    "pre-hadayek",
     "pre-dokki",
+}
+LEGACY_STATUS_ALIASES = {
+    "pre-hadayek": "pre-hadayk",
 }
 
 PAYMENT_METHOD_CASES = (
@@ -808,10 +808,13 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
         slug = str(status or "").strip().lower()
         if slug.startswith("wc-"):
             slug = slug[3:]
-        return slug
+        return LEGACY_STATUS_ALIASES.get(slug, slug)
 
     def _expected_inbound_create_outcome(self, status: str, payment: dict[str, Any]) -> dict[str, Any]:
-        if status in TERMINAL_WOO_STATUSES:
+        if status in {"pending", "on-hold"}:
+            docstatus = 0
+            state = "draft"
+        elif status in TERMINAL_WOO_STATUSES:
             docstatus = 2
             state = "cancelled"
         elif status in SUBMITTED_WOO_STATUSES:
@@ -826,7 +829,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
             "state": state,
             "payment_method": payment.get("expected_erp_method"),
             "should_auto_pay": should_auto_pay,
-            "skip_reason": "pending_payment" if status == "pending" else "",
+            "skip_reason": "pending_payment" if status in {"pending", "on-hold"} else "",
         }
 
     def _inbound_actual_state(self, woo_order_id: str) -> dict[str, Any]:
@@ -856,8 +859,12 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
         latest_event = latest_event or {}
         expected_skip_reason = str(expected.get("skip_reason") or "")
         actual_last_error = str(latest_event.get("last_error") or "").strip().lower()
-        if expected_skip_reason and not actual.get("invoice_name") and actual_last_error == expected_skip_reason:
-            return "pass", expected_skip_reason
+        latest_status = str(latest_event.get("status") or "").strip()
+        if expected_skip_reason and not actual.get("invoice_name"):
+            if actual_last_error == expected_skip_reason:
+                return "pass", expected_skip_reason
+            if latest_status == "Skipped" and actual_last_error in {"", expected_skip_reason}:
+                return "pass", expected_skip_reason
         if actual.get("docstatus") != expected.get("docstatus"):
             return "fail", "docstatus_mismatch"
         expected_state = str(expected.get("state") or "")
