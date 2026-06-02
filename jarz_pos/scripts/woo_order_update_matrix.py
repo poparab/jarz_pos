@@ -34,7 +34,6 @@ CORE_WOO_STATUSES = (
     "pre-nasrcity",
     "pre-ismailia",
     "pre-hadayk",
-    "pre-dokki",
     "out-for-delivery",
     "completed",
     "cancelled",
