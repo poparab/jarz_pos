@@ -456,6 +456,43 @@ def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[
     return receipt_map
 
 
+def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
+    cleaned_names = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
+    if not cleaned_names:
+        return {}
+
+    note_counts: Dict[str, int] = {}
+    try:
+        rows = frappe.get_all(
+            "Jarz Invoice Note",
+            filters={"sales_invoice": ["in", cleaned_names]},
+            fields=["sales_invoice", "count(name) as note_count"],
+            group_by="sales_invoice",
+            limit=max(len(cleaned_names) * 2, 20),
+        )
+        for row in rows:
+            invoice_name = str(row.get("sales_invoice") or "").strip()
+            if not invoice_name:
+                continue
+            note_counts[invoice_name] = int(row.get("note_count") or 0)
+    except Exception:
+        return {}
+
+    return note_counts
+
+
+def _serialize_invoice_note_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": sanitize_printable_text(row.get("name")),
+        "sales_invoice": sanitize_printable_text(row.get("sales_invoice")),
+        "pos_profile": sanitize_printable_text(row.get("pos_profile")),
+        "note": str(row.get("note") or "").replace("\r\n", "\n").replace("\r", "\n").strip(),
+        "added_by": sanitize_printable_text(row.get("added_by")),
+        "added_by_full_name": sanitize_printable_text(row.get("added_by_full_name") or row.get("added_by")),
+        "added_on": str(row.get("added_on") or row.get("creation") or ""),
+    }
+
+
 def _ensure_invoice_detail_access(invoice: frappe.Document) -> None:
     """Restrict invoice details to the current user's assigned POS Profiles."""
     allowed_profiles = _get_current_user_pos_profiles()
@@ -1013,6 +1050,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         # Batch fetch actual payment method for paid invoices
         actual_payment_methods: Dict[str, str] = {}
         payment_receipts_by_invoice = _get_active_payment_receipt_map([inv.name for inv in invoices])
+        invoice_note_counts = _get_invoice_note_counts([inv.name for inv in invoices])
         try:
             paid_inv_names = [
                 inv.name for inv in invoices
@@ -1158,6 +1196,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "payment_receipt_status": sanitize_printable_text(payment_receipts_by_invoice.get(inv.name, {}).get("payment_receipt_status")),
                 "payment_receipt_image_url": sanitize_printable_text(payment_receipts_by_invoice.get(inv.name, {}).get("payment_receipt_image_url")),
                 "pos_profile": sanitize_printable_text(inv.get("custom_kanban_profile")),
+                "note_count": int(invoice_note_counts.get(inv.name, 0)),
                 "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
                 "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
                 "is_return": int(getattr(inv, "is_return", 0) or 0),
@@ -1940,6 +1979,10 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
             data.update(receipt_data)
         except Exception:
             pass
+        try:
+            data["note_count"] = int(_get_invoice_note_counts([invoice.name]).get(invoice.name, 0))
+        except Exception:
+            data["note_count"] = 0
         data.update(get_invoice_amendment_eligibility(invoice))
         return _success(data=data)
     except Exception as e:
@@ -1947,6 +1990,92 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         frappe.logger().error(error_msg)
         frappe.log_error(f"Invoice Details Error: {str(e)}", "Kanban API")
         return _failure(error_msg)
+
+
+@frappe.whitelist(allow_guest=False)
+def get_invoice_notes(invoice_id: str) -> Dict[str, Any]:
+    """Return operational Jarz notes for a Sales Invoice only."""
+    try:
+        frappe.has_permission("Sales Invoice", ptype="read", throw=True)
+        invoice = frappe.get_doc("Sales Invoice", (invoice_id or "").strip())
+        _ensure_invoice_detail_access(invoice)
+
+        rows = frappe.get_all(
+            "Jarz Invoice Note",
+            filters={"sales_invoice": invoice.name},
+            fields=[
+                "name",
+                "sales_invoice",
+                "pos_profile",
+                "note",
+                "added_by",
+                "added_by_full_name",
+                "added_on",
+                "creation",
+            ],
+            order_by="added_on asc, creation asc",
+            limit=500,
+        )
+        notes = [_serialize_invoice_note_row(row) for row in rows]
+        return _success(data=notes, note_count=len(notes))
+    except Exception as e:
+        error_msg = f"Error getting invoice notes: {str(e)}"
+        frappe.logger().error(error_msg)
+        frappe.log_error(f"Invoice Notes Error: {str(e)}", "Kanban API")
+        return _failure(error_msg)
+
+
+@frappe.whitelist(allow_guest=False)
+def add_invoice_note(invoice_id: str, note: str) -> Dict[str, Any]:
+    """Add an operational Jarz note to a Sales Invoice."""
+    try:
+        frappe.has_permission("Sales Invoice", ptype="read", throw=True)
+        invoice = frappe.get_doc("Sales Invoice", (invoice_id or "").strip())
+        _ensure_invoice_detail_access(invoice)
+
+        note_text = str(note or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not note_text:
+            return _failure("Note cannot be empty")
+
+        note_doc = frappe.get_doc(
+            {
+                "doctype": "Jarz Invoice Note",
+                "sales_invoice": invoice.name,
+                "note": note_text,
+            }
+        )
+        note_doc.insert(ignore_permissions=True)
+        frappe.db.commit()
+
+        note_count = int(_get_invoice_note_counts([invoice.name]).get(invoice.name, 0))
+        payload = {
+            "event": "invoice_note_added",
+            "invoice_id": invoice.name,
+            "invoice": invoice.name,
+            "note_count": note_count,
+            "updated_by": frappe.session.user,
+            "timestamp": frappe.utils.now(),
+        }
+        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
+
+        note_data = _serialize_invoice_note_row(
+            {
+                "name": note_doc.name,
+                "sales_invoice": note_doc.sales_invoice,
+                "pos_profile": getattr(note_doc, "pos_profile", None),
+                "note": note_doc.note,
+                "added_by": getattr(note_doc, "added_by", None),
+                "added_by_full_name": getattr(note_doc, "added_by_full_name", None),
+                "added_on": getattr(note_doc, "added_on", None),
+            }
+        )
+        return _success(data=note_data, note_count=note_count)
+    except Exception as e:
+        error_msg = f"Error adding invoice note: {str(e)}"
+        frappe.logger().error(error_msg)
+        frappe.log_error(f"Add Invoice Note Error: {str(e)}", "Kanban API")
+        return _failure(error_msg)
+
 
 @frappe.whitelist(allow_guest=False)
 def get_kanban_filters() -> Dict[str, Any]:
@@ -1983,6 +2112,8 @@ try:
         update_invoice_state,
         cancel_invoice,
         get_invoice_details,
+        get_invoice_notes,
+        add_invoice_note,
         get_kanban_filters,
     ]
     for _f in _kanban_funcs:
