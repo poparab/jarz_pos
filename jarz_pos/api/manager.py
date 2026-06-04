@@ -559,6 +559,9 @@ def _build_invoice_amendment_request_id(
     payment_type: Optional[str],
     pickup: Union[bool, int, str, None],
     payment_method: Optional[str],
+    suppress_shipping_income: Union[bool, int, str, None] = None,
+    suppress_legacy_delivery_charges: Union[bool, int, str, None] = None,
+    zero_shipping_override: Union[bool, int, str, None] = None,
     provided_idempotency_key: Optional[str] = None,
 ) -> str:
     """Build a stable idempotency key for amendment retries of the same payload."""
@@ -583,6 +586,9 @@ def _build_invoice_amendment_request_id(
         "payment_type": payment_type,
         "pickup": _is_truthy_flag(pickup),
         "payment_method": payment_method,
+        "suppress_shipping_income": _is_truthy_flag(suppress_shipping_income),
+        "suppress_legacy_delivery_charges": _is_truthy_flag(suppress_legacy_delivery_charges),
+        "zero_shipping_override": _is_truthy_flag(zero_shipping_override),
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -719,6 +725,7 @@ def _run_invoice_amendment_job(
     pos_profile_override: Union[bool, int, str, None] = None,
     suppress_shipping_income: Union[bool, int, None] = None,
     suppress_legacy_delivery_charges: Union[bool, int, None] = None,
+    zero_shipping_override: Union[bool, int, str, None] = None,
     expected_source_grand_total: Optional[float] = None,
     expected_source_item_count: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -765,6 +772,21 @@ def _run_invoice_amendment_job(
         payment_method if payment_method is not None else source_invoice.get("custom_payment_method") or None
     )
     effective_pickup = _is_truthy_flag(pickup) or _is_truthy_flag(source_invoice.get("custom_is_pickup"))
+    zero_shipping_override_enabled = _is_truthy_flag(zero_shipping_override)
+    effective_suppress_shipping_income = (
+        True
+        if zero_shipping_override_enabled
+        else (bool(suppress_shipping_income) if suppress_shipping_income is not None else None)
+    )
+    effective_suppress_legacy_delivery_charges = (
+        True
+        if zero_shipping_override_enabled
+        else (
+            bool(suppress_legacy_delivery_charges)
+            if suppress_legacy_delivery_charges is not None
+            else None
+        )
+    )
     effective_required_delivery_datetime = required_delivery_datetime or _derive_required_delivery_datetime(source_invoice)
     effective_delivery_end_datetime = delivery_end_datetime or _derive_delivery_end_datetime(source_invoice)
     woo_order_id = source_invoice.get("woo_order_id")
@@ -1001,8 +1023,8 @@ def _run_invoice_amendment_job(
                 effective_payment_method,
                 amended_from=invoice_id,
                 woo_order_id=woo_order_id,
-                suppress_shipping_income=bool(suppress_shipping_income) if suppress_shipping_income is not None else None,
-                suppress_legacy_delivery_charges=bool(suppress_legacy_delivery_charges) if suppress_legacy_delivery_charges is not None else None,
+                suppress_shipping_income=effective_suppress_shipping_income,
+                suppress_legacy_delivery_charges=effective_suppress_legacy_delivery_charges,
             )
 
         replacement_invoice_name = (
@@ -1128,6 +1150,7 @@ def submit_invoice_amendment(
     pos_profile_override: Union[bool, int, str, None] = None,
     suppress_shipping_income: Union[bool, int, None] = None,
     suppress_legacy_delivery_charges: Union[bool, int, None] = None,
+    zero_shipping_override: Union[bool, int, str, None] = None,
     expected_source_grand_total: Optional[float] = None,
     expected_source_item_count: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -1146,6 +1169,11 @@ def submit_invoice_amendment(
         extra_profiles=[requested_profile] if requested_profile else None,
     )
 
+    zero_shipping_override_enabled = _is_truthy_flag(zero_shipping_override)
+    if zero_shipping_override_enabled:
+        suppress_shipping_income = True
+        suppress_legacy_delivery_charges = True
+
     existing_replacement = _find_existing_amendment_invoice(invoice_id)
     request_id = _build_invoice_amendment_request_id(
         invoice_id=invoice_id,
@@ -1159,6 +1187,9 @@ def submit_invoice_amendment(
         payment_type=payment_type,
         pickup=pickup,
         payment_method=payment_method if payment_method is not None else source_invoice.get("custom_payment_method"),
+        suppress_shipping_income=suppress_shipping_income,
+        suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+        zero_shipping_override=zero_shipping_override,
         provided_idempotency_key=idempotency_key,
     )
     if existing_replacement:
@@ -1203,6 +1234,7 @@ def submit_invoice_amendment(
         pos_profile_override=pos_profile_override,
         suppress_shipping_income=suppress_shipping_income,
         suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+        zero_shipping_override=zero_shipping_override,
         expected_source_grand_total=float(expected_source_grand_total) if expected_source_grand_total is not None else None,
         expected_source_item_count=int(expected_source_item_count) if expected_source_item_count is not None else None,
     )

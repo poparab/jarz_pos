@@ -277,6 +277,44 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["now"])
 		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["job_id"].startswith("amd-INV-AMD-001-"))
 
+	def test_submit_invoice_amendment_normalizes_zero_shipping_override(self):
+		"""Zero-shipping override should force suppression flags on the amendment job."""
+		from jarz_pos.api.manager import submit_invoice_amendment
+
+		source_invoice = _FakeInvoice(
+			name="INV-AMD-ZERO-001",
+			docstatus=1,
+			is_return=0,
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			sales_partner=None,
+			custom_payment_method="Cash",
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
+		mock_frappe.get_doc.return_value = source_invoice
+		mock_frappe.has_permission.return_value = True
+		mock_frappe.enqueue.return_value = {"success": True, "request_id": "amd-INV-AMD-ZERO-001-1234"}
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
+			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+			result = submit_invoice_amendment(
+				invoice_id="INV-AMD-ZERO-001",
+				cart_json="[]",
+				zero_shipping_override=1,
+			)
+
+		self.assertTrue(result.get("success"))
+		self.assertTrue(mock_frappe.enqueue.called)
+		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["suppress_shipping_income"])
+		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["suppress_legacy_delivery_charges"])
+		self.assertEqual(mock_frappe.enqueue.call_args.kwargs["zero_shipping_override"], 1)
+
 	def test_submit_invoice_amendment_returns_existing_replacement_idempotently(self):
 		"""Repeated submit requests should return the existing replacement invoice instead of reprocessing."""
 		from jarz_pos.api.manager import submit_invoice_amendment
