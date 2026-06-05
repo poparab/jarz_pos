@@ -26,7 +26,12 @@
   "column_break_receipt",
   "receipt_phone",
   "receipt_website",
-  "receipt_logo"
+  "receipt_logo",
+  "vapid_section",
+  "vapid_public_key",
+  "vapid_private_key",
+  "column_break_vapid",
+  "vapid_subject"
  ],
  "fields": [
   {
@@ -185,6 +190,37 @@
    "fieldname": "receipt_logo",
    "fieldtype": "Attach Image",
    "label": "Receipt Logo"
+  },
+  {
+   "fieldname": "vapid_section",
+   "fieldtype": "Section Break",
+   "label": "Web Push (VAPID)"
+  },
+  {
+   "description": "Base64url-encoded uncompressed EC public key served to browsers for pushManager.subscribe(). Auto-generated on first use.",
+   "fieldname": "vapid_public_key",
+   "fieldtype": "Data",
+   "label": "VAPID Public Key",
+   "read_only": 0
+  },
+  {
+   "description": "PEM-format EC private key used to sign VAPID push requests. Auto-generated on first use. Never expose this value.",
+   "fieldname": "vapid_private_key",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "VAPID Private Key",
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_vapid",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "https://erp.orderjarz.com",
+   "description": "URL or mailto: identifying the push sender to Apple/Google push servers.",
+   "fieldname": "vapid_subject",
+   "fieldtype": "Data",
+   "label": "VAPID Subject"
   }
  ],
  "index_web_pages_for_search": 0,

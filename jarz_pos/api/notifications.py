@@ -3,6 +3,7 @@ Jarz POS - Notification and polling API endpoints
 Alternative to websocket-based notifications for mobile clients
 """
 
+import base64
 import json
 import os
 from datetime import datetime, timedelta
@@ -313,8 +314,8 @@ DEFAULT_WALK_IN_CUSTOMER = "Walk-in"
 DEFAULT_NEW_ORDER_TITLE = "New Order"
 DEFAULT_ITEM_LABEL = "Item"
 ANDROID_ORDER_ALERT_SOUND = "jarz_order_alert_notification"
-WEBPUSH_NOTIFICATION_ICON = "/icons/Icon-192.png"
-WEBPUSH_NOTIFICATION_BADGE = "/icons/Icon-192.png"
+WEBPUSH_NOTIFICATION_ICON = "/pos/icons/Icon-192.png"
+WEBPUSH_NOTIFICATION_BADGE = "/pos/icons/Icon-192.png"
 INVOICE_STATUS_NOTIFICATION_TITLES = {
     "invoice_accepted": "Order Accepted",
     "invoice_cancelled": "Order Cancelled",
@@ -990,9 +991,9 @@ def handle_invoice_submission(doc: Any) -> None:
         _log_fcm_info(
             "Invoice notification processed "
             f"invoice={payload.get('invoice_id')} recipients={len(recipients)} "
-            f"fcm_status={push_result.get('status')} "
-            f"fcm_success={push_result.get('success_count', 0)} "
-            f"fcm_failure={push_result.get('failure_count', 0)}"
+            f"fcm_status={push_result.get('fcm', {}).get('status')} "
+            f"fcm_success={push_result.get('fcm', {}).get('success_count', 0)} "
+            f"vapid_success={push_result.get('vapid', {}).get('success_count', 0)}"
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
@@ -1225,11 +1226,12 @@ def _get_webpush_link() -> str:
     get_url = getattr(frappe.utils, "get_url", None)
     if callable(get_url):
         try:
-            return get_url()
+            base = get_url().rstrip("/")
+            return f"{base}/pos/"
         except Exception:
             pass
 
-    return "/"
+    return "/pos/"
 
 
 def _build_webpush_config(data_payload: Dict[str, str], title: str, body: str) -> Optional[Any]:
@@ -1404,20 +1406,288 @@ def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]
         frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_invoice_accepted failed")
 
 
-def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
-    tokens = _get_tokens_for_users(recipients)
-    if not tokens:
-        _log_fcm_info(f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}")
-        result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+# ── VAPID web push ────────────────────────────────────────────────────────────
+
+
+def _generate_vapid_keys() -> Tuple[str, str]:
+    """Generate a P-256 EC key pair for VAPID.
+
+    Returns (public_key_base64url, private_key_pem).
+    The public key is the raw uncompressed EC point (65 bytes) in base64url with no padding.
+    The private key is PEM format accepted by pywebpush.
+    """
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+
+    pub_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint,
+    )
+    public_key_b64url = base64.urlsafe_b64encode(pub_bytes).rstrip(b"=").decode("ascii")
+
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+
+    return public_key_b64url, private_pem
+
+
+def _get_or_create_vapid_keys() -> Tuple[str, str]:
+    """Return existing VAPID keys from settings, generating them on first call."""
+    settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
+    public_key = (settings.vapid_public_key or "").strip()
+    private_key = (settings.vapid_private_key or "").strip()
+
+    if public_key and private_key:
+        return public_key, private_key
+
+    public_key, private_key = _generate_vapid_keys()
+    frappe.db.set_value(
+        "Jarz POS Settings",
+        "Jarz POS Settings",
+        {"vapid_public_key": public_key, "vapid_private_key": private_key},
+    )
+    frappe.db.commit()
+    return public_key, private_key
+
+
+@frappe.whitelist(allow_guest=False)
+def get_vapid_public_key() -> Dict[str, str]:
+    """Return the VAPID application server public key, generating it on first call."""
+    public_key, _ = _get_or_create_vapid_keys()
+    return {"public_key": public_key}
+
+
+@frappe.whitelist(allow_guest=False)
+def register_vapid_subscription(subscription_json: str, browser: Optional[str] = None) -> Dict[str, Any]:
+    """Register or refresh a VAPID web push subscription for the signed-in user."""
+    sub_json = (subscription_json or "").strip()
+    if not sub_json:
+        frappe.throw(_("subscription_json is required"))
+
+    try:
+        parsed = json.loads(sub_json)
+    except (json.JSONDecodeError, ValueError):
+        frappe.throw(_("subscription_json must be valid JSON"))
+
+    if not parsed.get("endpoint"):
+        frappe.throw(_("subscription_json must contain an 'endpoint' field"))
+
+    keys = parsed.get("keys") or {}
+    if not keys.get("p256dh") or not keys.get("auth"):
+        frappe.throw(_("subscription_json 'keys' must contain 'p256dh' and 'auth' fields"))
+
+    user = frappe.session.user
+    if not user or user == "Guest":
+        frappe.throw(_("Authentication required"))
+
+    endpoint = parsed["endpoint"]
+
+    try:
+        existing = frappe.get_all(
+            "Jarz Web Push Subscription",
+            filters={"endpoint": endpoint},
+            fields=["name"],
+            limit=1,
+        )
+        if existing:
+            frappe.db.set_value(
+                "Jarz Web Push Subscription",
+                existing[0]["name"],
+                {
+                    "user": user,
+                    "subscription_json": sub_json,
+                    "browser": browser,
+                    "enabled": 1,
+                    "last_seen": frappe.utils.now_datetime(),
+                },
+                update_modified=True,
+            )
+            return {"success": True, "subscription": existing[0]["name"]}
+
+        doc = frappe.get_doc({
+            "doctype": "Jarz Web Push Subscription",
+            "user": user,
+            "subscription_json": sub_json,
+            "endpoint": endpoint,
+            "browser": browser,
+            "enabled": 1,
+        })
+        doc.insert(ignore_permissions=True)
+        return {"success": True, "subscription": doc.name}
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), "register_vapid_subscription failed")
+        frappe.throw(f"Unable to register web push subscription: {exc}")
+
+
+def _get_vapid_subscriptions_for_users(users: Sequence[str]) -> List[str]:
+    if not users:
+        return []
+
+    rows = frappe.get_all(
+        "Jarz Web Push Subscription",
+        filters={"user": ["in", list(users)], "enabled": 1},
+        fields=["subscription_json", "endpoint"],
+    )
+    seen_endpoints: set = set()
+    result: List[str] = []
+    for row in rows:
+        endpoint = row.get("endpoint") or ""
+        sub_json = row.get("subscription_json") or ""
+        if endpoint and sub_json and endpoint not in seen_endpoints:
+            seen_endpoints.add(endpoint)
+            result.append(sub_json)
+    return result
+
+
+def _disable_vapid_subscription(endpoint: str) -> None:
+    if not endpoint:
+        return
+    try:
+        rows = frappe.get_all(
+            "Jarz Web Push Subscription",
+            filters={"endpoint": endpoint},
+            fields=["name"],
+        )
+        for row in rows:
+            frappe.db.set_value(
+                "Jarz Web Push Subscription",
+                row["name"],
+                "enabled",
+                0,
+                update_modified=False,
+            )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Failed to disable VAPID subscription")
+
+
+def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Send standard VAPID web push notifications (iOS Safari PWA, Chrome, Firefox, Edge)."""
+    result: Dict[str, Any] = {
+        "ok": False,
+        "status": "pending",
+        "total": len(subscriptions),
+        "success_count": 0,
+        "failure_count": 0,
+        "errors": [],
+    }
+
+    if not subscriptions:
         result["ok"] = True
+        result["status"] = "skipped_no_subscriptions"
         return result
 
+    try:
+        from pywebpush import webpush as vapid_webpush, WebPushException  # type: ignore[import]
+    except ImportError:
+        result["status"] = "skipped_pywebpush_not_installed"
+        frappe.log_error("pywebpush not installed — VAPID push skipped", "VAPID Push Warning")
+        return result
+
+    try:
+        public_key, private_key_pem = _get_or_create_vapid_keys()
+    except Exception:
+        result["status"] = "skipped_vapid_keys_unavailable"
+        frappe.log_error(frappe.get_traceback(), "VAPID key retrieval failed")
+        return result
+
+    settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
+    vapid_subject = (settings.vapid_subject or "").strip() or "https://erp.orderjarz.com"
+
+    title, body = _resolve_notification_content(data_payload)
+    push_data = json.dumps({
+        "type": data_payload.get("type", ""),
+        "title": title,
+        "body": body,
+        "invoice_id": data_payload.get("invoice_id", ""),
+        "notification_id": data_payload.get("notification_id", ""),
+        "pos_profile": data_payload.get("pos_profile", ""),
+        "url": _get_webpush_link(),
+    })
+
+    for sub_json in subscriptions:
+        endpoint = ""
+        try:
+            parsed = json.loads(sub_json)
+            endpoint = parsed.get("endpoint", "") if isinstance(parsed, dict) else ""
+            vapid_webpush(
+                subscription_info=parsed,
+                data=push_data,
+                vapid_private_key=private_key_pem,
+                vapid_claims={"sub": vapid_subject},
+            )
+            result["success_count"] += 1
+        except WebPushException as ex:
+            status_code = getattr(getattr(ex, "response", None), "status_code", None)
+            _log_fcm_info(
+                f"VAPID push failed: status={status_code} "
+                f"endpoint=...{endpoint[-40:] if endpoint else '?'}"
+            )
+            if status_code in (404, 410):
+                _disable_vapid_subscription(endpoint)
+            result["failure_count"] += 1
+            result["errors"].append(f"status={status_code}")
+        except Exception as exc:
+            result["failure_count"] += 1
+            result["errors"].append(str(exc)[:120])
+            frappe.log_error(frappe.get_traceback(), "VAPID push failed unexpectedly")
+
+    if result["failure_count"] == 0:
+        result["ok"] = True
+        result["status"] = "success"
+    elif result["success_count"] > 0:
+        result["ok"] = True
+        result["status"] = "partial"
+    else:
+        result["status"] = "failed"
+
+    return result
+
+
+def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
     data = _prepare_invoice_data_payload("new_invoice", payload)
-    _log_fcm_info(
-        f"FCM send: new_invoice; recipients={len(recipients)}; "
-        f"tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
-    )
-    return _send_fcm_notifications(tokens, data)
+
+    # FCM path (Android / iOS native app)
+    tokens = _get_tokens_for_users(recipients)
+    if tokens:
+        _log_fcm_info(
+            f"FCM send: new_invoice; recipients={len(recipients)}; "
+            f"tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
+        )
+        fcm_result = _send_fcm_notifications(tokens, data)
+    else:
+        _log_fcm_info(f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}")
+        fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+        fcm_result["ok"] = True
+
+    # VAPID path (W3C Web Push — iOS Safari PWA, Chrome, Firefox, Edge)
+    vapid_subs = _get_vapid_subscriptions_for_users(recipients)
+    if vapid_subs:
+        _log_fcm_info(
+            f"VAPID send: new_invoice; recipients={len(recipients)}; "
+            f"subscriptions={len(vapid_subs)}; invoice={payload.get('invoice_id')}"
+        )
+        vapid_result = _send_vapid_notifications(vapid_subs, data)
+    else:
+        vapid_result = {
+            "ok": True,
+            "status": "skipped_no_subscriptions",
+            "success_count": 0,
+            "failure_count": 0,
+        }
+
+    return {
+        "ok": fcm_result.get("ok", False) or vapid_result.get("ok", False),
+        "status": fcm_result.get("status"),
+        "success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+        "failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+        "fcm": fcm_result,
+        "vapid": vapid_result,
+    }
 
 
 def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
