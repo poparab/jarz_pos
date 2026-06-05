@@ -68,6 +68,7 @@ def create_pos_invoice():
     raw_suppress_legacy_delivery_charges = frappe.form_dict.get('suppress_legacy_delivery_charges')
     suppress_shipping_income = _is_truthy_flag(raw_suppress_shipping_income)
     suppress_legacy_delivery_charges = _is_truthy_flag(raw_suppress_legacy_delivery_charges)
+    custom_delivery_income = frappe.form_dict.get('custom_delivery_income')
 
     if zero_shipping_override:
         suppress_shipping_income = True
@@ -182,6 +183,7 @@ RAW PARAMETERS:
             price_list=price_list,
             suppress_shipping_income=suppress_shipping_income,
             suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+            custom_delivery_income=custom_delivery_income,
         )
         
         # Log successful response

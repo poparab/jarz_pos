@@ -874,6 +874,29 @@ def change_invoice_shipping_address(invoice_name, address_name):
                     "Sales Invoice", invoice_name, "custom_sub_territory", "", update_modified=False
                 )
 
+            # Rebuild shipping income tax row to match new territory rate.
+            # Reload first to pick up all db.set_value changes above.
+            inv.reload()
+            had_shipping_income_row = any(
+                str(t.description or "").lower().startswith("shipping income")
+                for t in (inv.get("taxes") or [])
+            )
+            if had_shipping_income_row:
+                inv.set("taxes", [
+                    t for t in (inv.get("taxes") or [])
+                    if not str(t.description or "").lower().startswith("shipping income")
+                ])
+                if new_income > 0:
+                    from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
+                    add_delivery_charges_to_taxes(
+                        inv,
+                        new_income,
+                        delivery_description=f"Shipping Income ({new_territory})",
+                    )
+                inv.calculate_taxes_and_totals()
+                inv.flags.ignore_validate_update_after_submit = True
+                inv.save(ignore_permissions=True)
+
             # Append a comment on the SI for audit trail.
             try:
                 frappe.get_doc({
@@ -883,8 +906,8 @@ def change_invoice_shipping_address(invoice_name, address_name):
                     "reference_name": invoice_name,
                     "content": _(
                         "Shipping address changed to {0}. Territory updated from {1} to {2}. "
-                        "Shipping expense: {3} → {4}."
-                    ).format(address_name, old_territory, new_territory, old_expense, new_expense),
+                        "Shipping expense: {3} → {4}. Shipping income: {5} → {6}."
+                    ).format(address_name, old_territory, new_territory, old_expense, new_expense, old_income, new_income),
                 }).insert(ignore_permissions=True)
             except Exception:
                 pass

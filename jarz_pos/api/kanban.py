@@ -1107,6 +1107,24 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         except Exception:
             pass
 
+        # Batch-fetch actual shipping income from invoice tax rows (avoids territory-default mismatch).
+        actual_shipping_income_map: Dict[str, float] = {}
+        try:
+            if invoices:
+                si_tax_rows = frappe.get_all(
+                    "Sales Taxes and Charges",
+                    filters={
+                        "parent": ["in", [inv.name for inv in invoices]],
+                        "description": ["like", "Shipping Income%"],
+                    },
+                    fields=["parent", "tax_amount"],
+                    limit=QUERY_LIMITS.KANBAN_INVOICES,
+                )
+                for row in si_tax_rows:
+                    actual_shipping_income_map[row["parent"]] = float(row.get("tax_amount") or 0)
+        except Exception:
+            pass
+
         # Organize invoices by their current state
         for inv in invoices:
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
@@ -1180,7 +1198,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "total_taxes_and_charges": float(inv.total_taxes_and_charges or 0),
                 "full_address": sanitize_printable_text(invoice_addresses.get(inv.name, "")),
                 "items": invoice_items.get(inv.name, []),
-                "shipping_income": terr_ship.get("income", 0.0),
+                "shipping_income": actual_shipping_income_map.get(inv.name, terr_ship.get("income", 0.0)),
                 "shipping_expense": terr_ship.get("expense", 0.0),
                 "has_unsettled_courier_txn": bool(has_unsettled),
                 "customer_phone": sanitize_printable_text(customer_phone),
