@@ -357,6 +357,7 @@ def create_pos_invoice(
     woo_order_id: int | None = None,
     suppress_shipping_income: bool | None = None,
     suppress_legacy_delivery_charges: bool | None = None,
+    custom_delivery_income: float | str | None = None,
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -408,6 +409,15 @@ def create_pos_invoice(
             print(f"   ✅ Payment method validated: {payment_method}")
 
         print("   ✅ Input validation passed")
+
+        # Normalize custom_delivery_income: "" or None → None (use territory);
+        # any other value → flt; negative → error.
+        delivery_income_override: float | None = None
+        if custom_delivery_income is not None and str(custom_delivery_income).strip() != "":
+            _override_val = frappe.utils.flt(custom_delivery_income)
+            if _override_val < 0:
+                frappe.throw("custom_delivery_income must be non-negative")
+            delivery_income_override = _override_val
 
         # STEP 2: Customer Validation
         print("\n2️⃣ CUSTOMER VALIDATION:")
@@ -515,6 +525,13 @@ def create_pos_invoice(
         except Exception:
             # If custom field missing, don't fail invoice creation
             pass
+
+        # Persist delivery income override (None = territory default; 0 = free delivery; >0 = custom)
+        if delivery_income_override is not None:
+            try:
+                invoice_doc.custom_delivery_income = delivery_income_override
+            except Exception:
+                pass
 
         # STEP 6.1: Optional Sales Partner assignment (touch-friendly picker from POS)
         if sales_partner:
@@ -639,49 +656,66 @@ def create_pos_invoice(
             or delivery_promotion.suppress_legacy_delivery_charges
         )
 
-        # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
+        # STEP 7.4: Inject Shipping (Territory Delivery Income OR override) as Actual tax row
         if not suppress_shipping_income:
-            # STEP 7.4: Inject Shipping (Territory Delivery Income) as Actual tax row
             print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
             try:
-                territory_name = effective_order_territory or getattr(invoice_doc, "territory", None)
-                if territory_name and frappe.db.exists("Territory", territory_name):
-                    territory_doc = frappe.get_doc("Territory", territory_name)
-                    shipping_income = getattr(territory_doc, "delivery_income", 0) or 0
-                    print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
-                    if shipping_income and float(shipping_income) > 0:
-                        # Avoid duplicate insertion (idempotent)
-                        already_added = False
-                        if getattr(invoice_doc, "taxes", None):
-                            for tax in invoice_doc.taxes:
-                                if (tax.get("description") or "").lower().startswith("shipping income"):
-                                    already_added = True
-                                    print("   ⚠️ Shipping income tax row already present – skipping")
-                                    break
-                        if not already_added:
-                            add_delivery_charges_to_taxes(
-                                invoice_doc,
-                                shipping_income,
-                                delivery_description=f"Shipping Income ({territory_name})",
-                            )
-                            print("   ✅ Shipping income tax row appended")
-                    else:
-                        print("   ℹ️ No positive delivery_income on territory – nothing added")
+                # Idempotency guard shared by both paths
+                already_added = False
+                if getattr(invoice_doc, "taxes", None):
+                    for tax in invoice_doc.taxes:
+                        if (tax.get("description") or "").lower().startswith("shipping income"):
+                            already_added = True
+                            print("   ⚠️ Shipping income tax row already present – skipping")
+                            break
+
+                if delivery_income_override is not None:
+                    # Custom override path – fully replaces territory income.
+                    # override == 0 → free delivery (add_delivery_charges_to_taxes
+                    # early-returns for <= 0, so nothing is injected).
+                    print(f"   🎯 Custom delivery income override: {delivery_income_override}")
+                    if not already_added and delivery_income_override > 0:
+                        territory_label = effective_order_territory or getattr(invoice_doc, "territory", None) or "Override"
+                        add_delivery_charges_to_taxes(
+                            invoice_doc,
+                            delivery_income_override,
+                            delivery_description=f"Shipping Income ({territory_label})",
+                        )
+                        print("   ✅ Override shipping income tax row appended")
+                    elif delivery_income_override == 0:
+                        print("   ℹ️ Override = 0 → free delivery, no shipping row injected")
                 else:
-                    unresolved_source = _describe_unresolved_territory_source(
-                        resolved_shipping_address=resolved_shipping_address,
-                        shipping_address_name=resolved_shipping_address_name or shipping_address_name,
-                        customer_doc=customer_doc,
-                    )
-                    _append_unique_remark(invoice_doc, f"[UNRESOLVED TERRITORY] {unresolved_source}")
-                    logger.warning(
-                        "Order territory unresolved; shipping income skipped "
-                        f"(customer={customer_doc.name}, source={unresolved_source})"
-                    )
-                    print(
-                        "   ⚠️ Order territory unresolved – skipping shipping income "
-                        f"({unresolved_source})"
-                    )
+                    # Territory default path (unchanged)
+                    territory_name = effective_order_territory or getattr(invoice_doc, "territory", None)
+                    if territory_name and frappe.db.exists("Territory", territory_name):
+                        territory_doc = frappe.get_doc("Territory", territory_name)
+                        shipping_income = getattr(territory_doc, "delivery_income", 0) or 0
+                        print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
+                        if shipping_income and float(shipping_income) > 0:
+                            if not already_added:
+                                add_delivery_charges_to_taxes(
+                                    invoice_doc,
+                                    shipping_income,
+                                    delivery_description=f"Shipping Income ({territory_name})",
+                                )
+                                print("   ✅ Shipping income tax row appended")
+                        else:
+                            print("   ℹ️ No positive delivery_income on territory – nothing added")
+                    else:
+                        unresolved_source = _describe_unresolved_territory_source(
+                            resolved_shipping_address=resolved_shipping_address,
+                            shipping_address_name=resolved_shipping_address_name or shipping_address_name,
+                            customer_doc=customer_doc,
+                        )
+                        _append_unique_remark(invoice_doc, f"[UNRESOLVED TERRITORY] {unresolved_source}")
+                        logger.warning(
+                            "Order territory unresolved; shipping income skipped "
+                            f"(customer={customer_doc.name}, source={unresolved_source})"
+                        )
+                        print(
+                            "   ⚠️ Order territory unresolved – skipping shipping income "
+                            f"({unresolved_source})"
+                        )
             except Exception as ship_err:
                 print(f"   ❌ Failed adding shipping income: {ship_err}")
                 # Do not abort – continue invoice creation

@@ -10,7 +10,6 @@ on:
     paths:
       - "jarz_pos/**"
 
-# Cancel in-progress runs for the same branch on new pushes.
 concurrency:
   group: backend-${{ github.ref }}
   cancel-in-progress: true
@@ -18,22 +17,30 @@ concurrency:
 jobs:
   backend-tests:
     name: Frappe / jarz_pos Tests
-    # Runs on the self-hosted runner installed on the staging server.
-    # The runner has Docker + a running ERPNext site named "frontend".
     runs-on: [self-hosted, staging-docker]
 
     steps:
       - uses: actions/checkout@v4
 
-      # ── Sync app source into the running bench ─────────────────────────────
+      - name: Resolve backend container
+        id: backend-container
+        shell: bash
+        run: |
+          container_name="$(docker ps --format '{{.Names}}' | grep -E '^erp[-_]backend[-_][0-9]+$' | head -1)"
+          if [ -z "$container_name" ]; then
+            echo "Could not find an ERPNext backend container. Expected erp-backend-1 or erp_backend_1."
+            docker ps --format 'table {{.Names}}\t{{.Status}}'
+            exit 1
+          fi
+          echo "name=$container_name" >> "$GITHUB_OUTPUT"
+
       - name: Copy changed app files into container
         run: |
-          docker cp . erp-backend-1:/home/frappe/frappe-bench/apps/jarz_pos/
+          docker cp . "${{ steps.backend-container.outputs.name }}:/home/frappe/frappe-bench/apps/jarz_pos/"
 
-      # ── Run tests via bench ────────────────────────────────────────────────
       - name: Run jarz_pos tests
         run: |
-          docker exec erp-backend-1 bench \
+          docker exec "${{ steps.backend-container.outputs.name }}" bench \
             --site frontend \
             run-tests \
             --app jarz_pos \

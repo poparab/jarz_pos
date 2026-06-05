@@ -15,6 +15,7 @@ import json
 from typing import List, Dict, Any, Optional, Union
 import frappe
 from frappe import _
+from frappe.utils import add_days, flt, getdate, nowdate
 from jarz_pos.constants import ACCOUNTS, ROLES, WS_EVENTS
 
 try:
@@ -106,6 +107,188 @@ def _ensure_manager_dashboard_access() -> None:
     """Ensure the current user has JARZ Manager, Line Manager, or admin-level role for dashboard access."""
     if not _has_manager_dashboard_access():
         frappe.throw(_("Not permitted: Manager Dashboard access required"), frappe.PermissionError)
+
+
+def _has_shift_monitor_access() -> bool:
+    roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
+    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, ROLES.ADMINISTRATOR}
+    return bool(roles.intersection(allowed))
+
+
+def _ensure_shift_monitor_access() -> None:
+    if not _has_shift_monitor_access():
+        frappe.throw(_("Not permitted: Shift monitor access required"), frappe.PermissionError)
+
+
+def _get_all_active_pos_profiles() -> List[str]:
+    try:
+        return frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or []
+    except Exception:
+        return []
+
+
+def _current_user_shift_monitor_profiles() -> List[str]:
+    _ensure_shift_monitor_access()
+    return _get_all_active_pos_profiles()
+
+
+def _coerce_shift_monitor_date(value: Optional[str], fallback: str):
+    if not value:
+        return getdate(fallback)
+    try:
+        return getdate(value)
+    except Exception:
+        frappe.throw(_("Invalid date: {0}").format(value))
+
+
+def _normalize_shift_monitor_status(status: Optional[str]) -> str:
+    normalized = str(status or "all").strip().lower()
+    if normalized not in {"all", "open", "closed"}:
+        frappe.throw(_("Invalid status filter: {0}").format(status))
+    return normalized
+
+
+def _sum_shift_amount(rows: Any, fieldname: str) -> float:
+    total = 0.0
+    for row in rows or []:
+        if isinstance(row, dict):
+            total += flt(row.get(fieldname))
+        else:
+            total += flt(getattr(row, fieldname, 0))
+    return flt(total, 2)
+
+
+def _shift_monitor_user_details(
+    user: str,
+    user_cache: Dict[str, Dict[str, Optional[str]]],
+) -> Dict[str, Optional[str]]:
+    normalized_user = str(user or "").strip()
+    if not normalized_user:
+        return {
+            "user": None,
+            "full_name": None,
+            "employee": None,
+            "employee_name": None,
+        }
+
+    cached = user_cache.get(normalized_user)
+    if cached is not None:
+        return cached
+
+    full_name = frappe.db.get_value("User", normalized_user, "full_name")
+    employee = frappe.db.get_value(
+        "Employee",
+        {"user_id": normalized_user},
+        ["name", "employee_name"],
+        as_dict=True,
+    )
+    cached = {
+        "user": normalized_user,
+        "full_name": full_name,
+        "employee": employee.get("name") if employee else None,
+        "employee_name": employee.get("employee_name") if employee else None,
+    }
+    user_cache[normalized_user] = cached
+    return cached
+
+
+def _find_linked_pos_closing_entry(opening_name: str) -> Optional[str]:
+    linked = frappe.db.get_value("POS Opening Entry", opening_name, "pos_closing_entry")
+    if linked:
+        return linked
+    return frappe.db.get_value(
+        "POS Closing Entry",
+        {"pos_opening_entry": opening_name},
+        "name",
+    )
+
+
+def _build_shift_monitor_row(
+    opening: Any,
+    *,
+    user_cache: Dict[str, Dict[str, Optional[str]]],
+) -> Dict[str, Any]:
+    from jarz_pos.api.shift import _resolve_pos_profile_account
+
+    opening_user = _shift_monitor_user_details(getattr(opening, "user", None), user_cache)
+    opening_amount = _sum_shift_amount(getattr(opening, "balance_details", None), "opening_amount")
+    cash_account = _resolve_pos_profile_account(
+        getattr(opening, "company", None),
+        getattr(opening, "pos_profile", None),
+        None,
+        None,
+    )
+
+    closing_name = _find_linked_pos_closing_entry(opening.name)
+    closing = frappe.get_doc("POS Closing Entry", closing_name) if closing_name else None
+
+    closed_by = {"user": None, "full_name": None, "employee": None, "employee_name": None}
+    expected_closing_amount = None
+    actual_closing_amount = None
+    difference_amount = None
+    difference_kind = "none"
+    closed_at = None
+    journal_entry = None
+
+    if closing:
+        closing_user = (
+            getattr(closing, "owner", None)
+            or getattr(closing, "modified_by", None)
+            or getattr(opening, "modified_by", None)
+        )
+        closed_by = _shift_monitor_user_details(closing_user, user_cache)
+        expected_closing_amount = _sum_shift_amount(
+            getattr(closing, "payment_reconciliation", None),
+            "expected_amount",
+        )
+        actual_closing_amount = _sum_shift_amount(
+            getattr(closing, "payment_reconciliation", None),
+            "closing_amount",
+        )
+        difference_amount = flt(actual_closing_amount - expected_closing_amount, 2)
+        if difference_amount > 0:
+            difference_kind = "surplus"
+        elif difference_amount < 0:
+            difference_kind = "shortage"
+        closed_at = (
+            getattr(closing, "period_end_date", None)
+            or getattr(closing, "modified", None)
+            or getattr(opening, "period_end_date", None)
+        )
+        journal_entry = frappe.db.get_value(
+            "Journal Entry",
+            {
+                "user_remark": ["like", f"%{opening.name}%"],
+                "docstatus": 1,
+            },
+            "name",
+        )
+
+    shift_status = "closed" if closing else "open"
+    return {
+        "pos_profile": getattr(opening, "pos_profile", None),
+        "company": getattr(opening, "company", None),
+        "shift_status": shift_status,
+        "opening_entry": getattr(opening, "name", None),
+        "closing_entry": closing_name,
+        "opened_at": getattr(opening, "period_start_date", None),
+        "opened_by_user": opening_user["user"],
+        "opened_by_full_name": opening_user["full_name"],
+        "opened_by_employee": opening_user["employee"],
+        "opened_by_employee_name": opening_user["employee_name"],
+        "closed_at": closed_at,
+        "closed_by_user": closed_by["user"],
+        "closed_by_full_name": closed_by["full_name"],
+        "closed_by_employee": closed_by["employee"],
+        "closed_by_employee_name": closed_by["employee_name"],
+        "cash_account": cash_account,
+        "opening_amount": opening_amount,
+        "expected_closing_amount": expected_closing_amount,
+        "actual_closing_amount": actual_closing_amount,
+        "difference_amount": difference_amount,
+        "difference_kind": difference_kind,
+        "journal_entry": journal_entry,
+    }
 
 
 def _ensure_profile_scoped_invoice_access(
@@ -562,6 +745,7 @@ def _build_invoice_amendment_request_id(
     suppress_shipping_income: Union[bool, int, str, None] = None,
     suppress_legacy_delivery_charges: Union[bool, int, str, None] = None,
     zero_shipping_override: Union[bool, int, str, None] = None,
+    custom_delivery_income: Union[float, str, None] = None,
     provided_idempotency_key: Optional[str] = None,
 ) -> str:
     """Build a stable idempotency key for amendment retries of the same payload."""
@@ -589,6 +773,10 @@ def _build_invoice_amendment_request_id(
         "suppress_shipping_income": _is_truthy_flag(suppress_shipping_income),
         "suppress_legacy_delivery_charges": _is_truthy_flag(suppress_legacy_delivery_charges),
         "zero_shipping_override": _is_truthy_flag(zero_shipping_override),
+        "custom_delivery_income": (
+            None if (custom_delivery_income is None or str(custom_delivery_income).strip() == "")
+            else frappe.utils.flt(custom_delivery_income)
+        ),
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -728,6 +916,7 @@ def _run_invoice_amendment_job(
     zero_shipping_override: Union[bool, int, str, None] = None,
     expected_source_grand_total: Optional[float] = None,
     expected_source_item_count: Optional[int] = None,
+    custom_delivery_income: Union[float, str, None] = None,
 ) -> Dict[str, Any]:
     """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
     if _create_amendment_invoice is None:
@@ -789,6 +978,18 @@ def _run_invoice_amendment_job(
     )
     effective_required_delivery_datetime = required_delivery_datetime or _derive_required_delivery_datetime(source_invoice)
     effective_delivery_end_datetime = delivery_end_datetime or _derive_delivery_end_datetime(source_invoice)
+    # Resolve effective delivery income override:
+    #   None (key absent)   → preserve the source invoice's existing override
+    #   '' (empty string)   → explicitly clear (revert to territory default)
+    #   float/numeric str   → use this value (0 = free delivery, >0 = custom amount)
+    _cdi_raw = custom_delivery_income
+    if _cdi_raw is None:
+        src_override = source_invoice.get("custom_delivery_income")
+        effective_custom_delivery_income: Union[float, None] = frappe.utils.flt(src_override) if src_override is not None else None
+    elif str(_cdi_raw).strip() == "":
+        effective_custom_delivery_income = None  # explicit clear → territory default
+    else:
+        effective_custom_delivery_income = frappe.utils.flt(_cdi_raw)
     woo_order_id = source_invoice.get("woo_order_id")
     initiated_by = (initiated_by or frappe.session.user or "Unknown User").strip()
 
@@ -1025,6 +1226,7 @@ def _run_invoice_amendment_job(
                 woo_order_id=woo_order_id,
                 suppress_shipping_income=effective_suppress_shipping_income,
                 suppress_legacy_delivery_charges=effective_suppress_legacy_delivery_charges,
+                custom_delivery_income=effective_custom_delivery_income,
             )
 
         replacement_invoice_name = (
@@ -1153,6 +1355,7 @@ def submit_invoice_amendment(
     zero_shipping_override: Union[bool, int, str, None] = None,
     expected_source_grand_total: Optional[float] = None,
     expected_source_item_count: Optional[int] = None,
+    custom_delivery_income: Union[float, str, None] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload."""
     invoice_id = (invoice_id or "").strip()
@@ -1190,6 +1393,7 @@ def submit_invoice_amendment(
         suppress_shipping_income=suppress_shipping_income,
         suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
         zero_shipping_override=zero_shipping_override,
+        custom_delivery_income=custom_delivery_income,
         provided_idempotency_key=idempotency_key,
     )
     if existing_replacement:
@@ -1237,6 +1441,7 @@ def submit_invoice_amendment(
         zero_shipping_override=zero_shipping_override,
         expected_source_grand_total=float(expected_source_grand_total) if expected_source_grand_total is not None else None,
         expected_source_item_count=int(expected_source_item_count) if expected_source_item_count is not None else None,
+        custom_delivery_income=custom_delivery_income,
     )
 
 
@@ -1364,6 +1569,110 @@ def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, An
         except Exception:
             balances.append({"name": p, "title": p, "cash_account": None, "balance": 0.0})
     return {"success": True, "branches": balances, "total_balance": total}
+
+
+@frappe.whitelist(allow_guest=False)
+def get_pos_shift_monitor(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    pos_profile: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    _ensure_shift_monitor_access()
+
+    start_date = _coerce_shift_monitor_date(from_date, nowdate())
+    end_date = _coerce_shift_monitor_date(to_date, nowdate())
+    if start_date > end_date:
+        frappe.throw(_("From date cannot be later than To date"))
+
+    status_filter = _normalize_shift_monitor_status(status)
+    profiles = _current_user_shift_monitor_profiles()
+    selected_profile = str(pos_profile or "").strip()
+    if selected_profile:
+        if selected_profile not in profiles:
+            return {
+                "success": True,
+                "summary": {
+                    "open_count": 0,
+                    "closed_count": 0,
+                    "discrepancy_count": 0,
+                    "discrepancy_total": 0.0,
+                },
+                "profiles": [{"name": profile, "title": profile} for profile in profiles],
+                "shifts": [],
+            }
+        profiles = [selected_profile]
+
+    if not profiles:
+        return {
+            "success": True,
+            "summary": {
+                "open_count": 0,
+                "closed_count": 0,
+                "discrepancy_count": 0,
+                "discrepancy_total": 0.0,
+            },
+            "profiles": [],
+            "shifts": [],
+        }
+
+    openings = frappe.get_all(
+        "POS Opening Entry",
+        filters={
+            "docstatus": 1,
+            "pos_profile": ["in", profiles],
+            "period_start_date": [
+                "between",
+                [f"{start_date} 00:00:00", f"{end_date} 23:59:59"],
+            ],
+        },
+        fields=["name"],
+        order_by="period_start_date desc, modified desc",
+        limit=1000,
+    )
+
+    user_cache: Dict[str, Dict[str, Optional[str]]] = {}
+    rows: List[Dict[str, Any]] = []
+    discrepancy_total = 0.0
+    discrepancy_count = 0
+    open_count = 0
+    closed_count = 0
+
+    for row in openings:
+        opening = frappe.get_doc("POS Opening Entry", row["name"])
+        payload = _build_shift_monitor_row(opening, user_cache=user_cache)
+        if status_filter != "all" and payload["shift_status"] != status_filter:
+            continue
+
+        if payload["shift_status"] == "open":
+            open_count += 1
+        else:
+            closed_count += 1
+
+        difference_amount = flt(payload.get("difference_amount") or 0)
+        if difference_amount != 0:
+            discrepancy_count += 1
+            discrepancy_total += difference_amount
+
+        rows.append(payload)
+
+    return {
+        "success": True,
+        "summary": {
+            "open_count": open_count,
+            "closed_count": closed_count,
+            "discrepancy_count": discrepancy_count,
+            "discrepancy_total": flt(discrepancy_total, 2),
+        },
+        "filters": {
+            "from_date": str(start_date),
+            "to_date": str(end_date),
+            "status": status_filter,
+            "pos_profile": selected_profile or None,
+        },
+        "profiles": [{"name": profile, "title": profile} for profile in _get_all_active_pos_profiles()],
+        "shifts": rows,
+    }
 
 
 @frappe.whitelist(allow_guest=False)

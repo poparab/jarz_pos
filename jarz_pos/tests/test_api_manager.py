@@ -28,6 +28,12 @@ class _FakeInvoice:
 		return None
 
 
+def _raise_frappe(message, exc=None, title=None):
+	if exc and isinstance(exc, type) and issubclass(exc, Exception):
+		raise exc(message)
+	raise Exception(message)
+
+
 class TestManagerAPI(unittest.TestCase):
 	"""Test class for Manager API functionality."""
 
@@ -958,4 +964,161 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertEqual(invoice.get("custom_accepted_on"), "2026-05-04 15:00:00")
 		mock_frappe.db.set_value.assert_called_once()
 		invoice.add_comment.assert_called_once()
+
+	def test_get_pos_shift_monitor_denies_line_manager_only_access(self):
+		"""Line-manager-only users must not access the shift monitor page."""
+		from jarz_pos.api.manager import get_pos_shift_monitor
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_roles.return_value = ["JARZ line manager"]
+		mock_frappe.throw.side_effect = _raise_frappe
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe):
+			with self.assertRaises(PermissionError):
+				get_pos_shift_monitor()
+
+	def test_get_pos_shift_monitor_returns_open_and_closed_shift_rows(self):
+		"""Shift monitor should aggregate open and closed rows with discrepancy totals."""
+		from jarz_pos.api.manager import get_pos_shift_monitor
+
+		opening_closed = SimpleNamespace(
+			name="POS-OPE-0001",
+			user="opener@example.com",
+			company="JARZ",
+			pos_profile="Dokki",
+			period_start_date="2026-06-05 08:00:00",
+			balance_details=[SimpleNamespace(opening_amount=1000)],
+		)
+		closing = SimpleNamespace(
+			name="POS-CLO-0001",
+			owner="closer@example.com",
+			period_end_date="2026-06-05 16:00:00",
+			payment_reconciliation=[
+				SimpleNamespace(expected_amount=1400, closing_amount=1450),
+			],
+		)
+		opening_open = SimpleNamespace(
+			name="POS-OPE-0002",
+			user="second@example.com",
+			company="JARZ",
+			pos_profile="Nasr city",
+			period_start_date="2026-06-05 09:00:00",
+			balance_details=[SimpleNamespace(opening_amount=750)],
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_all.return_value = [
+			{"name": "POS-OPE-0002"},
+			{"name": "POS-OPE-0001"},
+		]
+
+		def _get_doc(doctype, name):
+			if doctype == "POS Opening Entry" and name == "POS-OPE-0001":
+				return opening_closed
+			if doctype == "POS Opening Entry" and name == "POS-OPE-0002":
+				return opening_open
+			if doctype == "POS Closing Entry" and name == "POS-CLO-0001":
+				return closing
+			raise AssertionError(f"Unexpected get_doc lookup: {doctype} {name}")
+
+		def _db_get_value(doctype, name, fieldname, *args, **kwargs):
+			if doctype == "POS Opening Entry" and name == "POS-OPE-0001" and fieldname == "pos_closing_entry":
+				return "POS-CLO-0001"
+			if doctype == "POS Opening Entry" and name == "POS-OPE-0002" and fieldname == "pos_closing_entry":
+				return None
+			if doctype == "POS Closing Entry":
+				return None
+			if doctype == "User" and name == "opener@example.com" and fieldname == "full_name":
+				return "Omar Opener"
+			if doctype == "User" and name == "second@example.com" and fieldname == "full_name":
+				return "Nada Starter"
+			if doctype == "User" and name == "closer@example.com" and fieldname == "full_name":
+				return "Sara Closer"
+			if doctype == "Employee" and isinstance(name, dict) and name.get("user_id") == "opener@example.com":
+				return {"name": "EMP-OPEN", "employee_name": "Omar"}
+			if doctype == "Employee" and isinstance(name, dict) and name.get("user_id") == "second@example.com":
+				return {"name": "EMP-START", "employee_name": "Nada"}
+			if doctype == "Employee" and isinstance(name, dict) and name.get("user_id") == "closer@example.com":
+				return {"name": "EMP-CLOSE", "employee_name": "Sara"}
+			if doctype == "Journal Entry" and isinstance(name, dict) and fieldname == "name":
+				return "JE-SHIFT-0001"
+			return None
+
+		mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe.db.get_value.side_effect = _db_get_value
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._current_user_shift_monitor_profiles", return_value=["Dokki", "Nasr city"]), \
+			 patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki", "Nasr city"]), \
+			 patch("jarz_pos.api.shift._resolve_pos_profile_account", side_effect=["Dokki - J", "Nasr city - J"]):
+			result = get_pos_shift_monitor(from_date="2026-06-05", to_date="2026-06-05")
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(result["summary"]["open_count"], 1)
+		self.assertEqual(result["summary"]["closed_count"], 1)
+		self.assertEqual(result["summary"]["discrepancy_count"], 1)
+		self.assertEqual(result["summary"]["discrepancy_total"], 50.0)
+		self.assertEqual(len(result["shifts"]), 2)
+
+		closed_row = next(row for row in result["shifts"] if row["opening_entry"] == "POS-OPE-0001")
+		self.assertEqual(closed_row["shift_status"], "closed")
+		self.assertEqual(closed_row["closing_entry"], "POS-CLO-0001")
+		self.assertEqual(closed_row["opened_by_full_name"], "Omar Opener")
+		self.assertEqual(closed_row["closed_by_full_name"], "Sara Closer")
+		self.assertEqual(closed_row["cash_account"], "Dokki - J")
+		self.assertEqual(closed_row["opening_amount"], 1000.0)
+		self.assertEqual(closed_row["expected_closing_amount"], 1400.0)
+		self.assertEqual(closed_row["actual_closing_amount"], 1450.0)
+		self.assertEqual(closed_row["difference_amount"], 50.0)
+		self.assertEqual(closed_row["difference_kind"], "surplus")
+		self.assertEqual(closed_row["journal_entry"], "JE-SHIFT-0001")
+
+		open_row = next(row for row in result["shifts"] if row["opening_entry"] == "POS-OPE-0002")
+		self.assertEqual(open_row["shift_status"], "open")
+		self.assertIsNone(open_row["closing_entry"])
+		self.assertIsNone(open_row["closed_at"])
+		self.assertEqual(open_row["cash_account"], "Nasr city - J")
+
+	def test_get_pos_shift_monitor_applies_closed_status_filter(self):
+		"""Closed filter should exclude open shifts from the response."""
+		from jarz_pos.api.manager import get_pos_shift_monitor
+
+		opening = SimpleNamespace(
+			name="POS-OPE-0001",
+			user="opener@example.com",
+			company="JARZ",
+			pos_profile="Dokki",
+			period_start_date="2026-06-05 08:00:00",
+			balance_details=[SimpleNamespace(opening_amount=1000)],
+		)
+		closing = SimpleNamespace(
+			name="POS-CLO-0001",
+			owner="closer@example.com",
+			period_end_date="2026-06-05 16:00:00",
+			payment_reconciliation=[SimpleNamespace(expected_amount=1200, closing_amount=1200)],
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_roles.return_value = ["System Manager"]
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_all.return_value = [{"name": "POS-OPE-0001"}]
+		mock_frappe.get_doc.side_effect = lambda doctype, name: opening if doctype == "POS Opening Entry" else closing
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, fieldname, *args, **kwargs: {
+			("POS Opening Entry", "POS-OPE-0001", "pos_closing_entry"): "POS-CLO-0001",
+			("User", "opener@example.com", "full_name"): "Omar Opener",
+			("User", "closer@example.com", "full_name"): "Sara Closer",
+		}.get((doctype, name, fieldname))
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+			 patch("jarz_pos.api.manager._current_user_shift_monitor_profiles", return_value=["Dokki"]), \
+			 patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki"]), \
+			 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"):
+			result = get_pos_shift_monitor(status="closed")
+
+		self.assertEqual(len(result["shifts"]), 1)
+		self.assertEqual(result["shifts"][0]["shift_status"], "closed")
+		self.assertEqual(result["summary"]["open_count"], 0)
+		self.assertEqual(result["summary"]["closed_count"], 1)
 
