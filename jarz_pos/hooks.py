@@ -92,6 +92,13 @@ workspaces = [
                 "type": "DocType",
                 "icon": "fa fa-cog",
                 "color": "#e74c3c"
+            },
+            {
+                "label": "Shipping Analytics",
+                "link_to": "shipping-analytics",
+                "type": "Page",
+                "icon": "fa fa-truck",
+                "color": "#FF6B35"
             }
         ],
         "cards": []
