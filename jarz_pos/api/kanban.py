@@ -936,6 +936,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             "custom_shipping_override", "custom_shipping_override_status",
             # Always-safe system field
             "remarks",
+            # WooCommerce order ID for customer-facing display
+            "woo_order_id",
         ]
 
         # Append pickup-related fields ONLY if they exist in meta to avoid SQL errors

@@ -449,6 +449,7 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         "is_return": int(invoice.get("is_return") or 0),
         "delivery_trip": invoice.get("custom_delivery_trip"),
         "custom_delivery_income": invoice.get("custom_delivery_income"),
+        "woo_order_id": invoice.get("woo_order_id"),
     }
     return data
 
