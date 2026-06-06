@@ -246,17 +246,19 @@ def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
                 duration_set = True
 
         if not duration_set:
-            # Fallback: look up timetable slot_hours for the POS profile
+            # Fallback: look up timetable slot duration for the POS profile
             try:
                 pos_profile_name = getattr(invoice_doc, "pos_profile", None)
                 if pos_profile_name:
-                    slot_hours = frappe.db.get_value(
+                    timetable = frappe.db.get_value(
                         "POS Profile Timetable",
                         {"pos_profile": pos_profile_name},
-                        "slot_hours",
+                        ["slot_hours", "slot_minutes"],
+                        as_dict=True,
                     )
-                    if slot_hours:
-                        invoice_doc.custom_delivery_duration = int(slot_hours) * 3600
+                    if timetable:
+                        total_minutes = int(timetable.slot_hours or 1) * 60 + int(timetable.slot_minutes or 0)
+                        invoice_doc.custom_delivery_duration = total_minutes * 60
                         duration_set = True
             except Exception:
                 pass

@@ -7,6 +7,10 @@
  "field_order": [
   "pos_profile",
   "slot_hours",
+  "slot_minutes",
+  "has_custom_last_slot",
+  "last_slot_hours",
+  "last_slot_minutes",
   "timetable"
  ],
  "fields": [
@@ -24,17 +28,44 @@
   },
   {
    "fieldname": "slot_hours",
-   "fieldtype": "Select",
+   "fieldtype": "Int",
    "in_list_view": 1,
    "label": "Slot Hours",
-   "options": "1\n2\n3\n4",
    "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "slot_minutes",
+   "fieldtype": "Select",
+   "label": "Slot Minutes",
+   "options": "0\n15\n30\n45",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "has_custom_last_slot",
+   "fieldtype": "Check",
+   "label": "Custom Last Slot"
+  },
+  {
+   "depends_on": "eval:doc.has_custom_last_slot",
+   "fieldname": "last_slot_hours",
+   "fieldtype": "Int",
+   "label": "Last Slot Hours"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.has_custom_last_slot",
+   "fieldname": "last_slot_minutes",
+   "fieldtype": "Select",
+   "label": "Last Slot Minutes",
+   "options": "0\n15\n30\n45"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-07-11 23:33:28.881466",
+ "modified": "2026-06-06 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "POS Profile Timetable",

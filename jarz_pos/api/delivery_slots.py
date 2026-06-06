@@ -60,30 +60,36 @@ POS_PROFILE: {pos_profile_name}
         print(f"🔎 Searching for timetable with pos_profile = '{pos_profile_name}'")
         
         # First, let's check what POS Profile Timetables exist
-        all_timetables = frappe.get_all("POS Profile Timetable", fields=["name", "pos_profile", "slot_hours"])
+        all_timetables = frappe.get_all("POS Profile Timetable", fields=["name", "pos_profile", "slot_hours", "slot_minutes"])
         print(f"📋 All available timetables: {all_timetables}")
-        
+
         timetable_config = frappe.get_value(
             "POS Profile Timetable",
             {"pos_profile": pos_profile_name},
-            ["name", "slot_hours"],
+            ["name", "slot_hours", "slot_minutes", "has_custom_last_slot", "last_slot_hours", "last_slot_minutes"],
             as_dict=True
         )
-        
+
         print(f"📊 Timetable config found: {timetable_config}")
-        
+
         if not timetable_config:
             error_msg = f"No timetable configured for POS Profile '{pos_profile_name}'"
             print(f"❌ ERROR: {error_msg}")
             logger.error(f"❌ {error_msg}")
             frappe.throw(error_msg)
-        
-        slot_hours = int(timetable_config.slot_hours)
+
+        slot_duration_minutes = int(timetable_config.slot_hours or 1) * 60 + int(timetable_config.slot_minutes or 0)
+        last_slot_duration_minutes = None
+        if timetable_config.has_custom_last_slot:
+            last_slot_duration_minutes = (
+                int(timetable_config.last_slot_hours or 1) * 60
+                + int(timetable_config.last_slot_minutes or 0)
+            )
         timetable_name = timetable_config.name
-        
+
         print(f"\n🔍 STEP 3: Processing timetable configuration...")
         print(f"📊 Timetable name: {timetable_name}")
-        print(f"⏰ Slot hours: {slot_hours}")
+        print(f"⏰ Slot duration: {slot_duration_minutes} minutes, last slot: {last_slot_duration_minutes} minutes")
         
         # Get day timings from the child table
         print(f"\n🔍 STEP 4: Getting day timings from child table...")
@@ -141,8 +147,8 @@ POS_PROFILE: {pos_profile_name}
             }
             print(f"📅 Day {timing.day}: {timing.opening_time} - {timing.closing_time} (same_day: {same_day})")
         
-        logger.info(f"✅ Found {len(day_timings)} day configurations with {slot_hours} hour slots")
-        print(f"\n✅ Found {len(day_timings)} day configurations with {slot_hours} hour slots")
+        logger.info(f"✅ Found {len(day_timings)} day configurations with {slot_duration_minutes} minute slots")
+        print(f"\n✅ Found {len(day_timings)} day configurations with {slot_duration_minutes} minute slots")
         print(f"📅 Day configurations: {day_config}")
         
         # Generate slots for next 5 days
@@ -207,8 +213,9 @@ POS_PROFILE: {pos_profile_name}
                 opening_time,
                 closing_time,
                 same_day,
-                slot_hours,
-                current_datetime if day_offset == 0 else None  # Only check current time for today
+                slot_duration_minutes,
+                current_datetime if day_offset == 0 else None,  # Only check current time for today
+                last_slot_duration_minutes
             )
             
             print(f"📊 Generated {len(day_slots)} slots for {day_name}")
@@ -251,92 +258,103 @@ def _generate_day_slots(
     opening_time: Union[time, timedelta],
     closing_time: Union[time, timedelta],
     same_day: str,
-    slot_hours: int,
-    current_datetime: datetime = None
+    slot_duration_minutes: int,
+    current_datetime: datetime = None,
+    last_slot_duration_minutes: int = None
 ) -> List[Dict[str, Any]]:
     """
-    Generate time slots for a specific day
-    
+    Generate time slots for a specific day.
+
     Args:
         target_date: Date to generate slots for
         opening_time: Store opening time (can be time or timedelta)
         closing_time: Store closing time (can be time or timedelta)
         same_day: "Same Day" or "Next Day" - indicates if closing time is same day or next day
-        slot_hours: Duration of each slot in hours
+        slot_duration_minutes: Duration of each regular slot in minutes
         current_datetime: Current datetime (only provided for today)
-    
+        last_slot_duration_minutes: If set, the final slot of the day uses this shorter duration
+            instead of the regular one, allowing an extra slot to fill remaining time before closing.
+
     Returns:
         List of time slots for the day
     """
     slots = []
-    
+
     # Convert timedelta to time if needed (Frappe Time fields return timedelta)
     if isinstance(opening_time, timedelta):
         opening_time = (datetime.min + opening_time).time()
     if isinstance(closing_time, timedelta):
         closing_time = (datetime.min + closing_time).time()
-    
+
     print(f"🔍 Converting times - Opening: {opening_time} (type: {type(opening_time)}), Closing: {closing_time} (type: {type(closing_time)})")
     print(f"🔍 Same day setting: {same_day}")
-    
+
     # Convert times to datetime objects for easier calculation
     current_slot_time = datetime.combine(target_date, opening_time)
-    
+
     # Handle same_day vs next_day closing times
     if same_day == TIMING_MODES.NEXT_DAY:
-        # Closing time is on the next day
         end_time = datetime.combine(target_date + timedelta(days=1), closing_time)
         print(f"🌙 Next day closing: {end_time}")
     else:
-        # Closing time is on the same day
         end_time = datetime.combine(target_date, closing_time)
         print(f"🌅 Same day closing: {end_time}")
-    
+
     print(f"🕐 Slot generation window: {current_slot_time} to {end_time}")
-    
+
     # Validate that end_time is after start_time
     if end_time <= current_slot_time:
         print(f"❌ Invalid time window: end_time ({end_time}) <= start_time ({current_slot_time})")
         return slots
-    
+
     # If this is today, ensure we only show future slots
     if current_datetime:
         # Add buffer of 30 minutes for preparation
         min_slot_time = current_datetime + timedelta(minutes=30)
         print(f"⏰ Minimum slot time (current + 30min buffer): {min_slot_time}")
-        
+
         if current_slot_time < min_slot_time:
             # Round up to next slot boundary
             minutes_since_opening = (min_slot_time - current_slot_time).total_seconds() / 60
-            slots_to_skip = int(minutes_since_opening / (slot_hours * 60)) + 1
-            current_slot_time += timedelta(hours=slot_hours * slots_to_skip)
+            slots_to_skip = int(minutes_since_opening / slot_duration_minutes) + 1
+            current_slot_time += timedelta(minutes=slot_duration_minutes * slots_to_skip)
             print(f"⏭️  Adjusted start time for today: {current_slot_time} (skipped {slots_to_skip} slots)")
-            
+
             # Check if adjusted time is still valid
             if current_slot_time >= end_time:
                 print(f"⚠️  No valid slots for today after time adjustment")
                 return slots
-    
+
     slot_count = 0
     max_iterations = 50  # Safety limit to prevent infinite loops
     iteration_count = 0
-    
+
     print(f"🔄 Starting slot generation loop...")
     while current_slot_time < end_time and iteration_count < max_iterations:
         iteration_count += 1
-        slot_end_time = current_slot_time + timedelta(hours=slot_hours)
-        
+        slot_end_time = current_slot_time + timedelta(minutes=slot_duration_minutes)
+
         print(f"🔄 Iteration {iteration_count}: Checking slot {current_slot_time} - {slot_end_time}")
-        
-        # Don't create slots that extend beyond closing time
+
+        # Regular slot overflows closing time — try custom last slot before stopping
         if slot_end_time > end_time:
-            print(f"🛑 Slot would extend beyond closing time: {slot_end_time} > {end_time}")
-            break
-        
+            print(f"🛑 Regular slot would extend beyond closing time: {slot_end_time} > {end_time}")
+            if last_slot_duration_minutes:
+                last_slot_end = current_slot_time + timedelta(minutes=last_slot_duration_minutes)
+                if last_slot_end <= end_time:
+                    print(f"🔚 Adding custom last slot: {current_slot_time} - {last_slot_end}")
+                    slot_end_time = last_slot_end
+                    # Fall through to append, then exit loop
+                else:
+                    print(f"🛑 Custom last slot also overflows: {last_slot_end} > {end_time}")
+                    break
+            else:
+                break
+
         # Format slot label
         day_label = _get_day_label(target_date)
         time_label = f"{current_slot_time.strftime('%I:%M %p')} - {slot_end_time.strftime('%I:%M %p')}"
-        
+
         slot_data = {
             'date': target_date.isoformat(),
             'time': current_slot_time.time().isoformat(),
@@ -347,16 +365,20 @@ def _generate_day_slots(
             'time_label': time_label,
             'is_default': False
         }
-        
+
         slots.append(slot_data)
         slot_count += 1
         print(f"✅ Generated slot {slot_count}: {time_label}")
-        
-        current_slot_time += timedelta(hours=slot_hours)
-    
+
+        # If we appended a custom last slot, the loop must end now
+        if slot_end_time != current_slot_time + timedelta(minutes=slot_duration_minutes):
+            break
+
+        current_slot_time += timedelta(minutes=slot_duration_minutes)
+
     if iteration_count >= max_iterations:
         print(f"⚠️  Stopped slot generation after {max_iterations} iterations to prevent infinite loop")
-    
+
     print(f"📊 Total slots generated for {target_date}: {len(slots)}")
     return slots
 
