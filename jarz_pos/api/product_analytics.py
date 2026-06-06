@@ -1,13 +1,17 @@
 """
-Product Analytics API for the Jarz POS mobile app.
+Product Analytics API — Jarz POS ERPNext Desk page.
 
-Aggregates sales, profit, and territory data from Sales Invoice records
-to power the Product Analytics Dashboard.
+Data source: tabSales Invoice (is_pos=1 individual invoices, docstatus=1 = submitted/non-cancelled)
+             tabSales Invoice Item (line items per invoice)
 
 Product types:
   - Bundle  : invoices that contain a Jarz Bundle erpnext_item header row
-  - Medium  : item_group in {"Medium", "Meduim"}
+  - Medium  : item_group in {"Medium", "Meduim"}  (typo alias exists in data)
   - Large   : item_group = "Large"
+
+Cancelled invoice filter: docstatus = 1 (Submitted).
+  docstatus=0 = Draft, docstatus=1 = Submitted, docstatus=2 = Cancelled.
+  is_return = 0 additionally excludes credit notes/returns.
 """
 
 from __future__ import annotations
@@ -171,18 +175,31 @@ def get_product_analytics(
         in_bundle_invoice = invoice in bundle_invoice_set
         is_bundle_header = item_code in bundle_item_codes
 
-        # Determine type for non-header items used in standalone invoices
+        # ── Intrinsic type: derived from item_group, never changes ────────
+        # Used for the per-product table so an item isn't mis-labelled as
+        # "Bundle" just because it happened to be sold inside a bundle once.
+        if item_group in _MEDIUM_GROUPS:
+            intrinsic_type = _TYPE_MEDIUM
+        elif item_group in _LARGE_GROUPS:
+            intrinsic_type = _TYPE_LARGE
+        else:
+            intrinsic_type = None  # will be determined by context below
+
+        # ── Context type: used for by_product_type revenue attribution ────
         if is_bundle_header:
             item_type = _TYPE_BUNDLE
         elif in_bundle_invoice:
-            item_type = _TYPE_BUNDLE
-        elif item_group in _MEDIUM_GROUPS:
-            item_type = _TYPE_MEDIUM
-        elif item_group in _LARGE_GROUPS:
-            item_type = _TYPE_LARGE
+            item_type = _TYPE_BUNDLE   # child item sold as part of a bundle
+        elif intrinsic_type:
+            item_type = intrinsic_type
         else:
-            # Skip items we don't recognise (shipping, etc.)
+            # Skip items we don't recognise (shipping fees, etc.)
             continue
+
+        # For items without a recognised item_group that appear in a bundle
+        # invoice (edge case), fall back to Bundle as context type.
+        if intrinsic_type is None:
+            intrinsic_type = _TYPE_BUNDLE
 
         bom_unit = bom_cost_map.get(item_code, 0.0)
         item_cost = bom_unit * qty
@@ -200,12 +217,11 @@ def get_product_analytics(
 
         # ── Per-product aggregation (skip bundle headers) ─────────────────
         if not is_bundle_header:
-            disp_type = _TYPE_BUNDLE if in_bundle_invoice else item_type
             if item_code not in product_agg:
                 product_agg[item_code] = {
                     "item_code": item_code,
                     "item_name": item_name,
-                    "type": disp_type,
+                    "type": intrinsic_type,  # intrinsic, not first-seen context
                     "total_qty": 0.0,
                     "total_revenue": 0.0,
                     "total_cost": 0.0,
@@ -301,7 +317,10 @@ def get_product_analytics(
     ]
 
     # ── Summary ───────────────────────────────────────────────────────────
-    total_orders = len({row["invoice_name"] for row in rows})
+    # Count only invoices that had at least one classified line item.
+    # territory_agg tracks every invoice that passed the classification
+    # filter (bundle headers are included via invoices.add() unconditionally).
+    total_orders = len({inv for agg in territory_agg.values() for inv in agg["invoices"]})
     total_revenue = sum(p["total_revenue"] for p in top_products)
     total_cost = sum(p["total_cost"] for p in top_products)
     total_gross_profit = total_revenue - total_cost
