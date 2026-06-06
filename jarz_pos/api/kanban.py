@@ -1220,6 +1220,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
                 "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
                 "is_return": int(getattr(inv, "is_return", 0) or 0),
+                "woo_order_id": inv.get("woo_order_id") or None,
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
 
