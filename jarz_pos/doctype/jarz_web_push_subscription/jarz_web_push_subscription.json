@@ -56,7 +56,7 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Endpoint",
-   "length": 2048,
+   "length": 1000,
    "read_only": 1
   },
   {
