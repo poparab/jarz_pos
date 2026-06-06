@@ -268,8 +268,16 @@ class ShippingAnalyticsDashboard {
 		frappe.call('jarz_pos.api.shipping_analytics.get_summary_kpis', args)
 			.then(r => r.message && this._render_kpis(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_alerts_data', args)
-			.then(r => r.message && this._render_alerts(r.message));
+		frappe.call({
+			method: 'jarz_pos.api.shipping_analytics.get_alerts_data',
+			args: args,
+			error: () => {
+				$('#sa-alerts').html(
+					'<div class="sa-alert warning"><span class="ico">⚠</span>' +
+					'<span>Could not load alerts — check the error log for details.</span></div>'
+				);
+			},
+		}).then(r => r.message !== undefined && this._render_alerts(r.message));
 
 		frappe.call('jarz_pos.api.shipping_analytics.get_cost_by_territory', args)
 			.then(r => r.message && this._render_territory(r.message));
@@ -352,13 +360,14 @@ class ShippingAnalyticsDashboard {
 			tooltipOptions: { formatTooltipY: v => _egp(v) },
 		});
 
-		// Avg cost bar
+		// Avg cost bar — sorted high to low so the most expensive territories appear first
+		let by_avg = [...rows].sort((a, b) => b.avg_cost - a.avg_cost);
 		_chart('sa-chart-terr-avg', {
 			type: 'bar',
 			height: 280,
 			data: {
-				labels: rows.map(r => _short(r.territory)),
-				datasets: [{ name: 'Avg Cost/Order', values: rows.map(r => r.avg_cost) }],
+				labels: by_avg.map(r => _short(r.territory)),
+				datasets: [{ name: 'Avg Cost/Order', values: by_avg.map(r => r.avg_cost) }],
 			},
 			colors: ['#FF6B35'],
 			tooltipOptions: { formatTooltipY: v => _egp(v) },

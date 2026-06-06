@@ -37,16 +37,23 @@ def get_summary_kpis(from_date=None, to_date=None):
     row = frappe.db.sql("""
         SELECT
             COUNT(*)                                                                    AS total_orders,
-            SUM(CASE WHEN custom_is_pickup = 0 THEN 1 ELSE 0 END)                      AS delivery_orders,
-            SUM(CASE WHEN custom_is_pickup = 1 THEN 1 ELSE 0 END)                      AS pickup_orders,
-            COALESCE(SUM(custom_shipping_expense), 0)                                   AS total_expense,
-            COALESCE(SUM(custom_delivery_income), 0)                                    AS total_income,
-            COALESCE(AVG(CASE WHEN custom_is_pickup = 0
-                               AND custom_shipping_expense > 0
-                              THEN custom_shipping_expense END), 0)                     AS avg_cost_per_order
-        FROM `tabSales Invoice`
-        WHERE docstatus = 1
-          AND posting_date BETWEEN %(fd)s AND %(td)s
+            SUM(CASE WHEN si.custom_is_pickup = 0 THEN 1 ELSE 0 END)                   AS delivery_orders,
+            SUM(CASE WHEN si.custom_is_pickup = 1 THEN 1 ELSE 0 END)                   AS pickup_orders,
+            COALESCE(SUM(si.custom_shipping_expense), 0)                                AS total_expense,
+            COALESCE(SUM(
+                CASE
+                    WHEN si.custom_is_pickup = 1 THEN 0
+                    WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
+                    ELSE COALESCE(t.delivery_income, 0)
+                END
+            ), 0)                                                                       AS total_income,
+            COALESCE(AVG(CASE WHEN si.custom_is_pickup = 0
+                               AND si.custom_shipping_expense > 0
+                              THEN si.custom_shipping_expense END), 0)                  AS avg_cost_per_order
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabTerritory` t ON t.name = si.territory
+        WHERE si.docstatus = 1
+          AND si.posting_date BETWEEN %(fd)s AND %(td)s
     """, {"fd": fd, "td": td}, as_dict=True)[0]
 
     pending_csr = frappe.db.count("Custom Shipping Request", {"status": "Pending"})
@@ -78,19 +85,26 @@ def get_cost_by_territory(from_date=None, to_date=None):
 
     rows = frappe.db.sql("""
         SELECT
-            territory,
+            si.territory,
             COUNT(*)                                                                    AS order_count,
-            COALESCE(SUM(custom_shipping_expense), 0)                                   AS total_expense,
-            COALESCE(SUM(custom_delivery_income), 0)                                    AS total_income,
-            COALESCE(AVG(CASE WHEN custom_shipping_expense > 0
-                              THEN custom_shipping_expense END), 0)                     AS avg_cost
-        FROM `tabSales Invoice`
-        WHERE docstatus = 1
-          AND posting_date BETWEEN %(fd)s AND %(td)s
-          AND territory IS NOT NULL
-          AND territory != ''
-        GROUP BY territory
-        ORDER BY total_expense DESC
+            COALESCE(SUM(si.custom_shipping_expense), 0)                                AS total_expense,
+            COALESCE(SUM(
+                CASE
+                    WHEN si.custom_is_pickup = 1 THEN 0
+                    WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
+                    ELSE COALESCE(t.delivery_income, 0)
+                END
+            ), 0)                                                                       AS total_income,
+            COALESCE(AVG(CASE WHEN si.custom_shipping_expense > 0
+                              THEN si.custom_shipping_expense END), 0)                  AS avg_cost
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabTerritory` t ON t.name = si.territory
+        WHERE si.docstatus = 1
+          AND si.posting_date BETWEEN %(fd)s AND %(td)s
+          AND si.territory IS NOT NULL
+          AND si.territory != ''
+        GROUP BY si.territory
+        ORDER BY SUM(si.custom_shipping_expense) DESC
     """, {"fd": fd, "td": td}, as_dict=True)
 
     for r in rows:
@@ -140,17 +154,24 @@ def get_cost_by_pos_profile(from_date=None, to_date=None):
 
     rows = frappe.db.sql("""
         SELECT
-            COALESCE(pos_profile, '(No Profile)')                                       AS branch,
+            COALESCE(si.pos_profile, '(No Profile)')                                    AS branch,
             COUNT(*)                                                                    AS order_count,
-            COALESCE(SUM(custom_shipping_expense), 0)                                   AS total_expense,
-            COALESCE(SUM(custom_delivery_income), 0)                                    AS total_income,
-            COALESCE(AVG(CASE WHEN custom_shipping_expense > 0
-                              THEN custom_shipping_expense END), 0)                     AS avg_cost
-        FROM `tabSales Invoice`
-        WHERE docstatus = 1
-          AND posting_date BETWEEN %(fd)s AND %(td)s
-        GROUP BY pos_profile
-        ORDER BY total_expense DESC
+            COALESCE(SUM(si.custom_shipping_expense), 0)                                AS total_expense,
+            COALESCE(SUM(
+                CASE
+                    WHEN si.custom_is_pickup = 1 THEN 0
+                    WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
+                    ELSE COALESCE(t.delivery_income, 0)
+                END
+            ), 0)                                                                       AS total_income,
+            COALESCE(AVG(CASE WHEN si.custom_shipping_expense > 0
+                              THEN si.custom_shipping_expense END), 0)                  AS avg_cost
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabTerritory` t ON t.name = si.territory
+        WHERE si.docstatus = 1
+          AND si.posting_date BETWEEN %(fd)s AND %(td)s
+        GROUP BY si.pos_profile
+        ORDER BY SUM(si.custom_shipping_expense) DESC
     """, {"fd": fd, "td": td}, as_dict=True)
 
     for r in rows:
@@ -383,18 +404,29 @@ def get_alerts_data(from_date=None, to_date=None):
     alerts = []
 
     # 1. Territories where delivery expense exceeds income (losing money)
+    # Use subquery so the outer WHERE can reference aliases without the
+    # MySQL 1247 "reference to group function" error.
     losing = frappe.db.sql("""
-        SELECT territory,
-               SUM(custom_shipping_expense) AS expense,
-               SUM(custom_delivery_income)  AS income
-        FROM `tabSales Invoice`
-        WHERE docstatus = 1
-          AND posting_date BETWEEN %(fd)s AND %(td)s
-          AND territory IS NOT NULL AND territory != ''
-        GROUP BY territory
-        HAVING SUM(custom_shipping_expense) > 0
-           AND SUM(custom_delivery_income) < SUM(custom_shipping_expense)
-        ORDER BY (SUM(custom_shipping_expense) - SUM(custom_delivery_income)) DESC
+        SELECT territory, expense, income
+        FROM (
+            SELECT si.territory,
+                   COALESCE(SUM(si.custom_shipping_expense), 0) AS expense,
+                   COALESCE(SUM(
+                       CASE
+                           WHEN si.custom_is_pickup = 1 THEN 0
+                           WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
+                           ELSE COALESCE(t.delivery_income, 0)
+                       END
+                   ), 0) AS income
+            FROM `tabSales Invoice` si
+            LEFT JOIN `tabTerritory` t ON t.name = si.territory
+            WHERE si.docstatus = 1
+              AND si.posting_date BETWEEN %(fd)s AND %(td)s
+              AND si.territory IS NOT NULL AND si.territory != ''
+            GROUP BY si.territory
+        ) sub
+        WHERE expense > 0 AND income < expense
+        ORDER BY (expense - income) DESC
     """, {"fd": fd, "td": td}, as_dict=True)
 
     for t in losing:
@@ -408,15 +440,19 @@ def get_alerts_data(from_date=None, to_date=None):
         })
 
     # 2. Couriers with unsettled balance older than 7 days
+    # Subquery avoids MySQL 1247 error when referencing the MIN() alias in HAVING.
     today = getdate(nowdate())
     aged = frappe.db.sql("""
-        SELECT party_type, party,
-               COALESCE(SUM(shipping_amount), 0) AS total,
-               MIN(date)                          AS oldest_date
-        FROM `tabCourier Transaction`
-        WHERE status = 'Unsettled'
-        GROUP BY party_type, party
-        HAVING DATEDIFF(CURDATE(), oldest_date) > 7
+        SELECT party_type, party, total, oldest_date
+        FROM (
+            SELECT party_type, party,
+                   COALESCE(SUM(shipping_amount), 0) AS total,
+                   MIN(date)                          AS oldest_date
+            FROM `tabCourier Transaction`
+            WHERE status = 'Unsettled'
+            GROUP BY party_type, party
+        ) sub
+        WHERE DATEDIFF(CURDATE(), oldest_date) > 7
         ORDER BY DATEDIFF(CURDATE(), oldest_date) DESC
     """, as_dict=True)
 
