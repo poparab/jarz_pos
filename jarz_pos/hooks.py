@@ -213,10 +213,14 @@ doc_events = {
     # Emit state-change events for already-submitted invoices edited elsewhere
     "on_update_after_submit": [
         "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
+        "jarz_pos.services.consumable_deduction.deduct_consumables_on_ofd",
         "jarz_pos.events.sales_invoice.stamp_out_for_delivery_flag",
     ],
         # Keep operational workflow fields aligned across all cancellation paths.
-        "on_cancel": "jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",
+        "on_cancel": [
+            "jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",
+            "jarz_pos.services.consumable_deduction.reverse_consumable_deduction_on_cancel",
+        ],
         # Validate bundle items before submission
         "before_submit": "jarz_pos.events.sales_invoice.validate_invoice_before_submit"
     }
