@@ -392,8 +392,9 @@ def get_alerts_data(from_date=None, to_date=None):
           AND posting_date BETWEEN %(fd)s AND %(td)s
           AND territory IS NOT NULL AND territory != ''
         GROUP BY territory
-        HAVING expense > 0 AND income < expense
-        ORDER BY (expense - income) DESC
+        HAVING SUM(custom_shipping_expense) > 0
+           AND SUM(custom_delivery_income) < SUM(custom_shipping_expense)
+        ORDER BY (SUM(custom_shipping_expense) - SUM(custom_delivery_income)) DESC
     """, {"fd": fd, "td": td}, as_dict=True)
 
     for t in losing:
