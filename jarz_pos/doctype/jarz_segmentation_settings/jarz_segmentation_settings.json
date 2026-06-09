@@ -1,0 +1,127 @@
+{
+ "actions": [],
+ "creation": "2026-06-09 12:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "lookback_days",
+  "champion_recency_max",
+  "champion_frequency_min",
+  "loyal_recency_max",
+  "loyal_frequency_min",
+  "at_risk_recency_min",
+  "at_risk_recency_max",
+  "cant_lose_recency_min",
+  "cant_lose_frequency_min",
+  "lost_recency_min",
+  "new_customer_recency_max",
+  "digest_email_recipients"
+ ],
+ "fields": [
+  {
+   "default": "90",
+   "description": "How many days back to count orders for Frequency score",
+   "fieldname": "lookback_days",
+   "fieldtype": "Int",
+   "label": "Frequency Lookback Window (Days)"
+  },
+  {
+   "default": "14",
+   "fieldname": "champion_recency_max",
+   "fieldtype": "Int",
+   "label": "Champion — Max Recency (Days)"
+  },
+  {
+   "default": "4",
+   "fieldname": "champion_frequency_min",
+   "fieldtype": "Int",
+   "label": "Champion — Min Frequency"
+  },
+  {
+   "default": "30",
+   "fieldname": "loyal_recency_max",
+   "fieldtype": "Int",
+   "label": "Loyal — Max Recency (Days)"
+  },
+  {
+   "default": "2",
+   "fieldname": "loyal_frequency_min",
+   "fieldtype": "Int",
+   "label": "Loyal — Min Frequency"
+  },
+  {
+   "default": "21",
+   "fieldname": "at_risk_recency_min",
+   "fieldtype": "Int",
+   "label": "At Risk — Min Recency (Days)"
+  },
+  {
+   "default": "60",
+   "fieldname": "at_risk_recency_max",
+   "fieldtype": "Int",
+   "label": "At Risk — Max Recency (Days)"
+  },
+  {
+   "default": "60",
+   "fieldname": "cant_lose_recency_min",
+   "fieldtype": "Int",
+   "label": "Can't Lose Them — Min Recency (Days)"
+  },
+  {
+   "default": "5",
+   "description": "Min lifetime order count to qualify as Can't Lose Them",
+   "fieldname": "cant_lose_frequency_min",
+   "fieldtype": "Int",
+   "label": "Can't Lose Them — Min Historical Frequency"
+  },
+  {
+   "default": "90",
+   "fieldname": "lost_recency_min",
+   "fieldtype": "Int",
+   "label": "Lost — Min Recency (Days)"
+  },
+  {
+   "default": "14",
+   "fieldname": "new_customer_recency_max",
+   "fieldtype": "Int",
+   "label": "New Customer — Max Days Since First Order"
+  },
+  {
+   "description": "Comma-separated email addresses for the segment change alerts",
+   "fieldname": "digest_email_recipients",
+   "fieldtype": "Small Text",
+   "label": "Digest Email Recipients"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-06-09 12:00:00",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Segmentation Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "role": "JARZ Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

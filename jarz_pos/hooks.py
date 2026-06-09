@@ -229,23 +229,11 @@ doc_events = {
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"jarz_pos.tasks.all"
-# 	],
-# 	"daily": [
-# 		"jarz_pos.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"jarz_pos.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"jarz_pos.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"jarz_pos.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+    "daily": [
+        "jarz_pos.tasks.run_nightly_rfm_segmentation",
+    ],
+}
 
 # Testing
 # -------
