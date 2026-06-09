@@ -8,7 +8,7 @@ app_license = "mit"
 # Fixtures
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
-        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account"
+        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item"
     ]]]},
     {"dt": "Jarz POS Settings"}
 ]
@@ -232,6 +232,10 @@ doc_events = {
 scheduler_events = {
     "daily": [
         "jarz_pos.tasks.run_nightly_rfm_segmentation",
+        "jarz_pos.tasks.run_daily_inventory_digest",
+    ],
+    "weekly": [
+        "jarz_pos.tasks.run_weekly_velocity_update",
     ],
 }
 

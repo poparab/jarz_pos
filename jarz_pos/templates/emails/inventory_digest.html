@@ -1,0 +1,135 @@
+<div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; color: #333;">
+  <h2 style="border-bottom: 2px solid #e74c3c; padding-bottom: 8px;">
+    Jarz Inventory Alert &mdash; {{ today }}
+  </h2>
+
+  {% if critical %}
+  <div style="background: #fdecea; border-left: 4px solid #e74c3c; padding: 12px; margin: 16px 0;">
+    <h3 style="color: #e74c3c; margin: 0 0 8px;">Critical &mdash; Running Out Soon ({{ critical|length }} items)</h3>
+    <table style="width:100%; border-collapse: collapse; font-size: 13px;">
+      <thead>
+        <tr style="background: #e74c3c; color: white;">
+          <th style="padding: 6px; text-align:left;">Item</th>
+          <th style="padding: 6px;">Group</th>
+          <th style="padding: 6px;">Type</th>
+          <th style="padding: 6px;">Stock</th>
+          <th style="padding: 6px;">Days Left</th>
+          <th style="padding: 6px;">Daily Velocity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in critical %}
+        <tr style="border-bottom: 1px solid #f5c6cb;">
+          <td style="padding: 6px;">{{ item.item_name }}</td>
+          <td style="padding: 6px; text-align:center;">{{ item.item_group }}</td>
+          <td style="padding: 6px; text-align:center;">
+            {% if item.replenishment_type == 'Manufacture' %}
+              Make
+            {% else %}
+              Buy
+            {% endif %}
+          </td>
+          <td style="padding: 6px; text-align:center;">{{ item.stock_on_hand }}</td>
+          <td style="padding: 6px; text-align:center; font-weight:bold; color:#e74c3c;">{{ item.days_remaining }}</td>
+          <td style="padding: 6px; text-align:center;">{{ "%.2f"|format(item.daily_velocity) }}/day</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if watch_list %}
+  <div style="background: #fff8e1; border-left: 4px solid #f39c12; padding: 12px; margin: 16px 0;">
+    <h3 style="color: #f39c12; margin: 0 0 8px;">Watch List &mdash; Low Stock ({{ watch_list|length }} items)</h3>
+    <table style="width:100%; border-collapse: collapse; font-size: 13px;">
+      <thead>
+        <tr style="background: #f39c12; color: white;">
+          <th style="padding: 6px; text-align:left;">Item</th>
+          <th style="padding: 6px;">Type</th>
+          <th style="padding: 6px;">Stock</th>
+          <th style="padding: 6px;">Days Left</th>
+          <th style="padding: 6px;">Daily Velocity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in watch_list %}
+        <tr style="border-bottom: 1px solid #ffeaa7;">
+          <td style="padding: 6px;">{{ item.item_name }}</td>
+          <td style="padding: 6px; text-align:center;">
+            {% if item.replenishment_type == 'Manufacture' %}Make{% else %}Buy{% endif %}
+          </td>
+          <td style="padding: 6px; text-align:center;">{{ item.stock_on_hand }}</td>
+          <td style="padding: 6px; text-align:center; color:#f39c12; font-weight:bold;">{{ item.days_remaining }}</td>
+          <td style="padding: 6px; text-align:center;">{{ "%.2f"|format(item.daily_velocity) }}/day</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if slow_movers %}
+  <div style="background: #f5f5f5; border-left: 4px solid #7f8c8d; padding: 12px; margin: 16px 0;">
+    <h3 style="color: #7f8c8d; margin: 0 0 8px;">Slow Movers &mdash; No Recent Sales ({{ slow_movers|length }} items)</h3>
+    <table style="width:100%; border-collapse: collapse; font-size: 13px;">
+      <thead>
+        <tr style="background: #7f8c8d; color: white;">
+          <th style="padding: 6px; text-align:left;">Item</th>
+          <th style="padding: 6px;">Group</th>
+          <th style="padding: 6px;">Type</th>
+          <th style="padding: 6px;">Stock on Hand</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in slow_movers %}
+        <tr style="border-bottom: 1px solid #ddd;">
+          <td style="padding: 6px;">{{ item.item_name }}</td>
+          <td style="padding: 6px; text-align:center;">{{ item.item_group }}</td>
+          <td style="padding: 6px; text-align:center;">
+            {% if item.replenishment_type == 'Manufacture' %}Make{% else %}Buy{% endif %}
+          </td>
+          <td style="padding: 6px; text-align:center;">{{ item.stock_on_hand }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if overstocked %}
+  <div style="background: #eaf4fb; border-left: 4px solid #3498db; padding: 12px; margin: 16px 0;">
+    <h3 style="color: #3498db; margin: 0 0 8px;">Overstocked &mdash; Excess Inventory ({{ overstocked|length }} items)</h3>
+    <table style="width:100%; border-collapse: collapse; font-size: 13px;">
+      <thead>
+        <tr style="background: #3498db; color: white;">
+          <th style="padding: 6px; text-align:left;">Item</th>
+          <th style="padding: 6px;">Type</th>
+          <th style="padding: 6px;">Stock</th>
+          <th style="padding: 6px;">Days Supply</th>
+          <th style="padding: 6px;">Est. Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in overstocked %}
+        <tr style="border-bottom: 1px solid #d6eaf8;">
+          <td style="padding: 6px;">{{ item.item_name }}</td>
+          <td style="padding: 6px; text-align:center;">
+            {% if item.replenishment_type == 'Manufacture' %}Make{% else %}Buy{% endif %}
+          </td>
+          <td style="padding: 6px; text-align:center;">{{ item.stock_on_hand }}</td>
+          <td style="padding: 6px; text-align:center;">{{ item.days_remaining }}</td>
+          <td style="padding: 6px; text-align:center;">{{ item.stock_value }} EGP</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <p style="font-size:11px; color:#aaa; margin-top:24px; border-top:1px solid #eee; padding-top:8px;">
+    Generated by Jarz Inventory Intelligence &mdash; {{ today }}<br>
+    Buy = Purchase from supplier &nbsp;|&nbsp; Make = Start a Work Order<br>
+    This is an alert only &mdash; no actions have been taken automatically.
+  </p>
+</div>

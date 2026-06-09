@@ -1,0 +1,108 @@
+{
+ "actions": [],
+ "creation": "2026-06-09 12:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "alert_section",
+  "critical_days_threshold",
+  "watch_days_threshold",
+  "overstock_days_threshold",
+  "slow_mover_days",
+  "email_section",
+  "digest_recipients",
+  "digest_send_time",
+  "seasonal_section",
+  "seasonal_multipliers"
+ ],
+ "fields": [
+  {
+   "fieldname": "alert_section",
+   "fieldtype": "Section Break",
+   "label": "Alert Thresholds"
+  },
+  {
+   "default": "5",
+   "description": "Flag items with fewer than this many days of stock remaining",
+   "fieldname": "critical_days_threshold",
+   "fieldtype": "Int",
+   "label": "Critical Low Stock (Days)"
+  },
+  {
+   "default": "14",
+   "description": "Flag items with fewer than this many days — Watch List",
+   "fieldname": "watch_days_threshold",
+   "fieldtype": "Int",
+   "label": "Watch List Threshold (Days)"
+  },
+  {
+   "default": "90",
+   "description": "Flag items with more than this many days of supply as overstocked",
+   "fieldname": "overstock_days_threshold",
+   "fieldtype": "Int",
+   "label": "Overstock Threshold (Days)"
+  },
+  {
+   "default": "30",
+   "description": "Items with zero sales in this many days are flagged as slow-moving",
+   "fieldname": "slow_mover_days",
+   "fieldtype": "Int",
+   "label": "Slow Mover Window (Days)"
+  },
+  {
+   "fieldname": "email_section",
+   "fieldtype": "Section Break",
+   "label": "Email Settings"
+  },
+  {
+   "description": "Comma-separated email addresses",
+   "fieldname": "digest_recipients",
+   "fieldtype": "Small Text",
+   "label": "Daily Digest Recipients"
+  },
+  {
+   "default": "07:00",
+   "description": "Controlled via scheduler — this is for reference only",
+   "fieldname": "digest_send_time",
+   "fieldtype": "Data",
+   "label": "Send Time (HH:MM)"
+  },
+  {
+   "fieldname": "seasonal_section",
+   "fieldtype": "Section Break",
+   "label": "Seasonal Multipliers"
+  },
+  {
+   "fieldname": "seasonal_multipliers",
+   "fieldtype": "Table",
+   "label": "Seasonal Periods",
+   "options": "Jarz Forecast Season"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-06-09 12:00:00",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Forecast Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
