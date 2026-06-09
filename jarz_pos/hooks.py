@@ -26,6 +26,11 @@ before_migrate = [
     "jarz_pos.utils.cleanup.remove_required_delivery_datetime_field",
 ]
 
+after_migrate = [
+    # Add Inventory Forecast shortcut to JARZ POS workspace (idempotent)
+    "jarz_pos.utils.setup_forecast.ensure_forecast_workspace_shortcuts",
+]
+
 # Apps
 # ------------------
 
@@ -99,6 +104,13 @@ workspaces = [
                 "type": "Page",
                 "icon": "fa fa-truck",
                 "color": "#FF6B35"
+            },
+            {
+                "label": "Inventory Forecast",
+                "link_to": "Jarz Forecast Settings",
+                "type": "DocType",
+                "icon": "fa fa-bar-chart",
+                "color": "#27ae60"
             }
         ],
         "cards": []
