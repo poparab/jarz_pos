@@ -1,62 +1,29 @@
 """
-Post-migrate utility: ensure the JARZ POS workspace exists with the right shortcuts
-including Jarz Forecast Settings. Idempotent — safe to run multiple times.
+Post-migrate utility: ensure the JARZ POS workspace exists with all shortcuts.
+Handles Frappe v15 workspace format where shortcuts are stored as JSON in the
+`content` field (not as child-table records).
+Idempotent — safe to run multiple times.
 """
+import json
 import frappe
 
 
 WORKSPACE_NAME = "JARZ POS"
 
-# Full workspace definition — used when creating from scratch
-WORKSPACE_DEFINITION = {
-    "name": WORKSPACE_NAME,
-    "title": WORKSPACE_NAME,
-    "module": "jarz pos",
-    "category": "Modules",
-    "public": 1,
-    "icon": "fa fa-shopping-cart",
-    "color": "#FF6B35",
-    "sequence_id": 1,
-}
-
-# All shortcuts that belong in the workspace (order matters)
-ALL_SHORTCUTS = [
-    {
-        "label": "Sales Invoice List",
-        "link_to": "Sales Invoice",
-        "type": "DocType",
-        "icon": "fa fa-file-text",
-        "color": "#3498db",
-    },
-    {
-        "label": "POS Profile",
-        "link_to": "POS Profile",
-        "type": "DocType",
-        "icon": "fa fa-cog",
-        "color": "#e74c3c",
-    },
-    {
-        "label": "Shipping Analytics",
-        "link_to": "shipping-analytics",
-        "type": "Page",
-        "icon": "fa fa-truck",
-        "color": "#FF6B35",
-    },
-    {
-        "label": "Inventory Forecast",
-        "link_to": "Jarz Forecast Settings",
-        "type": "DocType",
-        "icon": "fa fa-bar-chart",
-        "color": "#27ae60",
-    },
+# Shortcut block entries for the workspace content (Frappe v15 format)
+# Each shortcut_name maps to a DocType name or Page name.
+SHORTCUT_BLOCKS = [
+    {"id": "jarz_sc_01", "type": "shortcut", "data": {"shortcut_name": "Sales Invoice",         "col": 3}},
+    {"id": "jarz_sc_02", "type": "shortcut", "data": {"shortcut_name": "POS Profile",            "col": 3}},
+    {"id": "jarz_sc_03", "type": "shortcut", "data": {"shortcut_name": "Jarz Forecast Settings", "col": 3}},
 ]
 
 
 def ensure_jarz_pos_workspace():
     """
     Create or update the JARZ POS workspace.
-    - Creates it if it doesn't exist.
-    - Adds any missing shortcuts if it already exists.
+    - Creates it from scratch if it doesn't exist.
+    - Adds Jarz Forecast Settings shortcut if the workspace exists but lacks it.
     Called from after_migrate hook.
     """
     if not frappe.db.exists("Workspace", WORKSPACE_NAME):
@@ -65,39 +32,53 @@ def ensure_jarz_pos_workspace():
         _patch_workspace_shortcuts()
 
 
-# Alias used by hooks.py
+# Alias used by older hook registration
 ensure_forecast_workspace_shortcuts = ensure_jarz_pos_workspace
 
 
 def _create_workspace():
-    """Create the JARZ POS workspace from scratch."""
+    """Create the JARZ POS workspace with all shortcuts (Frappe v15 content-JSON format)."""
     ws = frappe.new_doc("Workspace")
-    ws.update(WORKSPACE_DEFINITION)
-    ws.title = WORKSPACE_NAME  # required for autoname = "field:title"
-    ws.name = WORKSPACE_NAME   # explicit name for prompt autoname
-    for sc in ALL_SHORTCUTS:
-        ws.append("shortcuts", sc)
+    ws.name   = WORKSPACE_NAME
+    ws.title  = WORKSPACE_NAME
+    ws.label  = WORKSPACE_NAME   # mandatory in Frappe v15
+    ws.module = "jarz pos"
+    ws.public = 1
+    ws.is_hidden  = 0
+    ws.hide_custom = 0
+    ws.sequence_id = 100
+    ws.icon        = "shopping-cart"
+    ws.content     = json.dumps(SHORTCUT_BLOCKS)
+    ws.flags.ignore_mandatory  = True
     ws.flags.ignore_permissions = True
     ws.insert(set_name=WORKSPACE_NAME)
     frappe.db.commit()
-    frappe.logger().info("[Forecast] Created JARZ POS workspace with all shortcuts")
+    frappe.logger().info("[Forecast] Created JARZ POS workspace with shortcuts")
 
 
 def _patch_workspace_shortcuts():
-    """Add any missing shortcuts to an existing workspace."""
-    ws = frappe.get_doc("Workspace", WORKSPACE_NAME)
-    existing_links = {s.link_to for s in (ws.shortcuts or [])}
+    """Add Jarz Forecast Settings shortcut to an existing workspace if absent."""
+    content_raw = frappe.db.get_value("Workspace", WORKSPACE_NAME, "content") or "[]"
+    try:
+        blocks = json.loads(content_raw)
+    except (ValueError, TypeError):
+        blocks = []
 
-    changed = False
-    for sc in ALL_SHORTCUTS:
-        if sc["link_to"] not in existing_links:
-            ws.append("shortcuts", sc)
-            changed = True
+    existing_shortcuts = {
+        b["data"].get("shortcut_name")
+        for b in blocks
+        if b.get("type") == "shortcut" and isinstance(b.get("data"), dict)
+    }
 
-    if changed:
-        ws.flags.ignore_permissions = True
-        ws.save()
-        frappe.db.commit()
-        frappe.logger().info(
-            "[Forecast] Patched JARZ POS workspace — added missing shortcuts"
-        )
+    to_add = [b for b in SHORTCUT_BLOCKS if b["data"]["shortcut_name"] not in existing_shortcuts]
+    if not to_add:
+        return
+
+    blocks.extend(to_add)
+    frappe.db.set_value(
+        "Workspace", WORKSPACE_NAME, "content", json.dumps(blocks),
+        update_modified=False
+    )
+    frappe.db.commit()
+    added = [b["data"]["shortcut_name"] for b in to_add]
+    frappe.logger().info("[Forecast] Patched JARZ POS workspace — added: %s", added)
