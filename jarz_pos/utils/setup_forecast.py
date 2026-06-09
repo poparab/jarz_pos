@@ -10,6 +10,7 @@ WORKSPACE_NAME = "JARZ POS"
 # Full workspace definition — used when creating from scratch
 WORKSPACE_DEFINITION = {
     "name": WORKSPACE_NAME,
+    "title": WORKSPACE_NAME,
     "module": "jarz pos",
     "category": "Modules",
     "public": 1,
@@ -72,10 +73,12 @@ def _create_workspace():
     """Create the JARZ POS workspace from scratch."""
     ws = frappe.new_doc("Workspace")
     ws.update(WORKSPACE_DEFINITION)
+    ws.title = WORKSPACE_NAME  # required for autoname = "field:title"
+    ws.name = WORKSPACE_NAME   # explicit name for prompt autoname
     for sc in ALL_SHORTCUTS:
         ws.append("shortcuts", sc)
     ws.flags.ignore_permissions = True
-    ws.insert()
+    ws.insert(set_name=WORKSPACE_NAME)
     frappe.db.commit()
     frappe.logger().info("[Forecast] Created JARZ POS workspace with all shortcuts")
 
