@@ -10,7 +10,8 @@ fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
         "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item"
     ]]]},
-    {"dt": "Jarz POS Settings"}
+    {"dt": "Jarz POS Settings"},
+    {"dt": "Jarz Commercial Policy"}
 ]
 
 # Ensure conflicting Custom Fields are removed before fixtures import

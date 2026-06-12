@@ -718,11 +718,15 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         shipping_override: Optional shipping amount override (e.g. doubled for double-shipping trips).
     """
     
-    # PICKUP ORDER VALIDATION: Reject courier assignment for pickup orders
+    # PICKUP / NO-COURIER VALIDATION: Reject courier assignment when the order
+    # purpose does not require courier delivery (pickup, or Employee / Sample-No-Courier
+    # commercial policies that set custom_no_courier).
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     is_pickup = bool(getattr(inv, "custom_is_pickup", 0))
     if is_pickup:
         frappe.throw("Cannot assign courier to pickup orders. Pickup orders do not require courier delivery.")
+    if bool(getattr(inv, "custom_no_courier", 0)):
+        frappe.throw("Cannot assign courier: this order's purpose does not require courier delivery.")
     
     derived_existing_party = False
 
@@ -2900,10 +2904,12 @@ def _get_delivery_expense_amount(inv):
 
     Returns 0.0 if not found.
     """
-    # 0) Pickup short-circuit (highest priority overall)
+    # 0) Pickup / no-courier short-circuit (highest priority overall)
     try:
-        # Check common custom fields
-        pickup_fields = ["custom_is_pickup", "is_pickup", "pickup"]
+        # Check common custom fields. ``custom_no_courier`` is set by Employee /
+        # Sample-No-Courier commercial policies: zero courier expense without using
+        # the pickup label.
+        pickup_fields = ["custom_is_pickup", "is_pickup", "pickup", "custom_no_courier"]
         for f in pickup_fields:
             try:
                 val = getattr(inv, f, None)

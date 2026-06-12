@@ -69,6 +69,10 @@ def create_pos_invoice():
     suppress_shipping_income = _is_truthy_flag(raw_suppress_shipping_income)
     suppress_legacy_delivery_charges = _is_truthy_flag(raw_suppress_legacy_delivery_charges)
     custom_delivery_income = frappe.form_dict.get('custom_delivery_income')
+    # New: commercial policy / order purpose (B2B, Employee, Sample, Free-shipping waiver)
+    order_purpose = frappe.form_dict.get('order_purpose')
+    commercial_policy = frappe.form_dict.get('commercial_policy')
+    policy_reason = frappe.form_dict.get('policy_reason')
 
     if zero_shipping_override:
         suppress_shipping_income = True
@@ -184,6 +188,9 @@ RAW PARAMETERS:
             suppress_shipping_income=suppress_shipping_income,
             suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
             custom_delivery_income=custom_delivery_income,
+            order_purpose=order_purpose,
+            commercial_policy=commercial_policy,
+            policy_reason=policy_reason,
         )
         
         # Log successful response

@@ -1,0 +1,167 @@
+{
+ "actions": [],
+ "autoname": "field:policy_name",
+ "creation": "2026-06-12 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "policy_name",
+  "enabled",
+  "priority",
+  "order_purpose",
+  "description",
+  "section_break_pricing",
+  "price_list",
+  "discount_percentage",
+  "section_break_shipping",
+  "shipping_income_behavior",
+  "shipping_expense_behavior",
+  "courier_behavior",
+  "section_break_scope",
+  "require_role",
+  "company",
+  "pos_profile"
+ ],
+ "fields": [
+  {
+   "fieldname": "policy_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Policy Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "100",
+   "description": "Lower number = higher priority when multiple policies match a purpose",
+   "fieldname": "priority",
+   "fieldtype": "Int",
+   "label": "Priority"
+  },
+  {
+   "fieldname": "order_purpose",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Order Purpose",
+   "options": "Standard\nB2B Supply\nEmployee\nSample - Courier\nSample - No Courier\nFree Shipping Waiver",
+   "reqd": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "section_break_pricing",
+   "fieldtype": "Section Break",
+   "label": "Pricing"
+  },
+  {
+   "fieldname": "price_list",
+   "fieldtype": "Link",
+   "label": "Price List",
+   "options": "Price List"
+  },
+  {
+   "description": "Sample fallback when no dedicated price list is set (0-100)",
+   "fieldname": "discount_percentage",
+   "fieldtype": "Percent",
+   "label": "Discount Percentage"
+  },
+  {
+   "fieldname": "section_break_shipping",
+   "fieldtype": "Section Break",
+   "label": "Shipping & Courier Behavior"
+  },
+  {
+   "default": "Normal",
+   "fieldname": "shipping_income_behavior",
+   "fieldtype": "Select",
+   "label": "Shipping Income Behavior",
+   "options": "Normal\nZero",
+   "reqd": 1
+  },
+  {
+   "default": "Normal",
+   "fieldname": "shipping_expense_behavior",
+   "fieldtype": "Select",
+   "label": "Shipping Expense Behavior",
+   "options": "Normal\nZero",
+   "reqd": 1
+  },
+  {
+   "default": "Courier",
+   "fieldname": "courier_behavior",
+   "fieldtype": "Select",
+   "label": "Courier Behavior",
+   "options": "Courier\nNo Courier",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_scope",
+   "fieldtype": "Section Break",
+   "label": "Gating & Scope"
+  },
+  {
+   "description": "If set, only users with this role may apply this policy. Otherwise manager pricing access is required.",
+   "fieldname": "require_role",
+   "fieldtype": "Link",
+   "label": "Require Role",
+   "options": "Role"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "POS Profile",
+   "options": "POS Profile"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-06-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Commercial Policy",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager"
+  }
+ ],
+ "sort_field": "priority",
+ "sort_order": "ASC",
+ "states": [],
+ "track_changes": 1
+}

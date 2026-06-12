@@ -991,6 +991,13 @@ def _run_invoice_amendment_job(
     else:
         effective_custom_delivery_income = frappe.utils.flt(_cdi_raw)
     woo_order_id = source_invoice.get("woo_order_id")
+    # Preserve commercial-policy / order purpose on amendment. Without this a B2B /
+    # Employee / Sample replacement would silently revert to Standard accounting
+    # (courier expense reappears, policy price list lost). Re-passing the purpose lets
+    # the service re-resolve the policy (income/courier suppression + price list) freshly.
+    effective_order_purpose = source_invoice.get("custom_order_purpose") or None
+    effective_commercial_policy = source_invoice.get("custom_commercial_policy") or None
+    effective_policy_reason = source_invoice.get("custom_policy_reason") or None
     initiated_by = (initiated_by or frappe.session.user or "Unknown User").strip()
 
     # Territory → POS profile safety check (before any DB writes)
@@ -1227,6 +1234,9 @@ def _run_invoice_amendment_job(
                 suppress_shipping_income=effective_suppress_shipping_income,
                 suppress_legacy_delivery_charges=effective_suppress_legacy_delivery_charges,
                 custom_delivery_income=effective_custom_delivery_income,
+                order_purpose=effective_order_purpose,
+                commercial_policy=effective_commercial_policy,
+                policy_reason=effective_policy_reason,
             )
 
         replacement_invoice_name = (
