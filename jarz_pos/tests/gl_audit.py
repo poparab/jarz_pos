@@ -148,6 +148,19 @@ def _check_site_total_balanced(company: str) -> _Result:
 
 
 def _check_no_dual_sided_lines(company: str) -> _Result:
+    """MONITORING ONLY — not a gate invariant.
+
+    A single GL line carrying both debit and credit > 0 is NOT necessarily a
+    defect: standard ERPNext books "Valuation and Total" charges (freight /
+    landed cost) on a perpetual-inventory Purchase Invoice (update_stock=1) as
+    a Total (debit) leg AND a Valuation (credit) leg on the SAME account, and
+    its GL-merge stores them as one row with both fields populated (e.g.
+    ACC-PINV-MEG-2026-00001 → Freight account DR=800 CR=800, net P&L zero, fully
+    capitalized into inventory). Because the merge sums debit and credit into
+    separate fields, there is no robust SQL predicate that distinguishes this
+    legitimate pattern from genuine corruption — so this can only be a human-
+    reviewed monitoring signal, never a commit gate.
+    """
     name = "no_dual_sided_gl_lines"
     rows = frappe.db.sql(
         """
@@ -348,13 +361,17 @@ def _check_no_orphaned_gl_smoke(company: str) -> _Result:
 _GATE_CHECKS = [
     _check_per_voucher_balanced,
     _check_site_total_balanced,
-    _check_no_dual_sided_lines,
     _check_no_negative_amounts,
     _check_journal_entries_balanced,
     _check_no_orphaned_gl_smoke,
 ]
 
 _MONITORING_CHECKS = [
+    # Dual-sided lines are a legitimate ERPNext valuation/landed-cost pattern on
+    # Purchase Invoices (see _check_no_dual_sided_lines docstring) — surfaced for
+    # human review, never gated. Confirmed against staging Purchase Invoice
+    # ACC-PINV-MEG-2026-00001.
+    _check_no_dual_sided_lines,
     _check_courier_outstanding_net_zero,
     _check_paid_invoices_zero_outstanding,
     _check_woo_paid_invoices_zero_outstanding,
