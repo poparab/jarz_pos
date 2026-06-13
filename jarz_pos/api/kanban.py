@@ -566,7 +566,9 @@ def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, Any]:
     Returns a dict with keys: income (float), expense (float),
     was_free_shipping (bool).
     """
-    if _is_pickup_invoice(invoice):
+    # Pickup and no-courier purposes (Employee / Sample-No-Courier) carry zero income
+    # AND zero courier expense. B2B Supply keeps normal expense (custom_no_courier == 0).
+    if _is_pickup_invoice(invoice) or bool(invoice.get("custom_no_courier")):
         return {"income": 0.0, "expense": 0.0, "was_free_shipping": False}
 
     shipping = _get_territory_shipping_values(invoice.get("territory") or "")

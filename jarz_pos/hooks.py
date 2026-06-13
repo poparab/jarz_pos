@@ -8,7 +8,7 @@ app_license = "mit"
 # Fixtures
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
-        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item"
+        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead"
     ]]]},
     {"dt": "Jarz POS Settings"}
 ]
@@ -29,6 +29,10 @@ before_migrate = [
 after_migrate = [
     # Add Inventory Forecast shortcut to JARZ POS workspace (idempotent)
     "jarz_pos.utils.setup_forecast.ensure_forecast_workspace_shortcuts",
+    # Seed B2B master data (idempotent, create-only)
+    "jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
+    # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
+    "jarz_pos.setup.crm_setup.ensure_crm_setup",
 ]
 
 # Apps
@@ -221,7 +225,11 @@ doc_events = {
         # Seed custom_kanban_profile from pos_profile on drafts; preserve submitted reassignments
         "validate": "jarz_pos.events.sales_invoice.sync_kanban_profile",
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
-    "on_submit": "jarz_pos.events.sales_invoice.publish_new_invoice",
+    "on_submit": [
+        "jarz_pos.events.sales_invoice.publish_new_invoice",
+        # CRM bridge: link B2B sale to Opportunity (never raises, fast-exits Standard)
+        "jarz_pos.crm.pos_bridge.link_b2b_sale_to_opportunity",
+    ],
     # Emit state-change events for already-submitted invoices edited elsewhere
     "on_update_after_submit": [
         "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
@@ -245,6 +253,9 @@ scheduler_events = {
     "daily": [
         "jarz_pos.tasks.run_nightly_rfm_segmentation",
         "jarz_pos.tasks.run_daily_inventory_digest",
+        # CRM automation (guarded, never raise)
+        "jarz_pos.crm.lead_scoring.compute_lead_scores",
+        "jarz_pos.crm.follow_ups.run_followup_reminders",
     ],
     "weekly": [
         "jarz_pos.tasks.run_weekly_velocity_update",

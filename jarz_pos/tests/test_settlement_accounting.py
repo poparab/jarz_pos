@@ -53,6 +53,7 @@ def _mock_invoice(name="INV-TEST", company="Test Company", grand_total=500.0,
     inv.territory = territory
     inv.sales_partner = sales_partner
     inv.custom_is_pickup = 0
+    inv.custom_no_courier = 0
     inv.items = []
     inv.get.side_effect = lambda k, default=None: getattr(inv, k, default)
     return inv

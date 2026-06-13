@@ -435,8 +435,13 @@ def get_territories(search=None):
         return []
 
 @frappe.whitelist()
-def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None):
-    """Create a new customer quickly from POS with Territory integration"""
+def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None, customer_type=None, customer_group=None):
+    """Create a new customer quickly from POS with Territory integration.
+
+    customer_type/customer_group default to "Individual" (unchanged retail behavior).
+    Pass customer_type="Company" with a B2B/Distributor/Employee customer_group to
+    create a business customer for the B2B sales flow.
+    """
     try:
         # Debug: Log the received parameters
         frappe.logger().info(f"create_customer called with: customer_name={customer_name}, mobile_no={mobile_no}, territory_id={territory_id}, address={customer_primary_address}, location_link={location_link}")
@@ -458,13 +463,22 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
             
         territory_doc = frappe.get_doc("Territory", territory_id)
         territory_name = territory_doc.territory_name
-        
+
+        # Resolve customer type/group. Defaults preserve retail behavior; validate any
+        # caller-supplied overrides so an invalid value can't silently mis-classify.
+        resolved_type = (customer_type or "").strip() or "Individual"
+        if resolved_type not in ("Individual", "Company"):
+            frappe.throw("customer_type must be 'Individual' or 'Company'")
+        resolved_group = (customer_group or "").strip() or "Individual"
+        if not frappe.db.exists("Customer Group", resolved_group):
+            frappe.throw(f"Customer Group '{resolved_group}' does not exist")
+
         # Create customer document with only essential fields
         customer_payload = {
             "doctype": "Customer",
             "customer_name": customer_name,
-            "customer_type": "Individual",
-            "customer_group": "Individual",
+            "customer_type": resolved_type,
+            "customer_group": resolved_group,
             "territory": territory_name,
         }
         # Store phone on the Customer itself when the field exists

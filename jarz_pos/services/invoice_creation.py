@@ -10,6 +10,7 @@ import traceback
 from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
 from jarz_pos.constants import ROLES
 from jarz_pos.services import delivery_promotions as _delivery_promotions
+from jarz_pos.services import commercial_policy as _commercial_policy
 from jarz_pos.utils.validation_utils import (
     validate_cart_data, 
     validate_customer, 
@@ -126,6 +127,47 @@ def _pricing_action_requires_manager(
     return False
 
 
+def _resolve_sales_partner_price_list(sales_partner: str | None) -> str | None:
+    if not sales_partner:
+        return None
+    try:
+        return _normalize_price_list_name(
+            frappe.db.get_value("Sales Partner", sales_partner, "price_list")
+        )
+    except Exception:
+        return None
+
+
+def _resolve_customer_price_list(customer_doc) -> str | None:
+    """Customer-specific, then Customer-Group, default selling price list (if present).
+
+    Uses getattr/db lookups defensively so missing fields never break creation.
+    """
+    if customer_doc is None:
+        return None
+    candidate = _normalize_price_list_name(getattr(customer_doc, "default_price_list", None))
+    if candidate:
+        return candidate
+    customer_group = getattr(customer_doc, "customer_group", None)
+    if customer_group:
+        try:
+            candidate = _normalize_price_list_name(
+                frappe.db.get_value("Customer Group", customer_group, "default_price_list")
+            )
+        except Exception:
+            candidate = None
+    return candidate
+
+
+def _resolve_company_default_price_list() -> str | None:
+    try:
+        return _normalize_price_list_name(
+            frappe.db.get_single_value("Selling Settings", "selling_price_list")
+        )
+    except Exception:
+        return None
+
+
 def _resolve_effective_price_list(
     pos_profile,
     cart_items,
@@ -134,12 +176,19 @@ def _resolve_effective_price_list(
     suppress_shipping_income: bool | None,
     suppress_legacy_delivery_charges: bool | None,
     logger,
+    policy_matched: bool = False,
+    policy_price_list: str | None = None,
+    customer_doc=None,
+    sales_partner: str | None = None,
 ) -> str | None:
     default_price_list = _normalize_price_list_name(
         getattr(pos_profile, "selling_price_list", None)
     )
     requested = _normalize_price_list_name(requested_price_list)
 
+    # Manager gating is unchanged: only an explicit manual override (or line pricing /
+    # suppress hints) requires manager access. Policy-derived price lists are gated
+    # separately by the commercial-policy resolver, so they do NOT re-trip this check.
     if _pricing_action_requires_manager(
         cart_items,
         requested_price_list=requested,
@@ -149,12 +198,28 @@ def _resolve_effective_price_list(
     ):
         _ensure_manager_pricing_access()
 
-    effective_price_list = requested or default_price_list
+    policy_pl = _normalize_price_list_name(policy_price_list)
+    if policy_matched:
+        # Non-Standard (B2B/Employee/Sample/...) resolution chain, highest priority first.
+        # Only reached for an explicitly chosen, permission-gated order purpose.
+        effective_price_list = (
+            requested
+            or policy_pl
+            or _resolve_sales_partner_price_list(sales_partner)
+            or _resolve_customer_price_list(customer_doc)
+            or default_price_list
+            or _resolve_company_default_price_list()
+        )
+    else:
+        # Standard order: BYTE-IDENTICAL to prior behavior — POS Profile default only.
+        effective_price_list = requested or default_price_list
+
     if effective_price_list and not frappe.db.exists("Price List", effective_price_list):
         frappe.throw(f"Price List '{effective_price_list}' does not exist")
 
     logger.info(
-        f"pricing_context resolved: requested={requested or ''}, default={default_price_list or ''}, effective={effective_price_list or ''}"
+        f"pricing_context resolved: requested={requested or ''}, policy={policy_pl or ''}, "
+        f"default={default_price_list or ''}, effective={effective_price_list or ''}"
     )
     return effective_price_list
 
@@ -360,6 +425,9 @@ def create_pos_invoice(
     suppress_shipping_income: bool | None = None,
     suppress_legacy_delivery_charges: bool | None = None,
     custom_delivery_income: float | str | None = None,
+    order_purpose: str | None = None,
+    commercial_policy: str | None = None,
+    policy_reason: str | None = None,
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -429,6 +497,15 @@ def create_pos_invoice(
         print("\n3️⃣ POS PROFILE VALIDATION:")
         pos_profile = validate_pos_profile(pos_profile_name, logger)
 
+        # STEP 3.5: Resolve Commercial Policy / Order Purpose (gated; Standard is inert)
+        policy_decision = _commercial_policy.resolve_commercial_policy(
+            order_purpose=order_purpose,
+            commercial_policy=commercial_policy,
+            policy_reason=policy_reason,
+            pos_profile=pos_profile,
+            logger=logger,
+        )
+
         # STEP 4: Item and Bundle Processing
         print("\n4️⃣ ITEM AND BUNDLE PROCESSING:")
         effective_price_list = _resolve_effective_price_list(
@@ -438,6 +515,10 @@ def create_pos_invoice(
             suppress_shipping_income=suppress_shipping_income,
             suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
             logger=logger,
+            policy_matched=policy_decision.matched,
+            policy_price_list=policy_decision.price_list,
+            customer_doc=customer_doc,
+            sales_partner=sales_partner,
         )
         processed_items = _process_cart_items(
             cart_items,
@@ -445,6 +526,25 @@ def create_pos_invoice(
             logger,
             price_list=effective_price_list,
         )
+
+        # Sample policies may carry a fallback discount %. Apply it to plain item rows
+        # that have no explicit line discount, reusing the existing line-discount path
+        # (no new discount engine). Bundle rows are left untouched.
+        if policy_decision.matched and policy_decision.discount_percentage > 0:
+            _disc = min(max(float(policy_decision.discount_percentage), 0.0), 100.0)
+            for _it in processed_items:
+                if (
+                    _it.get("is_bundle_parent")
+                    or _it.get("is_bundle_child")
+                    or _it.get("is_bundle_item")
+                    or _it.get("bundle_type")
+                ):
+                    continue
+                if _it.get("discount_percentage") in (None, "", 0, 0.0) and _it.get(
+                    "discount_amount"
+                ) in (None, "", 0, 0.0):
+                    _it["discount_percentage"] = _disc
+            print(f"   🎁 Sample discount applied to plain rows: {_disc}%")
 
         # STEP 5: Create Sales Invoice Document
         print("\n5️⃣ CREATING SALES INVOICE:")
@@ -517,6 +617,33 @@ def create_pos_invoice(
                 print("   🚏 Pickup mode enabled – shipping suppressed")
             except Exception as _mkpu_err:
                 print(f"   ⚠️ Could not mark pickup flag: {_mkpu_err}")
+
+        # STEP 6.0b: Freeze commercial-policy / order-purpose snapshot onto the invoice.
+        # For Standard orders these fields default to "Standard"/0, leaving accounting
+        # behavior byte-identical. For a MATCHED policy order the snapshot drives the
+        # accounting (custom_no_courier etc.), so stamping must NOT be silently swallowed
+        # — a stamp failure on a matched order must abort, never submit as Standard.
+        invoice_doc.custom_order_purpose = policy_decision.order_purpose or "Standard"
+        if policy_decision.matched:
+            if policy_decision.policy_name:
+                invoice_doc.custom_commercial_policy = policy_decision.policy_name
+            if policy_decision.reason:
+                invoice_doc.custom_policy_reason = policy_decision.reason
+            invoice_doc.custom_no_courier = 1 if policy_decision.no_courier else 0
+            _append_unique_remark(
+                invoice_doc, f"[ORDER PURPOSE] {policy_decision.order_purpose}"
+            )
+            if policy_decision.price_list:
+                _append_unique_remark(
+                    invoice_doc, f"[POLICY PRICE LIST] {policy_decision.price_list}"
+                )
+            print(
+                f"   🧾 Order purpose: {policy_decision.order_purpose} "
+                f"(policy={policy_decision.policy_name}, no_courier={policy_decision.no_courier})"
+            )
+        elif policy_decision.reason:
+            # Reason supplied without a matched policy (e.g. Standard) — keep for audit.
+            invoice_doc.custom_policy_reason = policy_decision.reason
 
         # Ensure custom_kanban_profile mirrors POS profile at creation time (defensive in addition to hook)
         try:
@@ -649,6 +776,7 @@ def create_pos_invoice(
             or free_shipping_waived
             or bool(pickup)
             or delivery_promotion.suppress_shipping_income
+            or policy_decision.suppress_shipping_income
         )
         suppress_legacy_delivery_charges = (
             (suppress_legacy_delivery_charges is True)  # explicit hint from amendment caller
@@ -656,6 +784,7 @@ def create_pos_invoice(
             or free_shipping_waived
             or bool(pickup)
             or delivery_promotion.suppress_legacy_delivery_charges
+            or policy_decision.suppress_legacy_delivery_charges
         )
 
         # STEP 7.4: Inject Shipping (Territory Delivery Income OR override) as Actual tax row
