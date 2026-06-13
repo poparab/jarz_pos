@@ -10,8 +10,7 @@ fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
         "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item"
     ]]]},
-    {"dt": "Jarz POS Settings"},
-    {"dt": "Jarz Commercial Policy"}
+    {"dt": "Jarz POS Settings"}
 ]
 
 # Ensure conflicting Custom Fields are removed before fixtures import
@@ -30,6 +29,8 @@ before_migrate = [
 after_migrate = [
     # Add Inventory Forecast shortcut to JARZ POS workspace (idempotent)
     "jarz_pos.utils.setup_forecast.ensure_forecast_workspace_shortcuts",
+    # Seed B2B master data (idempotent, create-only)
+    "jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
 ]
 
 # Apps

@@ -201,6 +201,61 @@ def get_pos_price_lists(profile: str):
 
     return results
 
+
+@frappe.whitelist(allow_guest=False)
+def get_commercial_policies(profile: str | None = None):
+    """Return enabled commercial policies (order purposes) the current user may apply.
+
+    Manager-gated, mirroring get_pos_price_lists. The Flutter cart uses this to render
+    the Order Purpose selector. Policies that require a role the user lacks are omitted.
+    """
+    _ensure_manager_pricing_access()
+
+    if not frappe.db.exists("DocType", "Jarz Commercial Policy"):
+        return []
+
+    profile_company = None
+    if profile:
+        profile_company = frappe.db.get_value("POS Profile", profile, "company")
+
+    user_roles = set(frappe.get_roles(frappe.session.user) or [])
+    rows = frappe.get_all(
+        "Jarz Commercial Policy",
+        filters={"enabled": 1},
+        fields=[
+            "name", "policy_name", "order_purpose", "price_list",
+            "discount_percentage", "shipping_income_behavior",
+            "shipping_expense_behavior", "courier_behavior",
+            "require_role", "company", "pos_profile",
+        ],
+        order_by="priority asc, policy_name asc",
+        limit_page_length=QUERY_LIMITS.DEFAULT_LIST,
+    )
+
+    results = []
+    for row in rows:
+        # Skip Standard (inert) and out-of-scope / not-permitted policies.
+        if (row.get("order_purpose") or "Standard") == "Standard":
+            continue
+        if row.get("pos_profile") and profile and row.get("pos_profile") != profile:
+            continue
+        if row.get("company") and profile_company and row.get("company") != profile_company:
+            continue
+        require_role = (row.get("require_role") or "").strip()
+        if require_role and require_role not in user_roles:
+            continue
+        results.append({
+            "name": row.get("name"),
+            "policy_name": row.get("policy_name"),
+            "order_purpose": row.get("order_purpose"),
+            "price_list": row.get("price_list"),
+            "discount_percentage": float(row.get("discount_percentage") or 0),
+            "waives_shipping_income": (row.get("shipping_income_behavior") == "Zero"),
+            "no_courier": (row.get("courier_behavior") == "No Courier"),
+        })
+    return results
+
+
 @frappe.whitelist(allow_guest=False)
 def get_profile_bundles(profile: str, price_list: Optional[str] = None):
     """Return bundles with items available to the given POS profile."""
