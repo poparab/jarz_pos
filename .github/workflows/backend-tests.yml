@@ -15,8 +15,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend-tests:
-    name: Frappe / jarz_pos Tests
+  # ---------------------------------------------------------------------------
+  # Job 1 — Logic gate.
+  # Runs the full jarz_pos suite (mock/unittest + DocType create-and-verify
+  # tests) on a FRESH, ephemeral site created per-run inside the existing
+  # backend container. A clean site means ERPNext's test bootstrap creates its
+  # master data (fiscal years, price lists, etc.) for the first time instead of
+  # colliding with the populated `frontend` clone — which is what made the old
+  # single-site run fail during BootStrapTestData. The GL-verification cases
+  # (which only audit pre-existing data) simply skip here; their coverage is
+  # provided by Job 2 below. The ephemeral site is always dropped afterwards.
+  # ---------------------------------------------------------------------------
+  logic-tests:
+    name: Logic tests (fresh ephemeral site)
     runs-on: [self-hosted, staging-docker]
 
     steps:
@@ -38,11 +49,85 @@ jobs:
         run: |
           docker cp . "${{ steps.backend-container.outputs.name }}:/home/frappe/frappe-bench/apps/jarz_pos/"
 
-      - name: Run jarz_pos tests
+      - name: Create fresh test site, run tests, drop site
+        env:
+          CONTAINER: ${{ steps.backend-container.outputs.name }}
+          DB_ROOT_PW: ${{ secrets.MARIADB_ROOT_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${DB_ROOT_PW:-}" ]; then
+            echo "::error::Repo secret MARIADB_ROOT_PASSWORD is not set. It is required to create the ephemeral CI test site. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          SITE="ci-jarz-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "Ephemeral test site: ${SITE}"
+
+          # Always drop the throwaway site, even on test failure. Never touches
+          # the bench default site (we never pass --set-default).
+          cleanup() {
+            docker exec "${CONTAINER}" bench drop-site "${SITE}" \
+              --mariadb-root-password "${DB_ROOT_PW}" --force --no-backup || true
+          }
+          trap cleanup EXIT
+
+          docker exec "${CONTAINER}" bench new-site "${SITE}" \
+            --mariadb-root-password "${DB_ROOT_PW}" \
+            --admin-password admin \
+            --install-app erpnext \
+            --install-app jarz_pos
+
+          docker exec "${CONTAINER}" bench --site "${SITE}" set-config allow_tests true
+          docker exec "${CONTAINER}" bench --site "${SITE}" run-tests --app jarz_pos --failfast
+        timeout-minutes: 30
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — Accounting / GL integrity gate.
+  # The GL-verification cases only have coverage against the populated
+  # `frontend` production clone, but `bench run-tests` against `frontend` is
+  # destructive: ERPNext's `before_tests` hook runs `delete from tabItem Price`
+  # and `set_defaults_for_tests()` then commits. So instead we run the SAME
+  # hard double-entry invariants as a READ-ONLY audit via `bench execute` —
+  # no bootstrap, no mutation, safe against the live clone. Only mathematical
+  # invariants (every voucher DR==CR, no negative/dual-sided lines, JEs
+  # balanced) gate the build; operational-state checks live in
+  # `run_monitoring` for a scheduled audit, not the commit gate.
+  #
+  # Serialized after logic-tests (same shared bench) but runs even if that job
+  # failed, so the two gates report independently.
+  # ---------------------------------------------------------------------------
+  gl-audit:
+    name: GL accounting integrity (read-only vs frontend)
+    runs-on: [self-hosted, staging-docker]
+    needs: logic-tests
+    if: ${{ always() }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve backend container
+        id: backend-container
+        shell: bash
+        run: |
+          container_name="$(docker ps --format '{{.Names}}' | grep -E '^erp[-_]backend[-_][0-9]+$' | head -1)"
+          if [ -z "$container_name" ]; then
+            echo "Could not find an ERPNext backend container. Expected erp-backend-1 or erp_backend_1."
+            docker ps --format 'table {{.Names}}\t{{.Status}}'
+            exit 1
+          fi
+          echo "name=$container_name" >> "$GITHUB_OUTPUT"
+
+      # Copy ONLY the audit module — additive, read-only test code. We do NOT
+      # overwrite the deployed app on the live `frontend` bench here.
+      - name: Stage the read-only audit module
+        run: |
+          docker cp ./jarz_pos/tests/gl_audit.py \
+            "${{ steps.backend-container.outputs.name }}:/home/frappe/frappe-bench/apps/jarz_pos/jarz_pos/tests/gl_audit.py"
+
+      - name: Run read-only GL integrity audit against frontend
         run: |
           docker exec "${{ steps.backend-container.outputs.name }}" bench \
             --site frontend \
-            run-tests \
-            --app jarz_pos \
-            --failfast
-        timeout-minutes: 20
+            execute jarz_pos.tests.gl_audit.run
+        timeout-minutes: 10
