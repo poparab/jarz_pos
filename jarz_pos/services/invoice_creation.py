@@ -224,6 +224,42 @@ def _resolve_effective_price_list(
     return effective_price_list
 
 
+def _validate_policy_price_list_coverage(policy_decision, effective_price_list, cart_items, logger) -> None:
+    """For a MATCHED commercial policy, ensure the resolved price list has a selling
+    Item Price for every plain cart item. Gives a clear, actionable error (instead of a
+    cryptic failure or a silently zero-priced order) when a B2B/Employee/Sample price
+    list has not been populated yet. Standard orders are unaffected (they price from the
+    cart rate as before)."""
+    if not getattr(policy_decision, "matched", False) or not effective_price_list:
+        return
+    missing = []
+    for it in cart_items or []:
+        if not isinstance(it, dict):
+            continue
+        code = str(it.get("item_code") or "").strip()
+        if not code:
+            continue
+        # Skip bundles and manually-overridden lines — those don't price off the list.
+        if it.get("is_bundle") or it.get("custom_rate_override") not in (None, "", 0, 0.0):
+            continue
+        if not frappe.db.exists(
+            "Item Price",
+            {"item_code": code, "price_list": effective_price_list, "selling": 1},
+        ):
+            missing.append(code)
+    if missing:
+        names = ", ".join(sorted(set(missing)))
+        logger.error(
+            f"Policy price list '{effective_price_list}' missing prices for: {names}"
+        )
+        frappe.throw(
+            f"Order purpose '{getattr(policy_decision, 'order_purpose', '')}' uses price "
+            f"list '{effective_price_list}', but it has no selling price for: {names}. "
+            f"Add an Item Price for these item(s) in '{effective_price_list}' "
+            f"(Selling → Item Price) before placing this order."
+        )
+
+
 def _resolve_item_rate(item_code, price_list, fallback_rate=0.0) -> float:
     if price_list:
         rate = frappe.db.get_value(
@@ -519,6 +555,11 @@ def create_pos_invoice(
             policy_price_list=policy_decision.price_list,
             customer_doc=customer_doc,
             sales_partner=sales_partner,
+        )
+        # Fail fast with an actionable message if a policy order's price list is missing
+        # prices (the common "B2B Selling not populated yet" data gap).
+        _validate_policy_price_list_coverage(
+            policy_decision, effective_price_list, cart_items, logger
         )
         processed_items = _process_cart_items(
             cart_items,

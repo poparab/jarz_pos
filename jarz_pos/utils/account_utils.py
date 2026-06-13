@@ -40,18 +40,22 @@ def get_account_for_company(account_name, company):
 
 
 def get_item_price(item_code, price_list):
-    """Get item price from price list with fallback to standard rate."""
-    price = frappe.db.get_value(
+    """Return the selling rate for an item in the given price list, or None if not set.
+
+    Strictly scoped to ``price_list`` — callers supply their own fallback (e.g. the
+    cart-provided rate). ERPNext v16 removed ``Item.standard_selling_rate``, so there is
+    NO item-level standard-rate fallback here: querying that column raises
+    ``OperationalError: Unknown column 'standard_selling_rate'`` and was the cause of POS
+    invoice creation failing (HTTP 417) whenever a resolved price list had no Item Price
+    for an item (e.g. an as-yet-unpopulated B2B/Employee/Sample list).
+    """
+    if not price_list:
+        return None
+    return frappe.db.get_value(
         "Item Price",
         {"item_code": item_code, "price_list": price_list},
         "price_list_rate",
     )
-    
-    if not price:
-        # Fallback to item's standard selling rate if no price list rate found
-        price = frappe.db.get_value("Item", item_code, "standard_selling_rate")
-    
-    return price
 
 
 def _get_cash_account(pos_profile: str, company: str) -> str:
