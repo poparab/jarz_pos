@@ -53,7 +53,7 @@ def get_item_price(item_code, price_list):
         return None
     return frappe.db.get_value(
         "Item Price",
-        {"item_code": item_code, "price_list": price_list},
+        {"item_code": item_code, "price_list": price_list, "customer": ["in", [None, ""]]},
         "price_list_rate",
     )
 

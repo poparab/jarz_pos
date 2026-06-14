@@ -261,5 +261,70 @@ class TestEffectivePriceListGating(unittest.TestCase):
         self.assertEqual(eff, _SELLING_PRICE_LIST)
 
 
+class TestCustomerTierPricing(unittest.TestCase):
+    """Model B: B2B tier resolves from Customer/Customer Group; per-customer override."""
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    def test_resolve_customer_price_list_from_group(self):
+        from jarz_pos.api.pos import resolve_customer_price_list
+
+        group = "_TEST B2B Tier"
+        if not frappe.db.exists("Customer Group", group):
+            frappe.get_doc({
+                "doctype": "Customer Group", "customer_group_name": group,
+                "parent_customer_group": "All Customer Groups", "is_group": 0,
+            }).insert(ignore_permissions=True)
+        frappe.db.set_value("Customer Group", group, "default_price_list", _SELLING_PRICE_LIST)
+        cust = "_TEST Tier Cust"
+        if not frappe.db.exists("Customer", cust):
+            frappe.get_doc({
+                "doctype": "Customer", "customer_name": cust, "customer_type": "Company",
+                "customer_group": group, "territory": frappe.db.get_value("Territory", {"is_group": 0}, "name"),
+            }).insert(ignore_permissions=True)
+        else:
+            frappe.db.set_value("Customer", cust, "customer_group", group)
+        self.assertEqual(
+            resolve_customer_price_list(cust)["price_list"], _SELLING_PRICE_LIST
+        )
+
+    def test_resolve_customer_price_list_unknown(self):
+        from jarz_pos.api.pos import resolve_customer_price_list
+
+        self.assertIsNone(resolve_customer_price_list("_TEST nope")["price_list"])
+
+    def test_per_customer_item_price_override(self):
+        # A customer-scoped Item Price wins over the generic list rate, and must NOT
+        # leak into a different customer's order. Use a dedicated price list so no
+        # pre-existing Item Price rows interfere.
+        code = frappe.db.get_value("Item", {"is_sales_item": 1, "disabled": 0}, "name")
+        plist = "_TEST Tier List"
+        if not frappe.db.exists("Price List", plist):
+            frappe.get_doc({
+                "doctype": "Price List", "price_list_name": plist,
+                "selling": 1, "currency": "EGP", "enabled": 1,
+            }).insert(ignore_permissions=True)
+        cust = "_TEST Override Cust"
+        if not frappe.db.exists("Customer", cust):
+            frappe.get_doc({
+                "doctype": "Customer", "customer_name": cust, "customer_type": "Company",
+                "customer_group": frappe.db.get_value("Customer Group", {"is_group": 0}, "name"),
+                "territory": frappe.db.get_value("Territory", {"is_group": 0}, "name"),
+            }).insert(ignore_permissions=True)
+        frappe.get_doc({
+            "doctype": "Item Price", "item_code": code, "price_list": plist,
+            "selling": 1, "price_list_rate": 123,
+        }).insert(ignore_permissions=True)
+        frappe.get_doc({
+            "doctype": "Item Price", "item_code": code, "price_list": plist,
+            "customer": cust, "selling": 1, "price_list_rate": 99,
+        }).insert(ignore_permissions=True)
+        # Generic (no customer / other customer) -> 123; the scoped customer -> 99.
+        self.assertEqual(ic._resolve_item_rate(code, plist), 123.0)
+        self.assertEqual(ic._resolve_item_rate(code, plist, customer="_TEST nope"), 123.0)
+        self.assertEqual(ic._resolve_item_rate(code, plist, customer=cust), 99.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -260,11 +260,23 @@ def _validate_policy_price_list_coverage(policy_decision, effective_price_list, 
         )
 
 
-def _resolve_item_rate(item_code, price_list, fallback_rate=0.0) -> float:
+def _resolve_item_rate(item_code, price_list, fallback_rate=0.0, customer=None) -> float:
     if price_list:
+        # Per-customer override: an Item Price scoped to this customer in the same price
+        # list wins over the generic list rate (special rates for a specific B2B client).
+        if customer:
+            cust_rate = frappe.db.get_value(
+                "Item Price",
+                {"item_code": item_code, "price_list": price_list, "customer": customer},
+                "price_list_rate",
+            )
+            if cust_rate not in (None, ""):
+                return float(cust_rate)
+        # Generic list rate: exclude customer-scoped rows so one customer's special price
+        # never leaks into another customer's order.
         rate = frappe.db.get_value(
             "Item Price",
-            {"item_code": item_code, "price_list": price_list},
+            {"item_code": item_code, "price_list": price_list, "customer": ["in", [None, ""]]},
             "price_list_rate",
         )
         if rate not in (None, ""):
@@ -566,6 +578,7 @@ def create_pos_invoice(
             pos_profile,
             logger,
             price_list=effective_price_list,
+            customer=getattr(customer_doc, "name", None),
         )
 
         # Sample policies may carry a fallback discount %. Apply it to plain item rows
@@ -992,7 +1005,7 @@ def _parse_delivery_charges(delivery_charges_json, logger):
     return delivery_charges
 
 
-def _process_cart_items(cart_items, pos_profile, logger, price_list=None):
+def _process_cart_items(cart_items, pos_profile, logger, price_list=None, customer=None):
     """Process all cart items including bundles."""
     logger.debug(f"Processing {len(cart_items)} cart items")
     processed_items = []  # Will contain both regular items and bundle items
@@ -1067,7 +1080,7 @@ def _process_cart_items(cart_items, pos_profile, logger, price_list=None):
             processed_items.extend(bundle_items)
         else:
             # Process regular item
-            regular_item = _process_regular_item(item_data, logger, price_list=price_list)
+            regular_item = _process_regular_item(item_data, logger, price_list=price_list, customer=customer)
             processed_items.append(regular_item)
     
     if not processed_items:
@@ -1121,7 +1134,7 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
         frappe.throw(error_msg)
 
 
-def _process_regular_item(item_data, logger, price_list=None):
+def _process_regular_item(item_data, logger, price_list=None, customer=None):
     """Process a regular item."""
     item_code = item_data.get("item_code")
     qty = item_data.get("qty", 1)
@@ -1141,7 +1154,7 @@ def _process_regular_item(item_data, logger, price_list=None):
         logger.debug(f"Item validated: {item_doc.item_name}")
         print(f"         ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
 
-        catalog_rate = _resolve_item_rate(item_code, price_list, fallback_rate=rate)
+        catalog_rate = _resolve_item_rate(item_code, price_list, fallback_rate=rate, customer=customer)
         custom_rate_override = item_data.get("custom_rate_override")
         effective_price_list_rate = float(catalog_rate)
         if custom_rate_override not in (None, ""):

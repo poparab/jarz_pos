@@ -257,6 +257,31 @@ def get_commercial_policies(profile: str | None = None):
 
 
 @frappe.whitelist(allow_guest=False)
+def resolve_customer_price_list(customer: str, pos_profile: str | None = None):
+    """Resolve the effective selling price list (B2B tier) for a customer.
+
+    Cascade: Customer.default_price_list → Customer Group.default_price_list → None.
+    The Flutter cart calls this when a B2B customer is selected under a customer-group
+    driven order purpose (one whose policy has no fixed price list) so it can show the
+    correct tier prices before checkout. Returns {"price_list": <name|null>}.
+    """
+    result = {"price_list": None}
+    if not customer or not frappe.db.exists("Customer", customer):
+        return result
+    pl = frappe.db.get_value("Customer", customer, "default_price_list")
+    if not pl:
+        group = frappe.db.get_value("Customer", customer, "customer_group")
+        if group:
+            pl = frappe.db.get_value("Customer Group", group, "default_price_list")
+    pl = (pl or "").strip() or None
+    # Only surface enabled selling price lists.
+    if pl and not frappe.db.get_value("Price List", pl, "selling"):
+        pl = None
+    result["price_list"] = pl
+    return result
+
+
+@frappe.whitelist(allow_guest=False)
 def get_profile_bundles(profile: str, price_list: Optional[str] = None):
     """Return bundles with items available to the given POS profile."""
     from jarz_pos.utils.validation_utils import assert_pos_profile_enabled

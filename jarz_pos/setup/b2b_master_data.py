@@ -140,7 +140,10 @@ def _ensure_commercial_policies(log):
 		{
 			"policy_name": "B2B Supply",
 			"order_purpose": "B2B Supply",
-			"price_list": "B2B Selling",
+			# No fixed price list: the B2B tier is resolved per-customer from
+			# Customer.default_price_list → Customer Group.default_price_list, so each
+			# B2B category (Customer Group) can carry its own pricing.
+			"price_list": None,
 			"shipping_income_behavior": "Zero",
 			"shipping_expense_behavior": "Normal",
 			"courier_behavior": "Courier",
@@ -186,6 +189,22 @@ def _ensure_commercial_policies(log):
 		name = spec["policy_name"]
 		try:
 			if frappe.db.exists("Jarz Commercial Policy", name):
+				# One-time normalization: earlier seeds pinned "B2B Supply" to the
+				# "B2B Selling" list. B2B pricing is now customer-group driven, so clear
+				# that fixed list (only if still the old seed default — never clobber a
+				# deliberate admin choice of a different list).
+				if (
+					name == "B2B Supply"
+					and frappe.db.get_value("Jarz Commercial Policy", name, "price_list")
+					== "B2B Selling"
+				):
+					frappe.db.set_value(
+						"Jarz Commercial Policy", name, "price_list", None,
+						update_modified=False,
+					)
+					log["created"].append(
+						"Jarz Commercial Policy: B2B Supply (cleared fixed price list → customer-group driven)"
+					)
 				log["existing"].append(f"Jarz Commercial Policy: {name}")
 				continue
 
