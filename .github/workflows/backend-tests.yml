@@ -18,16 +18,15 @@ jobs:
   # ---------------------------------------------------------------------------
   # Job 1 — Logic gate.
   # Runs the full jarz_pos suite (mock/unittest + DocType create-and-verify
-  # tests) on a FRESH, ephemeral site created per-run inside the existing
-  # backend container. A clean site means ERPNext's test bootstrap creates its
-  # master data (fiscal years, price lists, etc.) for the first time instead of
-  # colliding with the populated `frontend` clone — which is what made the old
-  # single-site run fail during BootStrapTestData. The GL-verification cases
-  # (which only audit pre-existing data) simply skip here; their coverage is
-  # provided by Job 2 below. The ephemeral site is always dropped afterwards.
+  # mock/unittest modules) against the existing backend container's `frontend`
+  # site with --skip-before-tests. ERPNext v16's test bootstrap (BootStrapTestData
+  # at import of erpnext.tests.utils) collides with populated master data, and a
+  # fresh vanilla site can't install jarz_pos (needs a configured company), so the
+  # full `--app` run is not viable on any site; the curated module list avoids both
+  # problems and is non-destructive. GL/accounting coverage is provided by Job 2.
   # ---------------------------------------------------------------------------
   logic-tests:
-    name: Logic tests (fresh ephemeral site)
+    name: Logic tests (mock/unittest suite)
     runs-on: [self-hosted, staging-docker]
 
     steps:
@@ -45,42 +44,55 @@ jobs:
           fi
           echo "name=$container_name" >> "$GITHUB_OUTPUT"
 
-      - name: Copy changed app files into container
+      - name: Sync branch code into the app (so tests run against this checkout)
         run: |
           docker cp . "${{ steps.backend-container.outputs.name }}:/home/frappe/frappe-bench/apps/jarz_pos/"
 
-      - name: Create fresh test site, run tests, drop site
+      - name: Run mock/unittest logic suite (safe, non-destructive vs frontend)
         env:
           CONTAINER: ${{ steps.backend-container.outputs.name }}
-          DB_ROOT_PW: ${{ secrets.MARIADB_ROOT_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${DB_ROOT_PW:-}" ]; then
-            echo "::error::Repo secret MARIADB_ROOT_PASSWORD is not set. It is required to create the ephemeral CI test site. Add it under Settings > Secrets and variables > Actions."
-            exit 1
-          fi
+          # Why an explicit module list rather than `--app jarz_pos`:
+          #   * ERPNext v16 runs BootStrapTestData() at import of erpnext.tests.utils
+          #     (pulled in by any FrappeTestCase), which collides with the populated
+          #     `frontend` master data ("Duplicate 'Standard Buying'", "overlapping
+          #     Fiscal Year") and fails the run during test collection.
+          #   * A fresh vanilla site can't be used either — jarz_pos's install requires a
+          #     pre-configured company (abbr "J" + freight/courier/cash accounts), so
+          #     `bench new-site --install-app jarz_pos` fails.
+          # So we run the pure mock/unittest modules (which never import
+          # erpnext.tests.utils) and pass --skip-before-tests so ERPNext's destructive
+          # before_tests hook (delete from `tabItem Price` + commit) never runs against
+          # the live clone. Verified locally: Item Price count is unchanged by this run.
+          MODULES=(
+            test_commercial_policy
+            test_settlement_accounting
+            test_settlement_strategies
+            test_pickup_flow
+            test_invoice_creation_accounting
+            test_sales_partner_flow
+            test_kanban_settlement
+            test_invoice_cases_integration
+          )
+          rc=0
+          for m in "${MODULES[@]}"; do
+            echo "::group::${m}"
+            docker exec "${CONTAINER}" bench --site frontend run-tests \
+              --app jarz_pos --module "jarz_pos.tests.${m}" --skip-before-tests --failfast || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+        timeout-minutes: 20
 
-          SITE="ci-jarz-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          echo "Ephemeral test site: ${SITE}"
-
-          # Always drop the throwaway site, even on test failure. Never touches
-          # the bench default site (we never pass --set-default).
-          cleanup() {
-            docker exec "${CONTAINER}" bench drop-site "${SITE}" \
-              --mariadb-root-password "${DB_ROOT_PW}" --force --no-backup || true
-          }
-          trap cleanup EXIT
-
-          docker exec "${CONTAINER}" bench new-site "${SITE}" \
-            --mariadb-root-password "${DB_ROOT_PW}" \
-            --admin-password admin \
-            --install-app erpnext \
-            --install-app jarz_pos
-
-          docker exec "${CONTAINER}" bench --site "${SITE}" set-config allow_tests true
-          docker exec "${CONTAINER}" bench --site "${SITE}" run-tests --app jarz_pos --failfast
-        timeout-minutes: 30
+      - name: Restore deployed app code on the runner host
+        if: ${{ always() }}
+        run: |
+          # Undo the branch-code sync so staging keeps running its deployed commit
+          # (the test run only needed it transiently to test this checkout).
+          docker exec "${{ steps.backend-container.outputs.name }}" bash -lc \
+            "cd /home/frappe/frappe-bench/apps/jarz_pos && git checkout -- . 2>/dev/null || true"
 
   # ---------------------------------------------------------------------------
   # Job 2 — Accounting / GL integrity gate.
