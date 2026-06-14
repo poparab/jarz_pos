@@ -1,14 +1,17 @@
 name: Backend Tests
 
 on:
+  workflow_dispatch: {}
   push:
     branches: [main, develop, "feature/**", "fix/**"]
     paths:
       - "jarz_pos/**"
+      - ".github/workflows/backend-tests.yml"
   pull_request:
     branches: [main, develop]
     paths:
       - "jarz_pos/**"
+      - ".github/workflows/backend-tests.yml"
 
 concurrency:
   group: backend-${{ github.ref }}
