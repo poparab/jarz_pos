@@ -527,3 +527,29 @@ def get_alerts_data(from_date=None, to_date=None):
         })
 
     return alerts
+
+
+@frappe.whitelist()
+def get_pickup_delivery_trend(from_date=None, to_date=None):
+    """Daily delivery vs pickup order counts for a stacked trend chart."""
+    _ensure_jarz_manager()
+    fd, td = _parse_dates(from_date, to_date)
+
+    rows = frappe.db.sql("""
+        SELECT
+            posting_date,
+            SUM(CASE WHEN custom_is_pickup = 1 THEN 1 ELSE 0 END) AS pickup,
+            SUM(CASE WHEN custom_is_pickup = 0 THEN 1 ELSE 0 END) AS delivery
+        FROM `tabSales Invoice`
+        WHERE docstatus = 1
+          AND posting_date BETWEEN %(fd)s AND %(td)s
+        GROUP BY posting_date
+        ORDER BY posting_date ASC
+    """, {"fd": fd, "td": td}, as_dict=True)
+
+    for r in rows:
+        r["posting_date"] = str(r["posting_date"])
+        r["pickup"] = int(r["pickup"] or 0)
+        r["delivery"] = int(r["delivery"] or 0)
+
+    return rows

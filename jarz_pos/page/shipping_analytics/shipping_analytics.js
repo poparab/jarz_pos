@@ -257,6 +257,21 @@ class ShippingAnalyticsDashboard {
     </div>
   </div>
 
+  <!-- ⑩ Trends & Aging -->
+  <div class="sa-section">
+    <div class="sa-title">Delivery Trends &amp; Courier Aging</div>
+    <div class="sa-grid">
+      <div class="sa-box">
+        <h6>Pickup vs Delivery Orders Over Time</h6>
+        <div id="sa-chart-pd-trend"></div>
+      </div>
+      <div class="sa-box">
+        <h6>Top Unsettled Courier Balances</h6>
+        <div id="sa-chart-aging"></div>
+      </div>
+    </div>
+  </div>
+
 </div>`);
 	}
 
@@ -305,6 +320,9 @@ class ShippingAnalyticsDashboard {
 
 		frappe.call('jarz_pos.api.shipping_analytics.get_double_shipping_impact', args)
 			.then(r => r.message && this._render_double(r.message));
+
+		frappe.call('jarz_pos.api.shipping_analytics.get_pickup_delivery_trend', args)
+			.then(r => r.message && this._render_pd_trend(r.message));
 	}
 
 	// ── Renderers ────────────────────────────────────────────────────────────
@@ -449,8 +467,23 @@ class ShippingAnalyticsDashboard {
 	_render_unsettled(rows) {
 		if (!rows.length) {
 			$('#sa-table-unsettled').html('<div class="sa-loading">No unsettled balances.</div>');
+			$('#sa-chart-aging').html('<div class="sa-loading">No unsettled balances.</div>');
 			return;
 		}
+
+		// Aging chart — top unsettled balances by amount (read-only view of the same data).
+		let top = rows.slice(0, 10);
+		_chart('sa-chart-aging', {
+			type: 'bar',
+			height: 260,
+			data: {
+				labels: top.map(r => _short(r.party)),
+				datasets: [{ name: 'Unsettled (EGP)', values: top.map(r => r.total_owed) }],
+			},
+			colors: ['#e67e22'],
+			tooltipOptions: { formatTooltipY: v => _egp(v) },
+		});
+
 		$('#sa-table-unsettled').html(`
 			<table class="sa-table">
 				<thead><tr>
@@ -613,6 +646,26 @@ class ShippingAnalyticsDashboard {
 					</tr>`).join('')}
 				</tbody>
 			</table>`);
+	}
+
+	_render_pd_trend(rows) {
+		if (!rows.length) {
+			$('#sa-chart-pd-trend').html('<div class="sa-loading">No data in range.</div>');
+			return;
+		}
+		_chart('sa-chart-pd-trend', {
+			type: 'bar',
+			height: 280,
+			data: {
+				labels: rows.map(r => r.posting_date),
+				datasets: [
+					{ name: 'Delivery', values: rows.map(r => r.delivery) },
+					{ name: 'Pickup', values: rows.map(r => r.pickup) },
+				],
+			},
+			colors: ['#3498db', '#FF6B35'],
+			barOptions: { stacked: true },
+		});
 	}
 }
 

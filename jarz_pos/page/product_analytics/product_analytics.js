@@ -225,6 +225,17 @@ class ProductAnalyticsDashboard {
     </div>
   </div>
 
+  <!-- ⑦ Margin Watch (hidden when nothing low-margin) -->
+  <div class="pa-section" id="pa-section-margin" style="display:none">
+    <div class="pa-title">Margin Watch — Low-Margin Products</div>
+    <div class="pa-grid one">
+      <div class="pa-box">
+        <h6>Products Below 20% Gross Margin (with a BOM cost)</h6>
+        <div id="pa-table-margin"></div>
+      </div>
+    </div>
+  </div>
+
 </div>`);
 	}
 
@@ -245,6 +256,7 @@ class ProductAnalyticsDashboard {
 			this._render_territory(d.by_territory || []);
 			this._render_trend(d.trend || []);
 			this._render_bundle_composition(d.bundle_composition || []);
+			this._render_margin_watch(d.top_products || []);
 		});
 	}
 
@@ -472,6 +484,44 @@ class ProductAnalyticsDashboard {
 						<td class="muted">${r.item_group || '—'}</td>
 						<td>${r.times_in_bundle.toLocaleString()}</td>
 						<td>${_egp(r.revenue)}</td>
+					</tr>`).join('')}
+				</tbody>
+			</table>`);
+	}
+
+	_render_margin_watch(rows) {
+		// Flag products that actually have a BOM cost but a thin gross margin.
+		let low = (rows || []).filter(r => {
+			let m = parseFloat(r.margin_pct || 0);
+			return r.total_revenue > 0 && r.bom_cost_per_unit > 0 && m > 0 && m < 20;
+		}).sort((a, b) => a.margin_pct - b.margin_pct);
+
+		if (!low.length) {
+			$('#pa-section-margin').hide();
+			return;
+		}
+		$('#pa-section-margin').show();
+
+		$('#pa-table-margin').html(`
+			<table class="pa-table">
+				<thead><tr>
+					<th>Product</th>
+					<th>Type</th>
+					<th>Units</th>
+					<th>Revenue</th>
+					<th>BOM Cost / Unit</th>
+					<th>Gross Profit</th>
+					<th>Margin %</th>
+				</tr></thead>
+				<tbody>
+					${low.map(r => `<tr>
+						<td>${r.item_name || r.item_code}</td>
+						<td><span class="badge ${_type_badge(r.type)}">${r.type}</span></td>
+						<td>${parseFloat(r.total_qty || 0).toLocaleString()}</td>
+						<td>${_egp(r.total_revenue)}</td>
+						<td class="muted">${_egp(r.bom_cost_per_unit)}</td>
+						<td class="green">${r.gross_profit > 0 ? _egp(r.gross_profit) : '—'}</td>
+						<td class="red">${parseFloat(r.margin_pct).toFixed(1)}%</td>
 					</tr>`).join('')}
 				</tbody>
 			</table>`);

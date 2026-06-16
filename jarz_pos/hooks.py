@@ -103,11 +103,39 @@ workspaces = [
                 "color": "#e74c3c"
             },
             {
+                "label": "Executive Overview",
+                "link_to": "executive-analytics",
+                "type": "Page",
+                "icon": "fa fa-dashboard",
+                "color": "#FF6B35"
+            },
+            {
+                "label": "Product Analytics",
+                "link_to": "product-analytics",
+                "type": "Page",
+                "icon": "fa fa-cube",
+                "color": "#7B61FF"
+            },
+            {
                 "label": "Shipping Analytics",
                 "link_to": "shipping-analytics",
                 "type": "Page",
                 "icon": "fa fa-truck",
                 "color": "#FF6B35"
+            },
+            {
+                "label": "Customer Analytics",
+                "link_to": "customer-analytics",
+                "type": "Page",
+                "icon": "fa fa-users",
+                "color": "#2980b9"
+            },
+            {
+                "label": "Inventory Intelligence",
+                "link_to": "inventory-analytics",
+                "type": "Page",
+                "icon": "fa fa-bar-chart",
+                "color": "#16a085"
             },
             {
                 "label": "Inventory Forecast",
