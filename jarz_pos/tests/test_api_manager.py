@@ -59,20 +59,25 @@ class TestManagerAPI(unittest.TestCase):
 			self.assertIn("cash_account", branch, "Branch should have cash_account")
 			self.assertIn("balance", branch, "Branch should have balance")
 
-	def test_get_transfer_target_branches_returns_assigned_active_profiles_for_staff(self):
-		"""Assigned staff should only receive active POS Profiles linked to their user."""
+	def test_get_transfer_target_branches_returns_all_enabled_profiles_for_staff(self):
+		"""Any staff should receive ALL enabled POS Profiles, regardless of their assignments.
+
+		Transfer targets are intentionally not scoped to the user's POS Profile User
+		links: staff must be able to push an order to any enabled branch. Source-side
+		scoping is enforced separately in update_invoice_branch.
+		"""
 		from jarz_pos.api.manager import get_transfer_target_branches
 
 		mock_frappe = MagicMock()
 		mock_frappe.session.user = "staff@example.com"
 
 		def _get_all(doctype, **kwargs):
-			if doctype == "Has Role":
-				return [{"role": "Sales User"}]
-			if doctype == "POS Profile User":
-				return ["Dokki", "Closed Branch", "Nasr city"]
+			# The picker must query enabled profiles directly and ignore POS Profile User.
 			if doctype == "POS Profile":
-				return ["Dokki", "Nasr city"]
+				self.assertEqual(kwargs.get("filters"), {"disabled": 0})
+				return ["Dokki", "Nasr city", "Mohandessin"]
+			if doctype == "POS Profile User":
+				raise AssertionError("picker must not scope by POS Profile User linkage")
 			return []
 
 		mock_frappe.get_all.side_effect = _get_all
@@ -87,6 +92,7 @@ class TestManagerAPI(unittest.TestCase):
 				"branches": [
 					{"name": "Dokki", "title": "Dokki"},
 					{"name": "Nasr city", "title": "Nasr city"},
+					{"name": "Mohandessin", "title": "Mohandessin"},
 				],
 			},
 		)
@@ -122,12 +128,17 @@ class TestManagerAPI(unittest.TestCase):
 			self.assertEqual(set(branch.keys()), {"name", "title"})
 
 	def test_get_transfer_target_branches_does_not_require_manager_dashboard_access(self):
-		"""Transfer branch picker should work for assigned staff without manager dashboard access."""
+		"""Transfer branch picker should work for any staff without the manager dashboard gate."""
 		from jarz_pos.api.manager import get_transfer_target_branches
 
-		with patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
-				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access", side_effect=AssertionError("dashboard gate should not run")), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.get_all.side_effect = (
+			lambda doctype, **kwargs: ["Dokki"] if doctype == "POS Profile" else []
+		)
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access", side_effect=AssertionError("dashboard gate should not run")):
 			result = get_transfer_target_branches()
 
 		self.assertEqual(
@@ -668,6 +679,114 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertEqual(invoice.get("custom_kanban_profile"), "Nasr city")
 		self.assertEqual(item_row.warehouse, "Stores - Nasr city")
 		mock_frappe.has_permission.assert_not_called()
+
+	def test_update_invoice_branch_allows_transfer_to_unassigned_target(self):
+		"""Staff may transfer an order they own to a target they are NOT assigned to.
+
+		Source-side scoping is enforced (the invoice's current profile must be in the
+		user's assigned profiles) but the target branch may be any enabled profile.
+		"""
+		from jarz_pos.api.manager import update_invoice_branch
+
+		item_row = SimpleNamespace(name="SII-021", item_code="ITEM-001", warehouse="Stores - Dokki")
+		invoice = _FakeInvoice(
+			name="INV-STAFF-TRANSFER-002",
+			docstatus=1,
+			is_pos=1,
+			company="Jarz",
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			items=[item_row],
+		)
+		invoice.add_comment = MagicMock()
+
+		meta = MagicMock()
+		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {
+			"custom_kanban_profile",
+			"set_warehouse",
+			"custom_sales_invoice_state",
+			"custom_acceptance_status",
+			"custom_accepted_by",
+			"custom_accepted_on",
+		} else None
+
+		mock_frappe = MagicMock()
+		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.get_roles.return_value = ["Sales User"]
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.get_all.return_value = []
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: {
+				("POS Profile", "Nasr city", "disabled"): 0,
+				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+				("Item", "ITEM-001", "is_stock_item"): 1,
+			}.get((doctype, name, field))
+		)
+
+		def _set_value(_doctype, _name, field, value, update_modified=True):
+			if _doctype == "Sales Invoice":
+				invoice._data[field] = value
+			if _doctype == "Sales Invoice Item" and _name == "SII-021" and field == "warehouse":
+				item_row.warehouse = value
+
+		mock_frappe.db.set_value.side_effect = _set_value
+		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_meta.return_value = meta
+
+		# Staff is assigned ONLY to the source branch ("Dokki"), NOT to the target ("Nasr city").
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]), \
+				 patch("jarz_pos.api.manager.notify_invoice_reassignment"), \
+				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress", "Ready"]):
+			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-002", new_branch="Nasr city")
+
+		self.assertTrue(result.get("success"))
+		self.assertEqual(invoice.get("custom_kanban_profile"), "Nasr city")
+		self.assertEqual(item_row.warehouse, "Stores - Nasr city")
+
+	def test_update_invoice_branch_rejects_unowned_source_invoice(self):
+		"""Staff cannot transfer an order whose source branch is not one of their assigned profiles."""
+		from jarz_pos.api.manager import update_invoice_branch
+
+		invoice = _FakeInvoice(
+			name="INV-STAFF-TRANSFER-003",
+			docstatus=1,
+			is_pos=1,
+			company="Jarz",
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready",
+			items=[SimpleNamespace(name="SII-022", item_code="ITEM-001", warehouse="Stores - Dokki")],
+		)
+
+		mock_frappe = MagicMock()
+		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.get_roles.return_value = ["Sales User"]
+		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe.db.exists.side_effect = lambda doctype, name: True
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field: 0 if (doctype, name, field) == ("POS Profile", "Nasr city", "disabled") else None
+		)
+		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.PermissionError = Exception
+		mock_frappe.throw.side_effect = _raise_frappe
+
+		# Staff is assigned to "Mohandessin" only; the invoice's source branch is "Dokki".
+		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Mohandessin"]):
+			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-003", new_branch="Nasr city")
+
+		self.assertFalse(result.get("success"))
+		self.assertIn("not permitted", result.get("error", "").lower())
+		# Source scoping must block before any branch field is written.
+		self.assertEqual(invoice.get("custom_kanban_profile"), "Dokki")
 
 	def test_update_invoice_branch_rejects_disabled_target_profile(self):
 		"""Disabled POS Profiles should fail with a specific validation error."""

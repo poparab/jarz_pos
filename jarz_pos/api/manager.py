@@ -1527,8 +1527,15 @@ def _publish_invoice_reassignment_refresh(
 
 @frappe.whitelist(allow_guest=False)
 def get_transfer_target_branches() -> Dict[str, Any]:
-    """Return active POS Profiles accessible to the current user for transfer pickers."""
-    profiles = _current_user_allowed_profiles()
+    """Return all enabled POS Profiles as transfer targets for any staff user.
+
+    Transfer targets are intentionally NOT scoped to the user's assigned POS
+    Profiles: staff must be able to push an order to any enabled branch. The
+    source-side restriction (a user may only transfer orders that belong to
+    their own assigned profile) is enforced separately in update_invoice_branch
+    via _ensure_profile_scoped_invoice_access.
+    """
+    profiles = frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or []
     return {
         "success": True,
         "branches": [{"name": profile, "title": profile} for profile in profiles],
@@ -2082,10 +2089,12 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
 
     Rules:
     - Only for submitted POS invoices (docstatus=1 and is_pos=1).
-    - The target POS Profile must exist, be enabled, and be allowed for the current user.
+    - The target POS Profile must exist and be enabled. It does NOT have to be one
+      of the current user's assigned profiles — staff may transfer to any enabled branch.
     - Only custom_kanban_profile and transfer-related Kanban workflow fields are updated.
     - pos_profile remains unchanged after submit.
-    - new_branch must be in current user's allowed POS Profiles.
+    - Source-side scoping is enforced: the user may only transfer an order whose current
+      profile is in their assigned POS Profiles (via _ensure_profile_scoped_invoice_access).
     - The reassignment touches modified and emits a realtime refresh event for other sessions.
     """
     try:
@@ -2106,10 +2115,11 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             return {"success": False, "error": f"Target POS Profile {new_branch} is disabled"}
 
         inv = frappe.get_doc("Sales Invoice", invoice_id)
+        # Source-side scoping only: the user may transfer orders that belong to their
+        # assigned profiles, but the target (new_branch) may be ANY enabled profile.
         _ensure_profile_scoped_invoice_access(
             inv,
             action_label="invoice transfer",
-            extra_profiles=[new_branch],
         )
         
         frappe.logger().info(f"Invoice docstatus: {inv.get('docstatus')}, is_pos: {inv.get('is_pos')}")
