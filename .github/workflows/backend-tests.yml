@@ -78,6 +78,11 @@ jobs:
             test_sales_partner_flow
             test_kanban_settlement
             test_invoice_cases_integration
+            test_b2b_permission_gating
+            test_b2b_customer_search_filter
+            test_b2b_crm_access
+            test_b2b_reorder_forecast
+            test_b2b_pos_bridge_delivery
           )
           rc=0
           for m in "${MODULES[@]}"; do

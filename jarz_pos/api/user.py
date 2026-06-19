@@ -30,11 +30,27 @@ def get_current_user_roles():
         int(frappe.db.get_value("User", user, "custom_require_pos_shift") or 0)
     )
 
+    role_set = set(roles or [])
+    is_b2b_sales_rep = "B2B Sales Rep" in role_set
+    is_manager = bool(
+        role_set.intersection(
+            {
+                "JARZ Manager",
+                "jarz line manager",
+                "JARZ line manager",
+                "System Manager",
+                "Administrator",
+            }
+        )
+    )
+
     return {
         "user": user,
         "full_name": full_name,
         "roles": roles,
         "is_jarz_manager": "JARZ Manager" in roles,
+        "is_b2b_sales_rep": is_b2b_sales_rep,
+        "can_access_b2b": is_b2b_sales_rep or is_manager,
         "employee": employee.get("name") if employee else None,
         "employee_name": employee.get("employee_name") if employee else None,
         "branch": employee.get("branch") if employee else None,

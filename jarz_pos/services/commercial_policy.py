@@ -170,11 +170,17 @@ def _ensure_policy_permission(policy) -> None:
             )
         return
 
-    # Lazy import avoids a circular import (invoice_creation imports this module).
+    # Default gate: allow a non-Standard purpose for B2B Sales Reps OR manager-pricing
+    # users. Lazy import avoids a circular import (invoice_creation imports this module).
     from jarz_pos.services.invoice_creation import _has_manager_pricing_access
 
-    if not _has_manager_pricing_access():
-        frappe.throw(
-            "Not permitted: manager pricing access required to apply order purpose "
-            f"'{policy.order_purpose}'."
-        )
+    roles = set(frappe.get_roles(frappe.session.user) or [])
+    if "B2B Sales Rep" in roles:
+        return
+    if _has_manager_pricing_access():
+        return
+
+    frappe.throw(
+        "Not permitted: B2B Sales Rep or manager pricing access required to apply order "
+        f"purpose '{policy.order_purpose}'."
+    )

@@ -332,8 +332,13 @@ def get_recent_customers(limit=10):
         return []
 
 @frappe.whitelist()
-def search_customers(name=None, phone=None):
-    """Enhanced search for customers by name or phone using direct SQL."""
+def search_customers(name=None, phone=None, customer_type=None):
+    """Enhanced search for customers by name or phone using direct SQL.
+
+    Optional ``customer_type`` ("Individual" | "Company") restricts results to that
+    customer type — used to keep Company customers in the B2B flow and out of B2C.
+    Default None leaves results unchanged (all types).
+    """
 
     if not name and not phone:
         return []
@@ -344,16 +349,16 @@ def search_customers(name=None, phone=None):
         "`customer_primary_address`", "`customer_primary_contact`",
         "`territory`", "`customer_group`"
     ]
-    
+
     # Conditionally add the 'phone' field to avoid errors if it doesn't exist
     if frappe.db.has_column("Customer", "phone"):
         fields_to_select.append("`phone`")
 
     query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
-    
+
     conditions = []
     params = {}
-    
+
     if name:
         conditions.append("(`customer_name` LIKE %(search_term)s OR `name` LIKE %(search_term)s)")
         params['search_term'] = f"%{name}%"
@@ -370,7 +375,25 @@ def search_customers(name=None, phone=None):
     if not conditions:
         return []
 
-    query += " OR ".join(conditions)
+    # Optional customer_type filter (parameterized). Constrains the name/phone match.
+    resolved_type = (customer_type or "").strip()
+    if resolved_type:
+        if resolved_type not in ("Individual", "Company"):
+            frappe.throw("customer_type must be 'Individual' or 'Company'")
+        if frappe.db.has_column("Customer", "customer_type"):
+            conditions.append("`customer_type` = %(customer_type)s")
+            params['customer_type'] = resolved_type
+
+    # The name/phone match is a single OR group; the optional customer_type filter
+    # (when present) is ANDed so it always constrains the result set.
+    type_condition = None
+    if resolved_type and 'customer_type' in params:
+        type_condition = conditions.pop()  # the customer_type clause appended above
+
+    query += "(" + " OR ".join(conditions) + ")"
+    if type_condition:
+        query += f" AND {type_condition}"
+
     query += " ORDER BY `customer_name` ASC LIMIT 20"
     
     try:

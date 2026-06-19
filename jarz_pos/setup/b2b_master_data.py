@@ -31,6 +31,54 @@ def _default_currency():
 	return "EGP"
 
 
+def _ensure_b2b_roles(log):
+	"""Ensure the B2B Sales Rep role and B2B Sales role profile exist.
+
+	Create-only: never modifies an existing Role or Role Profile. v15/v16 safe —
+	the Role/Role Profile doctypes always exist in core, but each unit is wrapped
+	so a failure logs and the rest continue.
+	"""
+	role_name = "B2B Sales Rep"
+	try:
+		if frappe.db.exists("Role", role_name):
+			log["existing"].append(f"Role: {role_name}")
+		else:
+			doc = frappe.get_doc(
+				{
+					"doctype": "Role",
+					"role_name": role_name,
+					"desk_access": 1,
+					"disabled": 0,
+				}
+			)
+			doc.insert(ignore_permissions=True)
+			log["created"].append(f"Role: {role_name}")
+	except Exception:
+		_logger().error(f"Failed to ensure Role '{role_name}'", exc_info=True)
+
+	# Bundle the role into a Role Profile (only if the role actually exists).
+	profile_name = "B2B Sales"
+	try:
+		if not frappe.db.exists("Role", role_name):
+			return
+		if frappe.db.exists("Role Profile", profile_name):
+			log["existing"].append(f"Role Profile: {profile_name}")
+			return
+		doc = frappe.get_doc(
+			{
+				"doctype": "Role Profile",
+				"role_profile": profile_name,
+				"roles": [{"role": role_name}],
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		log["created"].append(f"Role Profile: {profile_name}")
+	except Exception:
+		_logger().error(
+			f"Failed to ensure Role Profile '{profile_name}'", exc_info=True
+		)
+
+
 def _ensure_customer_groups(log):
 	groups = ["B2B", "Distributor", "Employee", "Sample"]
 	parent = "All Customer Groups"
@@ -239,6 +287,8 @@ def ensure_b2b_master_data():
 	try:
 		currency = _default_currency()
 
+		# Roles/role profile first (no dependency ordering required).
+		_ensure_b2b_roles(log)
 		# Order matters: price lists before the policies that reference them.
 		_ensure_customer_groups(log)
 		_ensure_price_lists(log, currency)

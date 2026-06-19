@@ -24,6 +24,14 @@ _CLOSED_OPP_STATUSES = ("Converted", "Closed", "Lost")
 
 _FOLLOWUP_DAYS = 7
 
+# Order purposes that trigger a post-delivery follow-up, and the corresponding
+# ToDo description template. Matching is case/spacing tolerant via _purpose_kind().
+_SAMPLE_FOLLOWUP_DAYS = 2
+_TRIAL_FOLLOWUP_DAYS = 3
+
+# The delivery state string used across the kanban / invoice state field.
+_OFD_STATES = ("Out for Delivery", "Out For Delivery", "Delivered")
+
 
 def _logger():
     return frappe.logger(LOGGER_NAME, allow_site=True)
@@ -180,6 +188,108 @@ def link_b2b_sale_to_opportunity(doc, method=None):
         try:
             _logger().error(
                 "link_b2b_sale_to_opportunity failed unexpectedly", exc_info=True
+            )
+        except Exception:
+            pass
+        return
+
+
+def _purpose_kind(order_purpose):
+    """Classify an order purpose into 'sample', 'trial' or None. Never raises."""
+    try:
+        p = str(order_purpose or "").strip().lower()
+    except Exception:
+        return None
+    if not p or p == "standard":
+        return None
+    if "sample" in p:
+        return "sample"
+    if "trial" in p:
+        return "trial"
+    return None
+
+
+def _invoice_delivery_state(doc):
+    """Return the current delivery/kanban state string for a Sales Invoice doc."""
+    try:
+        return str(
+            getattr(doc, "custom_sales_invoice_state", None)
+            or getattr(doc, "sales_invoice_state", None)
+            or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
+def create_delivery_followup_on_state(doc, method=None):
+    """on_update_after_submit handler: when a B2B Sample/Trial Sales Invoice reaches
+    delivery, create the right follow-up ToDo. NEVER raises; fast-exits non-B2B.
+
+    Sample delivered -> "Collect sample feedback for {customer}".
+    Trial delivered  -> "Do check-up call for {customer}".
+
+    Does NOT auto-advance the pipeline stage (advancement stays manual).
+    """
+    try:
+        if not doc:
+            return
+
+        # Fast exit: only Sample/Trial purposes are interesting.
+        kind = _purpose_kind(getattr(doc, "custom_order_purpose", None))
+        if kind is None:
+            return
+
+        # Only act once the invoice has actually reached a delivery state.
+        state = _invoice_delivery_state(doc)
+        if state not in _OFD_STATES:
+            return
+
+        customer = getattr(doc, "customer", None)
+        if not customer:
+            return
+
+        # _ensure_todo dedups on an OPEN ToDo for the same (reference_type,
+        # reference_name), so re-firing on_update_after_submit will not create
+        # duplicate reminders while a prior follow-up is still open.
+        try:
+            from jarz_pos.crm.follow_ups import _ensure_todo
+            from frappe.utils import add_days, today
+        except Exception:
+            return
+
+        if kind == "sample":
+            description = f"Collect sample feedback for {customer}"
+            followup_date = add_days(today(), _SAMPLE_FOLLOWUP_DAYS)
+        else:  # trial
+            description = f"Do check-up call for {customer}"
+            followup_date = add_days(today(), _TRIAL_FOLLOWUP_DAYS)
+
+        owner = getattr(doc, "owner", None) or frappe.session.user
+
+        # Reference the originating Opportunity when stamped, else the Customer.
+        ref_type, ref_name = "Customer", customer
+        try:
+            src_opp = getattr(doc, "custom_source_opportunity", None)
+            if src_opp and _doctype_exists("Opportunity") and frappe.db.exists(
+                "Opportunity", src_opp
+            ):
+                ref_type, ref_name = "Opportunity", src_opp
+        except Exception:
+            pass
+
+        # Stamp the invoice name into the description for traceability.
+        try:
+            inv_name = getattr(doc, "name", None)
+            if inv_name:
+                description = f"{description} [{inv_name}]"
+        except Exception:
+            pass
+
+        _ensure_todo(ref_type, ref_name, owner, description, date=followup_date)
+    except Exception:
+        try:
+            _logger().error(
+                "create_delivery_followup_on_state failed unexpectedly", exc_info=True
             )
         except Exception:
             pass

@@ -8,7 +8,7 @@ app_license = "mit"
 # Fixtures
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
-        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead"
+        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead", "Opportunity"
     ]]]},
     {"dt": "Jarz POS Settings"}
 ]
@@ -263,6 +263,8 @@ doc_events = {
         "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
         "jarz_pos.services.consumable_deduction.deduct_consumables_on_ofd",
         "jarz_pos.events.sales_invoice.stamp_out_for_delivery_flag",
+        # CRM: Sample/Trial delivery -> feedback / check-up follow-up (never raises)
+        "jarz_pos.crm.pos_bridge.create_delivery_followup_on_state",
     ],
         # Keep operational workflow fields aligned across all cancellation paths.
         "on_cancel": [
@@ -284,6 +286,7 @@ scheduler_events = {
         # CRM automation (guarded, never raise)
         "jarz_pos.crm.lead_scoring.compute_lead_scores",
         "jarz_pos.crm.follow_ups.run_followup_reminders",
+        "jarz_pos.crm.reorder_forecast.compute_reorder_forecast",
     ],
     "weekly": [
         "jarz_pos.tasks.run_weekly_velocity_update",
@@ -337,6 +340,21 @@ try:
     from jarz_pos.api import manager as _mgr
     _mgr.get_manager_dashboard_summary
     _mgr.get_manager_orders
+except Exception:
+    pass
+
+try:
+    # Ensure B2B CRM endpoints register their @frappe.whitelist() decorators.
+    from jarz_pos.api import crm as _crm
+    _crm.get_b2b_pipeline
+    _crm.get_account
+    _crm.advance_stage
+    _crm.create_lead
+    _crm.log_activity
+    _crm.get_my_followups
+    _crm.get_reorder_due
+    _crm.request_sample
+    _crm.place_b2b_order
 except Exception:
     pass
 

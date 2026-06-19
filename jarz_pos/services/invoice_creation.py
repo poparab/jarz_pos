@@ -58,6 +58,37 @@ def _ensure_manager_pricing_access() -> None:
         frappe.throw("Not permitted: manager pricing access required")
 
 
+# Roles that grant retail/cashier (B2C) access — a user with any of these is
+# allowed to place Standard orders even if they also hold "B2B Sales Rep".
+_B2C_RETAIL_ROLES = {
+    "Jarz POS Staff",
+    "System Manager",
+    "Administrator",
+    ROLES.JARZ_MANAGER,
+    ROLES.JARZ_LINE_MANAGER,
+    "JARZ line manager",
+}
+
+
+def _ensure_can_place_standard_order(order_purpose) -> None:
+    """Block a B2B-Sales-Rep-ONLY user from placing a Standard (B2C) retail order.
+
+    Conservative: only blocks when the user holds "B2B Sales Rep" and does NOT hold
+    any retail/cashier or manager role. Managers and cashiers are unaffected.
+    """
+    purpose = str(order_purpose or "").strip()
+    if purpose not in ("", "Standard"):
+        return
+
+    roles = set(frappe.get_roles(frappe.session.user) or [])
+    if "B2B Sales Rep" not in roles:
+        return
+    if roles.intersection(_B2C_RETAIL_ROLES):
+        return
+
+    frappe.throw("B2B Sales Rep accounts cannot place Standard retail orders.")
+
+
 def _normalize_price_list_name(value) -> str | None:
     cleaned = str(value or "").strip()
     return cleaned or None
@@ -553,6 +584,9 @@ def create_pos_invoice(
             pos_profile=pos_profile,
             logger=logger,
         )
+
+        # Block B2B-Sales-Rep-only accounts from placing Standard (B2C) retail orders.
+        _ensure_can_place_standard_order(policy_decision.order_purpose)
 
         # STEP 4: Item and Bundle Processing
         print("\n4️⃣ ITEM AND BUNDLE PROCESSING:")
