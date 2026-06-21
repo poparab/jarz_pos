@@ -486,6 +486,27 @@ def create_lead(
     return {"name": doc.name}
 
 
+@frappe.whitelist()
+def get_lead_sources():
+    """Return all Lead Source names (alphabetical) for the lead-source dropdown.
+
+    Frozen contract: ``jarz_pos.api.crm.get_lead_sources`` -> ``[str, ...]``.
+    Guarded so a site without the standard ``Lead Source`` DocType returns ``[]``
+    instead of raising.
+    """
+    _ensure_b2b_access()
+
+    if not _doctype_exists("Lead Source"):
+        return []
+
+    try:
+        names = frappe.get_all("Lead Source", pluck="name")
+    except Exception:
+        return []
+
+    return sorted(names)
+
+
 # ---------------------------------------------------------------------------
 # Activity logging
 # ---------------------------------------------------------------------------
