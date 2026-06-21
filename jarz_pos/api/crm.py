@@ -459,6 +459,11 @@ def create_lead(
         payload["email_id"] = email_id
     if source and _has_field("Lead", "source") and frappe.db.exists("Lead Source", source):
         payload["source"] = source
+    # This site has no ``Lead Source`` DocType; stamp the Select custom field
+    # instead, but only when the passed value is a valid option (never raise).
+    if source and _has_field("Lead", "custom_lead_source"):
+        if source in _custom_lead_source_options():
+            payload["custom_lead_source"] = source
     if territory and _has_field("Lead", "territory") and frappe.db.exists(
         "Territory", territory
     ):
@@ -496,15 +501,32 @@ def get_lead_sources():
     """
     _ensure_b2b_access()
 
-    if not _doctype_exists("Lead Source"):
-        return []
+    # 1. Standard ERPNext: a ``Lead Source`` DocType exists -> use its records.
+    if _doctype_exists("Lead Source"):
+        try:
+            names = frappe.get_all("Lead Source", pluck="name")
+        except Exception:
+            return []
+        return sorted(names)
 
+    # 2. This site: no ``Lead Source`` DocType, but a ``custom_lead_source``
+    #    Select field on Lead -> expose its options as the source list.
+    if _has_field("Lead", "custom_lead_source"):
+        return _custom_lead_source_options()
+
+    # 3. Nothing to offer.
+    return []
+
+
+def _custom_lead_source_options(doctype="Lead"):
+    """Non-empty Select options of ``custom_lead_source`` (guarded -> ``[]``)."""
     try:
-        names = frappe.get_all("Lead Source", pluck="name")
+        field = frappe.get_meta(doctype).get_field("custom_lead_source")
+        if not field or not field.options:
+            return []
+        return [opt.strip() for opt in field.options.split("\n") if opt.strip()]
     except Exception:
         return []
-
-    return sorted(names)
 
 
 # ---------------------------------------------------------------------------
