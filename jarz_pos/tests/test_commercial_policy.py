@@ -186,7 +186,11 @@ class TestCommercialPolicyPermission(unittest.TestCase):
 
     def test_default_manager_path_denied(self):
         policy = _ns(order_purpose="B2B Supply", require_role=None)
-        with patch(
+        # Pin roles to a set WITHOUT the B2B Sales Rep bypass (and without manager
+        # access) so the denied path is exercised deterministically — the session
+        # user (e.g. Administrator) otherwise implicitly carries every role,
+        # including B2B Sales Rep once that role exists on the site.
+        with patch.object(cp.frappe, "get_roles", return_value=["Sales User"]), patch(
             "jarz_pos.services.invoice_creation._has_manager_pricing_access",
             return_value=False,
         ):
