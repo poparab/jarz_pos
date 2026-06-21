@@ -457,13 +457,76 @@ def get_territories(search=None):
         frappe.log_error(f"Error fetching territories: {str(e)}")
         return []
 
+def _contacts_block_lead_conversion(mobile_no, source_lead):
+    """Return True if existing Contacts with ``mobile_no`` should block creating a
+    Customer while converting ``source_lead`` (Lead -> Customer).
+
+    When Frappe auto-creates a Contact for a Lead, that Contact carries the lead's
+    mobile. Converting that Lead to a Customer must NOT be blocked by its own
+    auto-created Contact. We only block when a *conflicting* third-party/customer
+    Contact shares the mobile.
+
+    A conflicting Contact is "OK to ignore" only if it is linked to ``source_lead``
+    AND is not linked to any existing Customer. If every conflicting Contact is
+    OK-to-ignore -> not blocked (return False). If any is a real third-party /
+    Customer contact -> blocked (return True).
+
+    On ANY error we fall back to the conservative behavior: a Contact with that
+    mobile exists -> treat as blocked, so we never accidentally create duplicates.
+    """
+    try:
+        contacts = frappe.get_all(
+            "Contact", filters={"mobile_no": mobile_no}, pluck="name"
+        )
+        if not contacts:
+            return False
+
+        for contact_name in contacts:
+            linked_to_lead = frappe.get_all(
+                "Dynamic Link",
+                filters={
+                    "parenttype": "Contact",
+                    "parent": contact_name,
+                    "link_doctype": "Lead",
+                    "link_name": source_lead,
+                },
+                limit=1,
+            )
+            if not linked_to_lead:
+                # Contact belongs to some other party -> real conflict.
+                return True
+
+            linked_to_customer = frappe.get_all(
+                "Dynamic Link",
+                filters={
+                    "parenttype": "Contact",
+                    "parent": contact_name,
+                    "link_doctype": "Customer",
+                },
+                limit=1,
+            )
+            if linked_to_customer:
+                # Already tied to a Customer -> real conflict.
+                return True
+
+        # Every conflicting contact belongs only to source_lead -> safe to ignore.
+        return False
+    except Exception:
+        # Conservative fallback: a Contact with this mobile exists -> block.
+        return True
+
+
 @frappe.whitelist()
-def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None, customer_type=None, customer_group=None):
+def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None, customer_type=None, customer_group=None, source_lead=None):
     """Create a new customer quickly from POS with Territory integration.
 
     customer_type/customer_group default to "Individual" (unchanged retail behavior).
     Pass customer_type="Company" with a B2B/Distributor/Employee customer_group to
     create a business customer for the B2B sales flow.
+
+    source_lead (optional): when converting a Lead -> Customer (B2B flow), pass the
+    Lead name so the Contact-mobile guard ignores the Lead's own auto-created Contact.
+    B2C retail callers omit this and get the unchanged strict guard.
     """
     try:
         # Debug: Log the received parameters
@@ -476,8 +539,16 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         # Allow duplicate names but block duplicate phone numbers to avoid merges/confusion
         if frappe.db.exists("Customer", {"mobile_no": mobile_no}):
             frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
-        # Also guard against existing contacts with the same mobile
-        if frappe.db.exists("Contact", {"mobile_no": mobile_no}):
+        # Also guard against existing contacts with the same mobile.
+        # Lead-aware: when converting a Lead -> Customer, ignore the Lead's own
+        # auto-created Contact; otherwise keep the strict B2C behavior.
+        valid_source_lead = bool(source_lead) and bool(
+            frappe.db.exists("Lead", source_lead)
+        )
+        if valid_source_lead:
+            if _contacts_block_lead_conversion(mobile_no, source_lead):
+                frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
+        elif frappe.db.exists("Contact", {"mobile_no": mobile_no}):
             frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
         
         # Validate territory exists

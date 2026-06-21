@@ -751,6 +751,8 @@ def _resolve_order_binding(
             )
         from jarz_pos.api.customer import create_customer
 
+        # When converting a Lead -> Customer, pass the lead so the create_customer
+        # Contact-mobile guard ignores the Lead's own auto-created Contact.
         created = create_customer(
             customer_name=customer_name,
             mobile_no=mobile_no,
@@ -758,6 +760,7 @@ def _resolve_order_binding(
             territory_id=territory_id,
             customer_type="Company",
             customer_group=customer_group,
+            source_lead=party_name if party_doctype == "Lead" else None,
         )
         customer = (
             created.get("name")
