@@ -93,10 +93,20 @@ def _parse_codes_value(value) -> list[str]:
 
 
 def _line_amount(item) -> float:
-    """Net amount of a single invoice line (post bundle/line discount)."""
+    """Net amount of a single invoice line (post bundle/line discount).
+
+    Falls back to ``price_list_rate`` when ``amount``/``rate`` are not yet
+    populated — this is the case at the POS inline and ``before_validate``
+    apply points, which run *before* ERPNext's ``calculate_taxes_and_totals``
+    computes ``rate``/``amount`` (only ``price_list_rate`` is set by then).
+    Mirrors ``delivery_promotions._get_merchandise_subtotal``.
+    """
     amount = getattr(item, "amount", None)
-    if amount in (None, ""):
-        rate = float(getattr(item, "rate", 0) or 0)
+    if not amount:
+        rate = getattr(item, "rate", None)
+        if not rate:
+            rate = getattr(item, "price_list_rate", 0)
+        rate = float(rate or 0)
         qty = float(getattr(item, "qty", 0) or 0)
         discount_pct = float(getattr(item, "discount_percentage", 0) or 0)
         discount_pct = min(max(discount_pct, 0.0), 100.0)
