@@ -205,10 +205,17 @@ def verify_invoice_totals(invoice_doc, logger):
     try:
         # Calculate expected totals
         expected_net_total = sum(item.amount for item in invoice_doc.items)
-        
+
+        # An additional header discount applied on "Net Total" (e.g. a promo
+        # code) reduces net_total but NOT the line amounts, so add it back
+        # before reconciling against the sum of line amounts.
+        actual_net_total = float(invoice_doc.net_total)
+        if (invoice_doc.get("apply_discount_on") or "") == "Net Total":
+            actual_net_total += float(invoice_doc.get("discount_amount") or 0)
+
         # Basic validation
-        if abs(float(invoice_doc.net_total) - expected_net_total) > 0.01:
-            error_msg = f"Net total mismatch: Expected {expected_net_total}, Got {invoice_doc.net_total}"
+        if abs(actual_net_total - expected_net_total) > 0.01:
+            error_msg = f"Net total mismatch: Expected {expected_net_total}, Got {actual_net_total}"
             logger.error(error_msg)
             print(f"   ❌ {error_msg}")
             frappe.throw(error_msg)
