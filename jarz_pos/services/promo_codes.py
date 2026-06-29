@@ -377,8 +377,14 @@ def apply_promo_evaluation_to_invoice(invoice_doc, evaluation, *, woo_discount_t
     """Mutate ``invoice_doc`` to reflect ``evaluation``.  Does NOT save."""
     total = round(float(evaluation.total_discount or 0), 2)
 
-    # Apply discount via ERPNext's net-total discount mechanism (idempotent SET).
-    invoice_doc.apply_discount_on = "Net Total"
+    # Apply discount via ERPNext's header-discount mechanism (idempotent SET).
+    # Use "Grand Total" because the POS flow's set_missing_values() copies the
+    # POS Profile's apply_discount_on default ("Grand Total") and would otherwise
+    # silently flip a "Net Total" setting, leaving net_total/grand_total in an
+    # inconsistent state. With "Grand Total", net_total stays equal to the line
+    # sum and grand_total = line_total + taxes - discount (delivery charges here
+    # are fixed "Actual" rows, so the result matches a net-total discount).
+    invoice_doc.apply_discount_on = "Grand Total"
     invoice_doc.discount_amount = total
 
     # Free delivery → waive any shipping/delivery tax rows.
