@@ -6,10 +6,12 @@ including validation, document creation, and submission.
 """
 
 import frappe
+import json
 import traceback
 from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
 from jarz_pos.constants import ROLES
 from jarz_pos.services import delivery_promotions as _delivery_promotions
+from jarz_pos.services import promo_codes as _promo_codes
 from jarz_pos.services import commercial_policy as _commercial_policy
 from jarz_pos.utils.validation_utils import (
     validate_cart_data, 
@@ -507,6 +509,8 @@ def create_pos_invoice(
     order_purpose: str | None = None,
     commercial_policy: str | None = None,
     policy_reason: str | None = None,
+    promo_codes=None,
+    channel: str = "flutter",
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -858,6 +862,30 @@ def create_pos_invoice(
         except Exception as promo_err:
             print(f"   ⚠️ Delivery promotion resolution failed: {promo_err}")
 
+        # STEP 7.3b: Promo-code engine (inline POS path).
+        # Evaluate BEFORE the suppression flags so a Free-Delivery promo can
+        # waive shipping income/legacy delivery charges.  Defensive: never
+        # break invoice creation.
+        promo_eval = _promo_codes.PromoEvaluation()
+        promo_codes_list = []
+        try:
+            promo_codes_list = _promo_codes._normalize_codes(promo_codes)
+            if promo_codes_list:
+                promo_eval = _promo_codes.evaluate_promo_codes(
+                    invoice_doc,
+                    promo_codes_list,
+                    customer=getattr(customer_doc, "name", None),
+                    customer_doc=customer_doc,
+                    pos_profile=pos_profile,
+                    channel=channel or "flutter",
+                    is_pickup=bool(pickup),
+                )
+                # Persist the requested codes so on_submit can record redemptions.
+                invoice_doc.custom_promo_codes = json.dumps(promo_codes_list)
+        except Exception as _promo_err:
+            print(f"   ⚠️ Promo-code evaluation failed: {_promo_err}")
+            promo_eval = _promo_codes.PromoEvaluation()
+
         suppress_shipping_income = (
             (suppress_shipping_income is True)  # explicit hint from amendment caller
             or partner_tax_suppressed
@@ -865,6 +893,7 @@ def create_pos_invoice(
             or bool(pickup)
             or delivery_promotion.suppress_shipping_income
             or policy_decision.suppress_shipping_income
+            or promo_eval.free_delivery
         )
         suppress_legacy_delivery_charges = (
             (suppress_legacy_delivery_charges is True)  # explicit hint from amendment caller
@@ -873,6 +902,7 @@ def create_pos_invoice(
             or bool(pickup)
             or delivery_promotion.suppress_legacy_delivery_charges
             or policy_decision.suppress_legacy_delivery_charges
+            or promo_eval.free_delivery
         )
 
         # STEP 7.4: Inject Shipping (Territory Delivery Income OR override) as Actual tax row
@@ -965,6 +995,20 @@ def create_pos_invoice(
                 print("   🚏 Pickup mode enabled")
             if delivery_promotion.suppress_legacy_delivery_charges:
                 print(f"   🎯 Promotion matched: {delivery_promotion.rule_name}")
+
+        # STEP 7.6: Apply promo-code discount to the document BEFORE the final
+        # calculate_taxes_and_totals so totals are correct.  Sets discount_amount
+        # + custom_promo_applied=1 so the before_validate hook does not re-apply.
+        try:
+            if promo_codes_list:
+                _promo_codes.apply_promo_evaluation_to_invoice(invoice_doc, promo_eval)
+                print(
+                    "   🎟️ Promo discount applied: "
+                    f"{promo_eval.total_discount:.2f} "
+                    f"(free_delivery={promo_eval.free_delivery})"
+                )
+        except Exception as _promo_apply_err:
+            print(f"   ⚠️ Promo-code application failed: {_promo_apply_err}")
 
         # STEP 8: Validate and Calculate Document
         print("\n8️⃣ DOCUMENT VALIDATION:")

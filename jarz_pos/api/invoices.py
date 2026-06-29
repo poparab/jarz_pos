@@ -73,6 +73,9 @@ def create_pos_invoice():
     order_purpose = frappe.form_dict.get('order_purpose')
     commercial_policy = frappe.form_dict.get('commercial_policy')
     policy_reason = frappe.form_dict.get('policy_reason')
+    # New: promo codes (JSON list or CSV) + channel for the promo engine
+    promo_codes = frappe.form_dict.get('promo_codes')
+    channel = frappe.form_dict.get('channel') or 'flutter'
 
     if zero_shipping_override:
         suppress_shipping_income = True
@@ -191,6 +194,8 @@ RAW PARAMETERS:
             order_purpose=order_purpose,
             commercial_policy=commercial_policy,
             policy_reason=policy_reason,
+            promo_codes=promo_codes,
+            channel=channel,
         )
         
         # Log successful response

@@ -250,6 +250,9 @@ override_doctype_class = {
 
 doc_events = {
     "Sales Invoice": {
+        # Promo-code engine: single apply path for Woo / Desk invoices. Runs
+        # before validate so calculate_taxes_and_totals picks up discount_amount.
+        "before_validate": "jarz_pos.services.promo_codes.apply_promo_codes_before_validate",
         # Seed custom_kanban_profile from pos_profile on drafts; preserve submitted reassignments
         "validate": "jarz_pos.events.sales_invoice.sync_kanban_profile",
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
@@ -257,6 +260,8 @@ doc_events = {
         "jarz_pos.events.sales_invoice.publish_new_invoice",
         # CRM bridge: link B2B sale to Opportunity (never raises, fast-exits Standard)
         "jarz_pos.crm.pos_bridge.link_b2b_sale_to_opportunity",
+        # Promo-code engine: record redemptions (concurrency-safe, may abort submit)
+        "jarz_pos.services.promo_codes.record_redemptions_on_submit",
     ],
     # Emit state-change events for already-submitted invoices edited elsewhere
     "on_update_after_submit": [
@@ -270,6 +275,8 @@ doc_events = {
         "on_cancel": [
             "jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",
             "jarz_pos.services.consumable_deduction.reverse_consumable_deduction_on_cancel",
+            # Promo-code engine: reverse redemptions, recompute times_used
+            "jarz_pos.services.promo_codes.reverse_redemptions_on_cancel",
         ],
         # Validate bundle items before submission
         "before_submit": "jarz_pos.events.sales_invoice.validate_invoice_before_submit"

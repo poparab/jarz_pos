@@ -1,0 +1,244 @@
+{
+ "actions": [],
+ "autoname": "field:code",
+ "creation": "2026-06-29 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "code",
+  "title",
+  "enabled",
+  "column_break_1",
+  "discount_type",
+  "discount_value",
+  "max_discount_amount",
+  "min_order_amount",
+  "section_break_scope",
+  "applies_to",
+  "item_scope",
+  "column_break_scope",
+  "company",
+  "currency",
+  "allow_pickup",
+  "channels",
+  "section_break_stack",
+  "stackable",
+  "priority",
+  "usage_limit",
+  "per_customer_limit",
+  "times_used",
+  "section_break_schedule",
+  "active_from",
+  "active_to",
+  "section_break_woo",
+  "woo_coupon_code",
+  "description"
+ ],
+ "fields": [
+  {
+   "fieldname": "code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Code",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Percentage",
+   "fieldname": "discount_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Discount Type",
+   "options": "\nPercentage\nFixed Amount\nFree Delivery",
+   "reqd": 1
+  },
+  {
+   "description": "Percent (0-100) for Percentage; absolute amount for Fixed Amount; ignored for Free Delivery",
+   "fieldname": "discount_value",
+   "fieldtype": "Float",
+   "label": "Discount Value"
+  },
+  {
+   "description": "Cap for percentage codes (0 = uncapped)",
+   "fieldname": "max_discount_amount",
+   "fieldtype": "Currency",
+   "label": "Max Discount Amount",
+   "options": "currency"
+  },
+  {
+   "description": "Minimum eligible net to qualify",
+   "fieldname": "min_order_amount",
+   "fieldtype": "Currency",
+   "label": "Min Order Amount",
+   "options": "currency"
+  },
+  {
+   "fieldname": "section_break_scope",
+   "fieldtype": "Section Break",
+   "label": "Scope"
+  },
+  {
+   "default": "Whole Order",
+   "fieldname": "applies_to",
+   "fieldtype": "Select",
+   "label": "Applies To",
+   "options": "\nWhole Order\nSpecific Items\nItem Groups",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.applies_to!='Whole Order'",
+   "fieldname": "item_scope",
+   "fieldtype": "Table",
+   "label": "Item Scope",
+   "options": "Jarz Promo Code Item"
+  },
+  {
+   "fieldname": "column_break_scope",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fetch_from": "company.default_currency",
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_pickup",
+   "fieldtype": "Check",
+   "label": "Allow Pickup Orders"
+  },
+  {
+   "description": "Empty = all channels",
+   "fieldname": "channels",
+   "fieldtype": "Table",
+   "label": "Channels",
+   "options": "Jarz Promotion Rule Channel"
+  },
+  {
+   "fieldname": "section_break_stack",
+   "fieldtype": "Section Break",
+   "label": "Stacking & Limits"
+  },
+  {
+   "default": "1",
+   "fieldname": "stackable",
+   "fieldtype": "Check",
+   "label": "Stackable"
+  },
+  {
+   "default": "100",
+   "description": "Lower applies first when stacking",
+   "fieldname": "priority",
+   "fieldtype": "Int",
+   "label": "Priority"
+  },
+  {
+   "description": "Global redemption cap (0 = unlimited)",
+   "fieldname": "usage_limit",
+   "fieldtype": "Int",
+   "label": "Usage Limit"
+  },
+  {
+   "description": "Per-customer cap (0 = unlimited)",
+   "fieldname": "per_customer_limit",
+   "fieldtype": "Int",
+   "label": "Per Customer Limit"
+  },
+  {
+   "description": "Count of active redemptions",
+   "fieldname": "times_used",
+   "fieldtype": "Int",
+   "label": "Times Used",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_schedule",
+   "fieldtype": "Section Break",
+   "label": "Schedule"
+  },
+  {
+   "fieldname": "active_from",
+   "fieldtype": "Datetime",
+   "label": "Active From"
+  },
+  {
+   "fieldname": "active_to",
+   "fieldtype": "Datetime",
+   "label": "Active To"
+  },
+  {
+   "fieldname": "section_break_woo",
+   "fieldtype": "Section Break",
+   "label": "WooCommerce & Notes"
+  },
+  {
+   "description": "Optional: Woo coupon string if it differs from Code",
+   "fieldname": "woo_coupon_code",
+   "fieldtype": "Data",
+   "label": "Woo Coupon Code"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-06-29 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Promo Code",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
