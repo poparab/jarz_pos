@@ -206,12 +206,13 @@ def verify_invoice_totals(invoice_doc, logger):
         # Calculate expected totals
         expected_net_total = sum(item.amount for item in invoice_doc.items)
 
-        # An additional header discount applied on "Net Total" (e.g. a promo
-        # code) reduces net_total but NOT the line amounts, so add it back
-        # before reconciling against the sum of line amounts.
-        actual_net_total = float(invoice_doc.net_total)
-        if (invoice_doc.get("apply_discount_on") or "") == "Net Total":
-            actual_net_total += float(invoice_doc.get("discount_amount") or 0)
+        # An additional header discount (e.g. a promo code) reduces net_total
+        # (ERPNext sets net_total = total - discount_amount regardless of
+        # apply_discount_on) but NOT the line amounts, so add it back before
+        # reconciling against the sum of line amounts.
+        actual_net_total = float(invoice_doc.net_total) + float(
+            invoice_doc.get("discount_amount") or 0
+        )
 
         # Basic validation
         if abs(actual_net_total - expected_net_total) > 0.01:
