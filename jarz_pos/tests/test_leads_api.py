@@ -51,6 +51,18 @@ def _ensure_b2b_role():
         ).insert(ignore_permissions=True)
 
 
+def _any_territory():
+    """Return an existing Territory name (prefer the standard root) or None.
+
+    Territory is a nested-set tree, so we never insert one in tests — we reuse
+    whatever the site already seeds (ERPNext always seeds "All Territories").
+    """
+    if frappe.db.exists("Territory", "All Territories"):
+        return "All Territories"
+    rows = frappe.get_all("Territory", pluck="name", limit_page_length=1)
+    return rows[0] if rows else None
+
+
 # ---------------------------------------------------------------------------
 # save_lead / get_lead / get_leads
 # ---------------------------------------------------------------------------
@@ -112,6 +124,58 @@ class TestSaveAndGetLead(unittest.TestCase):
     def test_create_requires_lead_name(self):
         with self.assertRaises(Exception):
             leads_api.save_lead({"category": _COFFEE})
+
+    # --- 1b) standard-CRM parity fields (email_id / source / territory) -----
+    def test_create_maps_crm_parity_fields(self):
+        """save_lead now maps email_id + guarded source/territory (create_lead parity)."""
+        territory = _any_territory()
+        # A known-good Lead Source (only when the standard DocType is installed).
+        source = None
+        if frappe.db.exists("DocType", "Lead Source"):
+            source = "_TEST Lead Source"
+            if not frappe.db.exists("Lead Source", source):
+                frappe.get_doc(
+                    {"doctype": "Lead Source", "source_name": source}
+                ).insert(ignore_permissions=True)
+
+        payload = {
+            "lead_name": "_TEST Parity",
+            "category": _COFFEE,
+            "email_id": "parity@example.com",
+            # Unknown source is silently ignored (no such Lead Source record /
+            # not a valid custom_lead_source option) — never raises.
+            "source": source or "_TEST No Such Source",
+        }
+        if territory:
+            payload["territory"] = territory
+
+        doc = frappe.get_doc("Lead", leads_api.save_lead(payload)["name"])
+        self.assertEqual(doc.email_id, "parity@example.com")
+        if territory:
+            self.assertEqual(doc.territory, territory)
+        if source:
+            self.assertEqual(doc.source, source)
+        else:
+            # Guard held: an unknown source left the Link field unset.
+            self.assertFalse(doc.get("source"))
+
+    def test_update_patches_crm_parity_fields(self):
+        """email_id / territory are PATCH-applied on update too, like other scalars."""
+        territory = _any_territory()
+
+        name = leads_api.save_lead({"lead_name": "_TEST Parity Update"})["name"]
+        patch = {"email_id": "later@example.com"}
+        if territory:
+            patch["territory"] = territory
+        leads_api.save_lead(patch, name=name)
+
+        doc = frappe.get_doc("Lead", name)
+        self.assertEqual(doc.email_id, "later@example.com")
+        if territory:
+            self.assertEqual(doc.territory, territory)
+        # Untouched rep-owned seeds preserved across the update.
+        self.assertEqual(doc.custom_b2b_stage, "Lead")
+        self.assertEqual(doc.status, "Open")
 
     # --- 2) update PATCHes only provided keys ------------------------------
     def test_update_patches_only_provided_keys(self):
@@ -367,6 +431,21 @@ class TestLeadInPipeline(unittest.TestCase):
         card = next(c for c in board["columns"]["Lead"] if c["name"] == name)
         self.assertEqual(card["doctype"], "Lead")
         self.assertEqual(card["stage"], "Lead")
+
+    def test_lead_column_sorted_by_score_desc(self):
+        """The Lead column orders higher lead_score first (per-column sort)."""
+        low = leads_api.save_lead(
+            {"lead_name": "_TEST Score Low", "category": _COFFEE, "score": 5}
+        )["name"]
+        high = leads_api.save_lead(
+            {"lead_name": "_TEST Score High", "category": _COFFEE, "score": 95}
+        )["name"]
+
+        board = crm_api.get_b2b_pipeline()
+        col = board["columns"]["Lead"]
+        # Restrict to our two test cards so pre-existing leads don't interfere.
+        order = [c["name"] for c in col if c["name"] in (low, high)]
+        self.assertEqual(order, [high, low])
 
 
 # ---------------------------------------------------------------------------

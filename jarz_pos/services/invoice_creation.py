@@ -265,6 +265,21 @@ def _validate_policy_price_list_coverage(policy_decision, effective_price_list, 
     cart rate as before)."""
     if not getattr(policy_decision, "matched", False) or not effective_price_list:
         return
+    # Free samples (and any policy that discounts the whole line by 100%) force every net
+    # line amount to zero, so the resolved price list is irrelevant — a populated Item
+    # Price cannot change a zero-net order. Skip coverage in that case (the same discount
+    # is applied from this policy_decision at the call site). Coverage still applies in
+    # full for any discount < 100%.
+    try:
+        _policy_disc = float(getattr(policy_decision, "discount_percentage", 0) or 0)
+    except (TypeError, ValueError):
+        _policy_disc = 0.0
+    if _policy_disc >= 100:
+        logger.info(
+            f"Skipping price-list coverage for '{effective_price_list}': policy discount "
+            f"{_policy_disc}% forces the net to zero."
+        )
+        return
     missing = []
     for it in cart_items or []:
         if not isinstance(it, dict):

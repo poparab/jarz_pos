@@ -330,5 +330,51 @@ class TestCustomerTierPricing(unittest.TestCase):
         self.assertEqual(ic._resolve_item_rate(code, plist, customer=cust), 99.0)
 
 
+class TestPolicyPriceListCoverage(unittest.TestCase):
+    """Coverage validation is SKIPPED for a 100%-discount (free-sample) policy, whose
+    net is forced to zero regardless of the price list. A sub-100% policy still enforces
+    coverage, and an unmatched/Standard order is never checked (regression guard)."""
+
+    def setUp(self):
+        self.logger = frappe.logger("jarz_pos.test")
+        # A code with no selling Item Price in the target list (a non-existent item is
+        # guaranteed uncovered). The list name only needs to be truthy — the function
+        # keys off Item Price existence, not Price List existence.
+        self.cart = [{"item_code": "_TEST_NO_PRICE_ITEM_XYZ"}]
+        self.price_list = "_TEST Sample List"
+
+    def test_full_discount_skips_coverage(self):
+        # Sample - Courier: discount 100 → net 0 → coverage irrelevant → must NOT throw
+        # even though the price list has no Item Price for the cart item.
+        decision = _ns(
+            matched=True,
+            discount_percentage=100,
+            order_purpose="Sample - Courier",
+            price_list=self.price_list,
+        )
+        ic._validate_policy_price_list_coverage(
+            decision, self.price_list, self.cart, self.logger
+        )  # no exception expected
+
+    def test_partial_discount_still_enforces_coverage(self):
+        # Sub-100% policy keeps the hard coverage guard: a missing Item Price throws.
+        decision = _ns(
+            matched=True,
+            discount_percentage=50,
+            order_purpose="B2B Supply",
+            price_list=self.price_list,
+        )
+        with self.assertRaises(Exception):
+            ic._validate_policy_price_list_coverage(
+                decision, self.price_list, self.cart, self.logger
+            )
+
+    def test_unmatched_policy_skips_coverage(self):
+        decision = _ns(matched=False, discount_percentage=0, order_purpose="Standard")
+        ic._validate_policy_price_list_coverage(
+            decision, self.price_list, self.cart, self.logger
+        )  # no exception expected
+
+
 if __name__ == "__main__":
     unittest.main()

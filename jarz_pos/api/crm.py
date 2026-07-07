@@ -148,6 +148,11 @@ def get_b2b_pipeline():
                 "Lead",
                 filters={"custom_b2b_stage": ["in", list(_PRE_SAMPLE_STAGES)]},
                 fields=lead_fields,
+                order_by=(
+                    "custom_lead_score desc"
+                    if _has_field("Lead", "custom_lead_score")
+                    else None
+                ),
                 limit_page_length=0,
             )
         except Exception:
@@ -201,6 +206,16 @@ def get_b2b_pipeline():
                 "last_activity": str(row.get("modified")) if row.get("modified") else None,
             }
             columns.setdefault(stage, []).append(card)
+
+    # Order every column by lead score (highest first). Cards with no score —
+    # all Opportunities and any Lead missing custom_lead_score — sort LAST.
+    # Python's sort is stable, so equal scores keep their original query order.
+    def _score_key(card):
+        score = card.get("lead_score")
+        return score if score is not None else -1
+
+    for stage_cards in columns.values():
+        stage_cards.sort(key=_score_key, reverse=True)
 
     return {"stages": stages, "columns": columns}
 

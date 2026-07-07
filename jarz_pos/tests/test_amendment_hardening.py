@@ -1017,5 +1017,95 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
         self.assertFalse(mf.log_error.called)
 
 
+# ---------------------------------------------------------------------------
+# Test 11 – B5 fix: a rate-less qty INCREASE must not trip the >50%-drop guard
+# ---------------------------------------------------------------------------
+
+class TestAmendmentRatelessQtyIncreaseNotBlocked(unittest.TestCase):
+    """A cart line of {item_code, qty} with no rate (the Flutter update-cart payload
+    shape) must resolve its rate from the price list / Item master, so a pure quantity
+    INCREASE is NOT falsely flagged as a suspicious >50% drop. When the rate cannot be
+    resolved the genuine guard still fires."""
+
+    def _build_mock_frappe(self):
+        mf = MagicMock()
+        mf._ = lambda x: x
+        mf.parse_json.side_effect = json.loads
+        mf.db.sql.return_value = [[1]]
+        mf.session.user = "test@example.com"
+        mf.local.site = "frontend"
+        mf.logger.return_value = MagicMock()
+        mf.db.savepoint.return_value = None
+        mf.utils.now.return_value = "2026-05-16 12:00:00"
+        return mf
+
+    def test_rateless_increase_resolves_rate_and_not_blocked(self):
+        # Source priced 3 @ 100 → grand_total 300. Submitted cart bumps qty to 5 with
+        # NO rate. Without resolution submitted_total would be 0 (blocked); resolving the
+        # rate to 100 yields 500 (≥ 50% of 300) so the guard must NOT fire.
+        inv = _make_invoice(grand_total=300.0)
+        cart = _make_cart_json([{"item_code": "ITEM-A", "qty": 5}])
+
+        resolve_calls = []
+
+        def fake_resolve(item_code, price_list, fallback_rate=0.0, customer=None):
+            resolve_calls.append((item_code, price_list, customer))
+            return 100.0
+
+        with (
+            patch("jarz_pos.api.manager.frappe", self._build_mock_frappe()),
+            patch("jarz_pos.services.invoice_creation._resolve_item_rate", side_effect=fake_resolve),
+            patch("jarz_pos.api.manager._create_amendment_invoice", return_value={"invoice_name": "ACC-SINV-TEST-010"}),
+            patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+            patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+            patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=[]),
+            patch("jarz_pos.api.manager.frappe.get_doc", side_effect=lambda *a, **k: inv),
+            patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+            patch("jarz_pos.api.manager._mark_source_invoice_as_amended", return_value=None),
+            patch("jarz_pos.api.manager._add_invoice_audit_comment", return_value=None),
+            patch("jarz_pos.api.manager._build_invoice_amendment_response", return_value={"success": True}),
+            patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", MagicMock()),
+        ):
+            from jarz_pos.api.manager import _run_invoice_amendment_job
+
+            result = _run_invoice_amendment_job(
+                invoice_id="ACC-SINV-TEST-001",
+                request_id="test-req-rateless",
+                cart_json=cart,
+                pos_profile_name="Nasr city",
+            )
+
+        self.assertTrue(resolve_calls, "rate-less line must trigger rate resolution")
+        self.assertEqual(resolve_calls[0][0], "ITEM-A")
+        self.assertNotEqual(result.get("amendment_block_code"), "suspicious_diff")
+
+    def test_unresolvable_rateless_line_still_blocks(self):
+        # Control: if the rate resolves to 0 (truly unknown), the genuine >50%-drop guard
+        # must still protect the order.
+        inv = _make_invoice(grand_total=300.0)
+        cart = _make_cart_json([{"item_code": "ITEM-A", "qty": 5}])
+
+        with (
+            patch("jarz_pos.api.manager.frappe", self._build_mock_frappe()),
+            patch("jarz_pos.services.invoice_creation._resolve_item_rate", return_value=0.0),
+            patch("jarz_pos.api.manager._create_amendment_invoice", MagicMock()),
+            patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+            patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+            patch("jarz_pos.api.manager.frappe.get_doc", return_value=inv),
+            patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+        ):
+            from jarz_pos.api.manager import _run_invoice_amendment_job
+
+            result = _run_invoice_amendment_job(
+                invoice_id="ACC-SINV-TEST-001",
+                request_id="test-req-rateless-zero",
+                cart_json=cart,
+                pos_profile_name="Nasr city",
+            )
+
+        self.assertFalse(result.get("success"))
+        self.assertEqual(result.get("amendment_block_code"), "suspicious_diff")
+
+
 if __name__ == "__main__":
     unittest.main()

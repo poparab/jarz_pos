@@ -22,8 +22,13 @@ import json
 
 import frappe
 
-# Reuse the CRM access gate verbatim; never reinvent the B2B gating here.
-from jarz_pos.api.crm import _ensure_b2b_access
+# Reuse the CRM access gate + field/option guards verbatim; never reinvent the
+# B2B gating or the standard-CRM parity guards here.
+from jarz_pos.api.crm import (
+    _custom_lead_source_options,
+    _ensure_b2b_access,
+    _has_field,
+)
 
 DEFAULT_LEAD_CATEGORY = "Coffee"
 
@@ -329,6 +334,7 @@ _SCALAR_FIELD_MAP = {
     "price_band": "custom_price_band",
     "phone": "phone",
     "mobile_no": "mobile_no",
+    "email_id": "email_id",
     "website": "website",
     "instagram": "custom_instagram",
     "facebook": "custom_facebook",
@@ -400,6 +406,27 @@ def save_lead(payload, name=None):
             if not isinstance(value, (list, tuple)):
                 value = [value]
             doc.set(field, json.dumps(list(value)))
+
+    # Standard-CRM parity (mirrors jarz_pos.api.crm.create_lead guards):
+    # ``source`` / ``custom_lead_source`` / ``territory`` are set only when the
+    # referenced master record or Select option actually exists, so an unknown
+    # value is silently ignored rather than raising. ``email_id`` is handled via
+    # ``_SCALAR_FIELD_MAP`` above. Applied on both create and update.
+    source = payload.get("source")
+    if source and _has_field("Lead", "source") and frappe.db.exists(
+        "Lead Source", source
+    ):
+        doc.set("source", source)
+    if source and _has_field("Lead", "custom_lead_source"):
+        if source in _custom_lead_source_options():
+            doc.set("custom_lead_source", source)
+    territory = payload.get("territory")
+    if (
+        territory
+        and _has_field("Lead", "territory")
+        and frappe.db.exists("Territory", territory)
+    ):
+        doc.set("territory", territory)
 
     # Branches child table (replace wholesale when provided).
     if "branches" in payload and payload.get("branches") is not None:

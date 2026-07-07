@@ -587,39 +587,65 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         customer_doc.insert(ignore_permissions=True)
         frappe.logger().info(f"Customer created successfully: {customer_doc.name}")
         
-        # Create address
-        address_payload = {
-            "doctype": "Address",
-            "address_title": customer_name,
-            "address_type": "Shipping",
-            "address_line1": customer_primary_address,
-            "city": territory_name,  # Use territory name as city
-            "is_primary_address": 1,
-            "is_shipping_address": 1,
-            "links": [{
-                "link_doctype": "Customer",
-                "link_name": customer_doc.name
-            }]
-        }
+        # Address handling.
+        # If customer_primary_address is an EXISTING Address docname (e.g. a Lead's primary
+        # Address passed by request_sample), LINK that address to the new customer instead
+        # of duplicating it as free text. Any other (free-text) value keeps the original
+        # create-new behavior unchanged for standard retail.
+        existing_address_name = str(customer_primary_address or "").strip()
+        if existing_address_name and frappe.db.exists("Address", existing_address_name):
+            address_doc = frappe.get_doc("Address", existing_address_name)
+            already_linked = any(
+                (
+                    getattr(link, "link_doctype", None) == "Customer"
+                    and getattr(link, "link_name", None) == customer_doc.name
+                )
+                for link in (address_doc.get("links") or [])
+            )
+            if not already_linked:
+                address_doc.append(
+                    "links",
+                    {"link_doctype": "Customer", "link_name": customer_doc.name},
+                )
+                address_doc.flags.ignore_permissions = True
+                address_doc.save(ignore_permissions=True)
+            frappe.logger().info(
+                f"Linked existing address {address_doc.name} to customer {customer_doc.name}"
+            )
+        else:
+            # Create address (free-text address line)
+            address_payload = {
+                "doctype": "Address",
+                "address_title": customer_name,
+                "address_type": "Shipping",
+                "address_line1": customer_primary_address,
+                "city": territory_name,  # Use territory name as city
+                "is_primary_address": 1,
+                "is_shipping_address": 1,
+                "links": [{
+                    "link_doctype": "Customer",
+                    "link_name": customer_doc.name
+                }]
+            }
 
-        # Store phone on Address if the field exists
-        if frappe.db.has_column("Address", "phone"):
-            address_payload["phone"] = mobile_no
-        if frappe.db.has_column("Address", "phone_number"):
-            address_payload["phone_number"] = mobile_no
-        if frappe.db.has_column("Address", "phone_no"):
-            address_payload["phone_no"] = mobile_no
-        if frappe.db.has_column("Address", "mobile_no"):
-            address_payload["mobile_no"] = mobile_no
+            # Store phone on Address if the field exists
+            if frappe.db.has_column("Address", "phone"):
+                address_payload["phone"] = mobile_no
+            if frappe.db.has_column("Address", "phone_number"):
+                address_payload["phone_number"] = mobile_no
+            if frappe.db.has_column("Address", "phone_no"):
+                address_payload["phone_no"] = mobile_no
+            if frappe.db.has_column("Address", "mobile_no"):
+                address_payload["mobile_no"] = mobile_no
 
-        address_doc = frappe.get_doc(address_payload)
-        
-        if location_link:
-            address_doc.address_line2 = f"Location: {location_link}"
-        
-        frappe.logger().info(f"Creating address")
-        address_doc.insert(ignore_permissions=True)
-        frappe.logger().info(f"Address created successfully: {address_doc.name}")
+            address_doc = frappe.get_doc(address_payload)
+
+            if location_link:
+                address_doc.address_line2 = f"Location: {location_link}"
+
+            frappe.logger().info(f"Creating address")
+            address_doc.insert(ignore_permissions=True)
+            frappe.logger().info(f"Address created successfully: {address_doc.name}")
         
         # Create contact
         contact_payload = {

@@ -1130,12 +1130,37 @@ def _run_invoice_amendment_job(
             }
 
     # Compute submitted total (best-effort: multiply rate × qty for each row).
+    # A rate-less line ({item_code, qty} with no rate/price, as the Flutter update-cart
+    # payload sends) must NOT be treated as zero value, or a pure quantity INCREASE
+    # (e.g. 3 → 5) would falsely trip the >50%-drop guard below. Resolve the missing rate
+    # from the invoice's selling price list / Item master using the SAME helper the
+    # invoice engine uses, so the guard reflects the real cart value. Genuine reductions
+    # (rows that keep a real, lower rate) are unaffected — the guard stays intact.
+    from jarz_pos.services.invoice_creation import _resolve_item_rate as _amend_resolve_item_rate
+
+    _amend_price_list = source_invoice.get("selling_price_list") or None
     submitted_total = 0.0
     if isinstance(parsed_cart, list):
         for row in parsed_cart:
             if isinstance(row, dict):
-                row_rate = float(row.get("rate") or 0)
+                row_rate = float(row.get("rate") or row.get("price") or 0)
                 row_qty = float(row.get("qty") or row.get("quantity") or 1)
+                # Only resolve for plain rows; bundle rows keep their existing best-effort
+                # rate (bundle pricing is not a single price-list lookup).
+                if row_rate <= 0 and not row.get("is_bundle"):
+                    _code = str(row.get("item_code") or "").strip()
+                    if _code:
+                        try:
+                            row_rate = float(
+                                _amend_resolve_item_rate(
+                                    _code,
+                                    _amend_price_list,
+                                    customer=effective_customer_name,
+                                )
+                                or 0
+                            )
+                        except Exception:
+                            row_rate = 0.0
                 submitted_total += row_rate * row_qty
 
     if source_grand_total > 0 and submitted_total < 0.5 * source_grand_total:
