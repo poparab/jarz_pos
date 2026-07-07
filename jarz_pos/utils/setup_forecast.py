@@ -24,6 +24,7 @@ SHORTCUTS = [
     {"label": "Shipping Analytics",      "type": "Page",    "link_to": "shipping-analytics",     "color": "#FF6B35", "icon": "truck"},
     {"label": "Customer Analytics",      "type": "Page",    "link_to": "customer-analytics",     "color": "#2980b9", "icon": "users"},
     {"label": "Inventory Intelligence",  "type": "Page",    "link_to": "inventory-analytics",    "color": "#16a085", "icon": "stock"},
+    {"label": "B2B Sales & Clients",     "type": "Page",    "link_to": "b2b-analytics",          "color": "#2980b9", "icon": "users"},
     {"label": "Sales Invoice",           "type": "DocType", "link_to": "Sales Invoice",          "color": "#3498db", "icon": "file"},
     {"label": "POS Profile",             "type": "DocType", "link_to": "POS Profile",            "color": "#e74c3c", "icon": "setting-gear"},
     {"label": "Jarz Forecast Settings",  "type": "DocType", "link_to": "Jarz Forecast Settings", "color": "#27ae60", "icon": "bar-chart"},

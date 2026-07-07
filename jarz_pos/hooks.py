@@ -138,6 +138,13 @@ workspaces = [
                 "color": "#16a085"
             },
             {
+                "label": "B2B Sales & Clients",
+                "link_to": "b2b-analytics",
+                "type": "Page",
+                "icon": "fa fa-users",
+                "color": "#2980b9"
+            },
+            {
                 "label": "Inventory Forecast",
                 "link_to": "Jarz Forecast Settings",
                 "type": "DocType",

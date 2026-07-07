@@ -28,6 +28,74 @@ def _parse_dates(from_date, to_date):
     return str(fd), str(td)
 
 
+def _safe(label, fn, default):
+    """Run a sub-section loader, log + fall back on failure so one broken
+    section never 500s the whole composed response."""
+    try:
+        return fn()
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"shipping_analytics: {label} failed")
+        return default
+
+
+@frappe.whitelist()
+def get_shipping_analytics(from_date=None, to_date=None):
+    """Composed shipping dashboard payload.
+
+    Assembles the twelve existing shipping helpers into the single dict the
+    mobile Shipping Analytics screen consumes. Each sub-call is wrapped
+    defensively: a failure returns that key's empty default instead of failing
+    the entire response. The twelve underlying methods are unchanged.
+    """
+    _ensure_jarz_manager()
+    fd, td = _parse_dates(from_date, to_date)
+
+    return {
+        "summary_kpis": _safe(
+            "summary_kpis", lambda: get_summary_kpis(from_date=fd, to_date=td), {}
+        ),
+        "alerts": _safe(
+            "alerts", lambda: get_alerts_data(from_date=fd, to_date=td), []
+        ),
+        "cost_by_territory": _safe(
+            "cost_by_territory", lambda: get_cost_by_territory(from_date=fd, to_date=td), []
+        ),
+        "cost_by_sub_territory": _safe(
+            "cost_by_sub_territory", lambda: get_cost_by_sub_territory(from_date=fd, to_date=td), []
+        ),
+        "cost_by_pos_profile": _safe(
+            "cost_by_pos_profile", lambda: get_cost_by_pos_profile(from_date=fd, to_date=td), []
+        ),
+        "cost_by_courier": _safe(
+            "cost_by_courier", lambda: get_cost_by_courier(from_date=fd, to_date=td), []
+        ),
+        "custom_shipping_breakdown": _safe(
+            "custom_shipping_breakdown",
+            lambda: get_custom_shipping_breakdown(from_date=fd, to_date=td),
+            {"summary": {"total": 0, "approved": 0, "rejected": 0, "pending": 0, "approval_rate": 0}, "rows": []},
+        ),
+        "double_shipping_impact": _safe(
+            "double_shipping_impact",
+            lambda: get_double_shipping_impact(from_date=fd, to_date=td),
+            {"trips": [], "total_double_trips": 0, "total_extra_cost": 0.0},
+        ),
+        "daily_trend": _safe(
+            "daily_trend", lambda: get_daily_trend(from_date=fd, to_date=td), []
+        ),
+        "pickup_vs_delivery_split": _safe(
+            "pickup_vs_delivery_split",
+            lambda: get_pickup_vs_delivery_split(from_date=fd, to_date=td),
+            {"pickup": 0, "delivery": 0},
+        ),
+        "unsettled_courier_balances": _safe(
+            "unsettled_courier_balances", get_unsettled_courier_balances, []
+        ),
+        "pickup_delivery_trend": _safe(
+            "pickup_delivery_trend", lambda: get_pickup_delivery_trend(from_date=fd, to_date=td), []
+        ),
+    }
+
+
 @frappe.whitelist()
 def get_summary_kpis(from_date=None, to_date=None):
     """Eight headline KPIs covering the selected date range."""
