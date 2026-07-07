@@ -366,6 +366,18 @@ except Exception:
     pass
 
 try:
+    # Ensure Leads catalog endpoints register their @frappe.whitelist() decorators.
+    from jarz_pos.api import leads as _leads
+    _leads.get_leads
+    _leads.get_lead
+    _leads.save_lead
+    _leads.set_lead_address
+    _leads.get_lead_categories
+    _leads.save_lead_category
+except Exception:
+    pass
+
+try:
     from jarz_pos.api import user as _user
     from jarz_pos.api import notifications as _notif
     from jarz_pos.api import shift as _shift

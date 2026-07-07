@@ -178,6 +178,33 @@ def _ensure_lead_sources(log):
 			_logger().error(f"Failed to ensure Lead Source '{source}'", exc_info=True)
 
 
+def _ensure_lead_categories(log):
+	"""Seed default Jarz Lead Category master records.
+
+	Create-only: each category is checked with ``frappe.db.exists`` before insert
+	and never overwritten. The Jarz Lead Category doctype is provided by this app;
+	the whole unit is guarded so a failure logs and the rest of the seeding continues.
+	"""
+	categories = ["Coffee"]
+	for name in categories:
+		try:
+			if frappe.db.exists("Jarz Lead Category", name):
+				log["existing"].append(f"Jarz Lead Category: {name}")
+				continue
+			doc = frappe.get_doc(
+				{
+					"doctype": "Jarz Lead Category",
+					"category_name": name,
+				}
+			)
+			doc.insert(ignore_permissions=True)
+			log["created"].append(f"Jarz Lead Category: {name}")
+		except Exception:
+			_logger().error(
+				f"Failed to ensure Jarz Lead Category '{name}'", exc_info=True
+			)
+
+
 def _ensure_commercial_policies(log):
 	"""Seed default Jarz Commercial Policy records.
 
@@ -294,6 +321,7 @@ def ensure_b2b_master_data():
 		_ensure_price_lists(log, currency)
 		_ensure_opportunity_lost_reasons(log)
 		_ensure_lead_sources(log)
+		_ensure_lead_categories(log)
 		_ensure_commercial_policies(log)
 
 		if log["created"]:

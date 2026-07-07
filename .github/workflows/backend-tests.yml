@@ -84,6 +84,7 @@ jobs:
             test_b2b_crm_access
             test_b2b_reorder_forecast
             test_b2b_pos_bridge_delivery
+            test_leads_api
           )
           rc=0
           for m in "${MODULES[@]}"; do
