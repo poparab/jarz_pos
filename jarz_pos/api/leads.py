@@ -38,7 +38,7 @@ _LEAD_FLAT_FIELDS = [
     "custom_source_brand_id",
     "lead_name",
     "custom_lead_category",
-    "custom_lead_score",
+    "custom_fit_score",
     "custom_fit_tier",
     "custom_branch_count",
     "custom_price_band",
@@ -137,7 +137,9 @@ def _map_lead_row(row):
         "source_brand_id": row.get("custom_source_brand_id"),
         "lead_name": row.get("lead_name"),
         "category": row.get("custom_lead_category"),
-        "score": _int(row.get("custom_lead_score")),
+        # Output key stays ``score`` (Flutter unchanged); source column is now the
+        # catalog-owned custom_fit_score (custom_lead_score belongs to the CRM job).
+        "score": _int(row.get("custom_fit_score")),
         "tier": row.get("custom_fit_tier"),
         "branch_count": _int(row.get("custom_branch_count")),
         "price_band": row.get("custom_price_band"),
@@ -189,7 +191,7 @@ def get_leads(category=None, status=None):
         "Lead",
         filters=filters or None,
         fields=_LEAD_FLAT_FIELDS,
-        order_by="custom_lead_score desc",
+        order_by="custom_fit_score desc",
         limit_page_length=0,
     )
 
@@ -330,7 +332,9 @@ _SCALAR_FIELD_MAP = {
     "company_name": "company_name",
     "category": "custom_lead_category",
     "tier": "custom_fit_tier",
-    "score": "custom_lead_score",
+    # Catalog fit score writes to its own field; custom_lead_score is owned by
+    # the nightly CRM job (compute_lead_scores) and must never be written here.
+    "score": "custom_fit_score",
     "price_band": "custom_price_band",
     "phone": "phone",
     "mobile_no": "mobile_no",

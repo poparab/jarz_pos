@@ -114,7 +114,10 @@ class TestSaveAndGetLead(unittest.TestCase):
         self.assertEqual(doc.custom_maps_url, "https://maps/roastery")
         self.assertEqual(doc.custom_primary_area, "Zamalek")
         self.assertEqual(doc.custom_price_band, "$$$")
-        self.assertEqual(int(doc.custom_lead_score), 87)
+        # Fit score writes to its OWN field now; custom_lead_score is reserved for
+        # the nightly CRM job (compute_lead_scores) and is NOT written by save_lead.
+        self.assertEqual(int(doc.custom_fit_score), 87)
+        self.assertEqual(int(doc.custom_lead_score or 0), 0)
         self.assertEqual(doc.custom_notes, "hot lead")
         # JSON list fields stored as json.dumps.
         self.assertEqual(json.loads(doc.custom_regions), ["North Coast", "Cairo"])
@@ -197,7 +200,7 @@ class TestSaveAndGetLead(unittest.TestCase):
         self.assertEqual(doc.custom_instagram, "@after")     # patched
         self.assertEqual(doc.lead_name, "_TEST Patchable")   # intact
         self.assertEqual(doc.custom_notes, "keep me")        # intact
-        self.assertEqual(int(doc.custom_lead_score), 40)     # intact
+        self.assertEqual(int(doc.custom_fit_score), 40)      # intact (fit score field)
         # Rep-owned seeds preserved across an update.
         self.assertEqual(doc.custom_b2b_stage, "Lead")
         self.assertEqual(doc.status, "Open")
@@ -264,6 +267,13 @@ class TestSaveAndGetLead(unittest.TestCase):
                 "score": 55,
             }
         )["name"]
+        # save_lead writes the fit score to custom_fit_score, never custom_lead_score.
+        self.assertEqual(
+            int(frappe.db.get_value("Lead", target, "custom_fit_score")), 55
+        )
+        self.assertEqual(
+            int(frappe.db.get_value("Lead", target, "custom_lead_score") or 0), 0
+        )
         # A second lead in a different (throwaway) category to prove filtering.
         other_cat = "_TEST Category X"
         _ensure_category(other_cat)
@@ -433,7 +443,11 @@ class TestLeadInPipeline(unittest.TestCase):
         self.assertEqual(card["stage"], "Lead")
 
     def test_lead_column_sorted_by_score_desc(self):
-        """The Lead column orders higher lead_score first (per-column sort)."""
+        """The Lead column orders higher fit score first (sorts by custom_fit_score).
+
+        The card's output key stays ``lead_score`` but its source column is the
+        catalog fit score (custom_fit_score), which is what save_lead writes.
+        """
         low = leads_api.save_lead(
             {"lead_name": "_TEST Score Low", "category": _COFFEE, "score": 5}
         )["name"]
@@ -586,8 +600,13 @@ class TestImportIdempotency(unittest.TestCase):
         self.assertEqual(self._count(self.SRC_A), 1)
         self.assertEqual(self._count(self.SRC_B), 1)
 
-        # Catalog metrics refreshed on the 2nd run.
-        self.assertEqual(int(frappe.db.get_value("Lead", lead_a, "custom_lead_score")), 99)
+        # Catalog metrics refreshed on the 2nd run. The fit score now lives on
+        # custom_fit_score; the importer NEVER writes custom_lead_score (that field
+        # is owned by the nightly CRM job compute_lead_scores).
+        self.assertEqual(int(frappe.db.get_value("Lead", lead_a, "custom_fit_score")), 99)
+        self.assertEqual(
+            int(frappe.db.get_value("Lead", lead_a, "custom_lead_score") or 0), 0
+        )
         self.assertEqual(
             int(frappe.db.get_value("Lead", lead_a, "custom_total_reviews")), 500
         )

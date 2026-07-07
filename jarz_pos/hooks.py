@@ -291,7 +291,11 @@ scheduler_events = {
         "jarz_pos.tasks.run_nightly_rfm_segmentation",
         "jarz_pos.tasks.run_daily_inventory_digest",
         # CRM automation (guarded, never raise)
-        "jarz_pos.crm.lead_scoring.compute_lead_scores",
+        # Lead-score auto-recompute DISABLED by product decision: the catalog
+        # fit score (custom_fit_score) is manually/Excel owned and must NEVER
+        # change automatically. Re-enable only if the CRM-computed
+        # custom_lead_score is wanted again.
+        # "jarz_pos.crm.lead_scoring.compute_lead_scores",
         "jarz_pos.crm.follow_ups.run_followup_reminders",
         "jarz_pos.crm.reorder_forecast.compute_reorder_forecast",
     ],

@@ -141,7 +141,10 @@ def _upsert_lead(lead):
     doc.custom_source_brand_id = source_id
     doc.lead_name = lead.get("name")
     doc.company_name = lead.get("name")
-    doc.custom_lead_score = _int(lead.get("score"))
+    # Catalog fit score lives on its OWN field so the nightly CRM job
+    # (compute_lead_scores) can keep exclusive ownership of custom_lead_score
+    # without clobbering the imported fit score. Refreshed on create AND update.
+    doc.custom_fit_score = _int(lead.get("score"))
     doc.custom_fit_tier = lead.get("tier")
     doc.custom_branch_count = _int(lead.get("branchCount"))
     doc.custom_price_band = lead.get("price")

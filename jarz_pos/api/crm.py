@@ -140,7 +140,7 @@ def get_b2b_pipeline():
     # --- Leads (pre-sample stages only) -----------------------------------
     if _doctype_exists("Lead") and _has_field("Lead", "custom_b2b_stage"):
         lead_fields = ["name", "custom_b2b_stage", "owner", "modified"]
-        for f in ("lead_name", "company_name", "custom_lead_score"):
+        for f in ("lead_name", "company_name", "custom_fit_score"):
             if _has_field("Lead", f):
                 lead_fields.append(f)
         try:
@@ -149,8 +149,8 @@ def get_b2b_pipeline():
                 filters={"custom_b2b_stage": ["in", list(_PRE_SAMPLE_STAGES)]},
                 fields=lead_fields,
                 order_by=(
-                    "custom_lead_score desc"
-                    if _has_field("Lead", "custom_lead_score")
+                    "custom_fit_score desc"
+                    if _has_field("Lead", "custom_fit_score")
                     else None
                 ),
                 limit_page_length=0,
@@ -167,7 +167,10 @@ def get_b2b_pipeline():
                 or row.get("name"),
                 "stage": stage,
                 "owner": row.get("owner"),
-                "lead_score": row.get("custom_lead_score"),
+                # Output key stays ``lead_score`` (Flutter unchanged); the kanban
+                # shows/sorts by the catalog fit score (custom_fit_score), not the
+                # nightly CRM signal score (custom_lead_score).
+                "lead_score": row.get("custom_fit_score"),
                 "customer": None,
                 "last_activity": str(row.get("modified")) if row.get("modified") else None,
             }
@@ -208,7 +211,7 @@ def get_b2b_pipeline():
             columns.setdefault(stage, []).append(card)
 
     # Order every column by lead score (highest first). Cards with no score —
-    # all Opportunities and any Lead missing custom_lead_score — sort LAST.
+    # all Opportunities and any Lead missing custom_fit_score — sort LAST.
     # Python's sort is stable, so equal scores keep their original query order.
     def _score_key(card):
         score = card.get("lead_score")
