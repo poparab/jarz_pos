@@ -22,6 +22,7 @@ This script is bench-run only. It is NOT whitelisted and NOT called from the app
 """
 
 import json
+from urllib.parse import urlsplit, urlunsplit
 
 import frappe
 
@@ -42,6 +43,34 @@ _BRANCH_PASSTHROUGH_FIELDS = (
     "website",
     "address",
 )
+
+# Frappe Data fields cap at 140 chars; guard values so no record fails on length.
+_MAX_DATA_LEN = 140
+_BRANCH_DATA_FIELDS = ("area", "region", "governorate", "price", "status", "phone")
+
+
+def _cap(value, n=_MAX_DATA_LEN):
+    """Truncate an over-long value to fit a Data(140) field; pass None through."""
+    if value is None:
+        return None
+    s = str(value)
+    return s if len(s) <= n else s[:n]
+
+
+def _fit_website(value):
+    """Fit a website/URL into Data(140) without corrupting it: drop the
+    query/fragment (usually UTM/tracking junk) first, then hard-truncate."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if len(s) <= _MAX_DATA_LEN:
+        return s
+    try:
+        p = urlsplit(s)
+        s = urlunsplit((p.scheme, p.netloc, p.path, "", ""))
+    except Exception:
+        pass
+    return s if len(s) <= _MAX_DATA_LEN else s[:_MAX_DATA_LEN]
 
 
 def run(json_path):
@@ -127,7 +156,7 @@ def _upsert_lead(lead):
     doc.custom_governorates = json.dumps(_as_list(lead.get("governorates")))
     doc.phone = lead.get("phone")
     doc.mobile_no = lead.get("phone")
-    doc.website = lead.get("website")
+    doc.website = _fit_website(lead.get("website"))
     doc.custom_instagram = lead.get("instagram")
     doc.custom_facebook = lead.get("facebook")
     doc.custom_maps_url = lead.get("mapsUrl")
@@ -141,14 +170,19 @@ def _upsert_lead(lead):
         if not isinstance(b, dict):
             continue
         row = {
-            "branch_name": b.get("name"),
+            "branch_name": _cap(b.get("name")),
             "latitude": _float(b.get("lat")),
             "longitude": _float(b.get("lng")),
             "maps_url": b.get("mapsUrl"),
         }
         for f in _BRANCH_PASSTHROUGH_FIELDS:
             if f in b:
-                row[f] = b.get(f)
+                if f == "website":
+                    row[f] = _fit_website(b.get(f))
+                elif f in _BRANCH_DATA_FIELDS:
+                    row[f] = _cap(b.get(f))
+                else:
+                    row[f] = b.get(f)
         doc.append("custom_branches", row)
 
     # Geo on the Lead from the primary branch (metric: always refreshed).
