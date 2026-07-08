@@ -41,7 +41,6 @@ WINDOW_DAYS = 120                 # lookback for "active" customers / invoices
 MIN_INVOICES = 2                  # min submitted non-return invoices to qualify
 TARGET_B2B_CUSTOMERS = 15         # customers promoted into a B2B group
 TARGET_DISTRIBUTORS = 3           # of those, promoted to Distributor instead of B2B
-MAX_INVOICES_TAGGED = 80          # cap on invoices flagged as B2B Supply
 TARGET_OPPORTUNITIES = 9          # demo pipeline opportunities to maintain
 TARGET_CONVERSIONS = 3            # customers linked back to a demo opportunity
 
@@ -50,6 +49,7 @@ B2B_GROUP = "B2B"
 DISTRIBUTOR_GROUP = "Distributor"
 B2B_GROUPS = (B2B_GROUP, DISTRIBUTOR_GROUP)
 B2B_PURPOSE = "B2B Supply"                 # Sales Invoice.custom_order_purpose (Select)
+STANDARD_PURPOSE = "Standard"              # default custom_order_purpose (revert target)
 B2B_POLICY = "B2B Supply"                  # Jarz Commercial Policy name (Link target)
 
 # Non-terminal Opportunity.custom_b2b_stage options to cycle through.
@@ -125,6 +125,24 @@ def _active_customers(cutoff):
 	)
 
 
+def _b2b_group_customers():
+	"""Authoritative promoted set: ALL customers currently in a B2B/Distributor group.
+
+	This is the single source of truth for both invoice tagging (step 4) and the
+	self-healing cleanup (step 4b). We deliberately query ``Customer`` by group rather
+	than scanning invoices, so the tagged set stays tied to the B2B customers.
+	"""
+	try:
+		return frappe.get_all(
+			"Customer",
+			filters={"customer_group": ["in", list(B2B_GROUPS)]},
+			pluck="name",
+		)
+	except Exception:
+		_logger().error("Failed to load B2B-group customers", exc_info=True)
+		return []
+
+
 # ---------------------------------------------------------------------------
 # Step 3 — promote customers into B2B / Distributor groups
 # ---------------------------------------------------------------------------
@@ -167,10 +185,19 @@ def _promote_customers(summary, cutoff):
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — tag recent invoices as B2B Supply
+# Step 4 — tag B2B customers' recent invoices as B2B Supply
 # ---------------------------------------------------------------------------
-def _tag_invoices(summary, b2b_customers, cutoff):
+def _tag_invoices(summary, cutoff):
+	"""Tag ALL in-window submitted, non-return invoices of the promoted B2B customers.
+
+	Idempotent by construction: the scope is bounded to the B2B/Distributor-group
+	customers (queried from ``Customer``, not an arbitrary invoice scan), there is NO
+	cap, and already-tagged invoices are excluded by the ``custom_order_purpose``
+	filter. A second run therefore finds every eligible invoice already tagged and
+	tags 0 new.
+	"""
 	log = _logger()
+	b2b_customers = _b2b_group_customers()
 	if not b2b_customers:
 		summary["invoices_tagged"] = 0
 		return
@@ -194,13 +221,11 @@ def _tag_invoices(summary, b2b_customers, cutoff):
 			  AND posting_date >= %(cutoff)s
 			  AND (custom_order_purpose IS NULL OR custom_order_purpose != %(purpose)s)
 			ORDER BY posting_date DESC, name DESC
-			LIMIT %(cap)s
 			""",
 			{
 				"custs": tuple(b2b_customers),
 				"cutoff": cutoff,
 				"purpose": B2B_PURPOSE,
-				"cap": MAX_INVOICES_TAGGED,
 			},
 			as_dict=True,
 		)
@@ -228,6 +253,55 @@ def _tag_invoices(summary, b2b_customers, cutoff):
 
 	summary["invoices_tagged"] = tagged
 	log.info(f"Tagged {tagged} invoice(s) as {B2B_PURPOSE}")
+
+
+# ---------------------------------------------------------------------------
+# Step 4b — self-healing cleanup: strip B2B Supply from non-B2B customers
+# ---------------------------------------------------------------------------
+def _revert_stray_b2b_tags(summary):
+	"""Revert ``custom_order_purpose='B2B Supply'`` on invoices whose customer is NOT
+	in a B2B/Distributor group back to ``Standard`` (and clear the B2B policy link).
+
+	This runs on every invocation and undoes the earlier buggy over-tagging (the
+	arbitrary batches of ~80 invoices that were flagged without being tied to a B2B
+	customer). On a steady-state site nothing matches and 0 rows are reverted.
+	"""
+	log = _logger()
+	reverted = 0
+	try:
+		b2b_customers = _b2b_group_customers()
+		filters = {"custom_order_purpose": B2B_PURPOSE}
+		if b2b_customers:
+			# Any B2B-Supply invoice NOT belonging to a promoted B2B customer is stray.
+			filters["customer"] = ["not in", b2b_customers]
+		stray = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
+	except Exception:
+		log.error("Failed to query stray B2B-tagged invoices", exc_info=True)
+		stray = []
+
+	for name in stray:
+		try:
+			frappe.db.set_value(
+				"Sales Invoice", name, "custom_order_purpose", STANDARD_PURPOSE,
+				update_modified=False,
+			)
+			# Only clear the policy if it was pointed at the B2B policy by the seeder.
+			current_policy = frappe.db.get_value(
+				"Sales Invoice", name, "custom_commercial_policy"
+			)
+			if current_policy == B2B_POLICY:
+				frappe.db.set_value(
+					"Sales Invoice", name, "custom_commercial_policy", None,
+					update_modified=False,
+				)
+			reverted += 1
+		except Exception:
+			log.error(f"Failed to revert stray B2B tag on '{name}'", exc_info=True)
+
+	summary["invoices_reverted"] = reverted
+	log.info(
+		f"Reverted {reverted} stray B2B-Supply invoice tag(s) to {STANDARD_PURPOSE}"
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +437,7 @@ def run(force=0):
 		"aborted": False,
 		"customers_promoted": 0,
 		"invoices_tagged": 0,
+		"invoices_reverted": 0,
 		"opportunities_created": 0,
 		"opportunities_total": 0,
 		"conversions_linked": 0,
@@ -398,11 +473,18 @@ def run(force=0):
 			log.error("Failed to load existing B2B customers", exc_info=True)
 			b2b_customers = []
 
-	# 4) Tag recent invoices as B2B Supply.
+	# 4) Tag the B2B customers' in-window invoices as B2B Supply.
 	try:
-		_tag_invoices(summary, b2b_customers, cutoff)
+		_tag_invoices(summary, cutoff)
 	except Exception:
 		log.error("_tag_invoices failed unexpectedly", exc_info=True)
+
+	# 4b) Self-healing cleanup: strip B2B Supply from any non-B2B customer's invoices
+	#     (undoes the old buggy arbitrary over-tagging). Runs every invocation.
+	try:
+		_revert_stray_b2b_tags(summary)
+	except Exception:
+		log.error("_revert_stray_b2b_tags failed unexpectedly", exc_info=True)
 
 	# 5) Create pipeline opportunities + link conversions.
 	try:
@@ -428,6 +510,7 @@ def run(force=0):
 	for detail in summary.get("customers_promoted_detail", []):
 		print(f"      - {detail}")
 	print(f"  invoices tagged    : {summary.get('invoices_tagged')}")
+	print(f"  invoices reverted  : {summary.get('invoices_reverted')}")
 	print(f"  opportunities new  : {summary.get('opportunities_created')} "
 		  f"(total demo: {summary.get('opportunities_total')})")
 	print(f"  conversions linked : {summary.get('conversions_linked')}")
