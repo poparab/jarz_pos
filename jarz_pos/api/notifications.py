@@ -1436,6 +1436,25 @@ def _generate_vapid_keys() -> Tuple[str, str]:
     return public_key_b64url, private_pem
 
 
+def _load_vapid_from_private_key(private_key_pem: str) -> Any:
+    """Build a py_vapid Vapid object from the stored private key.
+
+    The key is persisted as PEM by ``_generate_vapid_keys``. pywebpush's
+    ``webpush()`` helper routes a *string* ``vapid_private_key`` through
+    ``Vapid.from_string()``, which in py_vapid >= 1.9 expects base64url-encoded
+    DER — NOT PEM — and raises an ASN.1 "invalid length" error on a PEM string,
+    killing every push before any request reaches the push service. Passing a
+    pre-built ``Vapid`` object bypasses that path and is version-robust.
+    """
+    from py_vapid import Vapid02
+
+    key = (private_key_pem or "").strip()
+    if "BEGIN" in key:
+        return Vapid02.from_pem(key.encode("ascii"))
+    # Fallback for keys already stored as raw base64url DER.
+    return Vapid02.from_string(private_key=key)
+
+
 def _get_or_create_vapid_keys() -> Tuple[str, str]:
     """Return existing VAPID keys from settings, generating them on first call."""
     settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
@@ -1595,6 +1614,13 @@ def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[s
         frappe.log_error(frappe.get_traceback(), "VAPID key retrieval failed")
         return result
 
+    try:
+        vapid_key = _load_vapid_from_private_key(private_key_pem)
+    except Exception:
+        result["status"] = "skipped_vapid_key_invalid"
+        frappe.log_error(frappe.get_traceback(), "VAPID private key could not be parsed")
+        return result
+
     settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
     vapid_subject = (settings.vapid_subject or "").strip() or "https://erp.orderjarz.com"
 
@@ -1617,7 +1643,7 @@ def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[s
             vapid_webpush(
                 subscription_info=parsed,
                 data=push_data,
-                vapid_private_key=private_key_pem,
+                vapid_private_key=vapid_key,
                 vapid_claims={"sub": vapid_subject},
             )
             result["success_count"] += 1

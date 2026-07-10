@@ -172,16 +172,20 @@ class TestVapidWebPush(unittest.TestCase):
         )
 
         with patch.object(notifications, "_get_or_create_vapid_keys", return_value=("PUB", "PRIV")):
-            with patch.dict(sys.modules, {"pywebpush": fake_wp_module}):
-                result = notifications._send_vapid_notifications(
-                    [sub_json],
-                    {"type": "new_invoice", "title": "Order!", "body": "Table 1"},
-                )
+            with patch.object(notifications, "_load_vapid_from_private_key", return_value="VAPID_OBJ"):
+                with patch.dict(sys.modules, {"pywebpush": fake_wp_module}):
+                    result = notifications._send_vapid_notifications(
+                        [sub_json],
+                        {"type": "new_invoice", "title": "Order!", "body": "Table 1"},
+                    )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["success_count"], 1)
         self.assertEqual(result["failure_count"], 0)
         self.assertEqual(result["status"], "success")
+        # webpush must receive the parsed Vapid object, never the raw PEM string.
+        _, kwargs = mock_webpush.call_args
+        self.assertEqual(kwargs["vapid_private_key"], "VAPID_OBJ")
 
     def test_send_vapid_notifications_410_disables_subscription(self):
         notifications = self._load_notifications_module()
@@ -207,11 +211,12 @@ class TestVapidWebPush(unittest.TestCase):
         )
 
         with patch.object(notifications, "_get_or_create_vapid_keys", return_value=("PUB", "PRIV")):
-            with patch.dict(sys.modules, {"pywebpush": fake_wp_module}):
-                result = notifications._send_vapid_notifications(
-                    [sub_json],
-                    {"type": "new_invoice", "title": "t", "body": "b"},
-                )
+            with patch.object(notifications, "_load_vapid_from_private_key", return_value="VAPID_OBJ"):
+                with patch.dict(sys.modules, {"pywebpush": fake_wp_module}):
+                    result = notifications._send_vapid_notifications(
+                        [sub_json],
+                        {"type": "new_invoice", "title": "t", "body": "b"},
+                    )
 
         self.assertEqual(result["failure_count"], 1)
         notifications.frappe.db.set_value.assert_called_once_with(
@@ -221,6 +226,74 @@ class TestVapidWebPush(unittest.TestCase):
             0,
             update_modified=False,
         )
+
+    # ── _load_vapid_from_private_key (regression for iOS push key parsing) ─────
+
+    def test_load_vapid_from_private_key_parses_generated_pem(self):
+        """Regression: the PEM produced by _generate_vapid_keys must load.
+
+        py_vapid >= 1.9 `Vapid.from_string()` treats a string as base64url DER
+        and raises an ASN.1 "invalid length" error on a PEM, which previously
+        broke every iOS Safari PWA push. _load_vapid_from_private_key routes PEM
+        through `from_pem`, so a real generated key must parse without raising.
+        """
+        notifications = self._load_notifications_module()
+        _, pem = notifications._generate_vapid_keys()
+        self.assertIn("BEGIN", pem)
+
+        vapid = notifications._load_vapid_from_private_key(pem)
+
+        self.assertIsNotNone(vapid)
+        # A usable py_vapid object exposes the loaded private key.
+        self.assertTrue(hasattr(vapid, "private_key"))
+
+    def test_send_vapid_notifications_with_real_key_passes_object_not_pem(self):
+        """End-to-end: a real PEM reaches webpush as a parsed object, not a str."""
+        notifications = self._load_notifications_module()
+        _, pem = notifications._generate_vapid_keys()
+        sub_json = json.dumps({
+            "endpoint": "https://web.push.apple.com/real",
+            "keys": {"p256dh": "k1", "auth": "a1"},
+        })
+        fake_settings = SimpleNamespace(vapid_subject="mailto:ops@orderjarz.com")
+        notifications.frappe.get_doc.return_value = fake_settings
+
+        mock_webpush = MagicMock(return_value=None)
+        fake_wp_module = SimpleNamespace(webpush=mock_webpush, WebPushException=Exception)
+
+        with patch.object(notifications, "_get_or_create_vapid_keys", return_value=("PUB", pem)):
+            with patch.dict(sys.modules, {"pywebpush": fake_wp_module}):
+                result = notifications._send_vapid_notifications(
+                    [sub_json],
+                    {"type": "new_invoice", "title": "t", "body": "b"},
+                )
+
+        self.assertTrue(result["ok"])
+        _, kwargs = mock_webpush.call_args
+        self.assertNotIsInstance(
+            kwargs["vapid_private_key"], str,
+            "webpush must receive a parsed Vapid object, not the raw PEM string",
+        )
+
+    def test_send_vapid_notifications_unparseable_key_skips(self):
+        """An invalid private key is reported as skipped, not a hard crash."""
+        notifications = self._load_notifications_module()
+        sub_json = json.dumps({
+            "endpoint": "https://web.push.apple.com/x",
+            "keys": {"p256dh": "k", "auth": "a"},
+        })
+        fake_wp_module = SimpleNamespace(webpush=MagicMock(), WebPushException=Exception)
+
+        with patch.object(notifications, "_get_or_create_vapid_keys", return_value=("PUB", "not-a-real-key")):
+            with patch.dict(sys.modules, {"pywebpush": fake_wp_module}):
+                result = notifications._send_vapid_notifications(
+                    [sub_json],
+                    {"type": "new_invoice", "title": "t", "body": "b"},
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "skipped_vapid_key_invalid")
+        fake_wp_module.webpush.assert_not_called()
 
     # ── _push_new_invoice integration ─────────────────────────────────────────
 
