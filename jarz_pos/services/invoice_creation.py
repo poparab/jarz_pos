@@ -329,6 +329,22 @@ def _resolve_item_rate(item_code, price_list, fallback_rate=0.0, customer=None) 
         )
         if rate not in (None, ""):
             return float(rate)
+        # Category ("item-group") rate: when the item has no per-item Item Price in this
+        # list, fall back to the B2B category price stored in the app-owned
+        # ``Jarz Price List Category Rate`` DocType (one row per price_list + item_group,
+        # e.g. item_group="Medium" -> 75). This is NOT an Item Price row — this ERPNext
+        # build makes Item Price.item_code / uom mandatory with no item_group field, so
+        # category rates live in their own table. Standard/default lists carry no category
+        # rows, so this lookup finds nothing and the resolution falls through unchanged.
+        item_group = frappe.db.get_value("Item", item_code, "item_group")
+        if item_group:
+            group_rate = frappe.db.get_value(
+                "Jarz Price List Category Rate",
+                {"price_list": price_list, "item_group": item_group},
+                "rate",
+            )
+            if group_rate not in (None, ""):
+                return float(group_rate)
 
     return float(get_item_price(item_code, price_list) or fallback_rate or 0.0)
 

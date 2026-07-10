@@ -382,11 +382,16 @@ def _open_todos_for(reference_type, reference_name):
 # Stage advancement
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
-def advance_stage(doctype, name, stage, reason=None):
+def advance_stage(doctype, name, stage, reason=None, follow_up_date=None):
     """Set ``custom_b2b_stage`` on a Lead/Opportunity (manual advancement).
 
-    On move to "Lost/On-hold", also schedules a re-engage follow-up ToDo and (if
-    the field exists) stamps custom_next_followup_date a week out.
+    Follow-up date handling:
+      - When ``follow_up_date`` (ISO ``yyyy-mm-dd``) is supplied, stamp it on
+        ``custom_next_followup_date`` and reset ``custom_followup_done = 0`` so the
+        reminder passes pick the record up again. This works for any stage.
+      - On move to "Lost/On-hold" WITHOUT an explicit date, keep the legacy
+        behaviour: schedule a re-engage ToDo + stamp custom_next_followup_date 14
+        days out. An explicit date on Lost/On-hold overrides that +14 default.
 
     Returns: {"doctype", "name", "stage"}.
     """
@@ -403,14 +408,40 @@ def advance_stage(doctype, name, stage, reason=None):
     if stage not in _stage_options(doctype):
         frappe.throw(f"Invalid stage '{stage}'.")
 
+    follow_up_date = (follow_up_date or "").strip() or None
+
     frappe.db.set_value(
         doctype, name, "custom_b2b_stage", stage, update_modified=True
     )
 
-    if stage == _LOST_STAGE:
+    if follow_up_date:
+        # Explicit date wins on every stage (including Lost/On-hold): stamp it and
+        # re-open the follow-up loop so the daily reminders re-surface it.
+        _stamp_followup_date(doctype, name, follow_up_date)
+    elif stage == _LOST_STAGE:
         _schedule_reengage(doctype, name, reason)
 
     return {"doctype": doctype, "name": name, "stage": stage}
+
+
+def _stamp_followup_date(doctype, name, follow_up_date):
+    """Stamp custom_next_followup_date + reset custom_followup_done=0. Guarded."""
+    try:
+        if _has_field(doctype, "custom_next_followup_date"):
+            frappe.db.set_value(
+                doctype,
+                name,
+                "custom_next_followup_date",
+                follow_up_date,
+                update_modified=False,
+            )
+        if _has_field(doctype, "custom_followup_done"):
+            frappe.db.set_value(
+                doctype, name, "custom_followup_done", 0, update_modified=False
+            )
+    except Exception:
+        # Stage advancement already happened; a follow-up hiccup must not fail it.
+        pass
 
 
 def _schedule_reengage(doctype, name, reason):
@@ -442,6 +473,95 @@ def _schedule_reengage(doctype, name, reason):
             )
     except Exception:
         # Advancement already happened; a follow-up hiccup must not fail the call.
+        pass
+
+
+@frappe.whitelist()
+def complete_followup(doctype, name):
+    """Mark a follow-up complete — the write path that STOPS daily regeneration.
+
+    Sets ``custom_followup_done = 1``, clears ``custom_next_followup_date``, and closes
+    any open ToDo referencing the record. Because the reminder passes only ever pick up
+    records with ``custom_followup_done == 0`` (and re-open ToDos are deduped), completing
+    the follow-up here is what breaks the loop where reminders were re-created every day.
+
+    Access: a manager, or the B2B rep who owns / is assigned the record.
+
+    Returns: {"ok": True}.
+    """
+    _ensure_b2b_access()
+
+    if doctype not in ("Lead", "Opportunity"):
+        frappe.throw("doctype must be 'Lead' or 'Opportunity'.")
+    if not _doctype_exists(doctype) or not frappe.db.exists(doctype, name):
+        frappe.throw(f"{doctype} '{name}' not found.")
+    if not _can_complete_followup(doctype, name):
+        frappe.throw("Not permitted: only a manager or the assigned rep may complete this follow-up.")
+
+    if _has_field(doctype, "custom_followup_done"):
+        frappe.db.set_value(
+            doctype, name, "custom_followup_done", 1, update_modified=False
+        )
+    if _has_field(doctype, "custom_next_followup_date"):
+        frappe.db.set_value(
+            doctype, name, "custom_next_followup_date", None, update_modified=False
+        )
+
+    _close_open_todos(doctype, name)
+
+    return {"ok": True}
+
+
+def _can_complete_followup(doctype, name):
+    """Managers may always complete; a B2B rep only for records they own/are assigned."""
+    roles = set(frappe.get_roles(frappe.session.user) or [])
+    if roles.intersection(_manager_roles()):
+        return True
+    if "B2B Sales Rep" not in roles:
+        return False
+    user = frappe.session.user
+    try:
+        if frappe.db.get_value(doctype, name, "owner") == user:
+            return True
+    except Exception:
+        pass
+    # Fall back to a standard Frappe assignment (open ToDo allocated to the caller).
+    try:
+        if _doctype_exists("ToDo") and frappe.db.exists(
+            "ToDo",
+            {
+                "reference_type": doctype,
+                "reference_name": name,
+                "allocated_to": user,
+                "status": "Open",
+            },
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _close_open_todos(reference_type, reference_name):
+    """Close (status='Closed') every open ToDo referencing the record. Never raises."""
+    try:
+        if not _doctype_exists("ToDo"):
+            return
+        names = frappe.get_all(
+            "ToDo",
+            filters={
+                "reference_type": reference_type,
+                "reference_name": reference_name,
+                "status": "Open",
+            },
+            pluck="name",
+        )
+        for todo in names:
+            try:
+                frappe.db.set_value("ToDo", todo, "status", "Closed")
+            except Exception:
+                pass
+    except Exception:
         pass
 
 
