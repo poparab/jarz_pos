@@ -48,8 +48,6 @@ _B2B_ORDER_PURPOSE = "B2B Supply"
 def _manager_roles():
     return {
         "JARZ Manager",
-        "jarz line manager",
-        "JARZ line manager",
         "System Manager",
         "Administrator",
     }

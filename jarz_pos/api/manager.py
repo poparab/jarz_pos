@@ -111,7 +111,7 @@ def _ensure_manager_dashboard_access() -> None:
 
 def _has_shift_monitor_access() -> bool:
     roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
-    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, ROLES.ADMINISTRATOR}
+    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, ROLES.ADMINISTRATOR, ROLES.JARZ_LINE_MANAGER, "JARZ line manager"}
     return bool(roles.intersection(allowed))
 
 

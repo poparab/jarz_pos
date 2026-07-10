@@ -23,6 +23,14 @@ def _ensure_jarz_manager():
         frappe.throw(_("Only JARZ Manager can access reports"), frappe.PermissionError)
 
 
+def _ensure_materials_report_access():
+    """Materials & Consumables — JARZ Manager, Administrator, or JARZ line manager."""
+    roles = set(frappe.get_roles(frappe.session.user))
+    allowed = {ROLES.JARZ_MANAGER, ROLES.ADMINISTRATOR, ROLES.JARZ_LINE_MANAGER, "JARZ line manager"}
+    if not roles.intersection(allowed):
+        frappe.throw(_("You are not permitted to access this report"), frappe.PermissionError)
+
+
 @frappe.whitelist()
 def get_final_products_report() -> Dict[str, Any]:
     """
@@ -140,7 +148,7 @@ def get_materials_report() -> Dict[str, Any]:
         "consumables": [ ... ]
     }
     """
-    _ensure_jarz_manager()
+    _ensure_materials_report_access()
 
     target_groups = ["Raw Material", "Sub Assembly", "Consumable"]
 

@@ -36,8 +36,6 @@ def get_current_user_roles():
         role_set.intersection(
             {
                 "JARZ Manager",
-                "jarz line manager",
-                "JARZ line manager",
                 "System Manager",
                 "Administrator",
             }
