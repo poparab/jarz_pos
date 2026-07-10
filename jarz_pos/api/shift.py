@@ -888,12 +888,21 @@ def _get_or_create_cash_over_short_account(company: str) -> str:
 
     Prefers the account set in Jarz POS Settings if available.
     """
-    # Try Jarz POS Settings first
+    # Try Jarz POS Settings first – but only trust the configured account when it
+    # actually exists as a non-group ledger account in this company. A stale or
+    # missing value (e.g. carried over from a clone/restore) would otherwise make
+    # the discrepancy Journal Entry fail its link validation, silently skipping the
+    # Cash Over/Short posting. When invalid, fall through to find-or-create below.
     try:
         from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
         s = get_jarz_settings()
-        if s and s.cash_over_short_account:
-            return s.cash_over_short_account
+        configured = (s.cash_over_short_account or "").strip() if s else ""
+        if configured and frappe.db.get_value(
+            "Account",
+            {"name": configured, "company": company, "is_group": 0},
+            "name",
+        ):
+            return configured
     except Exception:
         pass
 
