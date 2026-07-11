@@ -351,5 +351,44 @@ class TestGetCustomerPricing(unittest.TestCase):
         self.assertEqual(out["prices"], [])
 
 
+class TestV16QuerySafety(unittest.TestCase):
+    """Regression guards for the two v16 query bugs found on staging: a
+    SQL-function string in SELECT, and selecting Item Price.item_group (no such
+    column). Both were previously swallowed by broad excepts and returned empty
+    data. These assert the queries stay v16-safe by inspecting the fields passed
+    to frappe.get_all."""
+
+    def _capture_get_all(self):
+        calls = []
+
+        def _spy(doctype, *args, **kwargs):
+            calls.append((doctype, kwargs.get("fields")))
+            return []
+
+        return calls, _spy
+
+    def test_pricing_categories_uses_no_sql_function_string(self):
+        calls, spy = self._capture_get_all()
+        with patch.object(pl.frappe, "get_all", side_effect=spy):
+            pl._pricing_categories()
+        item_fields = [f for dt, fs in calls if dt == "Item" for f in (fs or [])]
+        self.assertTrue(item_fields, "expected an Item query")
+        for f in item_fields:
+            self.assertNotIn("(", f, f"SQL-function string leaked into SELECT: {f}")
+            self.assertNotIn(" as ", f.lower(), f"aliased SQL string leaked: {f}")
+
+    def test_item_overrides_never_selects_item_group_from_item_price(self):
+        calls, spy = self._capture_get_all()
+        with patch.object(pl.frappe, "get_all", side_effect=spy):
+            pl._item_overrides_for_list("Companies")
+        ip_fields = [fs or [] for dt, fs in calls if dt == "Item Price"]
+        self.assertTrue(ip_fields, "expected an Item Price query")
+        for fields in ip_fields:
+            self.assertNotIn(
+                "item_group", fields,
+                "Item Price has no item_group column on this build — derive it from Item",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

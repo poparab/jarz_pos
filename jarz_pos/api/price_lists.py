@@ -131,23 +131,29 @@ def _pricing_categories():
     Returns ``[{"item_group", "item_count"}]`` sorted by item_group. These are the
     rows the pricing UI renders as editable category prices.
     """
+    # NOTE: do NOT use a SQL-function string ("count(name) as item_count") in
+    # ``fields`` — ERPNext v16's query engine rejects function-strings in SELECT.
+    # Pull the item_group column and count in Python (item set is small).
     try:
-        rows = frappe.get_all(
+        items = frappe.get_all(
             "Item",
             filters={"disabled": 0, "is_sales_item": 1},
-            fields=["item_group", "count(name) as item_count"],
-            group_by="item_group",
+            fields=["item_group"],
             order_by="item_group asc",
         )
     except Exception:
-        rows = []
-    out = []
-    for r in rows:
+        frappe.log_error(frappe.get_traceback(), "price_lists._pricing_categories")
+        items = []
+    counts: dict[str, int] = {}
+    for r in items:
         group = r.get("item_group")
         if not group:
             continue
-        out.append({"item_group": group, "item_count": int(r.get("item_count") or 0)})
-    return out
+        counts[group] = counts.get(group, 0) + 1
+    return [
+        {"item_group": group, "item_count": counts[group]}
+        for group in sorted(counts)
+    ]
 
 
 def _category_rate(price_list, item_group):
@@ -210,6 +216,9 @@ def _category_rows_for_list(price_list):
 
 def _item_overrides_for_list(price_list):
     """Per-item generic overrides in a price list (item_code set, no customer)."""
+    # NOTE: Item Price has NO ``item_group`` column on this ERPNext build, so it
+    # must NOT be in the SELECT (v16 raises "Unknown column"). item_group is
+    # derived per row from the Item below.
     try:
         rows = frappe.get_all(
             "Item Price",
@@ -218,10 +227,11 @@ def _item_overrides_for_list(price_list):
                 "customer": ["in", [None, ""]],
                 "item_code": ["is", "set"],
             },
-            fields=["item_code", "item_name", "item_group", "price_list_rate"],
-            order_by="item_group asc, item_code asc",
+            fields=["item_code", "item_name", "price_list_rate"],
+            order_by="item_code asc",
         )
     except Exception:
+        frappe.log_error(frappe.get_traceback(), "price_lists._item_overrides_for_list")
         rows = []
     out = []
     for r in rows:
