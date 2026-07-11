@@ -290,11 +290,24 @@ def _validate_policy_price_list_coverage(policy_decision, effective_price_list, 
         # Skip bundles and manually-overridden lines — those don't price off the list.
         if it.get("is_bundle") or it.get("custom_rate_override") not in (None, "", 0, 0.0):
             continue
-        if not frappe.db.exists(
+        # An item is covered if it has a per-item selling Item Price...
+        if frappe.db.exists(
             "Item Price",
             {"item_code": code, "price_list": effective_price_list, "selling": 1},
         ):
-            missing.append(code)
+            continue
+        # ...OR a category rate for its item_group. Category rates (Jarz Price List
+        # Category Rate) are the PRIMARY B2B pricing mechanism and are exactly what
+        # _resolve_item_rate falls back to, so coverage MUST recognize them too —
+        # otherwise a valid category-priced order is wrongly rejected as "no price".
+        item_group = frappe.db.get_value("Item", code, "item_group")
+        if item_group and frappe.db.get_value(
+            "Jarz Price List Category Rate",
+            {"price_list": effective_price_list, "item_group": item_group},
+            "rate",
+        ) not in (None, ""):
+            continue
+        missing.append(code)
     if missing:
         names = ", ".join(sorted(set(missing)))
         logger.error(

@@ -375,6 +375,55 @@ class TestPolicyPriceListCoverage(unittest.TestCase):
             decision, self.price_list, self.cart, self.logger
         )  # no exception expected
 
+    def test_category_rate_counts_as_coverage(self):
+        # REGRESSION: an item with NO per-item Item Price but WITH a Jarz Price List
+        # Category Rate for its item_group must be treated as covered (this is the
+        # primary B2B pricing path and is what _resolve_item_rate uses). Previously the
+        # coverage validator ignored category rates and wrongly rejected such orders.
+        decision = _ns(
+            matched=True, discount_percentage=0,
+            order_purpose="B2B Supply", price_list=self.price_list,
+        )
+        cart = [{"item_code": "_TEST_CAT_ITEM"}]
+
+        def _exists(doctype, _filters):
+            return False  # no per-item Item Price
+
+        def _get_value(doctype, key, field=None, **_kw):
+            if doctype == "Item":
+                return "Medium"  # the item's group
+            if doctype == "Jarz Price List Category Rate":
+                return 111.0  # a category rate exists for (list, Medium)
+            return None
+
+        with patch.object(ic.frappe.db, "exists", side_effect=_exists), patch.object(
+            ic.frappe.db, "get_value", side_effect=_get_value
+        ):
+            ic._validate_policy_price_list_coverage(
+                decision, self.price_list, cart, self.logger
+            )  # must NOT throw — category rate covers it
+
+    def test_no_price_and_no_category_still_throws(self):
+        # Negative control: no per-item price AND no category rate → still rejected.
+        decision = _ns(
+            matched=True, discount_percentage=0,
+            order_purpose="B2B Supply", price_list=self.price_list,
+        )
+        cart = [{"item_code": "_TEST_CAT_ITEM"}]
+
+        def _get_value(doctype, key, field=None, **_kw):
+            if doctype == "Item":
+                return "Medium"
+            return None  # no category rate
+
+        with patch.object(ic.frappe.db, "exists", return_value=False), patch.object(
+            ic.frappe.db, "get_value", side_effect=_get_value
+        ):
+            with self.assertRaises(Exception):
+                ic._validate_policy_price_list_coverage(
+                    decision, self.price_list, cart, self.logger
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
