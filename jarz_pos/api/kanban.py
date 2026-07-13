@@ -1837,6 +1837,12 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                     pe_doc.cancel()
                     cancelled_payment_entries.append(pe_doc.name)
 
+                # Cancelling the Payment Entry updates the linked Sales Invoice's
+                # outstanding_amount and `modified` timestamp in the DB. Re-read the
+                # invoice before cancelling it, otherwise this stale in-memory doc trips
+                # a TimestampMismatchError ("has been modified after you have opened it").
+                invoice.reload()
+                invoice.flags.ignore_permissions = True
                 invoice.cancel()
                 cancelled_docstatus = 2
 
