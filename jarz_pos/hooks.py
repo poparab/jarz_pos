@@ -309,6 +309,11 @@ scheduler_events = {
     "weekly": [
         "jarz_pos.tasks.run_weekly_velocity_update",
     ],
+    "hourly": [
+        # Escalate unpaid InstaPay/Mobile Wallet orders that have sat Out for
+        # Delivery awaiting payment confirmation past the configured threshold.
+        "jarz_pos.tasks.escalate_unconfirmed_online_payments",
+    ],
 }
 
 # Testing

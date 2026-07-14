@@ -20,6 +20,7 @@
   "column_break_general",
   "delivery_employee_group",
   "delivery_supplier_group",
+  "instapay_unconfirmed_alert_hours",
   "receipt_section",
   "receipt_header_text",
   "receipt_footer_text",
@@ -145,6 +146,14 @@
    "fieldname": "delivery_supplier_group",
    "fieldtype": "Data",
    "label": "Delivery Supplier Group"
+  },
+  {
+   "default": "6",
+   "description": "Hours an unpaid InstaPay/Mobile Wallet order can sit Out for Delivery awaiting payment before the hourly escalation job alerts managers.",
+   "fieldname": "instapay_unconfirmed_alert_hours",
+   "fieldtype": "Int",
+   "label": "InstaPay Unconfirmed Alert Hours",
+   "non_negative": 1
   },
   {
    "fieldname": "receipt_section",

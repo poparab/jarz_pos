@@ -14,6 +14,9 @@ from frappe import _
 from jarz_pos.api.payment_receipts import (
     ensure_uploaded_payment_receipt,
     mark_payment_receipts_changed_for_invoice,
+    confirm_receipt,
+    _ensure_payment_receipt_confirm_access,
+    _has_payment_receipt_confirm_access,
 )
 from jarz_pos.constants import ACCOUNTS, WS_EVENTS
 from jarz_pos.utils.account_utils import (
@@ -901,6 +904,348 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         "delivery_note": dn_result.get("delivery_note"),
         "delivery_note_reused": dn_result.get("reused"),
         "dn_logic_version": DN_LOGIC_VERSION,
+    }
+    frappe.publish_realtime(WS_EVENTS.COURIER_OUTSTANDING, payload)
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# InstaPay / Mobile Wallet — unpaid online-intent "assurance" flow
+# ---------------------------------------------------------------------------
+# When an UNPAID order whose intended method is an online (non-cash) method is
+# moved Out for Delivery, we MUST NOT shift the receivable to Courier
+# Outstanding nor mark it Paid: no money has arrived yet and the courier is not
+# liable. Instead the order stays honestly Unpaid on Debtors and waits for a
+# manager to confirm the bank/wallet transfer via ``confirm_online_payment``.
+
+
+def _invoice_is_online_intent(inv) -> bool:
+    """True when the invoice's intended ``custom_payment_method`` normalizes to a non-cash online method."""
+    try:
+        raw = inv.get("custom_payment_method") if hasattr(inv, "get") else getattr(inv, "custom_payment_method", None)
+    except Exception:
+        raw = getattr(inv, "custom_payment_method", None)
+    raw = str(raw or "").strip()
+    if not raw:
+        return False
+    try:
+        normalized = _normalize_collection_method(raw)
+    except Exception:
+        # Unknown / empty / unmapped method → not an online-intent order we handle here
+        return False
+    return _is_online_collection_method(normalized)
+
+
+def _resolve_party_display_name(party_type: str | None, party: str | None) -> str | None:
+    """Best-effort human label for an Employee/Supplier courier party."""
+    party_type = (party_type or "").strip()
+    party = (party or "").strip()
+    if not party:
+        return None
+    try:
+        if party_type == "Employee":
+            return frappe.db.get_value("Employee", party, "employee_name") or party
+        if party_type == "Supplier":
+            return frappe.db.get_value("Supplier", party, "supplier_name") or party
+    except Exception:
+        pass
+    return party
+
+
+def _seconds_since_datetime(ts) -> int | None:
+    if not ts:
+        return None
+    try:
+        dt = frappe.utils.get_datetime(ts)
+        if not dt:
+            return None
+        return int((frappe.utils.now_datetime() - dt).total_seconds())
+    except Exception:
+        return None
+
+
+def _latest_active_payment_receipt(invoice_name: str) -> dict | None:
+    """Return the newest non-Changed POS Payment Receipt linked to the invoice, if any."""
+    if not invoice_name:
+        return None
+    try:
+        rows = frappe.get_all(
+            "POS Payment Receipt",
+            filters={"sales_invoice": invoice_name, "status": ["!=", "Changed"]},
+            fields=["name", "status", "receipt_image", "receipt_image_url"],
+            order_by="creation desc",
+            limit_page_length=1,
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "name": row.get("name"),
+        "status": row.get("status"),
+        "receipt_image_url": row.get("receipt_image_url") or row.get("receipt_image"),
+    }
+
+
+def handle_unpaid_online_deliver_unconfirmed(inv, *, pos_profile: str | None = None) -> dict:
+    """Move an UNPAID online-intent order Out for Delivery WITHOUT touching accounting.
+
+    Contract:
+      * Set operational state to ``Out for Delivery``.
+      * Stamp ``custom_payment_confirmation_status='Awaiting Payment'`` +
+        ``custom_ofd_unconfirmed_since`` (now) + reset ``custom_payment_confirmation_alerted``.
+      * Ensure the Delivery Note exists (raise on error, like every other OFD flow).
+      * NEVER call ``mark_courier_outstanding`` and NEVER create a Payment Entry — the
+        receivable stays on Debtors and the invoice stays Unpaid.
+    """
+    if getattr(inv, "docstatus", 0) != 1:
+        frappe.throw("Invoice must be submitted before moving Out for Delivery.")
+
+    # Operational state → Out for Delivery
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
+
+    # Confirmation tracking fields (no accounting side-effects)
+    update_submitted_sales_invoice_fields(
+        inv,
+        {
+            "custom_payment_confirmation_status": "Awaiting Payment",
+            "custom_ofd_unconfirmed_since": frappe.utils.now_datetime(),
+            "custom_payment_confirmation_alerted": 0,
+        },
+    )
+
+    # Mandatory Delivery Note (same enforcement as every other OFD path)
+    dn_result = ensure_delivery_note_for_invoice(inv.name)
+    if dn_result.get("error"):
+        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+
+    payload = {
+        "success": True,
+        "invoice": inv.name,
+        "new_state": "Out for Delivery",
+        "payment_confirmation_status": "Awaiting Payment",
+        "delivery_note": dn_result.get("delivery_note"),
+        "delivery_note_reused": bool(dn_result.get("reused")),
+        "mode": "unpaid_online_deliver_unconfirmed",
+        "dn_logic_version": DN_LOGIC_VERSION,
+    }
+    frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
+    return payload
+
+
+def deliver_online_unconfirmed(invoice_name: str, pos_profile: str) -> dict:
+    """Endpoint logic: move an unpaid online-intent invoice Out for Delivery (unconfirmed)."""
+    invoice_name = (invoice_name or "").strip()
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    result = handle_unpaid_online_deliver_unconfirmed(inv, pos_profile=pos_profile)
+    return {
+        "success": True,
+        "invoice": inv.name,
+        "new_state": "Out for Delivery",
+        "payment_confirmation_status": "Awaiting Payment",
+        "delivery_note": result.get("delivery_note"),
+        "delivery_note_reused": bool(result.get("delivery_note_reused")),
+    }
+
+
+def list_unconfirmed_online_orders(pos_profile: str | None = None) -> dict:
+    """Endpoint logic: list submitted SIs awaiting online payment confirmation.
+
+    Scoped to the POS profiles the current user can access (same approach as
+    ``list_payment_receipts``). Joins the latest linked POS Payment Receipt for
+    the screenshot status/image and exposes a per-order ``can_confirm`` flag.
+    """
+    from jarz_pos.api.manager import _current_user_allowed_profiles
+
+    pos_profile = (pos_profile or "").strip()
+    filters: dict[str, object] = {
+        "docstatus": 1,
+        "custom_payment_confirmation_status": "Awaiting Payment",
+    }
+
+    accessible_profiles = _current_user_allowed_profiles() or []
+    if pos_profile:
+        filters["custom_kanban_profile"] = pos_profile
+    elif accessible_profiles:
+        filters["custom_kanban_profile"] = ["in", accessible_profiles]
+
+    rows = frappe.get_all(
+        "Sales Invoice",
+        filters=filters,
+        fields=[
+            "name",
+            "customer",
+            "customer_name",
+            "grand_total",
+            "outstanding_amount",
+            "custom_payment_method",
+            "custom_ofd_unconfirmed_since",
+            "custom_courier_party_type",
+            "custom_courier_party",
+            "pos_profile",
+            "custom_kanban_profile",
+        ],
+        order_by="custom_ofd_unconfirmed_since asc",
+    )
+
+    orders = []
+    for row in rows:
+        profile = row.get("custom_kanban_profile") or row.get("pos_profile")
+        party_type = row.get("custom_courier_party_type")
+        party = row.get("custom_courier_party")
+        receipt = _latest_active_payment_receipt(row.get("name")) or {}
+        unconfirmed_since = row.get("custom_ofd_unconfirmed_since")
+
+        orders.append(
+            {
+                "invoice": row.get("name"),
+                "customer": row.get("customer"),
+                "customer_name": row.get("customer_name"),
+                "amount": float(row.get("grand_total") or 0),
+                "expected_reference": row.get("name"),
+                "payment_method": row.get("custom_payment_method"),
+                "courier_party_type": party_type,
+                "courier_party": party,
+                "courier_name": _resolve_party_display_name(party_type, party),
+                "unconfirmed_since": str(unconfirmed_since) if unconfirmed_since else None,
+                "age_seconds": _seconds_since_datetime(unconfirmed_since),
+                "receipt_name": receipt.get("name"),
+                "receipt_status": receipt.get("status"),
+                "receipt_image_url": receipt.get("receipt_image_url"),
+                "can_confirm": _has_payment_receipt_confirm_access(profile),
+            }
+        )
+
+    return {"success": True, "orders": orders}
+
+
+def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: str | None = None, receipt_name: str | None = None) -> dict:
+    """Endpoint logic: manager confirms the bank/wallet transfer for an unpaid online order.
+
+    Creates a Receive Payment Entry (DR Bank/Instapay, CR Debtors) auto-allocated to the
+    invoice → marks it Paid. Idempotent: a second call (already confirmed, or a real
+    customer Payment Entry already exists) returns gracefully without duplicating anything.
+    """
+    # Permission gate — managers / admins / line-managers (scoped to profile)
+    _ensure_payment_receipt_confirm_access(pos_profile)
+
+    invoice_name = (invoice_name or "").strip()
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    company = inv.company
+    method_label = str(inv.get("custom_payment_method") or "").strip()
+    current_status = str(inv.get("custom_payment_confirmation_status") or "").strip()
+
+    # Idempotency: already confirmed OR a real (non courier-outstanding) customer PE exists
+    existing_pe = _get_real_customer_payment_entry(inv.name, company)
+    if current_status == "Payment Confirmed" or existing_pe:
+        return {
+            "success": True,
+            "invoice": inv.name,
+            "payment_entry": (existing_pe or {}).get("name"),
+            "payment_confirmation_status": "Payment Confirmed",
+            "amount": float(inv.grand_total or 0),
+            "method": method_label,
+            "already_confirmed": True,
+        }
+
+    if current_status != "Awaiting Payment":
+        frappe.throw("Invoice is not awaiting online payment confirmation.")
+
+    # Must still be unpaid
+    try:
+        outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
+    except Exception:
+        outstanding = float(inv.outstanding_amount or 0)
+    if outstanding <= 0.0001:
+        frappe.throw("Invoice is already fully paid.")
+
+    # Resolve the online collection ledger from the intended method
+    normalized_method = _normalize_collection_method(method_label)
+    if not _is_online_collection_method(normalized_method):
+        frappe.throw("Invoice payment method is not an online method.")
+
+    order_amount = float(inv.grand_total or 0) or outstanding
+
+    # Validate the uploaded screenshot (invoice + method + amount), then confirm the receipt
+    ensure_uploaded_payment_receipt(
+        receipt_name,
+        sales_invoice=inv.name,
+        payment_method=method_label,
+        amount=order_amount,
+    )
+    confirm_receipt(receipt_name)
+
+    # DR Bank/Instapay ledger, CR Debtors → auto-allocated to the SI → marks Paid
+    paid_from = _get_receivable_account(company)
+    paid_to = _get_online_collection_account(normalized_method, company)
+    pe = _create_payment_entry(inv, paid_from, paid_to, outstanding)
+
+    update_submitted_sales_invoice_fields(
+        inv,
+        {
+            "custom_payment_confirmation_status": "Payment Confirmed",
+            "custom_payment_confirmation_reference": (reference_no or "").strip() or None,
+            "custom_payment_confirmed_by": frappe.session.user,
+            "custom_payment_confirmed_date": frappe.utils.now_datetime(),
+        },
+    )
+
+    payload = {
+        "success": True,
+        "invoice": inv.name,
+        "payment_entry": pe.name,
+        "payment_confirmation_status": "Payment Confirmed",
+        "amount": order_amount,
+        "method": method_label,
+    }
+    frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload)
+    return payload
+
+
+def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None) -> dict:
+    """Endpoint logic: convert an unconfirmed online order into a cash-on-delivery courier order.
+
+    Delegates the accounting move (receivable → Courier Outstanding + Courier Transaction)
+    to ``mark_courier_outstanding`` and then stamps the confirmation status.
+    """
+    # Manager-level decision (makes the courier liable for cash collection)
+    _ensure_payment_receipt_confirm_access(pos_profile)
+
+    invoice_name = (invoice_name or "").strip()
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    res = mark_courier_outstanding(invoice_name, None, party_type, party) or {}
+
+    update_submitted_sales_invoice_fields(
+        inv,
+        {"custom_payment_confirmation_status": "Converted to Cash"},
+    )
+
+    payload = {
+        "success": True,
+        "invoice": inv.name,
+        "courier_transaction": res.get("courier_transaction"),
+        "payment_entry": res.get("payment_entry"),
+        "journal_entry": res.get("journal_entry"),
+        "payment_confirmation_status": "Converted to Cash",
     }
     frappe.publish_realtime(WS_EVENTS.COURIER_OUTSTANDING, payload)
     return payload

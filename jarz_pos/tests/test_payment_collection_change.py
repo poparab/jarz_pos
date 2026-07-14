@@ -122,6 +122,9 @@ def _build_stub_payment_receipts():
         "status": "Unconfirmed",
         "receipt_image_url": "/files/receipt.png",
     })
+    module.confirm_receipt = MagicMock(return_value={"success": True})
+    module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
+    module._has_payment_receipt_confirm_access = MagicMock(return_value=True)
     return module
 
 
@@ -373,3 +376,91 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
         self.assertEqual(invoice.custom_payment_method, "Instapay")
         self.assertTrue(invoice.flags.ignore_validate_update_after_submit)
         self.assertEqual(len(invoice._save_calls), 1)
+
+
+class TestConfirmOnlinePayment(unittest.TestCase):
+    """confirm_online_payment: booking, idempotency, field stamping."""
+
+    def test_confirm_creates_pe_debiting_bank_crediting_debtors_and_stamps_fields(self):
+        invoice = _FakeInvoice(
+            name="INV-ONLINE-CONF",
+            custom_payment_method="Instapay",
+            custom_payment_confirmation_status="Awaiting Payment",
+            outstanding_amount=150.0,
+        )
+        module, stub_frappe = _import_delivery_handling(invoice)
+
+        module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module._normalize_collection_method = MagicMock(return_value="Instapay")
+        module._is_online_collection_method = MagicMock(return_value=True)
+        module.ensure_uploaded_payment_receipt = MagicMock(return_value={
+            "name": "PPR-1",
+            "payment_method": "Instapay",
+            "amount": 150.0,
+            "status": "Unconfirmed",
+            "receipt_image_url": "/files/receipt.png",
+        })
+        module.confirm_receipt = MagicMock(return_value={"success": True})
+        module._get_receivable_account = MagicMock(return_value="Debtors - TC")
+        module._get_online_collection_account = MagicMock(return_value="Instapay - TC")
+
+        captured = {}
+
+        def _fake_pe(inv, paid_from, paid_to, outstanding, *args, **kwargs):
+            captured["paid_from"] = paid_from
+            captured["paid_to"] = paid_to
+            captured["outstanding"] = outstanding
+            return SimpleNamespace(name="PE-ONLINE-1")
+
+        module._create_payment_entry = MagicMock(side_effect=_fake_pe)
+        stub_frappe.db.get_value = MagicMock(return_value=150.0)
+
+        result = module.confirm_online_payment(
+            invoice_name="INV-ONLINE-CONF",
+            pos_profile="Nasr city",
+            reference_no="REF-777",
+            receipt_name="PPR-1",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["payment_entry"], "PE-ONLINE-1")
+        self.assertEqual(result["payment_confirmation_status"], "Payment Confirmed")
+        self.assertEqual(result["method"], "Instapay")
+        # DR Instapay/Bank ledger (paid_to), CR Debtors (paid_from)
+        self.assertEqual(captured["paid_to"], "Instapay - TC")
+        self.assertEqual(captured["paid_from"], "Debtors - TC")
+        self.assertEqual(captured["outstanding"], 150.0)
+        # Fields stamped on the invoice → confirmed
+        self.assertEqual(invoice.custom_payment_confirmation_status, "Payment Confirmed")
+        self.assertEqual(invoice.custom_payment_confirmation_reference, "REF-777")
+        self.assertEqual(invoice.custom_payment_confirmed_by, "manager@example.com")
+        module.confirm_receipt.assert_called_once_with("PPR-1")
+        module.ensure_uploaded_payment_receipt.assert_called_once()
+
+    def test_double_confirm_is_noop(self):
+        invoice = _FakeInvoice(
+            name="INV-ALREADY",
+            custom_payment_method="Instapay",
+            custom_payment_confirmation_status="Payment Confirmed",
+        )
+        module, stub_frappe = _import_delivery_handling(invoice)
+
+        module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
+        module._get_real_customer_payment_entry = MagicMock(return_value={"name": "PE-EXISTING"})
+        module._create_payment_entry = MagicMock()
+        module.confirm_receipt = MagicMock()
+
+        result = module.confirm_online_payment(
+            invoice_name="INV-ALREADY",
+            pos_profile="Nasr city",
+            reference_no="REF-1",
+            receipt_name="PPR-1",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result.get("already_confirmed"))
+        self.assertEqual(result["payment_entry"], "PE-EXISTING")
+        self.assertEqual(result["payment_confirmation_status"], "Payment Confirmed")
+        module._create_payment_entry.assert_not_called()
+        module.confirm_receipt.assert_not_called()

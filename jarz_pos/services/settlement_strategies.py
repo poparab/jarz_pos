@@ -27,6 +27,7 @@ from jarz_pos.services.delivery_handling import (
 from jarz_pos.services.delivery_handling import (
     handle_out_for_delivery_paid as handle_out_for_delivery_paid,  # alias for tests
     mark_courier_outstanding as mark_courier_outstanding,          # alias for tests
+    handle_unpaid_online_deliver_unconfirmed as handle_unpaid_online_deliver_unconfirmed,  # alias for tests
 )
 import sys
 from jarz_pos.utils.account_utils import (
@@ -60,6 +61,28 @@ def _is_unpaid(inv) -> bool:
         outstanding = float(inv.outstanding_amount or 0)
     status_l = (str(inv.get("status") or "").strip().lower())
     return (outstanding > 0.009) or status_l in {"unpaid", "overdue", "partially paid", "partly paid"}
+
+
+_CASH_TOKENS = {"cash", "cod", "cashondelivery"}
+# Only these normalized tokens count as unpaid online-intent (InstaPay + Mobile Wallet share
+# identical accounting). Payment-gateway/card methods are prepaid and are intentionally excluded.
+_ONLINE_INTENT_TOKENS = {"instapay", "insta", "bank", "bankaccount", "mobilewallet", "wallet"}
+
+
+def _is_online_intent(inv) -> bool:
+    """True when the invoice's intended payment method is a non-cash online method.
+
+    Self-contained (no frappe / DB calls) so it is safe under unit-test mocks. Unknown or
+    empty methods return False, so cash and gateway orders keep their existing flow.
+    """
+    try:
+        raw = inv.get("custom_payment_method") if hasattr(inv, "get") else getattr(inv, "custom_payment_method", None)
+    except Exception:
+        raw = getattr(inv, "custom_payment_method", None)
+    normalized = str(raw or "").strip().lower().replace(" ", "").replace("_", "")
+    if not normalized or normalized in _CASH_TOKENS:
+        return False
+    return normalized in _ONLINE_INTENT_TOKENS
 
 
 def _in_test_mode() -> bool:
@@ -425,6 +448,13 @@ def dispatch_settlement(inv_name: str, *, mode: str, pos_profile: Optional[str] 
 
     # Detect delivery partner mode
     delivery_partner = _resolve_delivery_partner(party_type, party)
+
+    # InstaPay / Mobile Wallet honesty guard: an UNPAID online-intent order (that is NOT a
+    # delivery-partner order) must move Out for Delivery WITHOUT shifting the receivable to
+    # Courier Outstanding or marking the invoice Paid. It stays honestly Unpaid until a manager
+    # confirms the transfer via confirm_online_payment.
+    if status == "unpaid" and not delivery_partner and _is_online_intent(inv):
+        return handle_unpaid_online_deliver_unconfirmed(inv, pos_profile=pos_profile)
 
     if delivery_partner:
         fn = PARTNER_STRATEGY.get(key)

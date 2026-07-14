@@ -182,3 +182,80 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 				)
 
 		self.assertIn("uploaded image", str(exc.exception))
+
+
+class TestConfirmOnlinePaymentGate(unittest.TestCase):
+	"""confirm_online_payment: manager permission gate + screenshot validation."""
+
+	def test_confirm_online_payment_denies_staff(self):
+		from jarz_pos.tests.test_payment_collection_change import (
+			_import_delivery_handling,
+			_FakeInvoice,
+		)
+
+		invoice = _FakeInvoice(
+			name="INV-GATE",
+			custom_payment_method="Instapay",
+			custom_payment_confirmation_status="Awaiting Payment",
+		)
+		module, _ = _import_delivery_handling(invoice)
+
+		module._ensure_payment_receipt_confirm_access = MagicMock(
+			side_effect=FrappePermissionError("Only branch managers and above can confirm")
+		)
+		module._create_payment_entry = MagicMock()
+		module.confirm_receipt = MagicMock()
+		module.ensure_uploaded_payment_receipt = MagicMock()
+
+		with self.assertRaises(FrappePermissionError):
+			module.confirm_online_payment(
+				invoice_name="INV-GATE",
+				pos_profile="Dokki",
+				reference_no="REF-1",
+				receipt_name="PPR-1",
+			)
+
+		# Gate runs first: no accounting or receipt confirmation happens
+		module._create_payment_entry.assert_not_called()
+		module.confirm_receipt.assert_not_called()
+		module.ensure_uploaded_payment_receipt.assert_not_called()
+		module._ensure_payment_receipt_confirm_access.assert_called_once_with("Dokki")
+
+	def test_confirm_online_payment_validates_screenshot(self):
+		from jarz_pos.tests.test_payment_collection_change import (
+			_import_delivery_handling,
+			_FakeInvoice,
+		)
+
+		invoice = _FakeInvoice(
+			name="INV-SHOT",
+			custom_payment_method="Instapay",
+			custom_payment_confirmation_status="Awaiting Payment",
+			outstanding_amount=150.0,
+		)
+		module, stub_frappe = _import_delivery_handling(invoice)
+
+		module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
+		module._get_real_customer_payment_entry = MagicMock(return_value=None)
+		module._normalize_collection_method = MagicMock(return_value="Instapay")
+		module._is_online_collection_method = MagicMock(return_value=True)
+		module._create_payment_entry = MagicMock()
+		module.confirm_receipt = MagicMock()
+		stub_frappe.db.get_value = MagicMock(return_value=150.0)
+		module.ensure_uploaded_payment_receipt = MagicMock(
+			side_effect=Exception("Payment receipt must have an uploaded image")
+		)
+
+		with self.assertRaises(Exception) as exc:
+			module.confirm_online_payment(
+				invoice_name="INV-SHOT",
+				pos_profile="Dokki",
+				reference_no="REF-1",
+				receipt_name="PPR-1",
+			)
+
+		self.assertIn("uploaded image", str(exc.exception))
+		# Screenshot validation blocks booking and receipt confirmation
+		module._create_payment_entry.assert_not_called()
+		module.confirm_receipt.assert_not_called()
+		module.ensure_uploaded_payment_receipt.assert_called_once()

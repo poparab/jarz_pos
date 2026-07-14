@@ -21,11 +21,18 @@ from jarz_pos.services.delivery_handling import (
     settle_single_invoice_paid as _settle_single_invoice_paid,
     settle_courier_collected_payment as _settle_courier_collected_payment,
     change_payment_collection_method as _change_payment_collection_method,
+    deliver_online_unconfirmed as _deliver_online_unconfirmed,
+    list_unconfirmed_online_orders as _list_unconfirmed_online_orders,
+    confirm_online_payment as _confirm_online_payment,
+    convert_online_order_to_cod as _convert_online_order_to_cod,
 )
 from jarz_pos.services.delivery_party import create_delivery_party as _create_delivery_party
 from jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
 from jarz_pos.services import delivery_handling as _delivery_services
-from jarz_pos.services.settlement_strategies import dispatch_settlement as _dispatch_settlement
+from jarz_pos.services.settlement_strategies import (
+    dispatch_settlement as _dispatch_settlement,
+    _is_online_intent as _is_online_intent,
+)
 from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
     get_pos_cash_account,
@@ -47,6 +54,37 @@ from jarz_pos.constants import DELIVERY_GROUPS, ROLES
 @frappe.whitelist()  # type: ignore[attr-defined]
 def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None):
     return _mark_courier_outstanding(invoice_name, courier, party_type, party)
+
+
+# ---------------------------------------------------------------------------
+# InstaPay / Mobile Wallet — unpaid online payment assurance & reconciliation
+# ---------------------------------------------------------------------------
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def deliver_online_unconfirmed(invoice_name: str, pos_profile: str):
+    """Move an unpaid online-intent (InstaPay/Mobile Wallet) order Out for Delivery
+    while it stays honestly Unpaid (no receivable move, no Payment Entry)."""
+    return _deliver_online_unconfirmed(invoice_name, pos_profile)
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def list_unconfirmed_online_orders(pos_profile: str | None = None):
+    """List submitted orders awaiting online payment confirmation (scoped to accessible profiles)."""
+    return _list_unconfirmed_online_orders(pos_profile)
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: str | None = None, receipt_name: str | None = None):
+    """Manager confirms the bank/wallet transfer: creates a Receive PE (DR Bank/Instapay,
+    CR Debtors) that marks the invoice Paid. Idempotent."""
+    return _confirm_online_payment(invoice_name, pos_profile, reference_no, receipt_name)
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None):
+    """Convert an unconfirmed online order into a cash-on-delivery courier order."""
+    return _convert_online_order_to_cod(invoice_name, pos_profile, party_type, party)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
@@ -473,6 +511,13 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
 
     order_amount = float(inv.grand_total or 0) if is_unpaid_effective else 0.0
 
+    # Online-intent unpaid orders (InstaPay/Mobile Wallet) collect NOTHING from the courier —
+    # the customer pays online and a manager confirms the transfer separately. Zero the courier
+    # cash-collection amounts so the preview never implies the courier is liable.
+    is_online_unconfirmed = bool(is_unpaid_effective and _is_online_intent(inv))
+    if is_online_unconfirmed:
+        order_amount = 0.0
+
     # Detect delivery partner mode
     _dp = None
     if party_type and party:
@@ -488,6 +533,10 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
         net_amount = order_amount
     else:
         net_amount = order_amount - shipping
+
+    # Online-intent unpaid orders: no courier cash collection at all.
+    if is_online_unconfirmed:
+        net_amount = 0.0
 
     # include resolved party if not provided – from any existing CT linked to invoice
     if not (party_type and party):
@@ -522,6 +571,7 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
             "last_payment_seconds": last_pe_seconds,
             "is_partner_order": is_partner_order,
             "delivery_partner": _dp,
+            "is_online_unconfirmed": is_online_unconfirmed,
         },
     )
     # expire after 3 minutes
@@ -541,6 +591,7 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
         "expires_in": 180,
         "is_partner_order": is_partner_order,
         "delivery_partner": _dp,
+        "is_online_unconfirmed": is_online_unconfirmed,
     }
 
 

@@ -154,6 +154,54 @@ class TestSettlementStrategies(unittest.TestCase):
 			self.assertEqual(result.get("mode"), "unpaid_settle_later")
 
 	@patch('jarz_pos.services.settlement_strategies.frappe')
+	def test_dispatch_settlement_unpaid_online_routes_to_unconfirmed(self, mock_frappe):
+		"""Unpaid online-intent (InstaPay) OFD must route to the honest-unpaid handler,
+		NOT mark_courier_outstanding / handle_unpaid_settle_later (receivable untouched)."""
+		from jarz_pos.services.settlement_strategies import dispatch_settlement
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-ONLINE-OFD"
+		mock_inv.docstatus = 1
+		mock_inv.outstanding_amount = 100.0
+		mock_inv.company = "Test Company"
+		# custom_payment_method resolves to an online method
+		mock_inv.get = MagicMock(return_value="Instapay")
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.db.get_value.return_value = 100.0
+
+		with patch('jarz_pos.services.settlement_strategies.handle_unpaid_online_deliver_unconfirmed') as mock_online, \
+				 patch('jarz_pos.services.settlement_strategies.mark_courier_outstanding') as mock_mco, \
+				 patch('jarz_pos.services.settlement_strategies.handle_unpaid_settle_later') as mock_later:
+			mock_online.return_value = {
+				"success": True,
+				"new_state": "Out for Delivery",
+				"payment_confirmation_status": "Awaiting Payment",
+			}
+
+			result = dispatch_settlement("INV-ONLINE-OFD", mode="later", pos_profile="POS-001")
+
+			mock_online.assert_called_once()
+			mock_mco.assert_not_called()
+			mock_later.assert_not_called()
+			self.assertEqual(result.get("payment_confirmation_status"), "Awaiting Payment")
+
+	def test_is_online_intent_detects_online_and_ignores_cash(self):
+		"""_is_online_intent recognises InstaPay/Mobile Wallet but not cash or unknown methods."""
+		from jarz_pos.services.settlement_strategies import _is_online_intent
+
+		def _inv(method):
+			m = MagicMock()
+			m.get = MagicMock(return_value=method)
+			return m
+
+		self.assertTrue(_is_online_intent(_inv("Instapay")))
+		self.assertTrue(_is_online_intent(_inv("Mobile Wallet")))
+		self.assertFalse(_is_online_intent(_inv("Cash")))
+		self.assertFalse(_is_online_intent(_inv("")))
+		self.assertFalse(_is_online_intent(_inv("Kashier Card")))
+
+	@patch('jarz_pos.services.settlement_strategies.frappe')
 	def test_dispatch_settlement_paid_now(self, mock_frappe):
 		"""Test dispatch_settlement for paid + settle now case."""
 		from jarz_pos.services.settlement_strategies import dispatch_settlement
