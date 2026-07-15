@@ -203,7 +203,10 @@ class TestSettlementStrategies(unittest.TestCase):
 		mock_frappe.get_doc.return_value = mock_inv
 		mock_frappe.db.get_value.return_value = 100.0
 
-		with patch('jarz_pos.services.settlement_strategies.handle_unpaid_online_deliver_unconfirmed') as mock_online:
+		# A regular in-house courier: no delivery-partner link, so dispatch keeps the
+		# online-intent branch rather than routing to PARTNER_STRATEGY.
+		with patch('jarz_pos.services.settlement_strategies.handle_unpaid_online_deliver_unconfirmed') as mock_online, \
+				 patch('jarz_pos.services.settlement_strategies._resolve_delivery_partner', return_value=None):
 			mock_online.return_value = {"success": True}
 
 			dispatch_settlement(
