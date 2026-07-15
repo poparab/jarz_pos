@@ -186,6 +186,38 @@ class TestSettlementStrategies(unittest.TestCase):
 			mock_later.assert_not_called()
 			self.assertEqual(result.get("payment_confirmation_status"), "Awaiting Payment")
 
+	@patch('jarz_pos.services.settlement_strategies.frappe')
+	def test_dispatch_settlement_unpaid_online_forwards_courier(self, mock_frappe):
+		"""Courier attribution must survive the dispatch hop. An unpaid online order
+		skips settlement, but it still goes out with a courier — dropping party_type/party
+		here sends the order out unattributed."""
+		from jarz_pos.services.settlement_strategies import dispatch_settlement
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-ONLINE-OFD"
+		mock_inv.docstatus = 1
+		mock_inv.outstanding_amount = 100.0
+		mock_inv.company = "Test Company"
+		mock_inv.get = MagicMock(return_value="Instapay")
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.db.get_value.return_value = 100.0
+
+		with patch('jarz_pos.services.settlement_strategies.handle_unpaid_online_deliver_unconfirmed') as mock_online:
+			mock_online.return_value = {"success": True}
+
+			dispatch_settlement(
+				"INV-ONLINE-OFD",
+				mode="later",
+				pos_profile="POS-001",
+				party_type="Employee",
+				party="HR-EMP-00042",
+			)
+
+			_, kwargs = mock_online.call_args
+			self.assertEqual(kwargs.get("party_type"), "Employee")
+			self.assertEqual(kwargs.get("party"), "HR-EMP-00042")
+
 	def test_is_online_intent_detects_online_and_ignores_cash(self):
 		"""_is_online_intent recognises InstaPay/Mobile Wallet but not cash or unknown methods."""
 		from jarz_pos.services.settlement_strategies import _is_online_intent

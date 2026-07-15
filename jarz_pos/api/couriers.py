@@ -62,10 +62,15 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def deliver_online_unconfirmed(invoice_name: str, pos_profile: str):
+def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None):
     """Move an unpaid online-intent (InstaPay/Mobile Wallet) order Out for Delivery
-    while it stays honestly Unpaid (no receivable move, no Payment Entry)."""
-    return _deliver_online_unconfirmed(invoice_name, pos_profile)
+    while it stays honestly Unpaid (no receivable move, no Payment Entry).
+
+    The courier (party_type/party) is recorded for attribution only; settlement happens
+    later on the manager reconciliation screen. Courier params are optional so older
+    clients can still dispatch an order mid-delivery.
+    """
+    return _deliver_online_unconfirmed(invoice_name, pos_profile, party_type, party)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]

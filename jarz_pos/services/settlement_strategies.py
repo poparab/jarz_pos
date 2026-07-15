@@ -454,7 +454,12 @@ def dispatch_settlement(inv_name: str, *, mode: str, pos_profile: Optional[str] 
     # Courier Outstanding or marking the invoice Paid. It stays honestly Unpaid until a manager
     # confirms the transfer via confirm_online_payment.
     if status == "unpaid" and not delivery_partner and _is_online_intent(inv):
-        return handle_unpaid_online_deliver_unconfirmed(inv, pos_profile=pos_profile)
+        return handle_unpaid_online_deliver_unconfirmed(
+            inv,
+            pos_profile=pos_profile,
+            party_type=party_type,
+            party=party,
+        )
 
     if delivery_partner:
         fn = PARTNER_STRATEGY.get(key)

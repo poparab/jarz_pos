@@ -988,19 +988,43 @@ def _latest_active_payment_receipt(invoice_name: str) -> dict | None:
     }
 
 
-def handle_unpaid_online_deliver_unconfirmed(inv, *, pos_profile: str | None = None) -> dict:
+def handle_unpaid_online_deliver_unconfirmed(
+    inv,
+    *,
+    pos_profile: str | None = None,
+    party_type: str | None = None,
+    party: str | None = None,
+) -> dict:
     """Move an UNPAID online-intent order Out for Delivery WITHOUT touching accounting.
 
     Contract:
       * Set operational state to ``Out for Delivery``.
       * Stamp ``custom_payment_confirmation_status='Awaiting Payment'`` +
         ``custom_ofd_unconfirmed_since`` (now) + reset ``custom_payment_confirmation_alerted``.
+      * Record the courier attribution (``party_type``/``party``) when supplied; the params
+        stay optional so clients that predate courier selection still transition cleanly.
       * Ensure the Delivery Note exists (raise on error, like every other OFD flow).
-      * NEVER call ``mark_courier_outstanding`` and NEVER create a Payment Entry — the
-        receivable stays on Debtors and the invoice stays Unpaid.
+      * NEVER call ``mark_courier_outstanding`` and NEVER create a Payment Entry or a
+        Courier Transaction — the receivable stays on Debtors and the invoice stays Unpaid
+        until the manager confirms the transfer.
     """
     if getattr(inv, "docstatus", 0) != 1:
         frappe.throw("Invoice must be submitted before moving Out for Delivery.")
+
+    party_type = (party_type or "").strip()
+    party = (party or "").strip()
+
+    courier_details = {
+        "delivery_partner": resolve_courier_delivery_partner(party_type, party),
+    }
+    if party_type and party:
+        resolved_pos_profile = resolve_assignment_pos_profile(inv, requested_pos_profile=pos_profile)
+        courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
+    else:
+        frappe.logger("jarz_pos").warning(
+            f"Invoice {inv.name} moved Out for Delivery (unpaid online, awaiting payment) "
+            f"with no courier assigned - client did not send party_type/party."
+        )
 
     # Operational state → Out for Delivery
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
@@ -1015,6 +1039,14 @@ def handle_unpaid_online_deliver_unconfirmed(inv, *, pos_profile: str | None = N
         },
     )
 
+    if party_type and party:
+        _persist_invoice_courier_assignment(
+            inv,
+            party_type=party_type,
+            party=party,
+            delivery_partner=courier_details.get("delivery_partner"),
+        )
+
     # Mandatory Delivery Note (same enforcement as every other OFD path)
     dn_result = ensure_delivery_note_for_invoice(inv.name)
     if dn_result.get("error"):
@@ -1025,6 +1057,9 @@ def handle_unpaid_online_deliver_unconfirmed(inv, *, pos_profile: str | None = N
         "invoice": inv.name,
         "new_state": "Out for Delivery",
         "payment_confirmation_status": "Awaiting Payment",
+        "party_type": party_type or None,
+        "party": party or None,
+        "delivery_partner": courier_details.get("delivery_partner") or None,
         "delivery_note": dn_result.get("delivery_note"),
         "delivery_note_reused": bool(dn_result.get("reused")),
         "mode": "unpaid_online_deliver_unconfirmed",
@@ -1034,7 +1069,12 @@ def handle_unpaid_online_deliver_unconfirmed(inv, *, pos_profile: str | None = N
     return payload
 
 
-def deliver_online_unconfirmed(invoice_name: str, pos_profile: str) -> dict:
+def deliver_online_unconfirmed(
+    invoice_name: str,
+    pos_profile: str,
+    party_type: str | None = None,
+    party: str | None = None,
+) -> dict:
     """Endpoint logic: move an unpaid online-intent invoice Out for Delivery (unconfirmed)."""
     invoice_name = (invoice_name or "").strip()
     if not invoice_name:
@@ -1044,12 +1084,20 @@ def deliver_online_unconfirmed(invoice_name: str, pos_profile: str) -> dict:
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
 
-    result = handle_unpaid_online_deliver_unconfirmed(inv, pos_profile=pos_profile)
+    result = handle_unpaid_online_deliver_unconfirmed(
+        inv,
+        pos_profile=pos_profile,
+        party_type=party_type,
+        party=party,
+    )
     return {
         "success": True,
         "invoice": inv.name,
         "new_state": "Out for Delivery",
         "payment_confirmation_status": "Awaiting Payment",
+        "party_type": result.get("party_type"),
+        "party": result.get("party"),
+        "delivery_partner": result.get("delivery_partner"),
         "delivery_note": result.get("delivery_note"),
         "delivery_note_reused": bool(result.get("delivery_note_reused")),
     }
