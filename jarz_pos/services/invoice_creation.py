@@ -141,11 +141,17 @@ def _pricing_action_requires_manager(
     default_price_list: str | None,
     suppress_shipping_income: bool | None,
     suppress_legacy_delivery_charges: bool | None,
+    auto_derivable_price_lists: set[str] | None = None,
 ) -> bool:
     requested = _normalize_price_list_name(requested_price_list)
     default = _normalize_price_list_name(default_price_list)
+    # A requested price list is a MANUAL override — and therefore manager-gated — only
+    # when it is NOT one the server itself would derive for this exact order context.
+    # The POS client applies the server-resolved tier list to the cart (so prices display
+    # correctly) and then echoes it back at checkout; that round-trip is not an override.
     if requested and requested != default:
-        return True
+        if requested not in (auto_derivable_price_lists or set()):
+            return True
     if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
         return True
 
@@ -201,6 +207,50 @@ def _resolve_company_default_price_list() -> str | None:
         return None
 
 
+def _auto_derivable_price_lists(
+    *,
+    default_price_list: str | None,
+    policy_matched: bool = False,
+    policy_price_list: str | None = None,
+    customer_doc=None,
+    sales_partner: str | None = None,
+) -> set[str]:
+    """Price lists the SERVER itself would derive for THIS EXACT order context.
+
+    This set mirrors the resolution chain in ``_resolve_effective_price_list`` and nothing
+    more — it is what separates a benign client echo from a manual manager override.
+
+    Why the echo needs an exemption: the POS client resolves a B2B/tier customer's price
+    list via ``jarz_pos.api.pos.resolve_customer_price_list`` (Customer.default_price_list
+    → Customer Group.default_price_list), applies it to the cart so displayed prices are
+    correct, then sends that SAME server-resolved name back as ``price_list`` at checkout.
+    Gating that round-trip as an override locked non-managers (cashiers / B2B Sales Reps)
+    out of B2B checkout entirely.
+
+    Why ``policy_matched`` gates most of it: the policy / sales-partner / customer
+    candidates are ONLY reachable in the matched branch of the chain. A Standard (retail)
+    order resolves strictly ``requested or default_price_list``, so a customer's B2B tier
+    list is NOT server-derivable there and must keep requiring manager access — otherwise
+    a cashier could apply cheaper B2B tier pricing to a retail sale with no approval,
+    which is exactly what this gate exists to stop.
+
+    The POS Profile default stays unconditional; it is harmless because
+    ``requested == default`` short-circuits before the gate is ever consulted.
+
+    Reuses the existing resolvers verbatim — no new pricing logic.
+    """
+    candidates = [_normalize_price_list_name(default_price_list)]
+    if policy_matched:
+        candidates.extend(
+            (
+                _normalize_price_list_name(policy_price_list),
+                _resolve_sales_partner_price_list(sales_partner),
+                _resolve_customer_price_list(customer_doc),
+            )
+        )
+    return {candidate for candidate in candidates if candidate}
+
+
 def _resolve_effective_price_list(
     pos_profile,
     cart_items,
@@ -219,15 +269,34 @@ def _resolve_effective_price_list(
     )
     requested = _normalize_price_list_name(requested_price_list)
 
-    # Manager gating is unchanged: only an explicit manual override (or line pricing /
-    # suppress hints) requires manager access. Policy-derived price lists are gated
-    # separately by the commercial-policy resolver, so they do NOT re-trip this check.
+    # Manager gating: only an explicit MANUAL override (or line pricing / suppress hints)
+    # requires manager access. A requested price list bypasses the gate ONLY when the
+    # server would itself derive it for this exact order context (see
+    # _auto_derivable_price_lists) — which, for policy / sales-partner / customer lists,
+    # means matched-policy orders only. Those are already gated by the commercial-policy
+    # resolver, so they do NOT re-trip this check. A Standard order derives nothing but
+    # the POS Profile default, so any other list there stays manager-only.
+    # Computed lazily: when the request matches the POS Profile default (the overwhelming
+    # majority of orders) the gate cannot trip on the price list, so we skip the call
+    # entirely. A Standard order costs no queries either way — the set builder short-
+    # circuits to the profile default without touching the DB when policy_matched is False.
+    auto_derivable: set[str] = set()
+    if requested and requested != default_price_list:
+        auto_derivable = _auto_derivable_price_lists(
+            default_price_list=default_price_list,
+            policy_matched=policy_matched,
+            policy_price_list=policy_price_list,
+            customer_doc=customer_doc,
+            sales_partner=sales_partner,
+        )
+
     if _pricing_action_requires_manager(
         cart_items,
         requested_price_list=requested,
         default_price_list=default_price_list,
         suppress_shipping_income=suppress_shipping_income,
         suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+        auto_derivable_price_lists=auto_derivable,
     ):
         _ensure_manager_pricing_access()
 

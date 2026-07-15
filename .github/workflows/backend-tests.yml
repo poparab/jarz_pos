@@ -71,6 +71,7 @@ jobs:
           # the live clone. Verified locally: Item Price count is unchanged by this run.
           MODULES=(
             test_commercial_policy
+            test_pricing_manager_gate
             test_settlement_accounting
             test_settlement_strategies
             test_pickup_flow
