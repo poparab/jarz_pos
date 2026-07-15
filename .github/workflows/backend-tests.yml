@@ -47,9 +47,44 @@ jobs:
           fi
           echo "name=$container_name" >> "$GITHUB_OUTPUT"
 
+      # ── Sync branch code into the app ──────────────────────────────────────
+      # NEVER `docker cp .` here. /home/frappe/frappe-bench/apps IS the live
+      # `erp_apps` volume, and `docker cp .` copies the runner's ENTIRE checkout —
+      # `.git` included — over the live repo. That transplanted CI's git state onto
+      # staging: a depth-1 shallow clone whose HEAD was the tip of main, plus an
+      # actions/checkout `http.…extraheader` AUTHORIZATION token left in the volume.
+      #
+      # The fallout (found 2026-07-15) was a systemic false-green. deploy_backend.ps1
+      # gates every step on `HeadBefore -ne RemoteHead`; CI had already moved on-disk
+      # HEAD to the deploy's target commit, so the deploy computed DEPLOY_REQUIRED=false
+      # and skipped pip/migrate/cache-clear/restart while reporting success. gunicorn
+      # runs with --preload, so the code only loads at master start: the new code sat
+      # on disk and never ran. Staging served code two commits stale, green all the way.
+      #
+      # `git archive HEAD` exports exactly the tracked tree at this commit — no `.git`,
+      # no untracked junk, no token — so the live repo's git state is left untouched
+      # and the deploy's change detection stays meaningful.
+      #
+      # Extracting via `docker exec` (not `docker cp`) also drops CI's root privilege:
+      # `docker cp` runs through the daemon as root and bypasses file permissions
+      # entirely, which is how it stamped the runner's uid 1001 across the volume.
+      # `docker exec` runs as `frappe` (uid 1000 = host `ubuntu`), so CI can only write
+      # what it legitimately owns. This REQUIRES the volume to be owned by uid 1000 —
+      # if this step dies with "Cannot open: Permission denied", the app dir is still
+      # uid 1001 and needs `sudo chown -R ubuntu:ubuntu` once (see the remediation text
+      # in deploy_backend.ps1's Assert-AppRepoIntegrity).
+      #
+      # Known limitation, unchanged from the old `docker cp`: tar adds and overwrites
+      # but never deletes, so a file the deployed commit has and this branch removed
+      # stays on disk for the test run. The restore below puts tracked files back.
       - name: Sync branch code into the app (so tests run against this checkout)
+        env:
+          CONTAINER: ${{ steps.backend-container.outputs.name }}
+        shell: bash
         run: |
-          docker cp . "${{ steps.backend-container.outputs.name }}:/home/frappe/frappe-bench/apps/jarz_pos/"
+          set -euo pipefail
+          git archive --format=tar HEAD \
+            | docker exec -i "${CONTAINER}" tar -xf - -C /home/frappe/frappe-bench/apps/jarz_pos
 
       - name: Run mock/unittest logic suite (safe, non-destructive vs frontend)
         env:
@@ -97,13 +132,38 @@ jobs:
           exit $rc
         timeout-minutes: 20
 
+      # Undo the branch-code sync so staging's worktree matches its deployed commit
+      # again (the test run only needed the branch code transiently).
+      #
+      # This step used to be a guaranteed no-op: the `docker cp .` above had already
+      # overwritten `.git`, so `git checkout -- .` restored the worktree to the CI
+      # commit — i.e. to the code it had just copied in — and the deployed commit it
+      # meant to bring back no longer existed in the (shallow) repo. Now that the sync
+      # leaves `.git` alone, HEAD is still the deployed commit and this genuinely
+      # reverts.
+      #
+      # It also no longer swallows errors with `|| true`. Failing loudly matters: a
+      # silent restore failure leaves branch code on the live volume, which is exactly
+      # what deploy_backend.ps1's integrity guard now refuses to deploy over.
       - name: Restore deployed app code on the runner host
         if: ${{ always() }}
+        env:
+          CONTAINER: ${{ steps.backend-container.outputs.name }}
+          APP_DIR: /home/frappe/frappe-bench/apps/jarz_pos
+        shell: bash
         run: |
-          # Undo the branch-code sync so staging keeps running its deployed commit
-          # (the test run only needed it transiently to test this checkout).
-          docker exec "${{ steps.backend-container.outputs.name }}" bash -lc \
-            "cd /home/frappe/frappe-bench/apps/jarz_pos && git checkout -- . 2>/dev/null || true"
+          set -euo pipefail
+          # Tracked files only. Deliberately NOT `git clean` — an untracked directory
+          # whose contents are all gitignored (e.g. a dir holding only __pycache__) is
+          # hidden by `git status` but still listed by `git clean -nd`, and whether
+          # `-d` actually removes it varies by git version. Against a live production
+          # clone that ambiguity isn't worth it; `checkout -- .` restores the deployed
+          # code, which is the property that matters. Any file the branch adds and the
+          # deployed commit lacks is left as an inert untracked file, which is why the
+          # deploy guard checks tracked files (-uno) rather than untracked ones.
+          docker exec "${CONTAINER}" git -c safe.directory="${APP_DIR}" -C "${APP_DIR}" checkout -- .
+          echo "Restored worktree to deployed commit:"
+          docker exec "${CONTAINER}" git -c safe.directory="${APP_DIR}" -C "${APP_DIR}" status -sb -uno
 
   # ---------------------------------------------------------------------------
   # Job 2 — Accounting / GL integrity gate.
@@ -142,7 +202,8 @@ jobs:
           echo "name=$container_name" >> "$GITHUB_OUTPUT"
 
       # Copy ONLY the audit module — additive, read-only test code. We do NOT
-      # overwrite the deployed app on the live `frontend` bench here.
+      # overwrite the deployed app on the live `frontend` bench here, and (unlike a
+      # bare `docker cp .`) a single-file copy cannot touch the live `.git`.
       - name: Stage the read-only audit module
         run: |
           docker cp ./jarz_pos/tests/gl_audit.py \
@@ -154,3 +215,27 @@ jobs:
             --site frontend \
             execute jarz_pos.tests.gl_audit.run
         timeout-minutes: 10
+
+      # The audit module is this branch's copy, not the deployed one. Put the live
+      # worktree back the way we found it — otherwise every CI run leaves staging
+      # dirty (modified if the file is tracked at the deployed commit, untracked if
+      # it isn't), which deploy_backend.ps1's integrity guard now rejects.
+      - name: Restore deployed app code on the runner host
+        if: ${{ always() }}
+        env:
+          CONTAINER: ${{ steps.backend-container.outputs.name }}
+          APP_DIR: /home/frappe/frappe-bench/apps/jarz_pos
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Tracked files only. Deliberately NOT `git clean` — an untracked directory
+          # whose contents are all gitignored (e.g. a dir holding only __pycache__) is
+          # hidden by `git status` but still listed by `git clean -nd`, and whether
+          # `-d` actually removes it varies by git version. Against a live production
+          # clone that ambiguity isn't worth it; `checkout -- .` restores the deployed
+          # code, which is the property that matters. Any file the branch adds and the
+          # deployed commit lacks is left as an inert untracked file, which is why the
+          # deploy guard checks tracked files (-uno) rather than untracked ones.
+          docker exec "${CONTAINER}" git -c safe.directory="${APP_DIR}" -C "${APP_DIR}" checkout -- .
+          echo "Restored worktree to deployed commit:"
+          docker exec "${CONTAINER}" git -c safe.directory="${APP_DIR}" -C "${APP_DIR}" status -sb -uno
