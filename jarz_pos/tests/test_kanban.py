@@ -7,6 +7,7 @@ from unittest.mock import patch
 import frappe
 from jarz_pos.api.kanban import (
 	_build_invoice_search_or_filters,
+	_get_invoice_latest_notes,
 	_sort_kanban_columns,
 	get_kanban_columns,
 	get_kanban_invoices,
@@ -292,6 +293,7 @@ class TestKanbanAPI(unittest.TestCase):
 		self.assertEqual(payload["event"], "invoice_note_added")
 		self.assertEqual(payload["invoice_id"], "ACC-SINV-0001")
 		self.assertEqual(payload["note_count"], 2)
+		self.assertEqual(payload["latest_note"], "Leave at reception")
 
 	@patch("jarz_pos.api.kanban._sort_kanban_columns", side_effect=lambda data: data)
 	@patch("jarz_pos.api.kanban._get_invoice_note_counts", return_value={"ACC-SINV-0001": 3})
@@ -356,3 +358,131 @@ class TestKanbanAPI(unittest.TestCase):
 
 		self.assertTrue(result.get("success"))
 		self.assertEqual(result["data"]["received"][0]["note_count"], 3)
+
+	@patch("jarz_pos.api.kanban._sort_kanban_columns", side_effect=lambda data: data)
+	@patch("jarz_pos.api.kanban._get_invoice_note_counts", return_value={"ACC-SINV-0001": 2})
+	@patch("jarz_pos.api.kanban._get_active_payment_receipt_map", return_value={})
+	@patch("jarz_pos.api.kanban._get_state_field_options", return_value=["Received"])
+	@patch("jarz_pos.api.kanban._get_current_user_pos_profiles", return_value=["Main"])
+	@patch("jarz_pos.api.kanban._resolve_customer_phone", return_value="")
+	@patch("jarz_pos.api.kanban._get_territory_shipping_values", return_value={"income": 0.0, "expense": 0.0})
+	@patch("jarz_pos.api.kanban._is_pickup_invoice", return_value=False)
+	@patch("jarz_pos.api.kanban.frappe.db.exists", return_value=False)
+	@patch("jarz_pos.api.kanban.frappe.get_meta")
+	@patch("jarz_pos.api.kanban.frappe.get_all")
+	def test_get_kanban_invoices_includes_latest_note_on_cards(
+		self,
+		mock_get_all,
+		mock_get_meta,
+		_mock_exists,
+		_mock_pickup,
+		_mock_shipping,
+		_mock_phone,
+		_mock_profiles,
+		_mock_states,
+		_mock_receipts,
+		_mock_note_counts,
+		_mock_sort,
+	):
+		"""Kanban cards should surface the most recent note text, or None when unnoted."""
+
+		class _MetaStub:
+			def get_field(self, fieldname):
+				return fieldname == "custom_kanban_profile"
+
+		mock_get_meta.return_value = _MetaStub()
+
+		def _invoice(name, customer_name):
+			return frappe._dict(
+				name=name,
+				customer_name=customer_name,
+				customer="CUST-1",
+				territory="Metro",
+				status="Unpaid",
+				posting_date="2026-06-04",
+				posting_time="09:00:00",
+				creation="2026-06-04 08:55:00",
+				grand_total=100,
+				net_total=90,
+				total_taxes_and_charges=10,
+				outstanding_amount=100,
+				custom_sales_invoice_state="Received",
+				docstatus=1,
+				is_return=0,
+				modified="2026-06-04 09:00:00",
+			)
+
+		noted_invoice = _invoice("ACC-SINV-0001", "Alice")
+		unnoted_invoice = _invoice("ACC-SINV-0002", "Bob")
+		note_query_kwargs = {}
+
+		def _fake_get_all(doctype, **kwargs):
+			if doctype == "Sales Invoice":
+				return [noted_invoice, unnoted_invoice]
+			if doctype == "Jarz Invoice Note":
+				note_query_kwargs.update(kwargs)
+				# Rows arrive pre-ordered by the requested `added_on desc, creation desc`.
+				return [
+					frappe._dict(
+						sales_invoice="ACC-SINV-0001",
+						note="  Newest\nnote  ",
+						added_on="2026-06-04 11:00:00",
+						creation="2026-06-04 11:00:00",
+					),
+					frappe._dict(
+						sales_invoice="ACC-SINV-0001",
+						note="Older note",
+						added_on="2026-06-04 09:30:00",
+						creation="2026-06-04 09:30:00",
+					),
+				]
+			return []
+
+		mock_get_all.side_effect = _fake_get_all
+
+		result = get_kanban_invoices()
+
+		self.assertTrue(result.get("success"))
+		cards = {card["name"]: card for card in result["data"]["received"]}
+		# Most recent note wins, sanitized and whitespace-collapsed.
+		self.assertEqual(cards["ACC-SINV-0001"]["latest_note"], "Newest note")
+		# Invoices without notes report None rather than an empty string.
+		self.assertIsNone(cards["ACC-SINV-0002"]["latest_note"])
+		# note_count behaviour is untouched.
+		self.assertEqual(cards["ACC-SINV-0001"]["note_count"], 2)
+		self.assertEqual(cards["ACC-SINV-0002"]["note_count"], 0)
+		self.assertEqual(note_query_kwargs.get("order_by"), "added_on desc, creation desc")
+		self.assertEqual(
+			note_query_kwargs.get("filters"),
+			{"sales_invoice": ["in", ["ACC-SINV-0001", "ACC-SINV-0002"]]},
+		)
+
+	@patch("jarz_pos.api.kanban.frappe.get_all")
+	def test_get_invoice_latest_notes_batches_truncates_and_guards_empty(self, mock_get_all):
+		"""Latest-note lookup uses one query, caps previews at 300 chars, skips empty input."""
+
+		self.assertEqual(_get_invoice_latest_notes([]), {})
+		self.assertEqual(_get_invoice_latest_notes(["", "   "]), {})
+		mock_get_all.assert_not_called()
+
+		mock_get_all.return_value = [
+			frappe._dict(
+				sales_invoice="ACC-SINV-0001",
+				note="x" * 450,
+				added_on="2026-06-04 11:00:00",
+				creation="2026-06-04 11:00:00",
+			),
+			frappe._dict(
+				sales_invoice="ACC-SINV-0002",
+				note="Short note",
+				added_on="2026-06-04 10:00:00",
+				creation="2026-06-04 10:00:00",
+			),
+		]
+
+		latest = _get_invoice_latest_notes(["ACC-SINV-0001", "ACC-SINV-0002"])
+
+		self.assertEqual(latest["ACC-SINV-0001"], "x" * 300)
+		self.assertEqual(latest["ACC-SINV-0002"], "Short note")
+		# A whole page of invoices costs exactly one query (no N+1).
+		self.assertEqual(mock_get_all.call_count, 1)

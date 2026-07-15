@@ -456,6 +456,22 @@ def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[
     return receipt_map
 
 
+#: Maximum length of the note preview surfaced on Kanban cards. Clients handle overflow.
+INVOICE_NOTE_PREVIEW_MAX_LENGTH = 300
+
+
+def _format_invoice_note_preview(note: Any) -> Optional[str]:
+    """Sanitize + truncate a note body for card/preview payloads.
+
+    Returns None when the note is empty so consumers can distinguish
+    "no notes" from "an empty note".
+    """
+    text = sanitize_printable_text(note)
+    if not text:
+        return None
+    return text[:INVOICE_NOTE_PREVIEW_MAX_LENGTH]
+
+
 def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
     cleaned_names = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
     if not cleaned_names:
@@ -479,6 +495,40 @@ def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
         return {}
 
     return note_counts
+
+
+def _get_invoice_latest_notes(invoice_names: List[str]) -> Dict[str, str]:
+    """Batch-resolve the most recent note text per invoice.
+
+    Uses a single ordered query and reduces to the first row seen per invoice
+    in Python, mirroring `_get_active_payment_receipt_map`. A grouped
+    "latest per group" query cannot carry the note body along with
+    max(added_on), so the reduce happens here rather than in SQL.
+    """
+    cleaned_names = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
+    if not cleaned_names:
+        return {}
+
+    latest_notes: Dict[str, str] = {}
+    try:
+        rows = frappe.get_all(
+            "Jarz Invoice Note",
+            filters={"sales_invoice": ["in", cleaned_names]},
+            fields=["sales_invoice", "note", "added_on", "creation"],
+            order_by="added_on desc, creation desc",
+            limit=min(max(len(cleaned_names) * 20, 200), QUERY_LIMITS.KANBAN_INVOICES * 3),
+        )
+        for row in rows:
+            invoice_name = str(row.get("sales_invoice") or "").strip()
+            if not invoice_name or invoice_name in latest_notes:
+                continue
+            preview = _format_invoice_note_preview(row.get("note"))
+            if preview:
+                latest_notes[invoice_name] = preview
+    except Exception:
+        return {}
+
+    return latest_notes
 
 
 def _serialize_invoice_note_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1057,6 +1107,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         actual_payment_methods: Dict[str, str] = {}
         payment_receipts_by_invoice = _get_active_payment_receipt_map([inv.name for inv in invoices])
         invoice_note_counts = _get_invoice_note_counts([inv.name for inv in invoices])
+        invoice_latest_notes = _get_invoice_latest_notes([inv.name for inv in invoices])
         try:
             paid_inv_names = [
                 inv.name for inv in invoices
@@ -1223,6 +1274,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "payment_receipt_image_url": sanitize_printable_text(payment_receipts_by_invoice.get(inv.name, {}).get("payment_receipt_image_url")),
                 "pos_profile": sanitize_printable_text(inv.get("custom_kanban_profile")),
                 "note_count": int(invoice_note_counts.get(inv.name, 0)),
+                "latest_note": invoice_latest_notes.get(inv.name),
                 "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
                 "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
                 "is_return": int(getattr(inv, "is_return", 0) or 0),
@@ -2016,6 +2068,10 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
             data["note_count"] = int(_get_invoice_note_counts([invoice.name]).get(invoice.name, 0))
         except Exception:
             data["note_count"] = 0
+        try:
+            data["latest_note"] = _get_invoice_latest_notes([invoice.name]).get(invoice.name)
+        except Exception:
+            data["latest_note"] = None
         data.update(get_invoice_amendment_eligibility(invoice))
         return _success(data=data)
     except Exception as e:
@@ -2086,6 +2142,7 @@ def add_invoice_note(invoice_id: str, note: str) -> Dict[str, Any]:
             "invoice_id": invoice.name,
             "invoice": invoice.name,
             "note_count": note_count,
+            "latest_note": _format_invoice_note_preview(note_doc.note),
             "updated_by": frappe.session.user,
             "timestamp": frappe.utils.now(),
         }
