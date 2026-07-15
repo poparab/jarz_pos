@@ -7,6 +7,7 @@ import frappe
 import json
 import traceback
 import datetime
+from frappe.query_builder.functions import Count
 from typing import Dict, List, Any, Optional, Union, Tuple
 from jarz_pos.constants import PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
 from jarz_pos.services.delivery_handling import (
@@ -450,7 +451,12 @@ def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[
                 "payment_receipt_image_url": image_url,
                 "payment_receipt_amount": float(row.get("amount") or 0.0),
             }
-    except Exception:
+    except Exception as e:
+        # Same policy as the note helpers: degrade the badge, log the cause.
+        frappe.log_error(
+            f"Payment Receipt Map Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+            "Kanban API",
+        )
         return {}
 
     return receipt_map
@@ -473,25 +479,48 @@ def _format_invoice_note_preview(note: Any) -> Optional[str]:
 
 
 def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
+    """Batch-resolve the number of notes per invoice.
+
+    Built with the query builder rather than a ``"count(name) as note_count"``
+    string in ``fields``: ERPNext v16 rejects SQL-function strings in SELECT
+    ("SQL functions are not allowed as strings in SELECT ... Use dict syntax"),
+    and this helper's old bare ``except`` turned that hard rejection into an
+    empty dict — so every Kanban card silently reported ``note_count == 0``
+    from the v16 upgrade onward. See also ``price_lists._pricing_categories``,
+    which sidesteps the same v16 restriction.
+
+    A real SQL ``COUNT``/``GROUP BY`` (rather than counting fetched rows in
+    Python) keeps the count exact regardless of how many notes an invoice has:
+    the result is one row per invoice, so no row cap can truncate a count.
+    """
     cleaned_names = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
     if not cleaned_names:
         return {}
 
     note_counts: Dict[str, int] = {}
     try:
-        rows = frappe.get_all(
-            "Jarz Invoice Note",
-            filters={"sales_invoice": ["in", cleaned_names]},
-            fields=["sales_invoice", "count(name) as note_count"],
-            group_by="sales_invoice",
-            limit=max(len(cleaned_names) * 2, 20),
-        )
+        note = frappe.qb.DocType("Jarz Invoice Note")
+        # One batched, grouped query for the whole page of invoices (no N+1).
+        # Naturally bounded to <= len(cleaned_names) rows, so no limit needed.
+        rows = (
+            frappe.qb.from_(note)
+            .select(note.sales_invoice, Count(note.name).as_("note_count"))
+            .where(note.sales_invoice.isin(cleaned_names))
+            .groupby(note.sales_invoice)
+        ).run(as_dict=True)
         for row in rows:
             invoice_name = str(row.get("sales_invoice") or "").strip()
             if not invoice_name:
                 continue
             note_counts[invoice_name] = int(row.get("note_count") or 0)
-    except Exception:
+    except Exception as e:
+        # Degrade to "no badges" rather than taking down the whole board, but
+        # never silently: swallowing this is exactly what hid the v16 SELECT
+        # rejection in production for months.
+        frappe.log_error(
+            f"Invoice Note Counts Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+            "Kanban API",
+        )
         return {}
 
     return note_counts
@@ -525,7 +554,13 @@ def _get_invoice_latest_notes(invoice_names: List[str]) -> Dict[str, str]:
             preview = _format_invoice_note_preview(row.get("note"))
             if preview:
                 latest_notes[invoice_name] = preview
-    except Exception:
+    except Exception as e:
+        # Same policy as `_get_invoice_note_counts`: a note preview must never
+        # break the board, but it must never fail invisibly either.
+        frappe.log_error(
+            f"Invoice Latest Notes Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+            "Kanban API",
+        )
         return {}
 
     return latest_notes

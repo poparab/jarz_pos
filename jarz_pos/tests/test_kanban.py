@@ -8,6 +8,7 @@ import frappe
 from jarz_pos.api.kanban import (
 	_build_invoice_search_or_filters,
 	_get_invoice_latest_notes,
+	_get_invoice_note_counts,
 	_sort_kanban_columns,
 	get_kanban_columns,
 	get_kanban_invoices,
@@ -486,3 +487,62 @@ class TestKanbanAPI(unittest.TestCase):
 		self.assertEqual(latest["ACC-SINV-0002"], "Short note")
 		# A whole page of invoices costs exactly one query (no N+1).
 		self.assertEqual(mock_get_all.call_count, 1)
+
+	@patch("jarz_pos.api.kanban.frappe.qb")
+	def test_get_invoice_note_counts_guards_empty_input(self, mock_qb):
+		"""Empty / blank invoice lists short-circuit before touching the database."""
+
+		self.assertEqual(_get_invoice_note_counts([]), {})
+		self.assertEqual(_get_invoice_note_counts(["", "   "]), {})
+		mock_qb.from_.assert_not_called()
+
+	@patch("jarz_pos.api.kanban.frappe.qb")
+	def test_get_invoice_note_counts_uses_single_grouped_query(self, mock_qb):
+		"""Counts come from one grouped COUNT query and map back onto invoices.
+
+		Regression cover for the v16 bug where `fields=["count(name) as
+		note_count"]` was rejected outright and every card reported zero notes.
+		"""
+
+		query = mock_qb.from_.return_value.select.return_value.where.return_value.groupby.return_value
+		query.run.return_value = [
+			frappe._dict(sales_invoice="ACC-SINV-0001", note_count=2),
+			frappe._dict(sales_invoice="ACC-SINV-0002", note_count=1),
+			# Defensive: rows without an invoice are ignored rather than crashing.
+			frappe._dict(sales_invoice="  ", note_count=9),
+		]
+
+		counts = _get_invoice_note_counts(["ACC-SINV-0001", "ACC-SINV-0002", "  "])
+
+		self.assertEqual(counts, {"ACC-SINV-0001": 2, "ACC-SINV-0002": 1})
+		# A whole page of invoices costs exactly one query (no N+1).
+		query.run.assert_called_once_with(as_dict=True)
+		mock_qb.DocType.assert_called_once_with("Jarz Invoice Note")
+
+	@patch("jarz_pos.api.kanban.frappe.log_error")
+	@patch("jarz_pos.api.kanban.frappe.qb")
+	def test_get_invoice_note_counts_logs_instead_of_silently_zeroing(self, mock_qb, mock_log_error):
+		"""A failing count query must be logged, not swallowed into zero badges.
+
+		The original bare `except Exception: return {}` is what let the v16
+		"SQL functions are not allowed as strings in SELECT" rejection ship to
+		production unnoticed: the board kept rendering, just with every notes
+		badge missing. Degrading is fine; degrading *invisibly* is the bug.
+		"""
+
+		mock_qb.from_.side_effect = frappe.ValidationError(
+			"SQL functions are not allowed as strings in SELECT: count(name) as note_count"
+		)
+
+		self.assertEqual(_get_invoice_note_counts(["ACC-SINV-0001"]), {})
+		self.assertTrue(mock_log_error.called, "note count failure must reach the Error Log")
+
+	@patch("jarz_pos.api.kanban.frappe.log_error")
+	@patch("jarz_pos.api.kanban.frappe.get_all")
+	def test_get_invoice_latest_notes_logs_instead_of_silently_dropping(self, mock_get_all, mock_log_error):
+		"""Latest-note failures follow the same degrade-but-log policy as counts."""
+
+		mock_get_all.side_effect = frappe.ValidationError("boom")
+
+		self.assertEqual(_get_invoice_latest_notes(["ACC-SINV-0001"]), {})
+		self.assertTrue(mock_log_error.called, "latest note failure must reach the Error Log")
