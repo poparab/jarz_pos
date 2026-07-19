@@ -212,6 +212,67 @@ class TestNoCourierSuppression(unittest.TestCase):
                 dh.mark_courier_outstanding("_TEST-NC-2", party_type="Employee", party="X")
 
 
+class TestFreeShippingExpenseNotZeroed(unittest.TestCase):
+    """Regression: a free-shipping bundle must STILL accrue the territory courier expense.
+
+    Free shipping is an INCOME-side promotion (the customer is not billed for
+    delivery) — suppressed independently via ``suppress_shipping_income``. The
+    company still pays the courier, so the expense resolver must be income-agnostic
+    and resolve the territory ``custom_delivery_expense`` even when a free-shipping
+    bundle is present. Prior to the fix this returned 0.0 and understated Creditors.
+    """
+
+    class _Doc(types.SimpleNamespace):
+        """SimpleNamespace that also supports dict-style .get() like a Frappe doc."""
+
+        def get(self, key, default=None):
+            return getattr(self, key, default)
+
+    def test_free_shipping_bundle_resolves_territory_expense(self):
+        # Invoice carries a free-shipping bundle line, but its territory has a 70 expense.
+        item = _ns(item_code="BUNDLE-PARENT", bundle_code="FREE-SHIP-BUNDLE")
+        inv = self._Doc(
+            name="_TEST-FS-1",
+            customer="_TEST-CUST",
+            territory="_TEST-TERRITORY",
+            items=[item],
+            # All genuine no-cost flags OFF so the Territory path is exercised.
+            custom_is_pickup=0,
+            is_pickup=0,
+            pickup=0,
+            custom_no_courier=0,
+            remarks="",
+            # Non-empty, non-"Approved" so the override branch is skipped without a DB call.
+            custom_shipping_override_status="NA",
+            custom_sub_territory="",
+        )
+
+        def _get_value(doctype, name, field, *args, **kwargs):
+            if doctype == "Territory" and field == "custom_delivery_expense":
+                return 70 if name == "_TEST-TERRITORY" else 0
+            if doctype == "Territory" and field == "parent_territory":
+                return None
+            # Sales Invoice sub-territory / any other lookup → empty.
+            return ""
+
+        with patch.object(dh, "frappe") as mf:
+            mf.db.get_value.side_effect = _get_value
+            mf.db.get_table_columns.return_value = [
+                "name",
+                "custom_delivery_expense",
+                "parent_territory",
+            ]
+            mf.db.exists.return_value = False
+
+            amount = dh._get_delivery_expense_amount(inv)
+
+        self.assertEqual(
+            amount,
+            70.0,
+            "Free-shipping bundle must resolve the territory courier expense, not 0.0",
+        )
+
+
 class TestPriceListChainHelpers(unittest.TestCase):
     """Resolution-chain helpers degrade gracefully and honor priority."""
 

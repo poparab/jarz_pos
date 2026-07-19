@@ -3284,12 +3284,22 @@ def _apply_collection_change_to_online(*, inv, ct, new_method: str, order_amount
 
 def _get_delivery_expense_amount(inv):
     """
-    Return delivery expense amount (float) for the given invoice.
+    Return delivery COURIER EXPENSE amount (float) for the given invoice.
 
-    Waiver rule (highest priority): If the invoice contains a Jarz Bundle that
-    has the Free Shipping flag enabled, return 0.0 regardless of Territory setup.
+    IMPORTANT — income vs. expense separation:
+      "Free shipping" is a CUSTOMER-FACING INCOME promotion (the customer is not
+      charged for delivery). The company STILL pays the courier the real delivery
+      cost, so free shipping must NEVER zero the courier expense here. Delivery
+      INCOME suppression is handled independently via ``suppress_shipping_income``
+      in ``services/invoice_creation.py``. This resolver is income-agnostic: a
+      free-shipping order simply has a negative delivery margin, not a zero cost.
 
-    Default strategy when no waiver applies:
+    Genuine no-cost cases (handled below) are the ONLY reasons to return 0.0:
+      - Pickup (``custom_is_pickup`` / ``is_pickup`` / ``pickup`` / ``[PICKUP]``)
+      - ``custom_no_courier`` commercial policies (Employee / Sample-No-Courier)
+      These mean "no courier is involved", hence no expense.
+
+    Default strategy when no no-courier case applies:
       1) Resolve Territory from Sales Invoice (inv.territory), else from Customer.
       2) Discover available Territory columns and probe common field names for shipping/expense
          (both custom_ and standard-style) WITHOUT triggering unknown-column errors.
@@ -3323,44 +3333,17 @@ def _get_delivery_expense_amount(inv):
     except Exception:
         pass
 
-    # 1) Free-shipping bundle short-circuit
-    try:
-        # Detect either parent or child lines associated with a Jarz Bundle that has free_shipping=1
-        # Parent heuristic: Sales Invoice Item has is_bundle_parent flag or matches a Jarz Bundle's erpnext_item
-        bundle_ids = set()
-        for it in getattr(inv, 'items', []) or []:
-            code = (getattr(it, 'item_code', None) or '').strip()
-            if not code:
-                continue
-            # Direct match via bundle record (when parent/child helper stored bundle_code)
-            try:
-                bcode = getattr(it, 'bundle_code', None) or getattr(it, 'parent_bundle', None)
-                if bcode and frappe.db.exists('Jarz Bundle', bcode):
-                    bundle_ids.add(bcode)
-            except Exception:
-                pass
-            # Heuristic: parent line is ERPNext item equal to bundle.erpnext_item
-            try:
-                rows = frappe.get_all('Jarz Bundle', filters={'erpnext_item': code}, pluck='name')
-                for r in rows:
-                    bundle_ids.add(r)
-            except Exception:
-                pass
-        if bundle_ids:
-            # Any of these bundles free_shipping?
-            cols = set()
-            try:
-                cols = set(frappe.db.get_table_columns('Jarz Bundle') or [])
-            except Exception:
-                cols = set()
-            has_flag = 'free_shipping' in cols
-            if has_flag:
-                flags = frappe.get_all('Jarz Bundle', filters={'name': ['in', list(bundle_ids)], 'free_shipping': 1}, pluck='name')
-                if flags:
-                    return 0.0
-    except Exception:
-        # If detection fails, fall back to territory logic
-        pass
+    # 1) Free-shipping bundles are INTENTIONALLY NOT short-circuited here.
+    #
+    # "Free shipping" only means the customer is not billed for delivery — it is
+    # an INCOME-side promotion, suppressed via ``suppress_shipping_income`` in
+    # ``services/invoice_creation.py``. The company still owes the courier the
+    # real territory delivery cost, so this EXPENSE resolver must remain
+    # income-agnostic and fall through to the Territory ``delivery_expense`` /
+    # ``custom_delivery_expense`` resolution below. Zeroing the courier expense
+    # for a free-shipping bundle would understate Creditors and hide the (correct)
+    # negative delivery margin — do NOT reintroduce a free_shipping branch here.
+
     # 1b) Custom shipping override short-circuit
     try:
         override_status = (
