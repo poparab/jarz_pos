@@ -514,7 +514,46 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
     unpaid_status = status_l in {"unpaid", "overdue", "partially paid", "partly paid"}
     is_unpaid_effective = (outstanding > 0.009) or unpaid_status or (last_pe_seconds is not None and last_pe_seconds <= int(recent_payment_seconds))
 
-    order_amount = float(inv.grand_total or 0) if is_unpaid_effective else 0.0
+    # Order amount = what the courier is holding / owes for this invoice. The authoritative
+    # source is the Courier Transaction accrued at Out-for-Delivery — the SAME rows the batch
+    # settlement (settle_delivery_party) and get_courier_balances aggregate. Reading it here
+    # keeps the single-invoice preview's amounts AND its collect/pay label identical to the
+    # batch "Settle All" path.
+    #
+    # This is the fix for the settle-later (COD / cash) divergence: when an order is dispatched
+    # "settle later", its receivable is moved to Courier Outstanding, so the invoice looks
+    # "Paid" (outstanding == 0) even though the courier still owes (order_amount - shipping).
+    # The old heuristic (`grand_total if is_unpaid_effective else 0`) therefore zeroed the order
+    # amount for exactly these orders, dropping the shipping deduction from a real order amount
+    # and flipping "collect from courier" into "pay courier" — while the batch path (which reads
+    # the Courier Transaction) still showed the correct positive "collect" balance.
+    settlement_ct_filters = {"reference_invoice": inv.name, "status": ["!=", "Settled"]}
+    if party_type and party:
+        settlement_ct_filters.update({"party_type": party_type, "party": party})
+    settlement_ct_rows = frappe.get_all(
+        "Courier Transaction",
+        filters=settlement_ct_filters,
+        fields=["amount", "shipping_amount", "party_type", "party"],
+        order_by="creation desc",
+        limit=1,
+    )
+    settlement_ct = settlement_ct_rows[0] if settlement_ct_rows else None
+
+    if settlement_ct is not None:
+        # Trust the recorded transaction (what the courier actually collected / owes).
+        order_amount = float(settlement_ct.get("amount") or 0)
+        ct_shipping = float(settlement_ct.get("shipping_amount") or 0)
+        if ct_shipping > 0:
+            # Prefer the shipping accrued on the CT so single & batch net the exact same value.
+            shipping = ct_shipping
+        # Adopt the CT's party when the caller did not specify one.
+        if not (party_type and party):
+            party_type = settlement_ct.get("party_type") or party_type
+            party = settlement_ct.get("party") or party
+    else:
+        # No transaction yet (preview generated before OFD): anticipate the courier collection
+        # from the invoice's paid/unpaid status, as before.
+        order_amount = float(inv.grand_total or 0) if is_unpaid_effective else 0.0
 
     # Online-intent unpaid orders (InstaPay/Mobile Wallet) collect NOTHING from the courier —
     # the customer pays online and a manager confirms the transfer separately. Zero the courier
