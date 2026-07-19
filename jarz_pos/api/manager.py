@@ -874,6 +874,87 @@ def _repoint_woocommerce_order_map(
             )
 
 
+def _carry_over_invoice_notes(
+    *,
+    source_invoice_name: str,
+    new_invoice_name: str,
+    logger: Any = None,
+) -> None:
+    """Move operational Jarz notes from a superseded source invoice onto its live
+    amendment replacement.
+
+    Notes are standalone ``Jarz Invoice Note`` documents linked to a Sales Invoice
+    via the ``sales_invoice`` field (the Kanban card's note badge + latest-note
+    preview read them through that link). Because amendment cancels the source
+    invoice and creates a brand-new invoice with a different name, the notes would
+    otherwise stay pinned to the cancelled invoice and disappear from the live
+    order. Re-pointing them here preserves the original author/timestamp metadata
+    exactly — unlike re-inserting, which ``JarzInvoiceNote.validate`` would restamp
+    with the amending user and ``now()``.
+
+    Errors are swallowed so a note-carry-over failure can never abort an already-
+    successful amendment.
+    """
+    try:
+        note_names = frappe.get_all(
+            "Jarz Invoice Note",
+            filters={"sales_invoice": source_invoice_name},
+            pluck="name",
+        ) or []
+        if not note_names:
+            return
+
+        # Re-derive the Kanban/POS profile from the replacement invoice so the
+        # carried-over notes stay aligned with the new invoice's board column.
+        invoice_values = frappe.db.get_value(
+            "Sales Invoice",
+            new_invoice_name,
+            ["custom_kanban_profile", "pos_profile"],
+            as_dict=True,
+        ) or {}
+        new_pos_profile = (
+            invoice_values.get("custom_kanban_profile")
+            or invoice_values.get("pos_profile")
+            or None
+        )
+
+        for note_name in note_names:
+            updates: Dict[str, Any] = {"sales_invoice": new_invoice_name}
+            if new_pos_profile:
+                updates["pos_profile"] = new_pos_profile
+            frappe.db.set_value(
+                "Jarz Invoice Note",
+                note_name,
+                updates,
+                update_modified=False,
+            )
+
+        if logger:
+            logger.info(
+                {
+                    "event": "invoice_notes_carried_over",
+                    "source_invoice": source_invoice_name,
+                    "new_invoice": new_invoice_name,
+                    "note_count": len(note_names),
+                }
+            )
+    except Exception as exc:
+        if logger:
+            logger.warning(
+                {
+                    "event": "invoice_note_carry_over_failed",
+                    "source_invoice": source_invoice_name,
+                    "new_invoice": new_invoice_name,
+                    "error": str(exc),
+                }
+            )
+        else:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Invoice note carry-over failed {source_invoice_name} -> {new_invoice_name}",
+            )
+
+
 def _build_invoice_amendment_response(
     *,
     request_id: str,
@@ -1291,6 +1372,15 @@ def _run_invoice_amendment_job(
                 f"Created as amendment of {invoice_id} by {initiated_by}. "
                 f"Request ID: {request_id}."
             ),
+        )
+
+        # Carry operational Jarz notes forward onto the live replacement so the
+        # Kanban note badge + latest-note preview survive the cancel-and-recreate
+        # amendment (notes are linked to the invoice by name, which changes here).
+        _carry_over_invoice_notes(
+            source_invoice_name=invoice_id,
+            new_invoice_name=replacement_invoice_name,
+            logger=logger,
         )
 
         # H3: Repoint WooCommerce Order Map from the cancelled source to the live
