@@ -1731,10 +1731,24 @@ def update_invoice_state(
                             txn.date = frappe.utils.now()
                         txn.reference_invoice = invoice.name
                         txn.amount = float(getattr(invoice, 'grand_total', 0) or 0)
-                        # partner_fees left blank for now; user will update later
                         # Determine payment mode: cash if cash PE created, else Online
                         payment_mode_val = PAYMENT_MODES.CASH if created_cash_payment_entry else PAYMENT_MODES.ONLINE
                         txn.payment_mode = payment_mode_val
+                        # §5-E: compute + store the commission/VAT split (and combined total)
+                        # so the "Settle Sales Partner" batch action can post the fee JE.
+                        try:
+                            from jarz_pos.services.delivery_handling import _compute_sales_partner_fees
+                            fees = _compute_sales_partner_fees(
+                                invoice, sales_partner_val,
+                                online=(payment_mode_val == PAYMENT_MODES.ONLINE),
+                            )
+                            txn.partner_fees = fees.get("total_fees")
+                            txn.base_fee = fees.get("base_fees")
+                            txn.vat_amount = fees.get("vat")
+                        except Exception as _fee_err:
+                            frappe.logger().warning(
+                                f"KANBAN API: SPT fee computation failed for {invoice.name}: {_fee_err}"
+                            )
                         txn.idempotency_token = idem_token
                         txn.insert(ignore_permissions=True)
                         created_partner_txn = txn.name

@@ -292,6 +292,127 @@ def resolve_online_partner_paid_to(company: str, sales_partner: str | None) -> s
     return get_company_receivable_account(company)
 
 
+# ------------------ Sales Partner settlement helpers (fee recognition) ------------------
+
+def get_sales_commission_account(company: str) -> str:
+    """Resolve the 'Commission on Sales' expense ledger for the company.
+
+    Used as the debit (expense) side when recognizing Sales Partner commission at
+    settlement time. Throws (via get_account_for_company) if the ledger is missing.
+    """
+    return get_account_for_company("Commission on Sales", company)
+
+
+def _ensure_tax_assets_group(company: str) -> str:
+    """Ensure an Asset 'Tax Assets - {abbr}' group account exists; return its name.
+
+    This is the parent group for recoverable input-tax ledgers such as Input VAT.
+    """
+    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+    desired = f"Tax Assets - {company_abbr}".strip()
+    if frappe.db.exists("Account", desired):
+        return desired
+
+    # Prefer nesting under a conventional Asset group, else any Asset group.
+    parent_name = None
+    for candidate in (
+        f"Current Assets - {company_abbr}",
+        f"Application of Funds (Assets) - {company_abbr}",
+    ):
+        if company_abbr and frappe.db.exists("Account", candidate):
+            parent_name = candidate
+            break
+    if not parent_name:
+        parent_name = frappe.db.get_value(
+            "Account",
+            {"company": company, "root_type": "Asset", "is_group": 1},
+            "name",
+        )
+    if not parent_name:
+        frappe.throw(f"Could not find an Asset group account to create 'Tax Assets' under for {company}")
+
+    acc = frappe.new_doc("Account")
+    acc.account_name = "Tax Assets"
+    acc.parent_account = parent_name
+    acc.company = company
+    acc.is_group = 1
+    acc.root_type = "Asset"
+    acc.insert(ignore_permissions=True)
+    return acc.name
+
+
+def ensure_input_vat_account(company: str) -> str:
+    """Ensure a recoverable 'Input VAT - {abbr}' Tax asset ledger exists; return its name.
+
+    Created on demand under an Asset 'Tax Assets - {abbr}' group. This is the debit
+    side for the 14% VAT charged on Sales Partner fees, treated as recoverable input VAT.
+    """
+    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+    desired = f"Input VAT - {company_abbr}".strip()
+    if frappe.db.exists("Account", desired):
+        return desired
+
+    parent_name = _ensure_tax_assets_group(company)
+    acc = frappe.new_doc("Account")
+    acc.account_name = "Input VAT"
+    acc.parent_account = parent_name
+    acc.company = company
+    acc.is_group = 0
+    acc.account_type = "Tax"
+    acc.root_type = "Asset"
+    acc.insert(ignore_permissions=True)
+    return acc.name
+
+
+def ensure_partner_payable_subaccount(sales_partner: str, company: str) -> str:
+    """Ensure a Payable child account '{sales_partner} Payable - {abbr}' exists; return its name.
+
+    Mirrors ``ensure_partner_receivable_subaccount`` but on the Payable/Creditors side. Used to
+    accrue the commission we owe a Sales Partner on CASH orders (partner collected our fee), so a
+    later Payment Entry can clear it. Created under the company's Payable group on demand.
+    """
+    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+    desired = f"{sales_partner} Payable - {company_abbr}".strip()
+    if frappe.db.exists("Account", desired):
+        return desired
+
+    leaf_payable = get_creditors_account(company)
+    parent_name = None
+    try:
+        leaf_doc = frappe.get_doc("Account", leaf_payable)
+        if int(getattr(leaf_doc, "is_group", 0)) == 1:
+            parent_name = leaf_doc.name
+        else:
+            parent_name = getattr(leaf_doc, "parent_account", None)
+    except Exception:
+        parent_name = None
+
+    if not parent_name:
+        parent_name = frappe.db.get_value(
+            "Account",
+            {"company": company, "account_type": "Payable", "is_group": 1},
+            "name",
+        )
+    if not parent_name:
+        parent_name = frappe.db.get_value(
+            "Account",
+            {"company": company, "root_type": "Liability", "is_group": 1},
+            "name",
+        )
+    if not parent_name:
+        frappe.throw(f"Could not find a Payable group account to create partner payable subaccount for {company}")
+
+    acc = frappe.new_doc("Account")
+    acc.account_name = f"{sales_partner} Payable"
+    acc.parent_account = parent_name
+    acc.company = company
+    acc.is_group = 0
+    acc.account_type = "Payable"
+    acc.root_type = "Liability"
+    acc.insert(ignore_permissions=True)
+    return acc.name
+
+
 @frappe.whitelist()
 def create_online_payment_entry(
     invoice_name: str,

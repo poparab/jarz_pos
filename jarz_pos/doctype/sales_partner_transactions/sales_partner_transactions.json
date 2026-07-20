@@ -13,7 +13,10 @@
   "reference_invoice",
   "amount",
   "partner_fees",
+  "base_fee",
+  "vat_amount",
   "payment_mode",
+  "journal_entry",
   "idempotency_token",
   "notes"
  ],
@@ -85,6 +88,23 @@
    "fieldname": "partner_fees",
    "fieldtype": "Currency",
    "label": "Partner fees"
+  },
+  {
+   "fieldname": "base_fee",
+   "fieldtype": "Currency",
+   "label": "Base Fee (Commission)"
+  },
+  {
+   "fieldname": "vat_amount",
+   "fieldtype": "Currency",
+   "label": "VAT Amount"
+  },
+  {
+   "fieldname": "journal_entry",
+   "fieldtype": "Link",
+   "label": "Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1
   },
   {
    "fieldname": "pos_profile",

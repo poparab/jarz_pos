@@ -1506,6 +1506,9 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
             spt.reference_invoice = inv.name
             spt.amount = float(inv.grand_total or 0)
             spt.partner_fees = fees.get("total_fees")
+            # §5-E: store the commission/VAT split so settlement can post the fee JE
+            spt.base_fee = fees.get("base_fees")
+            spt.vat_amount = fees.get("vat")
             spt.payment_mode = "Cash"
             spt.idempotency_token = idemp
             spt.status = "Unsettled"
@@ -1655,6 +1658,9 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
             spt.reference_invoice = inv.name
             spt.amount = float(inv.grand_total or 0)
             spt.partner_fees = fees.get("total_fees")
+            # §5-E: store the commission/VAT split so settlement can post the fee JE
+            spt.base_fee = fees.get("base_fees")
+            spt.vat_amount = fees.get("vat")
             spt.payment_mode = "Online" if is_online else "Cash"
             spt.idempotency_token = idemp
             spt.status = "Unsettled"
