@@ -290,8 +290,9 @@ def _find_existing_delivery_note_for_invoice(si) -> str | None:
     unknown-column error (swallowed by the outer try) and DN reuse silently failed →
     every OFD retry created a duplicate Delivery Note and double-booked stock. We now
     detect the link via the v16-valid ``Delivery Note Item.against_sales_invoice`` field
-    (stamped in ``ensure_delivery_note_for_invoice``), plus any custom parent link field,
-    with a conservative customer+qty heuristic as a last resort for legacy DNs.
+    (stamped in ``ensure_delivery_note_for_invoice``), plus any custom parent link field.
+    The old customer+qty heuristic was removed — it could cross-link a new order to an
+    unrelated same-qty DN.
     """
     try:
         # 1) Custom parent link field, if this site defines one.
@@ -321,35 +322,14 @@ def _find_existing_delivery_note_for_invoice(si) -> str | None:
                 limit_page_length=1,
             )
 
-        # 3) Legacy heuristic (best-effort; no remarks column on v16): a very recent
-        #    submitted DN for the same customer with an identical total qty. Only reached
-        #    for DNs created before this fix (which lack against_sales_invoice).
-        if not existing:
-            try:
-                total_qty = sum(float(it.qty or 0) for it in si.items)
-            except Exception:
-                total_qty = None
-
-            if total_qty is not None:
-                heuristics = frappe.get_all(
-                    "Delivery Note",
-                    filters={
-                        "docstatus": 1,
-                        "customer": si.customer,
-                        "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -3)],
-                    },
-                    fields=["name"],
-                    order_by="creation desc",
-                    limit_page_length=10,
-                )
-                for cand in heuristics:
-                    try:
-                        dn_doc = frappe.get_doc("Delivery Note", cand.name)
-                        if abs(float(dn_doc.get("total_qty") or 0) - (total_qty or 0)) < 0.0001:
-                            existing = [cand.name]
-                            break
-                    except Exception:
-                        continue
+        # 3) The old customer+qty heuristic was REMOVED (2026-07-20). It could match a
+        #    NEW order to an unrelated same-customer, same-qty DN and "deliver" the new
+        #    order against that other order's DN (stock never depleted for the new order).
+        #    Reliable detection now comes solely from the stamped
+        #    ``Delivery Note Item.against_sales_invoice`` (every DN this app creates carries
+        #    it). Legacy pre-stamp DNs are simply not reused — worst case a retry on a
+        #    pre-fix order makes a duplicate DN, the same as the old behavior, and far
+        #    safer than cross-linking unrelated orders.
 
         return existing[0] if existing else None
     except Exception as reuse_err:
@@ -698,7 +678,11 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
                 # FIX 4 (2026-07-20): stamp the v16-valid link so this DN can be
                 # reliably re-found by _find_existing_delivery_note_for_invoice on
                 # retry (the removed `remarks` column can no longer carry it).
+                # v16 REQUIRES the paired `si_detail` (Against Sales Invoice Item) whenever
+                # `against_sales_invoice` is set, else the DN item raises on insert — so we
+                # stamp the Sales Invoice Item row name here too.
                 "against_sales_invoice": si.name,
+                "si_detail": it.name,
             })
         # Attempt to set link field if exists (does not break if absent)
         try:
