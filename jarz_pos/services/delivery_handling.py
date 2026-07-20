@@ -4121,7 +4121,12 @@ def create_partner_settlement_je(
     tag = _partner_settlement_dedup_tag(delivery_partner, token)
 
     je = frappe.new_doc("Journal Entry")
-    je.voucher_type = "Bank Entry"
+    # FIX (2026-07-20): use "Journal Entry", not "Bank Entry". v16
+    # JournalEntry.validate_cheque_info rejects any Bank Entry without cheque_no/
+    # cheque_date, and this settlement has no cheque — the previous "Bank Entry"
+    # crashed deterministically and nothing settled. A plain Journal Entry with a
+    # bank-account line is valid and matches the (working) dispatch JEs.
+    je.voucher_type = "Journal Entry"
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Delivery Partner Settlement – {delivery_partner}"
