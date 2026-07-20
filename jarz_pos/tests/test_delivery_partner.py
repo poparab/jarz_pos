@@ -112,16 +112,16 @@ class TestPartnerUnpaidSettleNow(unittest.TestCase):
 	"""Test handle_partner_unpaid_settle_now strategy."""
 
 	@patch("jarz_pos.services.settlement_strategies.frappe")
-	@patch("jarz_pos.services.settlement_strategies._create_payment_entry")
-	@patch("jarz_pos.services.settlement_strategies.get_pos_cash_account")
-	@patch("jarz_pos.services.settlement_strategies._get_receivable_account")
 	@patch("jarz_pos.services.settlement_strategies._get_delivery_expense_amount")
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.services.settlement_strategies.create_partner_cod_dispatch_je")
+	@patch("jarz_pos.services.settlement_strategies.resolve_partner_bank_account")
+	@patch("jarz_pos.services.settlement_strategies.create_partner_settlement_je")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
 	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
 	def test_collects_full_order_amount(
-		self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_recv, mock_cash, mock_pe, mock_frappe
+		self, mock_update_state, mock_stamp, mock_ct, mock_settle_je, mock_bank, mock_dispatch_je, mock_dn, mock_exp, mock_frappe
 	):
 		from jarz_pos.services.settlement_strategies import handle_partner_unpaid_settle_now
 
@@ -129,12 +129,11 @@ class TestPartnerUnpaidSettleNow(unittest.TestCase):
 		mock_inv.name = "INV-PU1"
 		mock_inv.company = "Test Co"
 		mock_inv.grand_total = 500.0
-		mock_frappe.db.get_value.return_value = 500.0
-		mock_recv.return_value = "Debtors - T"
-		mock_cash.return_value = "Cash - T"
-		mock_pe.return_value = MagicMock(name="PE-001")
 		mock_exp.return_value = 50.0
 		mock_dn.return_value = {"delivery_note": "DN-001"}
+		mock_dispatch_je.return_value = "JE-DISPATCH-1"
+		mock_bank.return_value = "Bank - T"
+		mock_settle_je.return_value = "JE-SETTLE-1"
 		mock_ct.return_value = "CT-PARTNER-001"
 
 		result = handle_partner_unpaid_settle_now(
@@ -151,8 +150,18 @@ class TestPartnerUnpaidSettleNow(unittest.TestCase):
 		self.assertTrue(result["is_partner_order"])
 		self.assertEqual(result["delivery_partner"], "Partner A")
 		self.assertEqual(result["shipping_amount"], 50.0)
+		self.assertEqual(result["journal_entry"], "JE-DISPATCH-1")
+		self.assertEqual(result["settlement_journal_entry"], "JE-SETTLE-1")
 
-		# Verify CT created with full order amount
+		# No POS-cash Payment Entry — the branch never touches the customer's cash.
+		# Dispatch JE clears Debtors + books expense; settlement leg nets the partner.
+		mock_dispatch_je.assert_called_once()
+		mock_settle_je.assert_called_once()
+		settle_kwargs = mock_settle_je.call_args.kwargs
+		self.assertEqual(settle_kwargs["cash_net_total"], 450.0)  # 500 - 50
+		self.assertEqual(settle_kwargs["online_ship_total"], 0)
+
+		# Verify CT created with full order amount, marked Settled
 		mock_ct.assert_called_once()
 		ct_kwargs = mock_ct.call_args
 		self.assertEqual(ct_kwargs.kwargs["order_amount"], 500.0)
@@ -172,10 +181,11 @@ class TestPartnerUnpaidSettleLater(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	@patch("jarz_pos.services.settlement_strategies._get_delivery_expense_amount")
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.services.settlement_strategies.create_partner_cod_dispatch_je")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
 	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
-	def test_creates_unsettled_ct(self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
+	def test_creates_unsettled_ct(self, mock_update_state, mock_stamp, mock_ct, mock_dispatch_je, mock_dn, mock_exp, mock_frappe):
 		from jarz_pos.services.settlement_strategies import handle_partner_unpaid_settle_later
 
 		mock_inv = MagicMock()
@@ -184,6 +194,7 @@ class TestPartnerUnpaidSettleLater(unittest.TestCase):
 		mock_inv.grand_total = 300.0
 		mock_exp.return_value = 30.0
 		mock_dn.return_value = {"delivery_note": "DN-002"}
+		mock_dispatch_je.return_value = "JE-DISPATCH-2"
 		mock_ct.return_value = "CT-PARTNER-002"
 
 		result = handle_partner_unpaid_settle_later(
@@ -198,8 +209,14 @@ class TestPartnerUnpaidSettleLater(unittest.TestCase):
 		self.assertTrue(result["success"])
 		self.assertEqual(result["mode"], "partner_unpaid_settle_later")
 		self.assertTrue(result["is_partner_order"])
+		self.assertEqual(result["journal_entry"], "JE-DISPATCH-2")
 
-		# CT should be Unsettled
+		# Dispatch JE clears the receivable + books the expense; NO settlement leg yet
+		# (deferred to settle_delivery_partner).
+		mock_dispatch_je.assert_called_once()
+		self.assertNotIn("settlement_journal_entry", result)
+
+		# CT should be Unsettled with the full order amount tracked
 		ct_kwargs = mock_ct.call_args
 		self.assertEqual(ct_kwargs.kwargs["status"], "Unsettled")
 		self.assertEqual(ct_kwargs.kwargs["order_amount"], 300.0)
@@ -213,10 +230,13 @@ class TestPartnerPaidSettleNow(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	@patch("jarz_pos.services.settlement_strategies._get_delivery_expense_amount")
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.services.settlement_strategies.create_partner_online_dispatch_je")
+	@patch("jarz_pos.services.settlement_strategies.resolve_partner_bank_account")
+	@patch("jarz_pos.services.settlement_strategies.create_partner_settlement_je")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
 	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
-	def test_no_cash_exchange_for_online(self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
+	def test_no_cash_exchange_for_online(self, mock_update_state, mock_stamp, mock_ct, mock_settle_je, mock_bank, mock_dispatch_je, mock_dn, mock_exp, mock_frappe):
 		from jarz_pos.services.settlement_strategies import handle_partner_paid_settle_now
 
 		mock_inv = MagicMock()
@@ -225,6 +245,9 @@ class TestPartnerPaidSettleNow(unittest.TestCase):
 		mock_inv.grand_total = 700.0
 		mock_exp.return_value = 70.0
 		mock_dn.return_value = {"delivery_note": "DN-003"}
+		mock_dispatch_je.return_value = "JE-DISPATCH-3"
+		mock_bank.return_value = "Bank - T"
+		mock_settle_je.return_value = "JE-SETTLE-3"
 		mock_ct.return_value = "CT-PARTNER-003"
 
 		result = handle_partner_paid_settle_now(
@@ -238,8 +261,17 @@ class TestPartnerPaidSettleNow(unittest.TestCase):
 
 		self.assertTrue(result["success"])
 		self.assertEqual(result["mode"], "partner_paid_settle_now")
+		self.assertEqual(result["journal_entry"], "JE-DISPATCH-3")
+		self.assertEqual(result["settlement_journal_entry"], "JE-SETTLE-3")
 
-		# Order amount should be 0 for paid orders
+		# Dispatch accrues the partner payable; settlement leg pays the partner (S_exp).
+		mock_dispatch_je.assert_called_once()
+		mock_settle_je.assert_called_once()
+		settle_kwargs = mock_settle_je.call_args.kwargs
+		self.assertEqual(settle_kwargs["cash_net_total"], 0)
+		self.assertEqual(settle_kwargs["online_ship_total"], 70.0)
+
+		# Order amount should be 0 for prepaid orders
 		ct_kwargs = mock_ct.call_args
 		self.assertEqual(ct_kwargs.kwargs["order_amount"], 0)
 		self.assertEqual(ct_kwargs.kwargs["shipping_amount"], 70.0)
@@ -254,10 +286,11 @@ class TestPartnerPaidSettleLater(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	@patch("jarz_pos.services.settlement_strategies._get_delivery_expense_amount")
 	@patch("jarz_pos.services.settlement_strategies.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.services.settlement_strategies.create_partner_online_dispatch_je")
 	@patch("jarz_pos.services.settlement_strategies._create_partner_courier_transaction")
 	@patch("jarz_pos.services.settlement_strategies._stamp_partner_fields")
 	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
-	def test_unsettled_fee_only(self, mock_update_state, mock_stamp, mock_ct, mock_dn, mock_exp, mock_frappe):
+	def test_unsettled_fee_only(self, mock_update_state, mock_stamp, mock_ct, mock_dispatch_je, mock_dn, mock_exp, mock_frappe):
 		from jarz_pos.services.settlement_strategies import handle_partner_paid_settle_later
 
 		mock_inv = MagicMock()
@@ -266,6 +299,7 @@ class TestPartnerPaidSettleLater(unittest.TestCase):
 		mock_inv.grand_total = 400.0
 		mock_exp.return_value = 40.0
 		mock_dn.return_value = {"delivery_note": "DN-004"}
+		mock_dispatch_je.return_value = "JE-DISPATCH-4"
 		mock_ct.return_value = "CT-PARTNER-004"
 
 		result = handle_partner_paid_settle_later(
@@ -280,6 +314,11 @@ class TestPartnerPaidSettleLater(unittest.TestCase):
 		self.assertTrue(result["success"])
 		self.assertEqual(result["mode"], "partner_paid_settle_later")
 		self.assertTrue(result["is_partner_order"])
+		self.assertEqual(result["journal_entry"], "JE-DISPATCH-4")
+
+		# Dispatch accrues the partner payable; settlement leg deferred.
+		mock_dispatch_je.assert_called_once()
+		self.assertNotIn("settlement_journal_entry", result)
 
 		ct_kwargs = mock_ct.call_args
 		self.assertEqual(ct_kwargs.kwargs["order_amount"], 0)
@@ -367,55 +406,44 @@ class TestDeliveryPartnerBalancesAPI(unittest.TestCase):
 		self.assertEqual(result["order_count"], 0)
 		self.assertIn("message", result)
 
+	@patch("jarz_pos.api.delivery_partners.create_partner_settlement_je")
 	@patch("jarz_pos.api.delivery_partners.frappe")
-	def test_settle_creates_journal_entry(self, mock_frappe):
+	def test_settle_creates_journal_entry(self, mock_frappe, mock_settle_je):
 		from jarz_pos.api.delivery_partners import settle_delivery_partner
 
 		mock_dp = MagicMock()
 		mock_dp.bank_account = "BA-001"
-		mock_dp.settlement_account = "Expense - T"
+		mock_dp.settlement_account = "Deliverk - J"
 		mock_dp.partner_name = "Partner A"
-		mock_frappe.get_doc.side_effect = lambda *a, **kw: (
-			mock_dp if a == ("Delivery Partner", "Partner A")
-			else _make_je_mock()
-		)
+		mock_frappe.get_doc.return_value = mock_dp
+		# Two COD partner CTs (amount = order total > 0) -> partner remits net.
 		mock_frappe.get_all.return_value = [
-			{"name": "CT-001", "shipping_amount": 50, "reference_invoice": "INV-001"},
-			{"name": "CT-002", "shipping_amount": 30, "reference_invoice": "INV-002"},
+			{"name": "CT-001", "amount": 500, "shipping_amount": 50, "reference_invoice": "INV-001"},
+			{"name": "CT-002", "amount": 300, "shipping_amount": 30, "reference_invoice": "INV-002"},
 		]
 		mock_frappe.db.get_value.side_effect = lambda dt, dn, field=None: {
 			("Bank Account", "BA-001", "account"): "Bank Account - T",
 			("Account", "Bank Account - T", "company"): "Test Co",
 		}.get((dt, dn, field) if field else (dt, dn), None)
-		mock_frappe.utils.today.return_value = "2025-06-01"
-
-		# Mock the JE get_doc for creation
-		mock_je = MagicMock()
-		mock_je.name = "JE-001"
-		original_side_effect = mock_frappe.get_doc.side_effect
-
-		def get_doc_handler(*a, **kw):
-			if isinstance(a[0], dict) and a[0].get("doctype") == "Journal Entry":
-				return mock_je
-			if len(a) == 2 and a[0] == "Delivery Partner":
-				return mock_dp
-			return MagicMock()
-
-		mock_frappe.get_doc.side_effect = get_doc_handler
+		mock_settle_je.return_value = "JE-001"
 
 		result = settle_delivery_partner("Partner A")
 		self.assertTrue(result["success"])
 		self.assertEqual(result["order_count"], 2)
 		self.assertEqual(result["total_shipping"], 80.0)
+		self.assertEqual(result["cash_order_count"], 2)
+		self.assertEqual(result["online_order_count"], 0)
+		# COD net remitted = (500-50) + (300-30) = 720
+		self.assertEqual(result["cash_net_total"], 720.0)
+		self.assertEqual(result["online_ship_total"], 0)
 		self.assertEqual(result["journal_entry"], "JE-001")
-		mock_je.insert.assert_called_once()
-		mock_je.submit.assert_called_once()
 
-
-def _make_je_mock():
-	m = MagicMock()
-	m.name = "JE-mock"
-	return m
+		mock_settle_je.assert_called_once()
+		je_kwargs = mock_settle_je.call_args.kwargs
+		self.assertEqual(je_kwargs["cash_net_total"], 720.0)
+		self.assertEqual(je_kwargs["online_ship_total"], 0)
+		self.assertEqual(je_kwargs["company"], "Test Co")
+		self.assertEqual(je_kwargs["bank_account"], "Bank Account - T")
 
 
 if __name__ == "__main__":

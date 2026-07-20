@@ -2,12 +2,16 @@
 
 Provides endpoints for:
   - Listing delivery partner balances (unsettled shipping fees)
-  - Settling accumulated fees via bank Payment Entry
+  - Settling accumulated partner balances via one balanced Journal Entry
 """
 from __future__ import annotations
 
+import hashlib
+
 import frappe
 from frappe.utils import now_datetime
+
+from jarz_pos.services.delivery_handling import create_partner_settlement_je
 
 
 @frappe.whitelist()
@@ -66,22 +70,33 @@ def get_delivery_partner_unsettled_details(delivery_partner: str):
 
 @frappe.whitelist()
 def settle_delivery_partner(delivery_partner: str, bank_account: str | None = None):
-    """Settle all unsettled shipping fees for a Delivery Partner via bank Payment Entry.
+    """Settle every Unsettled partner Courier Transaction for a Delivery Partner.
 
-    Creates a Journal Entry:
-      DR  Freight/Delivery Expense Account  (total shipping)
-      CR  Bank Account                      (total shipping)
+    §5-D hybrid money model. Partner orders were booked against the partner's
+    Payable ``settlement_account`` at dispatch (with a per-partner Supplier party).
+    This sweep posts ONE balanced Journal Entry that nets the partner ledger back
+    to zero:
 
-    Then marks all matched Courier Transactions as Settled.
+      - CASH / COD CTs (amount = order total): the partner remits
+        Σ(order - shipping) into ``bank_account`` ->
+          DR Bank (Σ net) / CR settlement_account (Σ net) [Supplier].
+      - ONLINE / prepaid CTs (amount = 0): we pay the partner Σ(shipping) ->
+          DR settlement_account (Σ shipping) [Supplier] / CR Bank.
 
-    Returns: {success, delivery_partner, order_count, total_shipping, journal_entry}
+    Both portions coexist in one JE with the bank leg netted; EVERY
+    settlement_account line carries the per-partner Supplier party (fixes the v16
+    ValidationError crash). Idempotent via a batch ``user_remark`` tag.
+
+    Returns: {success, delivery_partner, partner_name, order_count,
+              cash_order_count, online_order_count, cash_net_total,
+              online_ship_total, total_shipping, bank_account, journal_entry}
     """
     if not delivery_partner:
         frappe.throw("delivery_partner is required")
 
     dp = frappe.get_doc("Delivery Partner", delivery_partner)
 
-    # Get all unsettled partner CTs
+    # Only Unsettled partner CTs for this partner.
     unsettled = frappe.get_all(
         "Courier Transaction",
         filters={
@@ -89,7 +104,8 @@ def settle_delivery_partner(delivery_partner: str, bank_account: str | None = No
             "is_partner_order": 1,
             "status": "Unsettled",
         },
-        fields=["name", "shipping_amount", "reference_invoice"],
+        fields=["name", "amount", "shipping_amount", "reference_invoice"],
+        order_by="date asc",
     )
 
     if not unsettled:
@@ -101,74 +117,69 @@ def settle_delivery_partner(delivery_partner: str, bank_account: str | None = No
             "message": "No unsettled transactions found",
         }
 
-    total_shipping = sum(float(ct.get("shipping_amount") or 0) for ct in unsettled)
-    if total_shipping <= 0:
-        frappe.throw("Total shipping amount is zero — nothing to settle")
+    # Split COD (amount > 0 -> partner remits the net) from ONLINE (amount == 0 ->
+    # we pay the partner the fee).
+    cash_net_total = 0.0
+    online_ship_total = 0.0
+    cash_order_count = 0
+    online_order_count = 0
+    for ct in unsettled:
+        amt = float(ct.get("amount") or 0)
+        ship = float(ct.get("shipping_amount") or 0)
+        if amt > 0.005:
+            cash_net_total += (amt - ship)
+            cash_order_count += 1
+        else:
+            online_ship_total += ship
+            online_order_count += 1
 
-    # Resolve bank account: explicit param > partner config > company default
+    if not dp.settlement_account:
+        frappe.throw(
+            "Delivery Partner has no settlement_account (Payable) configured. "
+            "Set it on the Delivery Partner master."
+        )
+
+    # Resolve bank ledger: explicit param > partner Bank Account > company default.
     if not bank_account and dp.bank_account:
         bank_account = frappe.db.get_value("Bank Account", dp.bank_account, "account")
     if not bank_account:
-        # Fallback: first submitted invoice's company default bank
         first_inv = unsettled[0].get("reference_invoice")
-        if first_inv:
-            company = frappe.db.get_value("Sales Invoice", first_inv, "company")
-            if company:
-                bank_account = frappe.db.get_value("Company", company, "default_bank_account")
-
+        company0 = frappe.db.get_value("Sales Invoice", first_inv, "company") if first_inv else None
+        if company0:
+            bank_account = frappe.db.get_value("Company", company0, "default_bank_account")
     if not bank_account:
         frappe.throw("No bank account found. Set it on the Delivery Partner or pass bank_account.")
 
-    # Resolve expense account
-    settlement_account = dp.settlement_account
-    if not settlement_account:
-        # Fallback: freight charges account from Jarz POS Settings
-        try:
-            from jarz_pos.utils.account_utils import get_freight_expense_account
-            first_inv = unsettled[0].get("reference_invoice")
-            if first_inv:
-                company = frappe.db.get_value("Sales Invoice", first_inv, "company")
-                settlement_account = get_freight_expense_account(company)
-        except Exception:
-            pass
-
-    if not settlement_account:
-        frappe.throw("No settlement/expense account configured for this partner.")
-
-    # Determine company from bank account
     company = frappe.db.get_value("Account", bank_account, "company")
     if not company:
         frappe.throw(f"Cannot determine company from bank account {bank_account}")
 
-    # Create Journal Entry
-    invoice_refs = ", ".join(ct.get("reference_invoice", "") for ct in unsettled if ct.get("reference_invoice"))
-    je = frappe.get_doc({
-        "doctype": "Journal Entry",
-        "voucher_type": "Bank Entry",
-        "posting_date": frappe.utils.today(),
-        "company": company,
-        "user_remark": f"Delivery Partner settlement: {delivery_partner} ({len(unsettled)} orders). Invoices: {invoice_refs[:500]}",
-        "accounts": [
-            {
-                "account": settlement_account,
-                "debit_in_account_currency": total_shipping,
-                "credit_in_account_currency": 0,
-            },
-            {
-                "account": bank_account,
-                "debit_in_account_currency": 0,
-                "credit_in_account_currency": total_shipping,
-            },
-        ],
-    })
-    je.insert(ignore_permissions=True)
-    je.submit()
+    total_shipping = round(sum(float(ct.get("shipping_amount") or 0) for ct in unsettled), 2)
 
-    # Mark all CTs as settled
+    # Deterministic per-batch idempotency token (stable across retries of the same set).
+    token = hashlib.sha1(
+        "|".join(sorted(str(ct["name"]) for ct in unsettled)).encode("utf-8")
+    ).hexdigest()[:12]
+
+    invoice_refs = ", ".join(
+        str(ct.get("reference_invoice") or "") for ct in unsettled if ct.get("reference_invoice")
+    )[:400]
+
+    je_name = create_partner_settlement_je(
+        delivery_partner=delivery_partner,
+        company=company,
+        bank_account=bank_account,
+        cash_net_total=cash_net_total,
+        online_ship_total=online_ship_total,
+        token=token,
+        human=f"Delivery Partner settlement: {delivery_partner} ({len(unsettled)} orders). Invoices: {invoice_refs}",
+    )
+
+    # Mark all swept CTs Settled and link the JE.
     for ct in unsettled:
         frappe.db.set_value(
             "Courier Transaction", ct["name"],
-            {"status": "Settled", "journal_entry": je.name},
+            {"status": "Settled", "journal_entry": je_name},
             update_modified=False,
         )
 
@@ -179,6 +190,11 @@ def settle_delivery_partner(delivery_partner: str, bank_account: str | None = No
         "delivery_partner": delivery_partner,
         "partner_name": dp.partner_name,
         "order_count": len(unsettled),
+        "cash_order_count": cash_order_count,
+        "online_order_count": online_order_count,
+        "cash_net_total": round(cash_net_total, 2),
+        "online_ship_total": round(online_ship_total, 2),
         "total_shipping": total_shipping,
-        "journal_entry": je.name,
+        "bank_account": bank_account,
+        "journal_entry": je_name,
     }

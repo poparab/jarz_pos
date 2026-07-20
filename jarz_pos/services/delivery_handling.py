@@ -1966,7 +1966,11 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
         if not pos_profile:
             frappe.throw("POS Profile is required to resolve Cash account")
 
-    filters = {"status": ["!=", "Settled"]}
+    # §5-D: NEVER let the generic (non-partner) courier sweep pick up delivery-partner
+    # orders. Partner orders are booked with the hybrid money model and settle ONLY
+    # through settle_delivery_partner (they hit the partner's Payable settlement_account,
+    # not Courier Outstanding). Mixing them here mis-posts the batch settlement.
+    filters = {"status": ["!=", "Settled"], "is_partner_order": ["in", [0, None]]}
     if party_type and party:
         filters.update({"party_type": party_type, "party": party})
     else:
@@ -1976,7 +1980,7 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
     cts = frappe.get_all(
         "Courier Transaction",
         filters=filters,
-        fields=["name", "amount", "shipping_amount", "party_type", "party"],
+        fields=["name", "amount", "shipping_amount", "party_type", "party", "is_partner_order"],
     )
     if not cts:
         frappe.throw("No unsettled courier transactions found for the selected party.")
@@ -3643,9 +3647,16 @@ def get_courier_balances():
     if "courier" in cols:
         fields.append("courier")  # legacy label column, may not exist
 
+    # §5-D: exclude delivery-partner orders from the generic courier balances — they
+    # are shown/settled separately via get_delivery_partner_balances /
+    # settle_delivery_partner against the partner's Payable, not Courier Outstanding.
+    balance_filters = {"status": ["!=", "Settled"]}
+    if "is_partner_order" in cols:
+        balance_filters["is_partner_order"] = ["in", [0, None]]
+
     rows = frappe.get_all(
         "Courier Transaction",
-        filters={"status": ["!=", "Settled"]},
+        filters=balance_filters,
         fields=fields,
     )
 
@@ -3831,6 +3842,322 @@ def _create_shipping_expense_to_creditors_je(inv, shipping_exp: float, creditors
     return je.name
 
 
+# ---------------------------------------------------------------------------
+# Delivery-Partner (§5-D hybrid money model) — party resolution + dispatch /
+# settlement Journal Entries.
+# ---------------------------------------------------------------------------
+#
+# A Delivery Partner (a courier COMPANY) is settled at the PARTNER level,
+# aggregating across every individual courier (Employee/Supplier) that delivered
+# for it. Its ledger is the Delivery Partner master's ``settlement_account`` — a
+# Payable. ERPNext v16 REJECTS any GL line on a Receivable/Payable account that
+# carries no party (this is exactly why the old ``settle_delivery_partner``
+# crashed). So EVERY line we post to that account carries a single, per-partner
+# Supplier party (NOT the individual courier), so the sub-ledger nets to zero on
+# settlement regardless of how many couriers the partner used.
+
+
+def _resolve_default_supplier_group() -> str:
+    """Best-effort Supplier Group for an auto-created delivery-partner Supplier."""
+    try:
+        from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
+        s = get_jarz_settings()
+        grp = getattr(s, "delivery_supplier_group", None) if s else None
+        if grp and frappe.db.exists("Supplier Group", grp):
+            return grp
+    except Exception:
+        pass
+    for candidate in ("Delivery", "All Supplier Groups"):
+        if frappe.db.exists("Supplier Group", candidate):
+            return candidate
+    grp = frappe.db.get_value("Supplier Group", {"is_group": 0}, "name")
+    if grp:
+        return grp
+    frappe.throw("No Supplier Group found to create a delivery-partner Supplier.")
+
+
+def get_delivery_partner_supplier(delivery_partner: str) -> str:
+    """Resolve (or create) the Supplier that represents a Delivery Partner.
+
+    This Supplier is the party on EVERY Journal Entry line posted to the partner's
+    ``settlement_account``. It MUST be consistent per Delivery Partner (settlement
+    aggregates across all its couriers), so it is keyed off the Delivery Partner —
+    never off the individual Employee/Supplier courier. Using the courier's own
+    identity would fragment the payable sub-ledger and it could never net to zero.
+
+    Resolution order:
+      1. ``Delivery Partner.supplier`` link when set (persisted for idempotency).
+      2. An existing Supplier whose ``supplier_name`` == ``partner_name`` (managers
+         often already keep one for the courier company) — linked back.
+      3. A newly created Supplier named after the partner — linked back.
+    """
+    dp = frappe.get_doc("Delivery Partner", delivery_partner)
+
+    linked = getattr(dp, "supplier", None)
+    if linked and frappe.db.exists("Supplier", linked):
+        return linked
+
+    partner_label = str(getattr(dp, "partner_name", "") or delivery_partner or "").strip()
+    if not partner_label:
+        frappe.throw(f"Delivery Partner {delivery_partner} has no partner_name to derive a Supplier.")
+
+    supplier = frappe.db.get_value("Supplier", {"supplier_name": partner_label}, "name")
+    if not supplier:
+        doc = frappe.get_doc({
+            "doctype": "Supplier",
+            "supplier_name": partner_label,
+            "supplier_group": _resolve_default_supplier_group(),
+            "supplier_type": "Company",
+        })
+        doc.insert(ignore_permissions=True)
+        supplier = doc.name
+
+    # Persist the link back onto the Delivery Partner (only when the field exists).
+    try:
+        if frappe.get_meta("Delivery Partner").get_field("supplier"):
+            frappe.db.set_value(
+                "Delivery Partner", delivery_partner, "supplier", supplier, update_modified=False
+            )
+    except Exception:
+        pass
+
+    return supplier
+
+
+def _get_partner_settlement_account(delivery_partner: str) -> str:
+    """Return the Delivery Partner's Payable ``settlement_account`` (validated)."""
+    acc = frappe.db.get_value("Delivery Partner", delivery_partner, "settlement_account")
+    if not acc:
+        frappe.throw(
+            f"Delivery Partner {delivery_partner} has no settlement_account configured. "
+            "Set a Payable account on the Delivery Partner master."
+        )
+    if not frappe.db.exists("Account", acc):
+        frappe.throw(f"Delivery Partner settlement_account {acc} does not exist.")
+    return acc
+
+
+def resolve_partner_bank_account(delivery_partner: str, company: str | None) -> str | None:
+    """Resolve the bank *ledger* used to settle a Delivery Partner.
+
+    Priority: Delivery Partner.bank_account (Bank Account -> account) > Company default.
+    """
+    dp_bank = frappe.db.get_value("Delivery Partner", delivery_partner, "bank_account")
+    if dp_bank:
+        acc = frappe.db.get_value("Bank Account", dp_bank, "account")
+        if acc:
+            return acc
+    if company:
+        acc = frappe.db.get_value("Company", company, "default_bank_account")
+        if acc:
+            return acc
+    return None
+
+
+def create_partner_cod_dispatch_je(inv, *, delivery_partner: str, shipping_exp: float) -> str:
+    """COD partner dispatch JE — clears the customer receivable AND books delivery cost.
+
+        DR  Partner settlement_account (GT - S_exp)   [Supplier party]
+        DR  Freight & Forwarding Charges (S_exp)
+        CR  Debtors (GT)                              [Customer party, ref = invoice]
+
+    The partner physically collects the customer's cash, so it now owes us the net
+    (order minus its own delivery fee). The Debtors credit references the Sales
+    Invoice, clearing its outstanding (invoice -> Paid) — no more stranded
+    receivable. Balanced for any sign of ``GT - S_exp`` (negative delivery margin
+    on free-shipping orders is handled). Idempotent per invoice.
+    """
+    company = inv.company
+    existing = _find_existing_je_by_tag(company, inv.name, "PARTNER_COD_DISPATCH")
+    if existing:
+        return existing
+
+    gt = round(float(getattr(inv, "grand_total", 0) or 0), 2)
+    s = round(float(shipping_exp or 0), 2)
+    net = round(gt - s, 2)
+
+    partner_acc = _get_partner_settlement_account(delivery_partner)
+    supplier = get_delivery_partner_supplier(delivery_partner)
+    freight_acc = get_freight_expense_account(company)
+    debtors_acc = getattr(inv, "debit_to", None) or _get_receivable_account(company)
+
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Journal Entry"
+    je.posting_date = frappe.utils.nowdate()
+    je.company = company
+    je.title = f"Partner COD Dispatch – {inv.name}"
+    je.user_remark = _je_user_remark(
+        inv.name, "PARTNER_COD_DISPATCH", f"Partner COD dispatch – {inv.name}"
+    )
+
+    if abs(net) > 0.005:
+        je.append("accounts", {
+            "account": partner_acc,
+            "party_type": "Supplier",
+            "party": supplier,
+            "debit_in_account_currency": net if net > 0 else 0,
+            "credit_in_account_currency": 0 if net > 0 else abs(net),
+        })
+    if s > 0.005:
+        je.append("accounts", {
+            "account": freight_acc,
+            "debit_in_account_currency": s,
+            "credit_in_account_currency": 0,
+        })
+    je.append("accounts", {
+        "account": debtors_acc,
+        "party_type": "Customer",
+        "party": inv.customer,
+        "reference_type": "Sales Invoice",
+        "reference_name": inv.name,
+        "debit_in_account_currency": 0,
+        "credit_in_account_currency": gt,
+    })
+
+    je.save(ignore_permissions=True)
+    je.submit()
+    return je.name
+
+
+def create_partner_online_dispatch_je(inv, *, delivery_partner: str, shipping_exp: float) -> str | None:
+    """Prepaid (online) partner dispatch JE — accrues the delivery payable to the partner.
+
+        DR  Freight & Forwarding Charges (S_exp)
+        CR  Partner settlement_account (S_exp)        [Supplier party]
+
+    The customer already paid us online (DR Bank / CR Debtors via pay_invoice), so
+    the receivable is already cleared. Here we only book the delivery cost and what
+    we owe the partner. Returns None when there is no delivery cost. Idempotent per invoice.
+    """
+    company = inv.company
+    s = round(float(shipping_exp or 0), 2)
+    if s <= 0.005:
+        return None
+    existing = _find_existing_je_by_tag(company, inv.name, "PARTNER_ONLINE_DISPATCH")
+    if existing:
+        return existing
+
+    partner_acc = _get_partner_settlement_account(delivery_partner)
+    supplier = get_delivery_partner_supplier(delivery_partner)
+    freight_acc = get_freight_expense_account(company)
+
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Journal Entry"
+    je.posting_date = frappe.utils.nowdate()
+    je.company = company
+    je.title = f"Partner Online Dispatch – {inv.name}"
+    je.user_remark = _je_user_remark(
+        inv.name, "PARTNER_ONLINE_DISPATCH", f"Partner online dispatch – {inv.name}"
+    )
+
+    je.append("accounts", {
+        "account": freight_acc,
+        "debit_in_account_currency": s,
+        "credit_in_account_currency": 0,
+    })
+    je.append("accounts", {
+        "account": partner_acc,
+        "party_type": "Supplier",
+        "party": supplier,
+        "debit_in_account_currency": 0,
+        "credit_in_account_currency": s,
+    })
+
+    je.save(ignore_permissions=True)
+    je.submit()
+    return je.name
+
+
+def _partner_settlement_dedup_tag(delivery_partner: str, token: str) -> str:
+    """Stable dedup tag embedded in the settlement JE ``user_remark``."""
+    return f"[JARZ-JE:DELIVERY_PARTNER_SETTLEMENT:{delivery_partner}:{token}]"
+
+
+def _find_partner_settlement_je(company: str, delivery_partner: str, token: str) -> str | None:
+    tag = _partner_settlement_dedup_tag(delivery_partner, token)
+    rows = frappe.get_all(
+        "Journal Entry",
+        filters={"company": company, "docstatus": 1, "user_remark": ["like", f"%{tag}%"]},
+        pluck="name",
+        limit_page_length=1,
+    )
+    return rows[0] if rows else None
+
+
+def create_partner_settlement_je(
+    *,
+    delivery_partner: str,
+    company: str,
+    bank_account: str,
+    cash_net_total: float,
+    online_ship_total: float,
+    token: str,
+    human: str | None = None,
+) -> str | None:
+    """Post ONE balanced Delivery-Partner settlement JE that clears the partner ledger.
+
+      COD portion   (partner remits collected cash):  DR Bank / CR Partner (Σ order-ship) [Supplier]
+      Online portion (we pay the partner the fee):     DR Partner (Σ ship) [Supplier] / CR Bank
+
+    Both portions may coexist in one JE; the bank leg is netted. EVERY Partner line
+    carries the per-partner Supplier party (the v16 crash fix). Returns None when
+    there is nothing to settle. Idempotent via the ``token`` tag.
+    """
+    existing = _find_partner_settlement_je(company, delivery_partner, token)
+    if existing:
+        return existing
+
+    cash_net = round(float(cash_net_total or 0), 2)
+    online_ship = round(float(online_ship_total or 0), 2)
+    if abs(cash_net) < 0.005 and abs(online_ship) < 0.005:
+        return None
+
+    if not bank_account or not frappe.db.exists("Account", bank_account):
+        frappe.throw("A valid bank account is required to settle the delivery partner.")
+
+    net_bank = round(cash_net - online_ship, 2)
+    partner_acc = _get_partner_settlement_account(delivery_partner)
+    supplier = get_delivery_partner_supplier(delivery_partner)
+    tag = _partner_settlement_dedup_tag(delivery_partner, token)
+
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Bank Entry"
+    je.posting_date = frappe.utils.nowdate()
+    je.company = company
+    je.title = f"Delivery Partner Settlement – {delivery_partner}"
+    je.user_remark = f"{human or ('Delivery Partner settlement: ' + delivery_partner)} {tag}"
+
+    # COD remittance clears the DEBIT booked on the partner account at dispatch.
+    if abs(cash_net) > 0.005:
+        je.append("accounts", {
+            "account": partner_acc,
+            "party_type": "Supplier",
+            "party": supplier,
+            "debit_in_account_currency": 0 if cash_net > 0 else abs(cash_net),
+            "credit_in_account_currency": cash_net if cash_net > 0 else 0,
+        })
+    # Paying the partner clears the CREDIT booked on the partner account at dispatch.
+    if abs(online_ship) > 0.005:
+        je.append("accounts", {
+            "account": partner_acc,
+            "party_type": "Supplier",
+            "party": supplier,
+            "debit_in_account_currency": online_ship if online_ship > 0 else 0,
+            "credit_in_account_currency": 0 if online_ship > 0 else abs(online_ship),
+        })
+    # Netted bank leg.
+    if abs(net_bank) > 0.005:
+        je.append("accounts", {
+            "account": bank_account,
+            "debit_in_account_currency": net_bank if net_bank > 0 else 0,
+            "credit_in_account_currency": 0 if net_bank > 0 else abs(net_bank),
+        })
+
+    je.save(ignore_permissions=True)
+    je.submit()
+    return je.name
+
+
 def _create_courier_transaction(inv, outstanding, shipping_exp, *, party_type: str | None, party: str | None, legacy_courier: str | None = None):
     """Create courier transaction log entry with Employee/Supplier party fields."""
     ct = frappe.new_doc("Courier Transaction")
@@ -3899,10 +4226,17 @@ def _requires_settlement_entry(order_amount: float, shipping_amount: float) -> b
 
 
 def _summarize_courier_transactions(rows: list[dict]) -> dict:
-    """Aggregate order/shipping totals from courier transactions."""
+    """Aggregate order/shipping totals from courier transactions.
+
+    §5-D: defensively skip any delivery-partner rows (``is_partner_order``) so this
+    generic (non-partner) courier summary never double-counts partner orders — those
+    settle exclusively through settle_delivery_partner against the partner's Payable.
+    """
     order_total = 0.0
     shipping_total = 0.0
     for row in rows:
+        if row.get("is_partner_order"):
+            continue
         order_total += float(row.get("amount") or 0)
         shipping_total += float(row.get("shipping_amount") or 0)
 

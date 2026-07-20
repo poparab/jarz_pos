@@ -14,6 +14,7 @@
   "is_active",
   "bank_account",
   "settlement_account",
+  "supplier",
   "section_break_notes",
   "notes"
  ],
@@ -70,6 +71,14 @@
    "description": "Payable/liability account to accrue delivery fees owed to this partner"
   },
   {
+   "fieldname": "supplier",
+   "fieldtype": "Link",
+   "label": "Supplier (Ledger Party)",
+   "options": "Supplier",
+   "read_only": 1,
+   "description": "Supplier used as the party on every settlement_account ledger line. Auto-resolved/created on first settlement; keep consistent per partner."
+  },
+  {
    "fieldname": "section_break_notes",
    "fieldtype": "Section Break",
    "label": "Notes"
@@ -82,7 +91,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-25 04:00:00.000000",
+ "modified": "2026-07-20 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Delivery Partner",

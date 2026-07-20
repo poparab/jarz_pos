@@ -21,6 +21,11 @@ from jarz_pos.services.delivery_handling import (
     _get_receivable_account,
     _create_payment_entry,
     update_submitted_sales_invoice_state,
+    # §5-D delivery-partner (hybrid money model) JE builders + party/bank resolvers.
+    create_partner_cod_dispatch_je,
+    create_partner_online_dispatch_je,
+    create_partner_settlement_je,
+    resolve_partner_bank_account,
 )
 # Re-export selected delivery handlers at module level so tests can patch via
 # 'jarz_pos.services.settlement_strategies.<name>'
@@ -257,46 +262,62 @@ def _create_partner_courier_transaction(
     return ct.name
 
 
+def _merge_dn_info(res: Dict[str, Any], dn_info: Any) -> None:
+    if isinstance(dn_info, dict):
+        for k in ("delivery_note", "delivery_note_reused"):
+            if k in dn_info:
+                res[k] = dn_info[k]
+
+
 def handle_partner_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str], delivery_partner: str) -> Dict[str, Any]:
-    """Partner COD settle-now: collect FULL order amount from courier (no shipping deduction)."""
+    """Partner COD, settle-now (§5-D hybrid money model).
+
+    The delivery PARTNER collects the customer's cash and remits the net
+    (order - delivery fee) to us immediately; it keeps the delivery fee.
+
+      Dispatch JE (clears the receivable + books the delivery cost):
+        DR Partner settlement_account (GT - S_exp) [Supplier] + DR Freight (S_exp)
+        / CR Debtors (GT) [Customer, ref = invoice]  -> invoice becomes Paid.
+      Settlement leg (posted immediately for settle-now):
+        DR Bank (GT - S_exp) / CR Partner settlement_account (GT - S_exp) [Supplier]
+        -> partner ledger nets to zero.
+
+    NOTE: there is NO POS-cash Payment Entry — the branch never touches the cash.
+    """
     company = inv.company
-    outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
-
-    try:
-        paid_from = _get_receivable_account(company)
-    except Exception:
-        if _in_test_mode():
-            paid_from = "Debtors - TEST"
-        else:
-            raise
-    try:
-        paid_to = get_pos_cash_account(pos_profile, company)
-    except Exception:
-        if _in_test_mode():
-            paid_to = "Cash - TEST"
-        else:
-            raise
-
-    pe_name = None
-    if outstanding > 0.0001:
-        pe = _create_payment_entry(inv, paid_from, paid_to, outstanding)
-        pe_name = pe.name
-
     shipping = float(_get_delivery_expense_amount(inv) or 0)
+    grand_total = float(inv.grand_total or 0)
 
-    # Move to OFD
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
+
+    # 1) Dispatch JE clears Debtors + books the delivery expense + debits the partner.
+    dispatch_je = create_partner_cod_dispatch_je(
+        inv, delivery_partner=delivery_partner, shipping_exp=shipping
+    )
+
+    # 2) Settlement leg posted immediately (partner remits the net into our bank).
+    bank_account = resolve_partner_bank_account(delivery_partner, company)
+    settlement_je = create_partner_settlement_je(
+        delivery_partner=delivery_partner,
+        company=company,
+        bank_account=bank_account,
+        cash_net_total=grand_total - shipping,
+        online_ship_total=0,
+        token=inv.name,
+        human=f"Delivery Partner COD settle-now: {inv.name}",
+    )
 
     ct_name = _create_partner_courier_transaction(
         inv,
         party_type=party_type,
         party=party,
         delivery_partner=delivery_partner,
-        order_amount=float(inv.grand_total or 0),
+        order_amount=grand_total,
         shipping_amount=shipping,
         status="Settled",
         payment_mode=payment_type or "Cash",
+        journal_entry=dispatch_je,
     )
     _stamp_partner_fields(inv.name, delivery_partner)
 
@@ -308,34 +329,43 @@ def handle_partner_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Opt
         "delivery_partner": delivery_partner,
         "courier_transaction": ct_name,
         "shipping_amount": shipping,
+        "journal_entry": dispatch_je,
+        "settlement_journal_entry": settlement_je,
     }
-    if pe_name:
-        res["payment_entry"] = pe_name
-        res["paid_amount"] = outstanding
-    if isinstance(dn_info, dict):
-        for k in ("delivery_note", "delivery_note_reused"):
-            if k in dn_info:
-                res[k] = dn_info[k]
+    _merge_dn_info(res, dn_info)
     return res
 
 
 def handle_partner_unpaid_settle_later(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str], delivery_partner: str) -> Dict[str, Any]:
-    """Partner COD settle-later: courier will deliver, collect full amount, and return to settle later."""
-    shipping = float(_get_delivery_expense_amount(inv) or 0)
+    """Partner COD, settle-later (§5-D hybrid money model).
 
-    # Move to OFD
+      Dispatch JE (same as settle-now — clears receivable + books delivery cost):
+        DR Partner settlement_account (GT - S_exp) [Supplier] + DR Freight (S_exp)
+        / CR Debtors (GT) [Customer, ref = invoice].
+
+    The settlement leg (DR Bank / CR Partner) is DEFERRED to settle_delivery_partner,
+    so the Courier Transaction stays Unsettled with the full order amount tracked.
+    """
+    shipping = float(_get_delivery_expense_amount(inv) or 0)
+    grand_total = float(inv.grand_total or 0)
+
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
+
+    dispatch_je = create_partner_cod_dispatch_je(
+        inv, delivery_partner=delivery_partner, shipping_exp=shipping
+    )
 
     ct_name = _create_partner_courier_transaction(
         inv,
         party_type=party_type,
         party=party,
         delivery_partner=delivery_partner,
-        order_amount=float(inv.grand_total or 0),
+        order_amount=grand_total,
         shipping_amount=shipping,
         status="Unsettled",
         payment_mode=payment_type or "Cash",
+        journal_entry=dispatch_je,
     )
     _stamp_partner_fields(inv.name, delivery_partner)
 
@@ -347,20 +377,44 @@ def handle_partner_unpaid_settle_later(inv, *, pos_profile: str, payment_type: O
         "delivery_partner": delivery_partner,
         "courier_transaction": ct_name,
         "shipping_amount": shipping,
+        "journal_entry": dispatch_je,
     }
-    if isinstance(dn_info, dict):
-        for k in ("delivery_note", "delivery_note_reused"):
-            if k in dn_info:
-                res[k] = dn_info[k]
+    _merge_dn_info(res, dn_info)
     return res
 
 
 def handle_partner_paid_settle_now(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str], delivery_partner: str) -> Dict[str, Any]:
-    """Partner online-paid settle-now: no cash exchange, just move to OFD and record fee."""
+    """Partner online/prepaid, settle-now (§5-D hybrid money model).
+
+    The customer already paid us online (DR Bank / CR Debtors via pay_invoice), so
+    the receivable is already cleared. We owe the partner the delivery fee.
+
+      Dispatch JE (accrue the payable):
+        DR Freight (S_exp) / CR Partner settlement_account (S_exp) [Supplier].
+      Settlement leg (posted immediately — we pay the partner):
+        DR Partner settlement_account (S_exp) [Supplier] / CR Bank
+        -> partner ledger nets to zero.
+    """
+    company = inv.company
     shipping = float(_get_delivery_expense_amount(inv) or 0)
 
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
+
+    dispatch_je = create_partner_online_dispatch_je(
+        inv, delivery_partner=delivery_partner, shipping_exp=shipping
+    )
+
+    bank_account = resolve_partner_bank_account(delivery_partner, company)
+    settlement_je = create_partner_settlement_je(
+        delivery_partner=delivery_partner,
+        company=company,
+        bank_account=bank_account,
+        cash_net_total=0,
+        online_ship_total=shipping,
+        token=inv.name,
+        human=f"Delivery Partner online settle-now: {inv.name}",
+    )
 
     ct_name = _create_partner_courier_transaction(
         inv,
@@ -371,6 +425,7 @@ def handle_partner_paid_settle_now(inv, *, pos_profile: str, payment_type: Optio
         shipping_amount=shipping,
         status="Settled",
         payment_mode=payment_type or "Online",
+        journal_entry=dispatch_je,
     )
     _stamp_partner_fields(inv.name, delivery_partner)
 
@@ -382,20 +437,30 @@ def handle_partner_paid_settle_now(inv, *, pos_profile: str, payment_type: Optio
         "delivery_partner": delivery_partner,
         "courier_transaction": ct_name,
         "shipping_amount": shipping,
+        "journal_entry": dispatch_je,
+        "settlement_journal_entry": settlement_je,
     }
-    if isinstance(dn_info, dict):
-        for k in ("delivery_note", "delivery_note_reused"):
-            if k in dn_info:
-                res[k] = dn_info[k]
+    _merge_dn_info(res, dn_info)
     return res
 
 
 def handle_partner_paid_settle_later(inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str], delivery_partner: str) -> Dict[str, Any]:
-    """Partner online-paid settle-later: no cash exchange, just track fee for later partner settlement."""
+    """Partner online/prepaid, settle-later (§5-D hybrid money model).
+
+      Dispatch JE (accrue the payable to the partner):
+        DR Freight (S_exp) / CR Partner settlement_account (S_exp) [Supplier].
+
+    The settlement leg (DR Partner / CR Bank) is DEFERRED to settle_delivery_partner;
+    the Courier Transaction stays Unsettled with amount=0 and the fee tracked.
+    """
     shipping = float(_get_delivery_expense_amount(inv) or 0)
 
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     dn_info = ensure_delivery_note_for_invoice(inv.name)
+
+    dispatch_je = create_partner_online_dispatch_je(
+        inv, delivery_partner=delivery_partner, shipping_exp=shipping
+    )
 
     ct_name = _create_partner_courier_transaction(
         inv,
@@ -406,6 +471,7 @@ def handle_partner_paid_settle_later(inv, *, pos_profile: str, payment_type: Opt
         shipping_amount=shipping,
         status="Unsettled",
         payment_mode=payment_type or "Online",
+        journal_entry=dispatch_je,
     )
     _stamp_partner_fields(inv.name, delivery_partner)
 
@@ -417,11 +483,9 @@ def handle_partner_paid_settle_later(inv, *, pos_profile: str, payment_type: Opt
         "delivery_partner": delivery_partner,
         "courier_transaction": ct_name,
         "shipping_amount": shipping,
+        "journal_entry": dispatch_je,
     }
-    if isinstance(dn_info, dict):
-        for k in ("delivery_note", "delivery_note_reused"):
-            if k in dn_info:
-                res[k] = dn_info[k]
+    _merge_dn_info(res, dn_info)
     return res
 
 
