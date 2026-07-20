@@ -278,6 +278,9 @@ doc_events = {
         # CRM: Sample/Trial delivery -> feedback / check-up follow-up (never raises)
         "jarz_pos.crm.pos_bridge.create_delivery_followup_on_state",
     ],
+        # FIX 5 (2026-07-20): document-level guard — refuse to cancel a dispatched
+        # invoice from ANY path (Desk / script / API), not just kanban.cancel_invoice.
+        "before_cancel": "jarz_pos.events.sales_invoice.block_cancel_if_dispatched",
         # Keep operational workflow fields aligned across all cancellation paths.
         "on_cancel": [
             "jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",

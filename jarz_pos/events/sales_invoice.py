@@ -127,6 +127,77 @@ def mark_cancelled_invoice_workflow_fields(doc: Any, method: Optional[str] = Non
 			frappe.log_error(frappe.get_traceback(), "mark_cancelled_invoice_workflow_fields failed")
 
 
+def block_cancel_if_dispatched(doc: Any, method: Optional[str] = None) -> None:
+	"""FIX 5 (2026-07-20): document-level guard blocking cancel of a dispatched invoice.
+
+	The OFD hard-mutation guard previously lived ONLY inside
+	``api/kanban.cancel_invoice``. A raw ``SI.cancel()`` from Desk, a server script or
+	any other path bypassed it and corrupted the ledger (dangling Courier Outstanding /
+	Creditors balances, reversed stock against a still-owed courier, etc.). Wiring the
+	SAME blocker into the Sales Invoice ``before_cancel`` lifecycle closes that hole for
+	EVERY cancel path.
+
+	The cancel is refused when the invoice shows ANY dispatch signal:
+	  * ``custom_was_out_for_delivery`` — the permanent dispatch lock, or
+	  * a current operational state of Out for Delivery / Delivered / Completed, or
+	  * a hard downstream artifact reported by ``get_invoice_hard_mutation_blocker``
+	    (submitted Delivery Note, active Delivery Trip, Courier Transaction, sales-partner
+	    settlement, settlement Journal Entries, active custom shipping request).
+
+	Legitimate pre-dispatch cancels (Sc20) are unaffected: no dispatch flag, a prep-state
+	value and a ``None`` blocker mean every signal is false and the cancel proceeds.
+	Returns are their own corrective artifact and are never blocked here.
+	"""
+	if not frappe or not doc or not getattr(doc, "name", None):
+		return
+
+	try:
+		if int(getattr(doc, "is_return", 0) or 0):
+			return
+	except Exception:
+		pass
+
+	# Gather dispatch signals defensively — a detection error must never silently
+	# let a corrupting cancel through, but must also never raise on its own.
+	was_ofd = False
+	try:
+		was_ofd = bool(int(getattr(doc, "custom_was_out_for_delivery", 0) or 0))
+	except Exception:
+		was_ofd = False
+
+	current_state = ""
+	try:
+		current_state = str(
+			doc.get("custom_sales_invoice_state")
+			or doc.get("sales_invoice_state")
+			or doc.get("custom_state")
+			or doc.get("state")
+			or ""
+		).strip().lower().replace(" ", "_").replace("-", "_")
+	except Exception:
+		current_state = ""
+	state_dispatched = current_state in {"out_for_delivery", "delivered", "completed"}
+
+	blocker = None
+	try:
+		from jarz_pos.api.manager import get_invoice_hard_mutation_blocker
+
+		blocker = get_invoice_hard_mutation_blocker(doc)
+	except Exception:
+		blocker = None
+
+	if was_ofd or state_dispatched or blocker:
+		reason = None
+		if isinstance(blocker, dict):
+			reason = blocker.get("mutation_block_reason")
+		if not reason:
+			reason = frappe._(
+				"This invoice was already dispatched (Out for Delivery) and cannot be "
+				"cancelled directly. Use the corrective / return workflow."
+			)
+		frappe.throw(reason, title=frappe._("Cancellation blocked"))
+
+
 def validate_invoice_before_submit(doc: Any, method: Optional[str] = None) -> None:
 	"""Placeholder for pre-submit validations (e.g., bundle checks).
 

@@ -283,11 +283,21 @@ def _get_invoice_warehouse_mismatches(si, expected_warehouse: str):
 
 
 def _find_existing_delivery_note_for_invoice(si) -> str | None:
-    """Return an existing submitted Delivery Note already linked to the invoice, if any."""
+    """Return an existing submitted Delivery Note already linked to the invoice, if any.
+
+    FIX 4 (2026-07-20): ERPNext v16 REMOVED the Delivery Note ``remarks`` column that
+    the previous detection matched on, so ``remarks LIKE "%<invoice>%"`` raised an
+    unknown-column error (swallowed by the outer try) and DN reuse silently failed →
+    every OFD retry created a duplicate Delivery Note and double-booked stock. We now
+    detect the link via the v16-valid ``Delivery Note Item.against_sales_invoice`` field
+    (stamped in ``ensure_delivery_note_for_invoice``), plus any custom parent link field,
+    with a conservative customer+qty heuristic as a last resort for legacy DNs.
+    """
     try:
+        # 1) Custom parent link field, if this site defines one.
         dn_link_field = None
         dn_meta = frappe.get_meta("Delivery Note")
-        for candidate in ["sales_invoice", "against_sales_invoice", "reference_invoice", "jarz_sales_invoice_ref"]:
+        for candidate in ["sales_invoice", "reference_invoice", "jarz_sales_invoice_ref"]:
             if dn_meta.get_field(candidate):
                 dn_link_field = candidate
                 break
@@ -301,39 +311,45 @@ def _find_existing_delivery_note_for_invoice(si) -> str | None:
                 limit_page_length=1,
             )
 
+        # 2) Primary v16 detection: Delivery Note Item -> against_sales_invoice.
+        #    Child rows carry the parent docstatus, so docstatus=1 == submitted DN.
         if not existing:
             existing = frappe.get_all(
-                "Delivery Note",
-                filters={"docstatus": 1, "remarks": ["like", f"%{si.name}%"]},
-                pluck="name",
+                "Delivery Note Item",
+                filters={"against_sales_invoice": si.name, "docstatus": 1},
+                pluck="parent",
                 limit_page_length=1,
             )
 
+        # 3) Legacy heuristic (best-effort; no remarks column on v16): a very recent
+        #    submitted DN for the same customer with an identical total qty. Only reached
+        #    for DNs created before this fix (which lack against_sales_invoice).
         if not existing:
             try:
                 total_qty = sum(float(it.qty or 0) for it in si.items)
             except Exception:
                 total_qty = None
 
-            heuristics = frappe.get_all(
-                "Delivery Note",
-                filters={
-                    "docstatus": 1,
-                    "customer": si.customer,
-                    "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -3)],
-                    "remarks": ["like", "%Auto-created from Sales Invoice%"],
-                },
-                fields=["name"],
-                limit_page_length=5,
-            )
-            for cand in heuristics:
-                try:
-                    dn_doc = frappe.get_doc("Delivery Note", cand.name)
-                    if abs(float(dn_doc.get("total_qty") or 0) - (total_qty or 0)) < 0.0001:
-                        existing = [cand.name]
-                        break
-                except Exception:
-                    continue
+            if total_qty is not None:
+                heuristics = frappe.get_all(
+                    "Delivery Note",
+                    filters={
+                        "docstatus": 1,
+                        "customer": si.customer,
+                        "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -3)],
+                    },
+                    fields=["name"],
+                    order_by="creation desc",
+                    limit_page_length=10,
+                )
+                for cand in heuristics:
+                    try:
+                        dn_doc = frappe.get_doc("Delivery Note", cand.name)
+                        if abs(float(dn_doc.get("total_qty") or 0) - (total_qty or 0)) < 0.0001:
+                            existing = [cand.name]
+                            break
+                    except Exception:
+                        continue
 
         return existing[0] if existing else None
     except Exception as reuse_err:
@@ -679,6 +695,10 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
                 "rate": it.rate,
                 "amount": it.amount,
                 "warehouse": it.get("warehouse") or default_wh,
+                # FIX 4 (2026-07-20): stamp the v16-valid link so this DN can be
+                # reliably re-found by _find_existing_delivery_note_for_invoice on
+                # retry (the removed `remarks` column can no longer carry it).
+                "against_sales_invoice": si.name,
             })
         # Attempt to set link field if exists (does not break if absent)
         try:
@@ -1004,9 +1024,14 @@ def handle_unpaid_online_deliver_unconfirmed(
       * Record the courier attribution (``party_type``/``party``) when supplied; the params
         stay optional so clients that predate courier selection still transition cleanly.
       * Ensure the Delivery Note exists (raise on error, like every other OFD flow).
-      * NEVER call ``mark_courier_outstanding`` and NEVER create a Payment Entry or a
-        Courier Transaction — the receivable stays on Debtors and the invoice stays Unpaid
-        until the manager confirms the transfer.
+      * NEVER call ``mark_courier_outstanding``, NEVER create a customer Payment Entry
+        and NEVER move the receivable — the receivable stays on Debtors and the invoice
+        stays Unpaid until the manager confirms the transfer.
+      * FIX 1 (2026-07-20): DO accrue the courier's freight the SAME way the settle-later
+        paths do — a shipping-only Courier Transaction (amount=0, shipping_amount=freight)
+        plus the freight-expense accrual (DR Freight & Forwarding Charges / CR
+        Creditors[courier]). This only tracks/owes the courier for the delivery; it does
+        NOT touch the customer receivable, which stays gated on payment confirmation.
     """
     if getattr(inv, "docstatus", 0) != 1:
         frappe.throw("Invoice must be submitted before moving Out for Delivery.")
@@ -1047,6 +1072,64 @@ def handle_unpaid_online_deliver_unconfirmed(
             delivery_partner=courier_details.get("delivery_partner"),
         )
 
+    # FIX 1 (2026-07-20): accrue the courier's freight expense on dispatch.
+    # In the unpaid-online path the customer pays online (never the courier), so we
+    # must NOT create a customer Payment Entry or move the receivable — that stays
+    # gated on confirm_online_payment. But the courier physically delivers and is OWED
+    # the freight, exactly like the settle-later paths (mark_courier_outstanding /
+    # handle_out_for_delivery_paid settlement="later"). So we book the freight accrual
+    # (DR Freight & Forwarding Charges / CR Creditors[courier]) and log a shipping-only
+    # Courier Transaction (amount=0, shipping_amount=freight) so the courier is tracked
+    # and can be settled later. Requires a resolved courier party; idempotent per
+    # invoice + courier.
+    freight_je = None
+    freight_ct = None
+    freight_amount = 0.0
+    if party_type and party:
+        stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
+        freight_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+        if freight_amount and freight_amount > 0:
+            # Persist the resolved expense on the SI only when it was previously empty.
+            try:
+                if stored_ship <= 0:
+                    inv.db_set("custom_shipping_expense", freight_amount, update_modified=False)
+            except Exception:
+                pass
+
+            # Idempotency: don't re-accrue if a freight CT already exists for this invoice+courier.
+            existing_freight_ct = frappe.get_all(
+                "Courier Transaction",
+                filters={
+                    "reference_invoice": inv.name,
+                    "party_type": party_type,
+                    "party": party,
+                    "notes": ["like", "%Courier freight accrual (unpaid online%"],
+                },
+                pluck="name",
+                limit_page_length=1,
+            )
+            if existing_freight_ct:
+                freight_ct = existing_freight_ct[0]
+            else:
+                ct = frappe.new_doc("Courier Transaction")
+                ct.party_type = party_type
+                ct.party = party
+                ct.date = frappe.utils.now_datetime()
+                ct.reference_invoice = inv.name
+                ct.amount = 0  # courier collects nothing — the customer pays online
+                ct.shipping_amount = float(freight_amount)
+                ct.status = "Unsettled"
+                ct.payment_mode = "Deferred"
+                ct.notes = "Courier freight accrual (unpaid online delivery, awaiting payment)"
+                ct.insert(ignore_permissions=True)
+                freight_ct = ct.name
+
+            # Freight-expense accrual JE (idempotent via user_remark tag — see FIX 3).
+            creditors_acc = get_creditors_account(inv.company)
+            freight_je = _create_shipping_expense_to_creditors_je(
+                inv, float(freight_amount), creditors_acc, party_type, party
+            )
+
     # Mandatory Delivery Note (same enforcement as every other OFD path)
     dn_result = ensure_delivery_note_for_invoice(inv.name)
     if dn_result.get("error"):
@@ -1062,6 +1145,10 @@ def handle_unpaid_online_deliver_unconfirmed(
         "delivery_partner": courier_details.get("delivery_partner") or None,
         "delivery_note": dn_result.get("delivery_note"),
         "delivery_note_reused": bool(dn_result.get("reused")),
+        # FIX 1: courier freight accrual artifacts (None when no courier assigned).
+        "courier_transaction": freight_ct,
+        "journal_entry": freight_je,
+        "shipping_amount": float(freight_amount or 0),
         "mode": "unpaid_online_deliver_unconfirmed",
         "dn_logic_version": DN_LOGIC_VERSION,
     }
@@ -2105,18 +2192,10 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
 
     try:
         frappe.db.savepoint("ofdelivery_start")
-        # Idempotency: check existing JE tagged via custom ref in user_remark / title
-        existing = frappe.get_all(
-            "Journal Entry",
-            filters={
-                "company": company,
-                "title": ["like", f"Out For Delivery – {inv.name}%"],
-                "docstatus": 1,
-            },
-            pluck="name",
-            limit_page_length=1,
-        )
-        je_name = existing[0] if existing else None
+        # FIX 3 (2026-07-20): dedup on the reliable user_remark tag. The old
+        # ``title LIKE "Out For Delivery – <inv>%"`` guard never matched because
+        # v16 overwrites the JE title with the first account name on save.
+        je_name = _find_existing_je_by_tag(company, inv.name, "OFD")
 
         if je_name and shipping_exp > 0:
             try:
@@ -2153,6 +2232,8 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
             je.posting_date = frappe.utils.nowdate()
             je.company = company
             je.title = f"Out For Delivery – {inv.name}"
+            # FIX 3: carry the dedup key on user_remark (title is not persisted as-is on v16).
+            je.user_remark = _je_user_remark(inv.name, "OFD", f"Out For Delivery – {inv.name}")
             if settlement == "cash_now":
                 # DR Freight, CR Cash (pay courier now)
                 je.append("accounts", {
@@ -2498,27 +2579,25 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
 
     frappe.logger().info(f"DEBUG settle_single_invoice_paid: has_outstanding_mode={has_outstanding_mode}, order_amount={order_amount}, shipping_exp={shipping_exp}")
 
-    # Helper to find existing JE (idempotency)
-    def _existing_je(title: str):
-        rows = frappe.get_all(
-            "Journal Entry",
-            filters={"company": company, "title": title, "docstatus": 1},
-            pluck="name",
-            limit_page_length=1,
-        )
-        return rows[0] if rows else None
+    # Helper to find existing JE (idempotency).
+    # FIX 3 (2026-07-20): match on the reliable user_remark tag instead of the
+    # v16-overwritten title, so a retried settlement cannot double-post the JE.
+    def _existing_je(je_type: str):
+        return _find_existing_je_by_tag(company, inv.name, je_type)
 
     if has_outstanding_mode:
         # Unpaid + settle later final settlement (cases based on order_amount vs shipping_exp)
         frappe.logger().info(f"DEBUG settle_single_invoice_paid: OUTSTANDING MODE - Creating settlement JE")
         title = f"Courier Outstanding Settlement – {inv.name}"
-        je_name = _existing_je(title)
+        je_type = "COURIER_OUTSTANDING_SETTLEMENT"
+        je_name = _existing_je(je_type)
         if not je_name:
             je = frappe.new_doc("Journal Entry")
             je.voucher_type = "Journal Entry"
             je.posting_date = frappe.utils.nowdate()
             je.company = company
             je.title = title
+            je.user_remark = _je_user_remark(inv.name, je_type, title)
             if order_amount >= shipping_exp:
                 frappe.logger().info(f"DEBUG settle_single_invoice_paid: Case 1 - order_amount({order_amount}) >= shipping_exp({shipping_exp})")
                 # Common case
@@ -2600,13 +2679,15 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     else:
         # Paid + settle later shipping-only scenario (previous behavior)
         title = f"Courier Single Shipping Payment – {inv.name}"
-        je_name = _existing_je(title)
+        je_type = "COURIER_SHIPPING_SETTLEMENT"
+        je_name = _existing_je(je_type)
         if not je_name:
             je = frappe.new_doc("Journal Entry")
             je.voucher_type = "Journal Entry"
             je.posting_date = frappe.utils.nowdate()
             je.company = company
             je.title = title
+            je.user_remark = _je_user_remark(inv.name, je_type, title)
             # Always clear previously accrued payable: DR Creditors / CR Cash.
             # (Expense was recognized at Out For Delivery stage.)
             je.append("accounts", {
@@ -2733,19 +2814,17 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         validate_account_exists(acc)
 
     title = f"Courier Collected Settlement – {inv.name}"
-    existing = frappe.get_all(
-        "Journal Entry",
-        filters={"company": company, "title": title, "docstatus": 1},
-        pluck="name",
-        limit_page_length=1,
-    )
-    je_name = existing[0] if existing else None
+    je_type = "COURIER_COLLECTED_SETTLEMENT"
+    # FIX 3 (2026-07-20): dedup on the reliable user_remark tag instead of the
+    # v16-overwritten title, so a retried collected-settlement cannot double-post.
+    je_name = _find_existing_je_by_tag(company, inv.name, je_type)
     if not je_name:
         je = frappe.new_doc("Journal Entry")
         je.voucher_type = "Journal Entry"
         je.posting_date = frappe.utils.nowdate()
         je.company = company
         je.title = title
+        je.user_remark = _je_user_remark(inv.name, je_type, title)
         if order_amount >= shipping_exp:
             net_to_branch = order_amount - shipping_exp
             if net_to_branch > 0.0001:
@@ -2950,6 +3029,43 @@ def change_payment_collection_method(
 
 # Helper functions
 
+# ---------------------------------------------------------------------------
+# FIX 3 (2026-07-20): Reliable Journal Entry idempotency keys.
+#
+# The OFD / settlement / courier-expense dedup guards historically matched on
+# ``title LIKE "<label> – <invoice>%"``. On ERPNext v16 ``JournalEntry.validate``
+# UNCONDITIONALLY overwrites ``title`` with ``self.get_title()`` (= the first
+# account name), so any title we set is discarded before it is stored and the
+# ``title LIKE`` guard NEVER matches → a retried OFD/settlement call double-posts
+# the JE. ``user_remark`` is NOT rewritten by the controller, so we tag it with a
+# stable invoice+type key and dedup on that instead. No schema change required.
+# ---------------------------------------------------------------------------
+
+def _je_dedup_tag(invoice_name: str, je_type: str) -> str:
+    """Return the stable dedup tag embedded in ``Journal Entry.user_remark``."""
+    return f"[JARZ-JE:{je_type}:{invoice_name}]"
+
+
+def _je_user_remark(invoice_name: str, je_type: str, human: str) -> str:
+    """Compose a human-readable ``user_remark`` that also carries the dedup tag."""
+    return f"{human} {_je_dedup_tag(invoice_name, je_type)}"
+
+
+def _find_existing_je_by_tag(company: str, invoice_name: str, je_type: str) -> str | None:
+    """Return a submitted Journal Entry already tagged for this invoice + type, if any.
+
+    Reliable replacement for the broken ``title LIKE`` guards (see FIX 3 note).
+    """
+    tag = _je_dedup_tag(invoice_name, je_type)
+    rows = frappe.get_all(
+        "Journal Entry",
+        filters={"company": company, "docstatus": 1, "user_remark": ["like", f"%{tag}%"]},
+        pluck="name",
+        limit_page_length=1,
+    )
+    return rows[0] if rows else None
+
+
 def _get_courier_outstanding_account(company: str) -> str:
     """Return the 'Courier Outstanding' ledger for the given company."""
     acc = frappe.db.get_value(
@@ -3083,7 +3199,19 @@ def _validate_collection_receipt(receipt_name: str | None, invoice_name: str, ne
 
 
 def _get_online_collection_account(method: str, company: str) -> str:
-    if method in {ACCOUNTS.INSTAPAY, ACCOUNTS.PAYMENT_GATEWAY}:
+    if method == ACCOUNTS.INSTAPAY:
+        # FIX 2 (2026-07-20): InstaPay MUST land in the SAME bank ledger that
+        # api/invoices.pay_invoice books it to — the explicit "Bank Account - <abbr>"
+        # account. The previous "first leaf under the Bank Accounts group" lookup
+        # resolved to "Mobile Wallet - J" on staging, splitting InstaPay collections
+        # across two ledgers (confirm_online_payment / change_payment_collection_method
+        # vs. pay_invoice). Mirror pay_invoice's mapping exactly.
+        company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+        account = f"Bank Account - {company_abbr}".strip()
+        if not frappe.db.exists("Account", account):
+            account = None
+    elif method == ACCOUNTS.PAYMENT_GATEWAY:
+        # Payment Gateway keeps the group-based lookup (unchanged; not part of FIX 2).
         account = frappe.db.get_value(
             "Account",
             {
@@ -3671,8 +3799,18 @@ def _create_shipping_expense_to_creditors_je(inv, shipping_exp: float, creditors
     """Create JE: DR Freight & Forwarding Charges, CR Creditors (payable) with party assigned.
 
     Requires valid party_type (Supplier/Employee) & party (name).
+
+    FIX 3 (2026-07-20): idempotent — reuse an existing courier-freight accrual JE for
+    this invoice instead of double-posting. Dedup keys off ``user_remark`` because v16
+    overwrites the JE ``title`` with the first account name on save.
     """
     company = inv.company
+
+    # Idempotency guard: reuse a courier-expense JE already tagged for this invoice.
+    existing = _find_existing_je_by_tag(company, inv.name, "COURIER_EXPENSE")
+    if existing:
+        return existing
+
     freight_acc = get_freight_expense_account(company)
 
     je = frappe.new_doc("Journal Entry")
@@ -3680,6 +3818,7 @@ def _create_shipping_expense_to_creditors_je(inv, shipping_exp: float, creditors
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Courier Expense – {inv.name}"
+    je.user_remark = _je_user_remark(inv.name, "COURIER_EXPENSE", f"Courier Expense – {inv.name}")
 
     # DR Freight Expense
     je.append("accounts", {
