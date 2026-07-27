@@ -11,6 +11,9 @@ from frappe.query_builder.functions import Count
 from typing import Dict, List, Any, Optional, Union, Tuple
 from jarz_pos.constants import PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
 from jarz_pos.utils.access_control import (
+    ClosedShiftError,
+    ShiftRequiredError,
+    assert_vouchers_not_in_closed_shift,
     ensure_open_shift_for_invoice,
     ensure_profile_scoped_invoice_access,
     get_invoice_branch,
@@ -123,13 +126,25 @@ except ImportError:
         return filter_conditions
 
 try:
-    from jarz_pos.api.manager import get_invoice_amendment_eligibility, get_invoice_hard_mutation_blocker
+    from jarz_pos.api.manager import (
+        get_invoice_amendment_eligibility,
+        get_invoice_cancellation_eligibility,
+        get_invoice_hard_mutation_blocker,
+    )
 except Exception:
     def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:  # type: ignore
         return {
             "can_amend": False,
             "amendment_block_code": "unavailable",
             "amendment_block_reason": "Invoice amendment eligibility is unavailable.",
+        }
+
+    def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:  # type: ignore
+        return {
+            "can_cancel": False,
+            "cancellation_block_code": "unavailable",
+            "cancellation_block_reason": "Invoice cancellation eligibility is unavailable.",
+            "cancellation_suggests_return": False,
         }
 
     def get_invoice_hard_mutation_blocker(inv: Any) -> Optional[Dict[str, Any]]:  # type: ignore
@@ -1897,6 +1912,69 @@ def update_invoice_state(
         frappe.log_error(f"Update Invoice State Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API")
         return _failure(error_msg)
 
+def _release_operational_artifacts(invoice_name: str) -> Dict[str, Any]:
+    """Free the operational records a cancelled invoice was still holding.
+
+    Cancelling the accounting documents used to leave the *operational* ones
+    dangling: an uploaded payment receipt stayed pending forever, the delivery
+    trip kept counting the order towards its completion, and an approved-but-
+    unused shipping request stayed active. None of these affect the ledger,
+    which is why they went unnoticed — they affect what staff see on screen.
+
+    Every step is independently guarded: releasing artifacts must never be able
+    to fail a cancellation that has already committed its accounting.
+    """
+    released: Dict[str, Any] = {}
+
+    try:
+        from jarz_pos.api.payment_receipts import mark_payment_receipts_changed_for_invoice
+
+        changed = mark_payment_receipts_changed_for_invoice(invoice_name)
+        if changed:
+            released["payment_receipts"] = changed
+    except Exception:
+        frappe.logger().warning(
+            f"KANBAN API: payment receipt release failed for {invoice_name}"
+        )
+
+    try:
+        from jarz_pos.api.trips import sync_trip_status
+
+        sync_trip_status(invoice_name)
+        released["trip_synced"] = True
+    except Exception:
+        frappe.logger().warning(f"KANBAN API: trip sync failed for {invoice_name}")
+
+    try:
+        from jarz_pos.api.manager import _find_active_custom_shipping_requests
+
+        cancelled_requests: List[str] = []
+        for csr_name in _find_active_custom_shipping_requests(invoice_name):
+            try:
+                csr = frappe.get_doc("Custom Shipping Request", csr_name)
+                if int(getattr(csr, "docstatus", 0) or 0) == 1:
+                    csr.flags.ignore_permissions = True
+                    csr.cancel()
+                    cancelled_requests.append(csr_name)
+                elif int(getattr(csr, "docstatus", 0) or 0) == 0:
+                    frappe.delete_doc(
+                        "Custom Shipping Request", csr_name, ignore_permissions=True, force=True
+                    )
+                    cancelled_requests.append(csr_name)
+            except Exception:
+                frappe.logger().warning(
+                    f"KANBAN API: could not release shipping request {csr_name}"
+                )
+        if cancelled_requests:
+            released["custom_shipping_requests"] = cancelled_requests
+    except Exception:
+        frappe.logger().warning(
+            f"KANBAN API: shipping request release failed for {invoice_name}"
+        )
+
+    return released
+
+
 @frappe.whitelist(allow_guest=False)
 def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) -> Dict[str, Any]:
     """Cancel a Sales Invoice prior to dispatch with audit trail and notifications."""
@@ -1957,6 +2035,37 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
         if not (is_unpaid or is_paid):
             return _failure(f"Invoice has partial payments ({outstanding:.2f} remaining of {grand_total:.2f}); settle or refund before cancelling")
 
+        # ── Shift safety ────────────────────────────────────────────────
+        # Cancelling a Payment Entry flips its GL rows to is_cancelled=1, which
+        # removes them from any shift window that already counted them. If that
+        # window is closed, its reconciliation and Cash-Over/Short JE silently
+        # stop matching the ledger. Two guards, in order of specificity:
+        #   1. the branch must be open right now (cash is about to move), and
+        #   2. no payment we are about to cancel may belong to a CLOSED shift.
+        # Unpaid invoices move no cash, so neither applies to them.
+        linked_payment_entries: List[str] = []
+        if is_paid:
+            linked_payment_entries = sorted({
+                pe for pe in frappe.get_all(
+                    "Payment Entry Reference",
+                    filters={
+                        "reference_doctype": "Sales Invoice",
+                        "reference_name": invoice.name,
+                        "docstatus": 1,
+                        "parenttype": "Payment Entry",
+                    },
+                    pluck="parent",
+                ) if pe
+            })
+            try:
+                ensure_open_shift_for_invoice(invoice, action_label="cancelling a paid order")
+                assert_vouchers_not_in_closed_shift(
+                    [("Payment Entry", pe) for pe in linked_payment_entries],
+                    action_label="cancelling this order",
+                )
+            except (ShiftRequiredError, ClosedShiftError) as shift_err:
+                return _failure(str(getattr(shift_err, "message", None) or shift_err))
+
         credit_note_name: Optional[str] = None
         cancelled_payment_entries: List[str] = []
         cancelled_docstatus = 1
@@ -1973,18 +2082,8 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 invoice.cancel()
                 cancelled_docstatus = 2
             else:
-                payment_entries = frappe.get_all(
-                    "Payment Entry Reference",
-                    filters={
-                        "reference_doctype": "Sales Invoice",
-                        "reference_name": invoice.name,
-                        "docstatus": 1,
-                        "parenttype": "Payment Entry",
-                    },
-                    pluck="parent",
-                )
-
-                for pe_name in sorted({pe for pe in payment_entries if pe}):
+                # Resolved above so the closed-shift guard could inspect them.
+                for pe_name in linked_payment_entries:
                     if not pe_name:
                         continue
                     pe_doc = frappe.get_doc("Payment Entry", pe_name)
@@ -2051,6 +2150,8 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             except Exception:
                 frappe.logger().warning(f"KANBAN API: Unable to add cancellation comment for {invoice.name}")
 
+            released_artifacts = _release_operational_artifacts(invoice.name)
+
             payload = {
                 "invoice_id": invoice.name,
                 "old_state": current_state,
@@ -2066,6 +2167,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 "paid_path": is_paid,
                 "cancelled_payment_entries": cancelled_payment_entries or None,
                 "kanban_profile": get_invoice_branch(invoice),
+                "released_artifacts": released_artifacts or None,
             }
 
             publish_invoice_event(WS_EVENTS.INVOICE_STATE_CHANGE, payload, invoice)
@@ -2087,6 +2189,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 invoice_id=invoice.name,
                 cancelled_docstatus=cancelled_docstatus,
                 credit_note=credit_note_name,
+                released_artifacts=released_artifacts,
                 state=STATUS.CANCELLED,
                 reason=reason,
                 notes=notes,
@@ -2175,6 +2278,7 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         except Exception:
             data["latest_note"] = None
         data.update(get_invoice_amendment_eligibility(invoice))
+        data.update(get_invoice_cancellation_eligibility(invoice))
         return _success(data=data)
     except Exception as e:
         error_msg = f"Error getting invoice details: {str(e)}"

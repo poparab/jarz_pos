@@ -359,3 +359,86 @@ def ensure_open_shift(pos_profile: str, *, action_label: str) -> None:
 def ensure_open_shift_for_invoice(inv: Any, *, action_label: str) -> None:
     """:func:`ensure_open_shift` for the branch that owns *inv*."""
     ensure_open_shift(get_invoice_branch(inv), action_label=action_label)
+
+
+class ClosedShiftError(frappe.ValidationError):
+    """Raised when an action would rewrite the books of an already-closed shift.
+
+    Distinct from :class:`ShiftRequiredError`: that one means "open a shift and
+    retry", this one means "this can never be retried — use the return
+    workflow", so the client must not offer a Start Shift affordance.
+    """
+
+
+def find_closed_shift_covering(voucher_creation: Any) -> Optional[Dict[str, Any]]:
+    """Return the submitted POS Closing Entry whose window contains *voucher_creation*.
+
+    ``jarz_pos.api.shift._get_shift_account_movements`` buckets a shift's cash
+    movements by GL Entry ``creation`` between the shift's start and end, and
+    filters ``is_cancelled = 0``.  Cancelling a voucher created inside a window
+    that has already been closed therefore *retroactively* removes its rows from
+    that closed shift — the reconciliation and the Cash-Over/Short journal entry
+    posted at close stop matching the ledger they were computed from.
+
+    Matching on the closing entry's own window (rather than the opening entry's
+    start plus "now") is what makes this precise: an opening entry that is still
+    open has no closing row, so a live shift never matches here and normal
+    same-shift cancellations stay allowed.
+    """
+    if not voucher_creation:
+        return None
+
+    try:
+        rows = frappe.get_all(
+            "POS Closing Entry",
+            filters={
+                "docstatus": 1,
+                "period_start_date": ["<=", voucher_creation],
+                "period_end_date": [">=", voucher_creation],
+            },
+            fields=["name", "pos_profile", "period_start_date", "period_end_date"],
+            limit=1,
+        ) or []
+    except Exception:
+        # A detection failure must not silently permit the corrupting cancel,
+        # but must not raise on its own either — the caller treats None as
+        # "no closed shift found" and other guards still apply.
+        frappe.log_error(
+            frappe.get_traceback(),
+            "find_closed_shift_covering failed",
+        )
+        return None
+
+    return rows[0] if rows else None
+
+
+def assert_vouchers_not_in_closed_shift(
+    vouchers: Sequence[Any],
+    *,
+    action_label: str,
+) -> None:
+    """Refuse *action_label* when any of *vouchers* sits inside a closed shift.
+
+    *vouchers* is a sequence of ``(doctype, name)`` pairs.  Each one's
+    ``creation`` timestamp is tested against every closed shift window; the
+    first hit aborts.
+    """
+    for doctype, name in vouchers or []:
+        if not doctype or not name:
+            continue
+        try:
+            created = frappe.db.get_value(doctype, name, "creation")
+        except Exception:
+            continue
+        closed = find_closed_shift_covering(created)
+        if not closed:
+            continue
+        frappe.throw(
+            _(
+                "{0} {1} was booked inside shift {2}, which is already closed. "
+                "{3} would rewrite that shift's reconciled totals. Use the "
+                "return workflow instead."
+            ).format(doctype, name, closed.get("name"), action_label.capitalize()),
+            ClosedShiftError,
+            title=_("Shift Already Closed"),
+        )

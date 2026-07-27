@@ -123,6 +123,7 @@ jobs:
             test_leads_api
             test_access_control
             test_realtime_scoping
+            test_cancellation_guards
           )
           rc=0
           for m in "${MODULES[@]}"; do

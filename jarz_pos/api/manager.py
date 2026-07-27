@@ -12,6 +12,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import re
 from typing import List, Dict, Any, Optional, Union
 import frappe
 from frappe import _
@@ -472,31 +473,48 @@ def _find_active_custom_shipping_requests(invoice_name: str) -> List[str]:
     return sorted({row for row in rows if row})
 
 
+def _mentions_invoice(text: Optional[str], invoice_name: str) -> bool:
+    """True when *text* references *invoice_name* as a whole token.
+
+    A plain ``LIKE %name%`` cannot distinguish an invoice from its own
+    amendments: ``ACC-SINV-2026-00001`` is a substring of
+    ``ACC-SINV-2026-00001-1``, so the amendment's settlement Journal Entry used
+    to block cancellation of the *original*. Requiring the match to end at a
+    non-identifier character keeps every genuine reference while dropping that
+    whole class of false positives.
+
+    Deliberately permissive on recall: this feeds a safety blocker, so missing a
+    real reference (under-blocking) is far worse than an extra hit.
+    """
+    if not text or not invoice_name:
+        return False
+    pattern = re.escape(invoice_name) + r"(?![0-9A-Za-z\-_])"
+    return re.search(pattern, str(text)) is not None
+
+
 def _find_submitted_journal_entries(invoice_name: str) -> List[str]:
     """Return submitted Journal Entries that already settled against the invoice."""
     journal_entry_names = set()
 
-    try:
-        title_rows = frappe.get_all(
-            "Journal Entry",
-            filters={"docstatus": 1, "title": ["like", f"%{invoice_name}%"]},
-            pluck="name",
-            limit_page_length=20,
-        ) or []
-        journal_entry_names.update(row for row in title_rows if row)
-    except Exception:
-        pass
-
-    try:
-        remark_rows = frappe.get_all(
-            "Journal Entry",
-            filters={"docstatus": 1, "user_remark": ["like", f"%{invoice_name}%"]},
-            pluck="name",
-            limit_page_length=20,
-        ) or []
-        journal_entry_names.update(row for row in remark_rows if row)
-    except Exception:
-        pass
+    # `title` and `user_remark` are matched broadly in SQL, then narrowed in
+    # Python by `_mentions_invoice`. `title` is kept even though ERPNext v16
+    # overwrites it on validate — historical (pre-v16) entries can still carry a
+    # meaningful title, and dropping the source could only ever under-block.
+    for fieldname in ("title", "user_remark"):
+        try:
+            rows = frappe.get_all(
+                "Journal Entry",
+                filters={"docstatus": 1, fieldname: ["like", f"%{invoice_name}%"]},
+                fields=["name", fieldname],
+                limit_page_length=50,
+            ) or []
+            journal_entry_names.update(
+                row.get("name")
+                for row in rows
+                if row.get("name") and _mentions_invoice(row.get(fieldname), invoice_name)
+            )
+        except Exception:
+            pass
 
     try:
         ref_rows = frappe.get_all(
@@ -655,6 +673,123 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
         "can_amend": True,
         "amendment_block_code": None,
         "amendment_block_reason": None,
+    }
+
+
+#: Operational states that still allow an outright cancellation.
+_DISPATCHED_STATES = {"out_for_delivery", "delivered", "completed", "cancelled"}
+
+
+def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:
+    """Return whether a submitted invoice can still be cancelled outright.
+
+    Mirrors the guards inside ``jarz_pos.api.kanban.cancel_invoice`` so the
+    client can explain *why* the action is unavailable instead of letting the
+    user press it and receive a raw server error. Kept next to
+    :func:`get_invoice_amendment_eligibility` because both are merged into the
+    same card payload.
+
+    A blocked cancel is not a dead end: everything except ``return_invoice``
+    and ``invoice_not_submitted`` is a candidate for the return workflow, which
+    is what ``suggest_return`` tells the client.
+    """
+    invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
+
+    def _blocked(code: str, reason: str, *, suggest_return: bool = False, **extra: Any) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "can_cancel": False,
+            "cancellation_block_code": code,
+            "cancellation_block_reason": reason,
+            "cancellation_suggests_return": suggest_return,
+        }
+        payload.update(extra)
+        return payload
+
+    if not invoice_name:
+        return _blocked("invoice_missing", _("Invoice was not found."))
+
+    if int(inv.get("docstatus") or 0) != 1:
+        return _blocked("invoice_not_submitted", _("Only submitted invoices can be cancelled."))
+
+    if int(inv.get("is_return") or 0):
+        return _blocked("return_invoice", _("Return invoices cannot be cancelled."))
+
+    current_state = str(
+        inv.get("custom_sales_invoice_state")
+        or inv.get("sales_invoice_state")
+        or inv.get("custom_state")
+        or inv.get("state")
+        or ""
+    ).strip().lower().replace(" ", "_").replace("-", "_")
+    if current_state in _DISPATCHED_STATES:
+        return _blocked(
+            "already_dispatched",
+            _("This order was already dispatched. Use the return workflow instead."),
+            suggest_return=True,
+        )
+
+    mutation_blocker = get_invoice_hard_mutation_blocker(inv)
+    if mutation_blocker:
+        return _blocked(
+            mutation_blocker.get("mutation_block_code") or "mutation_blocked",
+            mutation_blocker.get("mutation_block_reason") or _("This invoice cannot be changed from this workflow."),
+            suggest_return=True,
+            **{
+                key: value
+                for key, value in mutation_blocker.items()
+                if key not in {"mutation_block_code", "mutation_block_reason"}
+            },
+        )
+
+    outstanding = flt(inv.get("outstanding_amount"))
+    grand_total = flt(inv.get("grand_total"))
+    tolerance = 0.50
+    if not (outstanding >= (grand_total - tolerance) or outstanding <= tolerance):
+        return _blocked(
+            "partial_payment",
+            _("This invoice has a partial payment; settle or refund it before cancelling."),
+            suggest_return=True,
+        )
+
+    # A paid invoice cancels its Payment Entries, so the shift rules apply.
+    if outstanding <= tolerance and grand_total > tolerance:
+        try:
+            from jarz_pos.utils.access_control import (
+                find_closed_shift_covering,
+                get_open_shift_for_profile,
+                get_invoice_branch,
+                user_requires_pos_shift,
+            )
+
+            for pe_name in _find_submitted_payment_entries(invoice_name):
+                closed = find_closed_shift_covering(
+                    frappe.db.get_value("Payment Entry", pe_name, "creation")
+                )
+                if closed:
+                    return _blocked(
+                        "closed_shift",
+                        _(
+                            "The payment for this order was booked in shift {0}, "
+                            "which is already closed. Use the return workflow instead."
+                        ).format(closed.get("name")),
+                        suggest_return=True,
+                        closed_shift=closed.get("name"),
+                    )
+
+            if user_requires_pos_shift() and not get_open_shift_for_profile(get_invoice_branch(inv)):
+                return _blocked(
+                    "shift_required",
+                    _("Start a shift on this branch before cancelling a paid order."),
+                )
+        except Exception:
+            # Advisory only — the authoritative guard runs inside cancel_invoice.
+            pass
+
+    return {
+        "can_cancel": True,
+        "cancellation_block_code": None,
+        "cancellation_block_reason": None,
+        "cancellation_suggests_return": False,
     }
 
 
