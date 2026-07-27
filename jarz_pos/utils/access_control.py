@@ -226,12 +226,24 @@ def get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
 
     Used to address realtime events at the branch that owns an order instead of
     broadcasting them to every logged-in device.
+
+    Disabled profiles are excluded, matching :func:`get_user_pos_profiles`. The
+    two are opposite ends of the same rule — without this, a closed branch would
+    still push live events to users who can no longer load those orders at all.
     """
-    filtered = sorted({str(p).strip() for p in (profiles or []) if str(p or "").strip()})
-    if not filtered:
+    requested = sorted({str(p).strip() for p in (profiles or []) if str(p or "").strip()})
+    if not requested:
         return []
 
     try:
+        filtered = frappe.get_all(
+            "POS Profile",
+            filters={"name": ["in", requested], "disabled": 0},
+            pluck="name",
+        ) or []
+        if not filtered:
+            return []
+
         rows = frappe.get_all(
             "POS Profile User",
             filters={"parent": ["in", filtered], "parenttype": "POS Profile"},

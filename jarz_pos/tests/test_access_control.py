@@ -75,6 +75,38 @@ class TestBranchResolution(unittest.TestCase):
             self.assertTrue(mock_log.called)
 
 
+class TestBranchRecipients(unittest.TestCase):
+    def test_disabled_branches_resolve_no_recipients(self):
+        """Mirrors get_user_pos_profiles: a closed branch reaches nobody.
+
+        Otherwise a disabled branch keeps pushing live events to users who can
+        no longer load those orders.
+        """
+        from jarz_pos.utils.access_control import get_users_for_pos_profiles
+
+        with patch.object(frappe, "get_all", return_value=[]) as mock_get_all:
+            self.assertEqual(get_users_for_pos_profiles(["Closed Branch"]), [])
+            # Only the POS Profile filter query runs; the child-table read is skipped.
+            self.assertEqual(mock_get_all.call_count, 1)
+
+    def test_enabled_branch_returns_its_users(self):
+        from jarz_pos.utils.access_control import get_users_for_pos_profiles
+
+        with patch.object(frappe, "get_all") as mock_get_all:
+            mock_get_all.side_effect = [
+                ["Branch A"],
+                [{"user": "a@x.com"}, {"user": "b@x.com"}, {"user": "a@x.com"}],
+            ]
+            self.assertEqual(
+                get_users_for_pos_profiles(["Branch A"]), ["a@x.com", "b@x.com"]
+            )
+
+    def test_no_profiles_is_a_no_op(self):
+        from jarz_pos.utils.access_control import get_users_for_pos_profiles
+
+        self.assertEqual(get_users_for_pos_profiles([]), [])
+
+
 class TestInvoiceBranch(unittest.TestCase):
     def test_kanban_profile_wins_over_pos_profile(self):
         """pos_profile freezes at submit; a transfer only moves custom_kanban_profile."""
