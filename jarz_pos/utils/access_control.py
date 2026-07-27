@@ -29,11 +29,15 @@ from typing import Any, Dict, List, Optional, Sequence
 UNRESTRICTED_USERS = {"Administrator"}
 
 #: ``frappe.flags`` that mean we are running outside a real user session.
+#:
+#: ``in_test`` is deliberately absent. Including it switched branch scoping off
+#: for the whole test run, so no test could ever exercise the guard — the first
+#: test written against it failed for that reason. Test suites run as
+#: ``Administrator``, which is already unrestricted, so nothing needs the flag.
 _SYSTEM_CONTEXT_FLAGS = (
     "in_install",
     "in_migrate",
     "in_patch",
-    "in_test",
     "in_import",
     "in_setup_wizard",
 )
