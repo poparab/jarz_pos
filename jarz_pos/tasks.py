@@ -138,7 +138,14 @@ def escalate_unconfirmed_online_payments():
                     "pos_profile": row.get("custom_kanban_profile") or row.get("pos_profile"),
                 }
                 try:
-                    frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload, user="*")
+                    from jarz_pos.utils.realtime import publish_to_branches
+
+                    branch = payload.get("pos_profile")
+                    publish_to_branches(
+                        WS_EVENTS.INVOICE_STATE_CHANGE,
+                        payload,
+                        [branch] if branch else [],
+                    )
                 except Exception:
                     pass
 

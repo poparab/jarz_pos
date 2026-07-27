@@ -1002,24 +1002,36 @@ def _create_discrepancy_journal_entry(
     return je.name
 
 
-@frappe.whitelist(allow_guest=False)
-def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | None = None):
-    if not pos_opening_entry:
-        frappe.throw(_("POS Opening Entry is required"))
+def _close_shift(
+    opening,
+    closing_balances: list[dict[str, Any]] | None,
+    *,
+    forced_by: str | None = None,
+    reason: str | None = None,
+    acknowledge_unsettled: bool = False,
+) -> dict[str, Any]:
+    """Close *opening* and post any Cash Over/Short difference.
 
+    Shared by the normal close (the opener closes their own shift) and the
+    manager force-close, so both take the identical accounting path: the counted
+    amount is whatever the closer typed, and any variance books the same
+    discrepancy Journal Entry. ``forced_by`` only adds an audit trail — it never
+    changes the numbers.
+    """
     closing_balances = _normalize_closing_balances_payload(closing_balances)
     if not closing_balances:
         frappe.throw(_("At least one closing balance row is required"))
 
-    opening = frappe.get_doc("POS Opening Entry", pos_opening_entry)
-
-    if opening.user != frappe.session.user:
-        frappe.throw(_("You are not allowed to close this shift"), frappe.PermissionError)
-
     if opening.status != "Open" or opening.docstatus != 1:
         frappe.throw(_("Selected POS Opening Entry should be open."), title=_("Invalid Opening Entry"))
 
-    _throw_if_shift_has_unsettled_courier_transactions(opening.pos_profile)
+    courier_block: dict[str, Any] = {}
+    if forced_by and acknowledge_unsettled:
+        # The manager has seen the outstanding courier balances and is closing
+        # anyway — record exactly what was left open rather than dropping it.
+        courier_block = _get_shift_courier_close_block(opening.pos_profile)
+    else:
+        _throw_if_shift_has_unsettled_courier_transactions(opening.pos_profile)
 
     closing = make_closing_entry_from_opening(opening)
     closing_payment_reconciliation = getattr(closing, "payment_reconciliation", None) or []
@@ -1060,6 +1072,15 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         frappe.throw(
             _("Failed to close shift: {0}").format(error_message),
             title=_("Shift Close Failed"),
+        )
+
+    if forced_by:
+        _record_force_close_audit(
+            opening=opening,
+            closing=closing,
+            forced_by=forced_by,
+            reason=reason,
+            courier_block=courier_block,
         )
 
     # --- Create discrepancy journal entry if closing differs from expected ---
@@ -1129,17 +1150,175 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
         "net_movement": flt(total_inflows - total_outflows),
         "account_movements": account_movements,
         "sales_invoices": [],
+        "forced_by": forced_by,
+        "shift_user": opening.user,
     }
 
-    # Notify all users on this POS profile about shift end
+    # Notify all users on this POS profile about shift end. The shift's owner is
+    # the subject of the message even when a manager pressed the button, so the
+    # branch sees "<opener>'s shift was closed", not the manager's name alone.
     _notify_shift_event(
         pos_profile=opening.pos_profile,
         event_type="ended",
-        user=frappe.session.user,
+        user=opening.user or frappe.session.user,
         opening_entry=opening.name,
     )
 
     return result
+
+
+def _record_force_close_audit(
+    *,
+    opening,
+    closing,
+    forced_by: str,
+    reason: str | None,
+    courier_block: dict[str, Any] | None = None,
+) -> None:
+    """Leave a permanent trail of who force-closed whose shift, and why."""
+    try:
+        forced_by_name = frappe.db.get_value("User", forced_by, "full_name") or forced_by
+        owner_name = frappe.db.get_value("User", opening.user, "full_name") or opening.user
+        lines = [
+            f"Shift force-closed by {forced_by_name} ({forced_by}) on behalf of "
+            f"{owner_name} ({opening.user}).",
+            f"Reason: {reason or 'not provided'}",
+        ]
+        if courier_block and courier_block.get("blocked"):
+            lines.append(
+                "Closed with {0} unsettled courier transaction(s) across {1} invoice(s) "
+                "still outstanding; these remain open and must still be settled.".format(
+                    courier_block.get("transaction_count", 0),
+                    courier_block.get("invoice_count", 0),
+                )
+            )
+        message = " ".join(lines)
+        for doc in (opening, closing):
+            try:
+                doc.add_comment("Comment", message)
+            except Exception:
+                continue
+        frappe.logger().info(
+            f"SHIFT: force close {opening.name} (owner={opening.user}) by {forced_by}"
+        )
+    except Exception:
+        # An audit-trail failure must not roll back a completed close, but it
+        # must never pass unnoticed either.
+        frappe.log_error(frappe.get_traceback(), "jarz_pos.shift.force_close_audit")
+
+
+@frappe.whitelist(allow_guest=False)
+def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | None = None):
+    if not pos_opening_entry:
+        frappe.throw(_("POS Opening Entry is required"))
+
+    opening = frappe.get_doc("POS Opening Entry", pos_opening_entry)
+
+    if opening.user != frappe.session.user:
+        frappe.throw(_("You are not allowed to close this shift"), frappe.PermissionError)
+
+    return _close_shift(opening, closing_balances)
+
+
+@frappe.whitelist(allow_guest=False)
+def force_close_shift(
+    pos_opening_entry: str,
+    closing_balances: list[dict[str, Any]] | None = None,
+    reason: str | None = None,
+    acknowledge_unsettled: bool | int | str = False,
+):
+    """Close a shift opened by somebody else.
+
+    Only the opener could close a shift, and nobody else could start one on that
+    branch while it stayed open — so a staff member who left with an open shift
+    took the whole branch offline until an administrator intervened in Desk.
+    This is that escape hatch, restricted to shift-monitor managers and to the
+    branches they are assigned to.
+
+    The manager supplies the counted amounts exactly as the opener would, so a
+    real drawer difference still books a Cash Over/Short entry instead of being
+    papered over.
+    """
+    from jarz_pos.utils.access_control import (
+        ensure_profile_scoped_invoice_access,
+    )
+
+    if not pos_opening_entry:
+        frappe.throw(_("POS Opening Entry is required"))
+
+    reason = (reason or "").strip()
+    if not reason:
+        frappe.throw(_("A reason is required when closing someone else's shift."))
+
+    opening = frappe.get_doc("POS Opening Entry", pos_opening_entry)
+
+    # Role gate (may this user force-close at all?) …
+    from jarz_pos.api.manager import _ensure_shift_monitor_access
+
+    _ensure_shift_monitor_access()
+    # … then branch gate (is this branch one of theirs?).
+    ensure_profile_scoped_invoice_access(
+        frappe._dict({"custom_kanban_profile": opening.pos_profile}),
+        action_label="closing a shift on this branch",
+    )
+
+    if opening.user == frappe.session.user:
+        # Nothing forced about closing your own shift — take the normal path so
+        # the audit trail stays meaningful.
+        return _close_shift(opening, closing_balances)
+
+    acknowledge = str(acknowledge_unsettled or "").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    } or acknowledge_unsettled is True
+
+    return _close_shift(
+        opening,
+        closing_balances,
+        forced_by=frappe.session.user,
+        reason=reason,
+        acknowledge_unsettled=acknowledge,
+    )
+
+
+@frappe.whitelist(allow_guest=False)
+def get_force_close_preview(pos_opening_entry: str) -> dict[str, Any]:
+    """What a manager needs to see before force-closing someone else's shift.
+
+    Returns the shift's owner, its payment modes (so the UI can ask for a count
+    per mode), and any courier balances that would block a normal close.
+    """
+    from jarz_pos.api.manager import _ensure_shift_monitor_access
+    from jarz_pos.utils.access_control import ensure_profile_scoped_invoice_access
+
+    if not pos_opening_entry:
+        frappe.throw(_("POS Opening Entry is required"))
+
+    opening = frappe.get_doc("POS Opening Entry", pos_opening_entry)
+    _ensure_shift_monitor_access()
+    ensure_profile_scoped_invoice_access(
+        frappe._dict({"custom_kanban_profile": opening.pos_profile}),
+        action_label="closing a shift on this branch",
+    )
+
+    account = _resolve_pos_profile_account(opening.company, opening.pos_profile, None, None)
+    courier_block = _get_shift_courier_close_block(opening.pos_profile)
+
+    return {
+        "success": True,
+        "opening_entry": opening.name,
+        "pos_profile": opening.pos_profile,
+        "status": opening.status,
+        "user": opening.user,
+        "user_full_name": frappe.db.get_value("User", opening.user, "full_name") or opening.user,
+        "period_start_date": str(opening.period_start_date or ""),
+        "is_current_user": opening.user == frappe.session.user,
+        "modes_of_payment": [
+            row.mode_of_payment for row in (opening.balance_details or []) if row.mode_of_payment
+        ],
+        "expected_amount": flt(_get_account_balance(account, opening.company)) if account else 0.0,
+        "account": account,
+        "courier_block": courier_block,
+    }
 
 
 # ---------------------------------------------------------------------------

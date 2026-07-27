@@ -227,7 +227,10 @@ def test_websocket_emission() -> Dict[str, Any]:
             "test_event": True
         }
         
-        frappe.publish_realtime(WS_EVENTS.NEW_INVOICE, new_invoice_payload, user="*")
+        # Aim the test at the caller: user="*" resolves to the room "user:*",
+        # which nobody joins, so this endpoint proved nothing.
+        _test_target = frappe.session.user
+        frappe.publish_realtime(WS_EVENTS.NEW_INVOICE, new_invoice_payload, user=_test_target)
         
         # Emit state change event (triggers kanban refresh)
         state_change_payload = {
@@ -241,11 +244,11 @@ def test_websocket_emission() -> Dict[str, Any]:
             "test_event": True
         }
         
-        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, state_change_payload, user="*")
-        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, state_change_payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, state_change_payload, user=_test_target)
+        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, state_change_payload, user=_test_target)
         
         # Also emit a generic test event
-        frappe.publish_realtime(WS_EVENTS.TEST_EVENT, {"message": "Test websocket emission", "timestamp": timestamp}, user="*")
+        frappe.publish_realtime(WS_EVENTS.TEST_EVENT, {"message": "Test websocket emission", "timestamp": timestamp}, user=_test_target)
         
         return {
             "success": True,
@@ -1077,8 +1080,7 @@ def notify_invoice_cancellation(
             payload["territory"] = _pick_display_text(getattr(doc, "territory", None))
 
         recipients = _resolve_recipients_for_payload(payload)
-        target = recipients if recipients else "*"
-        frappe.publish_realtime(WS_EVENTS.INVOICE_CANCELLED, payload, user=target)
+        _publish_to_recipients(WS_EVENTS.INVOICE_CANCELLED, payload, recipients)
 
         data_payload = _prepare_invoice_status_data_payload("invoice_cancelled", payload)
 
@@ -1384,15 +1386,39 @@ def _ensure_acceptance_defaults(doc: Any) -> None:
         frappe.log_error(frappe.get_traceback(), f"Failed to set acceptance defaults for {getattr(doc, 'name', '?')}")
 
 
+def _publish_to_recipients(
+    event: str, payload: Dict[str, Any], recipients: Sequence[str]
+) -> None:
+    """Emit *event* to each recipient individually.
+
+    ``publish_realtime(user=[...])`` builds the room ``user:['a@b.com', ...]``,
+    which no socket ever joins — the events looked delivered and went nowhere.
+    The old ``"*"`` fallback was equally dead *and*, had it worked, would have
+    broadcast the order to every branch. Emitting one room per user is the only
+    form Frappe actually routes.
+    """
+    cleaned = sorted({str(u).strip() for u in (recipients or []) if str(u or "").strip()})
+    if not cleaned:
+        frappe.logger().warning(
+            f"NOTIFY: no recipients for {event} on {payload.get('invoice_id') or payload.get('name')}"
+        )
+        return
+
+    for user in cleaned:
+        try:
+            frappe.publish_realtime(event, payload, user=user)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"publish_realtime {event} failed for {user}")
+
+
 def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
     try:
-        target = recipients if recipients else "*"
-        frappe.publish_realtime(WS_EVENTS.NEW_INVOICE, payload, user=target)
-        
+        _publish_to_recipients(WS_EVENTS.NEW_INVOICE, payload, recipients)
+
         if frappe.conf.get("developer_mode"):
             frappe.msgprint(
                 f"Published jarz_pos_new_invoice event for {payload.get('invoice_id')} "
-                f"to {len(recipients) if recipients else 'all'} users"
+                f"to {len(recipients) if recipients else 0} users"
             )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_new_invoice failed")
@@ -1400,8 +1426,7 @@ def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -
 
 def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
     try:
-        target = recipients if recipients else "*"
-        frappe.publish_realtime(WS_EVENTS.INVOICE_ACCEPTED, payload, user=target)
+        _publish_to_recipients(WS_EVENTS.INVOICE_ACCEPTED, payload, recipients)
     except Exception:
         frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_invoice_accepted failed")
 

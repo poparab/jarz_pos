@@ -44,6 +44,31 @@ DN_LOGIC_VERSION = "2026-05-04a"
 PARTNER_FEES_VAT_RATE = 0.14  # 14%
 
 
+def _publish_branch_event(event: str, payload: dict, *, invoice=None) -> list:
+    """Emit *event* to the branch that owns the order.
+
+    Replaces two broken forms that were both in use here: a bare
+    ``publish_realtime(event, payload)`` (site-wide ``all`` room — every System
+    User on every branch) and ``user="*"`` (the room ``user:*``, which nobody
+    joins, so the event vanished). Both are now addressed to the assigned users
+    of the order's own POS Profile.
+    """
+    from jarz_pos.utils.realtime import (
+        publish_invoice_event,
+        publish_invoice_event_by_name,
+    )
+
+    if invoice is not None:
+        return publish_invoice_event(event, payload, invoice)
+
+    name = (
+        payload.get("invoice")
+        or payload.get("invoice_id")
+        or payload.get("invoice_name")
+    )
+    return publish_invoice_event_by_name(event, payload, name)
+
+
 def _safe_float(value, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -909,7 +934,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         "delivery_note_reused": dn_result.get("reused"),
         "dn_logic_version": DN_LOGIC_VERSION,
     }
-    frappe.publish_realtime(WS_EVENTS.COURIER_OUTSTANDING, payload)
+    _publish_branch_event(WS_EVENTS.COURIER_OUTSTANDING, payload)
     return payload
 
 
@@ -1136,7 +1161,7 @@ def handle_unpaid_online_deliver_unconfirmed(
         "mode": "unpaid_online_deliver_unconfirmed",
         "dn_logic_version": DN_LOGIC_VERSION,
     }
-    frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
+    _publish_branch_event(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
     return payload
 
 
@@ -1330,7 +1355,7 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
         "amount": order_amount,
         "method": method_label,
     }
-    frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload)
+    _publish_branch_event(WS_EVENTS.INVOICE_STATE_CHANGE, payload, invoice=inv)
     return payload
 
 
@@ -1366,7 +1391,7 @@ def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type:
         "journal_entry": res.get("journal_entry"),
         "payment_confirmation_status": "Converted to Cash",
     }
-    frappe.publish_realtime(WS_EVENTS.COURIER_OUTSTANDING, payload)
+    _publish_branch_event(WS_EVENTS.COURIER_OUTSTANDING, payload)
     return payload
 
 
@@ -1425,7 +1450,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
 
     # Step 0: Proactively prompt UI to collect cash BEFORE creating Payment Entry (two-step UX)
     try:
-        frappe.publish_realtime(
+        _publish_branch_event(
             WS_EVENTS.SALES_PARTNER_COLLECT_PROMPT,
             {
                 "invoice": inv.name,
@@ -1434,7 +1459,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
                 "outstanding": float(outstanding or 0),
                 "mode": "sales_partner_collect_prompt",
             },
-            user="*",
+            invoice=inv,
         )
     except Exception:
         pass
@@ -1548,7 +1573,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
         "sales_partner": sales_partner,
         "mode": "sales_partner_unpaid_cash",
     }
-    frappe.publish_realtime(WS_EVENTS.SALES_PARTNER_UNPAID_OFD, payload, user="*")
+    _publish_branch_event(WS_EVENTS.SALES_PARTNER_UNPAID_OFD, payload)
     return payload
 
 
@@ -1703,7 +1728,7 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
         "new_state_key": _state_key(target_state),
         "explicit_mode": explicit_mode or None,
     }
-    frappe.publish_realtime(WS_EVENTS.SALES_PARTNER_PAID_OFD, payload, user="*")
+    _publish_branch_event(WS_EVENTS.SALES_PARTNER_PAID_OFD, payload)
     return payload
 
 
@@ -1758,7 +1783,7 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     je = _create_expense_journal_entry(inv, amount, paid_from, paid_to)
     
     # Fire realtime event so other sessions update cards instantly
-    frappe.publish_realtime(
+    _publish_branch_event(
         WS_EVENTS.COURIER_EXPENSE_PAID,
         {"invoice": inv.name, "journal_entry": je.name, "amount": amount},
     )
@@ -1836,7 +1861,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     ct.notes = "delivery expense only (pay later)"
     ct.insert(ignore_permissions=True)
     
-    frappe.publish_realtime(
+    _publish_branch_event(
         WS_EVENTS.COURIER_EXPENSE_ONLY,
         {
             "invoice": inv.name,
@@ -2026,7 +2051,11 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
         frappe.db.set_value("Courier Transaction", r.name, "status", "Settled")
     frappe.db.commit()
 
-    frappe.publish_realtime(
+    # Party-level settlement spans many invoices, so there is no single order to
+    # key off — address the branch whose cash account funded the settlement.
+    from jarz_pos.utils.realtime import publish_to_branches
+
+    publish_to_branches(
         WS_EVENTS.COURIER_SETTLED,
         {
             "courier": label,
@@ -2034,7 +2063,9 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
             "net_balance": net_balance,
             "order_amount": total_amount,
             "shipping_amount": total_shipping,
+            "pos_profile": pos_profile,
         },
+        [pos_profile] if pos_profile else [],
     )
     return {
         "journal_entry": je_name,
@@ -2329,7 +2360,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         "delivery_note_reused": dn_result.get("reused"),
         "dn_logic_version": DN_LOGIC_VERSION,
     }
-    frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload, user="*")
+    _publish_branch_event(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
     return {"success": True, **payload}
 
 
@@ -2432,7 +2463,7 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
             "delivery_note_reused": dn_result.get("reused"),
             "dn_logic_version": DN_LOGIC_VERSION,
         }
-        frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload, user="*")
+        _publish_branch_event(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
         return {"success": True, **payload}
 
     except Exception as err:
@@ -2668,7 +2699,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             "party": party,
             "courier_transactions": cts,
         }
-        frappe.publish_realtime(WS_EVENTS.SINGLE_COURIER_SETTLEMENT, payload, user="*")
+        _publish_branch_event(WS_EVENTS.SINGLE_COURIER_SETTLEMENT, payload)
         return {"success": True, **payload}
     else:
         # Paid + settle later shipping-only scenario (previous behavior)
@@ -2738,7 +2769,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             "party": party,
             "courier_transactions": cts,
         }
-        frappe.publish_realtime(WS_EVENTS.SINGLE_COURIER_SETTLEMENT, payload, user="*")
+        _publish_branch_event(WS_EVENTS.SINGLE_COURIER_SETTLEMENT, payload)
         return {"success": True, **payload}
 
 
@@ -2861,7 +2892,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         "party_type": party_type,
         "party": party,
     }
-    frappe.publish_realtime(WS_EVENTS.COURIER_COLLECTED_SETTLEMENT, payload, user="*")
+    _publish_branch_event(WS_EVENTS.COURIER_COLLECTED_SETTLEMENT, payload)
     return {"success": True, **payload}
 
 
@@ -3014,7 +3045,7 @@ def change_payment_collection_method(
             "receipt_status": result.get("receipt_status"),
             "changed_receipts": result.get("changed_receipts") or [],
         }
-        frappe.publish_realtime(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload, user="*")
+        _publish_branch_event(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
         return {"success": True, **result, **payload}
     except Exception:
         frappe.db.rollback(save_point="change_payment_collection_method")

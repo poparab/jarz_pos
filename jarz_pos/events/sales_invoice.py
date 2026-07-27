@@ -17,11 +17,18 @@ except Exception:  # pragma: no cover - allows import-time safety in non-Frappe 
 	frappe = None  # type: ignore
 
 
-def _safe_publish(event: str, message: dict[str, Any]) -> None:
-	"""Publish a realtime message if frappe is available; ignore failures."""
+def _safe_publish(event: str, message: dict[str, Any], doc: Any = None) -> None:
+	"""Publish a realtime message to the order's branch; ignore failures.
+
+	A bare ``publish_realtime`` lands in the site-wide ``all`` room, which puts
+	one branch's invoice on every branch's socket. Routing through the branch
+	helper keeps these legacy fallback events scoped like everything else.
+	"""
 	try:
 		if frappe:
-			frappe.publish_realtime(event, message)
+			from jarz_pos.utils.realtime import publish_invoice_event
+
+			publish_invoice_event(event, message, doc)
 	except Exception:
 		# Avoid breaking document lifecycle if realtime publish fails
 		try:
@@ -76,6 +83,7 @@ def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
 		_safe_publish(
 			"jarz_pos:new_invoice",
 			{"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)},
+			doc,
 		)
 		if frappe:
 			frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
@@ -86,7 +94,11 @@ def publish_state_change_if_needed(doc: Any, method: Optional[str] = None) -> No
 
 	Intentionally lightweight. Frontend can refetch details by name.
 	"""
-	_safe_publish("jarz_pos:invoice_state", {"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)})
+	_safe_publish(
+		"jarz_pos:invoice_state",
+		{"name": getattr(doc, "name", None), "status": getattr(doc, "status", None)},
+		doc,
+	)
 
 
 def mark_cancelled_invoice_workflow_fields(doc: Any, method: Optional[str] = None) -> None:

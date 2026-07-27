@@ -15,6 +15,18 @@ def _is_manager() -> bool:
     return ROLES.JARZ_MANAGER in roles
 
 
+def _publish_shipping_event(event: str, payload: dict, *, invoice_name: str) -> None:
+    """Notify the branch that owns the order, rather than the whole site.
+
+    A shipping override is only actionable by the branch running the order and
+    the managers assigned to it — both of which are exactly the POS Profile's
+    user list.
+    """
+    from jarz_pos.utils.realtime import publish_invoice_event_by_name
+
+    publish_invoice_event_by_name(event, payload, invoice_name)
+
+
 @frappe.whitelist(allow_guest=False)
 def request_custom_shipping(invoice_name: str, amount: float, reason: str):
     """Create a Custom Shipping Request for an invoice.
@@ -81,14 +93,14 @@ def request_custom_shipping(invoice_name: str, amount: float, reason: str):
     frappe.db.commit()
 
     # Notify managers via realtime
-    frappe.publish_realtime(WS_EVENTS.CUSTOM_SHIPPING_REQUESTED, {
+    _publish_shipping_event(WS_EVENTS.CUSTOM_SHIPPING_REQUESTED, {
         "request": csr.name,
         "invoice": invoice_name,
         "original_amount": original_amount,
         "requested_amount": amount,
         "reason": reason,
         "requested_by": frappe.session.user,
-    }, user="*")
+    }, invoice_name=invoice_name)
 
     return {
         "success": True,
@@ -123,12 +135,12 @@ def approve_custom_shipping(request_name: str):
     csr.submit()
     frappe.db.commit()
 
-    frappe.publish_realtime(WS_EVENTS.CUSTOM_SHIPPING_APPROVED, {
+    _publish_shipping_event(WS_EVENTS.CUSTOM_SHIPPING_APPROVED, {
         "request": csr.name,
         "invoice": csr.invoice,
         "approved_amount": float(csr.requested_amount or 0),
         "approved_by": frappe.session.user,
-    }, user="*")
+    }, invoice_name=csr.invoice)
 
     return {
         "success": True,
@@ -182,12 +194,12 @@ def reject_custom_shipping(request_name: str, rejection_reason: str = ""):
 
     frappe.db.commit()
 
-    frappe.publish_realtime(WS_EVENTS.CUSTOM_SHIPPING_REJECTED, {
+    _publish_shipping_event(WS_EVENTS.CUSTOM_SHIPPING_REJECTED, {
         "request": csr.name,
         "invoice": csr.invoice,
         "rejection_reason": rejection_reason,
         "rejected_by": frappe.session.user,
-    }, user="*")
+    }, invoice_name=csr.invoice)
 
     return {
         "success": True,

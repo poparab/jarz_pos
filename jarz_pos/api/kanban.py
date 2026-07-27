@@ -10,6 +10,14 @@ import datetime
 from frappe.query_builder.functions import Count
 from typing import Dict, List, Any, Optional, Union, Tuple
 from jarz_pos.constants import PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
+from jarz_pos.utils.access_control import (
+    ensure_open_shift_for_invoice,
+    ensure_profile_scoped_invoice_access,
+    get_invoice_branch,
+    get_user_pos_profiles,
+    get_users_for_pos_profiles,
+)
+from jarz_pos.utils.realtime import publish_invoice_event
 from jarz_pos.services.delivery_handling import (
     DN_LOGIC_VERSION,
     build_ofd_shortage_field_values,
@@ -197,22 +205,12 @@ def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
     return False
 
 def _get_current_user_pos_profiles() -> List[str]:
-    """Return names of POS Profiles linked to the current session user (and not disabled)."""
-    try:
-        user = frappe.session.user
-        # POS Profile linkage is via child table 'POS Profile User' (parent is the profile name)
-        linked = frappe.get_all('POS Profile User', filters={'user': user}, pluck='parent') or []
-        if not linked:
-            return []
-        profiles = frappe.get_all(
-            'POS Profile',
-            filters={'name': ['in', linked], 'disabled': 0},
-            pluck='name',
-        ) or []
-        return profiles
-    except Exception as e:
-        frappe.logger().warning(f"KANBAN API: Failed to resolve user POS profiles: {e}")
-        return []
+    """Return names of POS Profiles linked to the current session user (and not disabled).
+
+    Thin alias over the shared resolver so the board and the manager feed can no
+    longer disagree about which branches a user owns.
+    """
+    return get_user_pos_profiles()
 
 def _parse_filter_payload(filters: Optional[Union[str, Dict[str, Any]]]) -> Dict[str, Any]:
     if isinstance(filters, dict):
@@ -580,13 +578,7 @@ def _serialize_invoice_note_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _ensure_invoice_detail_access(invoice: frappe.Document) -> None:
     """Restrict invoice details to the current user's assigned POS Profiles."""
-    allowed_profiles = _get_current_user_pos_profiles()
-    if not allowed_profiles:
-        frappe.throw(frappe._("Not permitted: no POS Profiles assigned"), frappe.PermissionError)
-
-    invoice_profile = str(invoice.get("custom_kanban_profile") or invoice.get("pos_profile") or "").strip()
-    if invoice_profile not in allowed_profiles:
-        frappe.throw(frappe._("Not permitted for this invoice branch"), frappe.PermissionError)
+    ensure_profile_scoped_invoice_access(invoice, action_label="viewing this order")
 
 
 def _get_territory_shipping_values(territory_name: str) -> Dict[str, float]:
@@ -845,6 +837,7 @@ def preview_invoice_out_for_delivery(invoice_id: str) -> Dict[str, Any]:
         return _failure("invoice_id is required")
 
     invoice = frappe.get_doc("Sales Invoice", invoice_id)
+    ensure_profile_scoped_invoice_access(invoice, action_label="previewing this order")
     if invoice.docstatus != 1:
         return _failure("Only submitted (docstatus=1) Sales Invoices can move Out for Delivery")
 
@@ -976,8 +969,17 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 kanban_data[_state_key(st)] = []
 
         if not allowed_profiles:
+            # An empty board and "you were never given a branch" look identical to
+            # the user, so say which one this is.
             frappe.logger().info("KANBAN API: No POS Profile linked to user; returning empty board")
-            return _success(data=kanban_data)
+            return _success(
+                data=kanban_data,
+                notice_code="no_branch_assigned",
+                notice=frappe._(
+                    "You are not assigned to any branch (POS Profile). Ask a "
+                    "manager to add you to a branch to see orders."
+                ),
+            )
 
         # Optional client-provided branches list (subset of allowed profiles)
         client_selected_branches: List[str] = []
@@ -1047,8 +1049,26 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             or_filters=search_or_filters or None,
             fields=fields,
             order_by="posting_date desc, posting_time desc",
-            limit=QUERY_LIMITS.TERRITORIES,
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
         )
+
+        # The rows are ordered newest-first, so anything past the cap is the
+        # *oldest* still-open work — exactly what a dispatcher must not lose.
+        # Report the shortfall instead of quietly serving a partial board.
+        board_truncated = len(invoices) >= QUERY_LIMITS.KANBAN_INVOICES
+        total_matching = len(invoices)
+        if board_truncated:
+            try:
+                total_matching = frappe.db.count("Sales Invoice", filters=filter_conditions)
+            except Exception:
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    "Kanban truncation count failed",
+                )
+            frappe.logger().warning(
+                f"KANBAN API: board truncated at {QUERY_LIMITS.KANBAN_INVOICES} of "
+                f"{total_matching} matching invoices for {frappe.session.user}"
+            )
 
         # Territory shipping cache
         territory_cache: Dict[str, Dict[str, float]] = {}
@@ -1371,7 +1391,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             ][:30]
 
         # Return unified success
-        return _success(data=kanban_data)
+        return _success(
+            data=kanban_data,
+            truncated=board_truncated,
+            total_matching=total_matching,
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
+        )
     except Exception as e:
         error_msg = f"Error getting kanban invoices: {str(e)}"
         frappe.logger().error(error_msg)
@@ -1384,13 +1409,18 @@ def update_invoice_state(
     new_state: str,
     shortage_approved: bool | int = False,
     shortage_reason: Optional[str] = None,
+    expected_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update the custom_sales_invoice_state of a Sales Invoice (legacy field kept for backward compatibility).
-    
+
     Args:
         invoice_id: ID of the Sales Invoice to update
         new_state: New state value to set
-        
+        expected_state: State the caller believes the invoice is in. When supplied
+            and the invoice has since moved, the change is rejected instead of
+            silently overwriting whoever got there first. Optional so older
+            clients keep working.
+
     Returns:
         Dict with success status and message
     """
@@ -1412,6 +1442,10 @@ def update_invoice_state(
             else:
                 return _failure(f"'{new_state}' is not a valid state")
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
+        # Branch scoping: the board is filtered per branch on read, so this is the
+        # gate that stops a crafted call (or a socket-sourced invoice id from
+        # another branch) from moving somebody else's order.
+        ensure_profile_scoped_invoice_access(invoice, action_label="moving this order")
         if invoice.docstatus != 1:
             return _failure("Only submitted (docstatus=1) Sales Invoices can change state")
         old_state = (
@@ -1420,6 +1454,16 @@ def update_invoice_state(
             or invoice.get("custom_state")
             or invoice.get("state")
         )
+
+        # Optimistic concurrency: reject rather than clobber when two staff drag
+        # the same card at once.
+        if expected_state:
+            if _state_key(str(expected_state)) != _state_key(str(old_state or "")):
+                return _failure(
+                    f"This order already moved to '{old_state}' (you were looking at "
+                    f"'{expected_state}'). Refresh the board and try again."
+                )
+
         if old_state == new_state:
             print(f"State unchanged; old_state == new_state == {new_state}")
             return _success(message="State unchanged (already set)", invoice_id=invoice_id, state=new_state)
@@ -1434,6 +1478,11 @@ def update_invoice_state(
 
         normalized_target = (new_state or "").strip().lower()
         create_dn = normalized_target in {"out for delivery", "out_for_delivery"}
+        # Dispatch moves stock (Delivery Note) and can raise a cash Payment Entry
+        # against the branch account, so it belongs inside a shift window. Plain
+        # Received -> In Progress -> Ready moves stay open.
+        if create_dn:
+            ensure_open_shift_for_invoice(invoice, action_label="dispatching an order")
         dn_logic_version = DN_LOGIC_VERSION
         shortage_approved = _coerce_bool(shortage_approved)
         shortage_reason = (shortage_reason or "").strip() or None
@@ -1826,9 +1875,10 @@ def update_invoice_state(
             "dn_logic_version": dn_logic_version,
             "cash_payment_entry": created_cash_payment_entry,
             "sales_partner_transaction": created_partner_txn,
+            "kanban_profile": get_invoice_branch(invoice),
         }
-        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload, user="*")
-        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
+        publish_invoice_event(WS_EVENTS.INVOICE_STATE_CHANGE, payload, invoice)
+        publish_invoice_event(WS_EVENTS.KANBAN_UPDATE, payload, invoice)
         return _success(
             message=f"Invoice {invoice_id} state updated",
             invoice_id=invoice_id,
@@ -1866,6 +1916,8 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             return _failure("You are not permitted to cancel orders")
 
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
+        # Role check above says *what* this user may do; this says *whose* orders.
+        ensure_profile_scoped_invoice_access(invoice, action_label="cancelling this order")
         if int(getattr(invoice, "docstatus", 0) or 0) != 1:
             return _failure("Only submitted invoices can be cancelled")
         if int(getattr(invoice, "is_return", 0) or 0):
@@ -2013,10 +2065,11 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
                 "docstatus": cancelled_docstatus,
                 "paid_path": is_paid,
                 "cancelled_payment_entries": cancelled_payment_entries or None,
+                "kanban_profile": get_invoice_branch(invoice),
             }
 
-            frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload, user="*")
-            frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
+            publish_invoice_event(WS_EVENTS.INVOICE_STATE_CHANGE, payload, invoice)
+            publish_invoice_event(WS_EVENTS.KANBAN_UPDATE, payload, invoice)
 
             try:
                 notify_invoice_cancellation(invoice.name, reason, notes=notes, credit_note=credit_note_name)
@@ -2194,8 +2247,9 @@ def add_invoice_note(invoice_id: str, note: str) -> Dict[str, Any]:
             "latest_note": _format_invoice_note_preview(note_doc.note),
             "updated_by": frappe.session.user,
             "timestamp": frappe.utils.now(),
+            "kanban_profile": get_invoice_branch(invoice),
         }
-        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
+        publish_invoice_event(WS_EVENTS.KANBAN_UPDATE, payload, invoice)
 
         note_data = _serialize_invoice_note_row(
             {

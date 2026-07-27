@@ -98,7 +98,9 @@ def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
     try:
         now = frappe.utils.now()
         payload = {"name": f"TEST-SI-{now}", "timestamp": now, "by": frappe.session.user}
-        frappe.publish_realtime(event, payload, user="*")
+        # Debug endpoint: aim at the caller. user="*" is the room "user:*", which
+        # nobody joins, so this never proved the socket worked.
+        frappe.publish_realtime(event, payload, user=frappe.session.user)
         # Also emit a kanban-style state-change with no old_state to trigger a refresh
         kanban_payload = {
             "event": WS_EVENTS.INVOICE_STATE_CHANGE,
@@ -108,7 +110,7 @@ def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
             "old_state": None,
             "new_state": "Received",
         }
-        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, kanban_payload, user="*")
+        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, kanban_payload, user=frappe.session.user)
         return success_response(message="Event emitted", data=payload)
     except Exception as e:
         return handle_api_error(e, "Emit Test Event")

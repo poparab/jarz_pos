@@ -66,6 +66,13 @@ try:
 except Exception:
     _create_amendment_invoice = None  # type: ignore
 
+from jarz_pos.utils.access_control import (
+    ensure_profile_scoped_invoice_access as _shared_ensure_profile_scoped_invoice_access,
+    get_user_pos_profiles,
+    get_users_for_pos_profiles,
+)
+from jarz_pos.utils.realtime import publish_invoice_event, publish_to_branches
+
 
 # Allowed states for invoice transfer (normalized: lowercase, no extra spaces)
 # These match the actual field values: "Received", "In Progress", "Ready"
@@ -77,24 +84,15 @@ _ALLOWED_AMENDMENT_STATES = _ALLOWED_TRANSFER_STATES
 def _current_user_allowed_profiles() -> List[str]:
     """Return POS Profiles the current user can manage.
 
-    Rules:
-    - If user has role System Manager or POS Manager, return all active POS Profiles.
-    - Else, return POS Profiles linked via child table POS Profile User.
+    Branch membership is the POS Profile User child table for *everyone*: a
+    manager is added to the branches they run, exactly like a staff member.
+    Only ``Administrator`` still sees every profile.
+
+    This used to hand System Manager / POS Manager the full list while the
+    Kanban board scoped the same user to their linked profiles — the manager
+    feed would list an order that the board then refused to open.
     """
-    user = frappe.session.user
-    roles = set([r.get("role") for r in frappe.get_all("Has Role", filters={"parent": user}, fields=["role"])])
-    try:
-        if ROLES.ADMIN & roles:
-            return frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or []
-    except Exception:
-        pass
-    try:
-        linked = frappe.get_all("POS Profile User", filters={"user": user}, pluck="parent") or []
-        if not linked:
-            return []
-        return frappe.get_all("POS Profile", filters={"name": ["in", linked], "disabled": 0}, pluck="name") or []
-    except Exception:
-        return []
+    return get_user_pos_profiles()
 
 
 def _has_manager_dashboard_access() -> bool:
@@ -128,8 +126,14 @@ def _get_all_active_pos_profiles() -> List[str]:
 
 
 def _current_user_shift_monitor_profiles() -> List[str]:
+    """Branches whose shifts this user may monitor.
+
+    The role check says the user may open the monitor at all; the branch list
+    says whose shifts they see. Previously every monitor user saw every active
+    profile, which contradicted the branch scoping applied everywhere else.
+    """
     _ensure_shift_monitor_access()
-    return _get_all_active_pos_profiles()
+    return _current_user_allowed_profiles()
 
 
 def _coerce_shift_monitor_date(value: Optional[str], fallback: str):
@@ -297,35 +301,16 @@ def _ensure_profile_scoped_invoice_access(
     action_label: str,
     extra_profiles: Optional[List[str]] = None,
 ) -> None:
-    if _has_manager_dashboard_access():
-        return
+    """Assert the current user may act on this invoice's branch.
 
-    allowed_profiles = {
-        str(profile or "").strip()
-        for profile in _current_user_allowed_profiles()
-        if str(profile or "").strip()
-    }
-    if not allowed_profiles:
-        frappe.throw(
-            _("Not permitted: no assigned POS Profile was found for this user."),
-            frappe.PermissionError,
-        )
-
-    required_profiles: List[str] = []
-    operational_profile = str(inv.get("custom_kanban_profile") or inv.get("pos_profile") or "").strip()
-    if operational_profile:
-        required_profiles.append(operational_profile)
-    for profile in extra_profiles or []:
-        cleaned = str(profile or "").strip()
-        if cleaned:
-            required_profiles.append(cleaned)
-
-    unauthorized_profiles = sorted({profile for profile in required_profiles if profile not in allowed_profiles})
-    if unauthorized_profiles:
-        frappe.throw(
-            _("Not permitted: {0} is limited to your assigned POS Profiles.").format(action_label),
-            frappe.PermissionError,
-        )
+    Holding a manager role no longer waives the branch check — a manager is
+    scoped to the branches they were added to, same as anyone else.
+    """
+    _shared_ensure_profile_scoped_invoice_access(
+        inv,
+        action_label=action_label,
+        extra_profiles=extra_profiles,
+    )
 
 
 def _get_state_field_options() -> List[str]:
@@ -1407,7 +1392,9 @@ def _run_invoice_amendment_job(
         # page reload.  Fire-and-forget: a publish failure must never abort
         # the amendment that has already succeeded.
         try:
-            frappe.publish_realtime(
+            from jarz_pos.utils.realtime import publish_invoice_event_by_name
+
+            publish_invoice_event_by_name(
                 "jarz_pos_invoice_amended",
                 {
                     "source_invoice_id": invoice_id,
@@ -1415,7 +1402,7 @@ def _run_invoice_amendment_job(
                     "request_id": request_id,
                     "timestamp": frappe.utils.now(),
                 },
-                user="*",
+                replacement_invoice_name or invoice_id,
             )
         except Exception as pub_exc:
             logger.warning(
@@ -1631,8 +1618,11 @@ def _publish_invoice_reassignment_refresh(
         "invoice": invoice_summary,
     }
     try:
-        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, payload, user="*")
-        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, payload, user="*")
+        # A transfer needs both sides to redraw: the branch losing the order has
+        # to drop the card, the branch receiving it has to show it.
+        both_branches = [b for b in (old_branch, new_branch) if b]
+        publish_to_branches(WS_EVENTS.INVOICE_STATE_CHANGE, payload, both_branches)
+        publish_to_branches(WS_EVENTS.KANBAN_UPDATE, payload, both_branches)
     except Exception:
         frappe.log_error(
             frappe.get_traceback(),
@@ -1669,7 +1659,16 @@ def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, An
     _ensure_manager_dashboard_access()
     profiles = _current_user_allowed_profiles()
     if not profiles:
-        return {"success": True, "branches": [], "total_balance": 0.0}
+        return {
+            "success": True,
+            "branches": [],
+            "total_balance": 0.0,
+            "notice_code": "no_branch_assigned",
+            "notice": _(
+                "You are not assigned to any branch (POS Profile). Ask an "
+                "administrator to add you to the branches you manage."
+            ),
+        }
 
     # Try to get company if not given
     if not company:
@@ -1718,10 +1717,12 @@ def get_pos_shift_monitor(
         frappe.throw(_("From date cannot be later than To date"))
 
     status_filter = _normalize_shift_monitor_status(status)
-    profiles = _current_user_shift_monitor_profiles()
+    # `accessible_profiles` drives the filter picker; `profiles` narrows the query.
+    accessible_profiles = _current_user_shift_monitor_profiles()
+    profiles = list(accessible_profiles)
     selected_profile = str(pos_profile or "").strip()
     if selected_profile:
-        if selected_profile not in profiles:
+        if selected_profile not in accessible_profiles:
             return {
                 "success": True,
                 "summary": {
@@ -1730,7 +1731,7 @@ def get_pos_shift_monitor(
                     "discrepancy_count": 0,
                     "discrepancy_total": 0.0,
                 },
-                "profiles": [{"name": profile, "title": profile} for profile in profiles],
+                "profiles": [{"name": profile, "title": profile} for profile in accessible_profiles],
                 "shifts": [],
             }
         profiles = [selected_profile]
@@ -1746,6 +1747,11 @@ def get_pos_shift_monitor(
             },
             "profiles": [],
             "shifts": [],
+            "notice_code": "no_branch_assigned",
+            "notice": _(
+                "You are not assigned to any branch (POS Profile). Ask an "
+                "administrator to add you to the branches you manage."
+            ),
         }
 
     openings = frappe.get_all(
@@ -1802,7 +1808,9 @@ def get_pos_shift_monitor(
             "status": status_filter,
             "pos_profile": selected_profile or None,
         },
-        "profiles": [{"name": profile, "title": profile} for profile in _get_all_active_pos_profiles()],
+        # Filter options are every branch this user may monitor — not the
+        # narrowed query set, which would collapse to the current selection.
+        "profiles": [{"name": profile, "title": profile} for profile in accessible_profiles],
         "shifts": rows,
     }
 
@@ -1821,7 +1829,18 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
     limit = max(1, min(int(limit or 200), 500))
     allowed = _current_user_allowed_profiles()
     if not allowed:
-        return {"success": True, "invoices": []}
+        # Passing the role gate but owning no branch used to return a bare empty
+        # feed, which reads as "no orders today" rather than "you were never
+        # added to a branch".
+        return {
+            "success": True,
+            "invoices": [],
+            "notice_code": "no_branch_assigned",
+            "notice": _(
+                "You are not assigned to any branch (POS Profile). Ask an "
+                "administrator to add you to the branches you manage."
+            ),
+        }
 
     profiles = allowed
     if branch and branch.lower() != "all":

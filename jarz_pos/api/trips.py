@@ -24,6 +24,42 @@ from jarz_pos.utils.courier_visibility import (
 )
 
 
+def _publish_trip_event(event: str, payload: dict, trip, *, pos_profile: str | None = None) -> None:
+    """Notify the branches a trip belongs to instead of the whole site.
+
+    Delivery Trip carries no POS Profile of its own, so the branches are derived
+    from the orders on the trip (normally one, but a trip is not structurally
+    prevented from spanning branches).
+    """
+    from jarz_pos.utils.realtime import publish_to_branches
+
+    profiles: set[str] = set()
+    if pos_profile:
+        profiles.add(str(pos_profile).strip())
+
+    try:
+        names = [
+            r.invoice for r in (getattr(trip, "invoices", None) or []) if getattr(r, "invoice", None)
+        ]
+        if names:
+            rows = frappe.get_all(
+                "Sales Invoice",
+                filters={"name": ["in", names]},
+                fields=["custom_kanban_profile", "pos_profile"],
+            ) or []
+            for row in rows:
+                branch = str(row.get("custom_kanban_profile") or row.get("pos_profile") or "").strip()
+                if branch:
+                    profiles.add(branch)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Failed to resolve trip branches for realtime event {event}",
+        )
+
+    publish_to_branches(event, payload, sorted(p for p in profiles if p))
+
+
 # ---------------------------------------------------------------------------
 # Trip creation
 # ---------------------------------------------------------------------------
@@ -154,7 +190,7 @@ def create_delivery_trip(invoice_names, party_type: str, party: str, pos_profile
     frappe.db.commit()
 
     # Publish realtime event
-    frappe.publish_realtime(WS_EVENTS.TRIP_CREATED, {
+    _publish_trip_event(WS_EVENTS.TRIP_CREATED, {
         "trip": trip.name,
         "status": trip.status,
         "courier_party_type": trip.courier_party_type,
@@ -166,7 +202,7 @@ def create_delivery_trip(invoice_names, party_type: str, party: str, pos_profile
         "total_shipping_expense": float(trip.total_shipping_expense or 0),
         "is_double_shipping": bool(trip.is_double_shipping),
         "invoices": [r.invoice for r in trip.invoices],
-    }, user="*")
+    }, trip, pos_profile=resolved_pos_profile)
 
     return {
         "success": True,
@@ -482,12 +518,12 @@ def send_trip_for_delivery(
         )
         raise
 
-    frappe.publish_realtime(WS_EVENTS.TRIP_OFD, {
+    _publish_trip_event(WS_EVENTS.TRIP_OFD, {
         "trip": trip.name,
         "status": trip.status,
         "processed": processed,
         "is_double_shipping": bool(trip.is_double_shipping),
-    }, user="*")
+    }, trip)
 
     return {
         "success": True,
@@ -576,11 +612,11 @@ def mark_trip_as_delivered(trip_name: str):
         )
         raise
 
-    frappe.publish_realtime(WS_EVENTS.TRIP_COMPLETED, {
+    _publish_trip_event(WS_EVENTS.TRIP_COMPLETED, {
         "trip": trip.name,
         "status": trip.status,
         "invoices": [r.invoice for r in trip.invoices],
-    }, user="*")
+    }, trip)
 
     return {
         "success": True,
@@ -814,7 +850,7 @@ def sync_trip_status(invoice_name: str):
     if trip.status != old_status:
         trip.save(ignore_permissions=True)
         if trip.status == "Completed":
-            frappe.publish_realtime(WS_EVENTS.TRIP_COMPLETED, {
+            _publish_trip_event(WS_EVENTS.TRIP_COMPLETED, {
                 "trip": trip.name,
                 "status": trip.status,
-            }, user="*")
+            }, trip)

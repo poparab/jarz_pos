@@ -12,6 +12,11 @@ import json
 from jarz_pos.services.invoice_creation import create_pos_invoice as _create_invoice
 from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.constants import ACCOUNTS
+from jarz_pos.utils.access_control import (
+    ensure_open_shift,
+    ensure_open_shift_for_invoice,
+    ensure_profile_scoped_invoice_access,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +30,18 @@ def _is_truthy_flag(value) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _guard_branch_sale(pos_profile: str | None, *, action_label: str) -> None:
+    """Assert the selling branch belongs to this user and currently has a shift."""
+    profile = str(pos_profile or "").strip()
+    if not profile:
+        return
+    ensure_profile_scoped_invoice_access(
+        frappe._dict({"custom_kanban_profile": profile}),
+        action_label=action_label,
+    )
+    ensure_open_shift(profile, action_label=action_label)
 
 
 @frappe.whitelist()
@@ -80,7 +97,12 @@ def create_pos_invoice():
     if zero_shipping_override:
         suppress_shipping_income = True
         suppress_legacy_delivery_charges = True
-    
+
+    # Selling on a branch means moving that branch's stock and cash, so the
+    # branch has to be yours and it has to be open.
+    _guard_branch_sale(pos_profile_name, action_label="creating an order")
+
+
     # Frappe best practice: Use frappe.logger() for structured logging
     logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
     
@@ -295,6 +317,8 @@ def pay_invoice(
             pass  # Lock attempt - continue even if fails
 
         inv = frappe.get_doc("Sales Invoice", invoice_name)
+        ensure_profile_scoped_invoice_access(inv, action_label="registering a payment")
+        ensure_open_shift_for_invoice(inv, action_label="registering a payment")
         if inv.docstatus != 1:
             frappe.throw("Invoice must be submitted before registering payment")
         
@@ -542,6 +566,7 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         frappe.throw("invoice_name required")
 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+    ensure_profile_scoped_invoice_access(inv, action_label="previewing this settlement")
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
 
@@ -760,7 +785,8 @@ def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_t
         
         # Get the invoice
         inv = frappe.get_doc("Sales Invoice", invoice_id)
-        
+        ensure_profile_scoped_invoice_access(inv, action_label="rescheduling this order")
+
         # Check permissions
         if not frappe.has_permission("Sales Invoice", "write", inv):
             frappe.throw("Insufficient permissions to update this invoice")

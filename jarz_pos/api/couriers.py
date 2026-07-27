@@ -44,6 +44,68 @@ from jarz_pos.utils.courier_visibility import (
 )
 from frappe.utils import now_datetime, get_datetime
 from jarz_pos.constants import DELIVERY_GROUPS, ROLES
+from jarz_pos.utils.access_control import (
+    ensure_open_shift,
+    ensure_open_shift_for_invoice,
+    ensure_profile_scoped_invoice_access,
+)
+
+
+# ---------------------------------------------------------------------------
+# Entry guards
+#
+# This module is a thin dispatch layer over ``services.delivery_handling``, which
+# makes it the natural choke point for the two questions every courier action
+# must answer first: is this order in one of my branches, and is that branch
+# open? Both guards run before any document is touched.
+# ---------------------------------------------------------------------------
+
+
+def _invoice_branch_row(invoice_name: str):
+    """Cheap branch lookup — avoids loading the whole invoice just to gate it."""
+    name = (invoice_name or "").strip()
+    if not name:
+        frappe.throw(frappe._("invoice_name is required"))
+    row = frappe.db.get_value(
+        "Sales Invoice",
+        name,
+        ["name", "custom_kanban_profile", "pos_profile"],
+        as_dict=True,
+    )
+    if not row:
+        frappe.throw(frappe._("Sales Invoice {0} was not found").format(name))
+    return row
+
+
+def _guard_invoice_action(
+    invoice_name: str,
+    *,
+    action_label: str,
+    require_shift: bool = True,
+) -> None:
+    """Branch-scope, and optionally shift-gate, an invoice-level courier action."""
+    row = _invoice_branch_row(invoice_name)
+    ensure_profile_scoped_invoice_access(row, action_label=action_label)
+    if require_shift:
+        ensure_open_shift_for_invoice(row, action_label=action_label)
+
+
+def _guard_branch_action(
+    pos_profile: str | None,
+    *,
+    action_label: str,
+    require_shift: bool = True,
+) -> None:
+    """Branch-scope, and optionally shift-gate, a profile-level courier action."""
+    profile = str(pos_profile or "").strip()
+    if not profile:
+        return
+    ensure_profile_scoped_invoice_access(
+        frappe._dict({"custom_kanban_profile": profile}),
+        action_label=action_label,
+    )
+    if require_shift:
+        ensure_open_shift(profile, action_label=action_label)
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +115,7 @@ from jarz_pos.constants import DELIVERY_GROUPS, ROLES
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None):
+    _guard_invoice_action(invoice_name, action_label="recording courier outstanding")
     return _mark_courier_outstanding(invoice_name, courier, party_type, party)
 
 
@@ -70,6 +133,7 @@ def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: 
     later on the manager reconciliation screen. Courier params are optional so older
     clients can still dispatch an order mid-delivery.
     """
+    _guard_invoice_action(invoice_name, action_label="dispatching an order")
     return _deliver_online_unconfirmed(invoice_name, pos_profile, party_type, party)
 
 
@@ -83,22 +147,26 @@ def list_unconfirmed_online_orders(pos_profile: str | None = None):
 def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: str | None = None, receipt_name: str | None = None):
     """Manager confirms the bank/wallet transfer: creates a Receive PE (DR Bank/Instapay,
     CR Debtors) that marks the invoice Paid. Idempotent."""
+    _guard_invoice_action(invoice_name, action_label="confirming an online payment")
     return _confirm_online_payment(invoice_name, pos_profile, reference_no, receipt_name)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None):
     """Convert an unconfirmed online order into a cash-on-delivery courier order."""
+    _guard_invoice_action(invoice_name, action_label="converting an order to cash on delivery")
     return _convert_online_order_to_cod(invoice_name, pos_profile, party_type, party)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def pay_delivery_expense(invoice_name: str, pos_profile: str):
+    _guard_invoice_action(invoice_name, action_label="paying a delivery expense")
     return _pay_delivery_expense(invoice_name, pos_profile)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: str | None = None, party: str | None = None):
+    _guard_invoice_action(invoice_name, action_label="paying a courier expense")
     return _courier_delivery_expense_only(invoice_name, courier, party_type, party)
 
 
@@ -120,6 +188,7 @@ def settle_courier(courier: str | None = None, pos_profile: str | None = None, p
     Preferred: pass party_type and party to settle unified delivery party.
     Fallback: pass courier (legacy label) which will settle legacy rows only.
     """
+    _guard_branch_action(pos_profile, action_label="settling a courier")
     if party_type and party:
         return _settle_delivery_party(party_type=party_type, party=party, pos_profile=pos_profile)
     if courier:
@@ -129,11 +198,13 @@ def settle_courier(courier: str | None = None, pos_profile: str | None = None, p
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def settle_delivery_party(party_type: str, party: str, pos_profile: str | None = None):
+    _guard_branch_action(pos_profile, action_label="settling a delivery party")
     return _settle_delivery_party(party_type=party_type, party=party, pos_profile=pos_profile)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None):
+    _guard_invoice_action(invoice_name, action_label="settling a courier for this order")
     return _settle_courier_for_invoice(invoice_name, pos_profile)
 
 
@@ -254,12 +325,14 @@ def get_active_couriers(pos_profile: str | None = None):
 @frappe.whitelist()  # type: ignore[attr-defined]
 def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: str, pos_profile: str, party_type: str | None = None, party: str | None = None):
     # 'courier' kept only for backward compatibility; underlying service ignores legacy Courier DocType
+    _guard_invoice_action(invoice_name, action_label="dispatching an order")
     return _handle_out_for_delivery_paid(invoice_name, courier, settlement, pos_profile, party_type, party)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: str, pos_profile: str, idempotency_token: str | None = None, party_type: str | None = None, party: str | None = None):
     # 'courier' kept only for backward compatibility; underlying service ignores legacy Courier DocType
+    _guard_invoice_action(invoice_name, action_label="dispatching an order")
     return _handle_out_for_delivery_transition(invoice_name, courier, mode, pos_profile, idempotency_token, party_type, party)
 
 
@@ -272,6 +345,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     Returns: { success, invoice, journal_entry, shipping_amount, party_type, party, courier_transactions }
     """
     frappe.logger().info(f"API settle_single_invoice_paid CALLED: invoice={invoice_name}, pos_profile={pos_profile}, party_type={party_type}, party={party}")
+    _guard_invoice_action(invoice_name, action_label="settling this order")
     return _settle_single_invoice_paid(invoice_name, pos_profile, party_type, party)
 
 @frappe.whitelist(allow_guest=False)
@@ -282,6 +356,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
     Returns: { success, invoice, payment_details }
     """
     frappe.logger().info(f"API settle_courier_collected_payment CALLED: invoice={invoice_name}, pos_profile={pos_profile}, party_type={party_type}, party={party}")
+    _guard_invoice_action(invoice_name, action_label="settling a collected payment")
     return _settle_courier_collected_payment(invoice_name, pos_profile, party_type, party)
 
 
@@ -310,6 +385,12 @@ def change_payment_collection_method(
         _ensure_collection_change_access()
         inv = frappe.get_doc("Sales Invoice", (invoice_name or "").strip())
         frappe.has_permission("Sales Invoice", "write", doc=inv, throw=True)
+        ensure_profile_scoped_invoice_access(
+            inv, action_label="changing the collection method"
+        )
+        ensure_open_shift_for_invoice(
+            inv, action_label="changing the collection method"
+        )
         result = _change_payment_collection_method(
             invoice_name=invoice_name,
             new_method=new_method,
