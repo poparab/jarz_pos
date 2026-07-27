@@ -32,7 +32,9 @@
   "vapid_public_key",
   "vapid_private_key",
   "column_break_vapid",
-  "vapid_subject"
+  "vapid_subject",
+  "returns_section",
+  "enable_invoice_returns"
  ],
  "fields": [
   {
@@ -41,7 +43,7 @@
    "label": "Account Defaults"
   },
   {
-    "default": "Cash Over Short - J",
+   "default": "Cash Over Short - J",
    "description": "Expense ledger used to record shift cash discrepancies.",
    "fieldname": "cash_over_short_account",
    "fieldtype": "Link",
@@ -49,7 +51,7 @@
    "options": "Account"
   },
   {
-    "default": "Indirect Expenses - J",
+   "default": "Indirect Expenses - J",
    "description": "Parent account group for ad-hoc expenses.",
    "fieldname": "indirect_expenses_parent",
    "fieldtype": "Link",
@@ -57,7 +59,7 @@
    "options": "Account"
   },
   {
-    "default": "Freight and Forwarding Charges - J",
+   "default": "Freight and Forwarding Charges - J",
    "description": "Expense account for freight / delivery charges.",
    "fieldname": "freight_charges_account",
    "fieldtype": "Link",
@@ -65,7 +67,7 @@
    "options": "Account"
   },
   {
-    "default": "Courier Outstanding - J",
+   "default": "Courier Outstanding - J",
    "description": "Receivable account tracking courier balances.",
    "fieldname": "courier_outstanding_account",
    "fieldtype": "Link",
@@ -77,7 +79,7 @@
    "fieldtype": "Column Break"
   },
   {
-    "default": "Bank Accounts - J",
+   "default": "Bank Accounts - J",
    "description": "Parent group for online-payment bank accounts.",
    "fieldname": "default_bank_parent_account",
    "fieldtype": "Link",
@@ -85,7 +87,7 @@
    "options": "Account"
   },
   {
-    "default": "Mobile Wallet - J",
+   "default": "Mobile Wallet - J",
    "description": "Account for Mobile Wallet payments.",
    "fieldname": "mobile_wallet_account",
    "fieldtype": "Link",
@@ -93,7 +95,7 @@
    "options": "Account"
   },
   {
-    "default": "Debtors - J",
+   "default": "Debtors - J",
    "description": "Override the company default receivable account.",
    "fieldname": "default_receivable_account",
    "fieldtype": "Link",
@@ -101,7 +103,7 @@
    "options": "Account"
   },
   {
-    "default": "Creditors - J",
+   "default": "Creditors - J",
    "description": "Override the company default payable (Creditors) account.",
    "fieldname": "default_payable_account",
    "fieldtype": "Link",
@@ -161,14 +163,14 @@
    "label": "Payment Receipt"
   },
   {
-    "default": "ORDER RECEIPT",
+   "default": "ORDER RECEIPT",
    "description": "Text shown at top of printed receipts.",
    "fieldname": "receipt_header_text",
    "fieldtype": "Small Text",
    "label": "Receipt Header"
   },
   {
-    "default": "Thank you for Your Order",
+   "default": "Thank you for Your Order",
    "description": "Text shown at bottom of printed receipts.",
    "fieldname": "receipt_footer_text",
    "fieldtype": "Small Text",
@@ -179,7 +181,7 @@
    "fieldtype": "Column Break"
   },
   {
-    "default": "01061332266",
+   "default": "01061332266",
    "description": "Phone number displayed on receipts.",
    "fieldname": "receipt_phone",
    "fieldtype": "Data",
@@ -187,7 +189,7 @@
    "options": "Phone"
   },
   {
-    "default": "https://www.orderjarz.com",
+   "default": "https://www.orderjarz.com",
    "description": "Website URL displayed on receipts.",
    "fieldname": "receipt_website",
    "fieldtype": "Data",
@@ -230,6 +232,18 @@
    "fieldname": "vapid_subject",
    "fieldtype": "Data",
    "label": "VAPID Subject"
+  },
+  {
+   "fieldname": "returns_section",
+   "fieldtype": "Section Break",
+   "label": "Order Returns"
+  },
+  {
+   "default": "0",
+   "description": "Master switch for the post-dispatch return workflow. When off, the return endpoints refuse and the client hides the action. Turning it off is the instant rollback lever — it needs no deploy or restart.",
+   "fieldname": "enable_invoice_returns",
+   "fieldtype": "Check",
+   "label": "Enable Invoice Returns"
   }
  ],
  "index_web_pages_for_search": 0,

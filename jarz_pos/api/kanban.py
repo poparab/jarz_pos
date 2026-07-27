@@ -96,7 +96,9 @@ except ImportError:
         return " ".join(str(value).split())
     
     def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
-        filter_conditions = {"docstatus": 1, "is_pos": 1}
+        # Mirrors utils.invoice_utils.apply_invoice_filters — is_return excludes
+        # credit notes, which inherit is_pos from the invoice they reverse.
+        filter_conditions = {"docstatus": 1, "is_pos": 1, "is_return": 0}
         if not filters:
             return filter_conditions
         
@@ -2279,6 +2281,16 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
             data["latest_note"] = None
         data.update(get_invoice_amendment_eligibility(invoice))
         data.update(get_invoice_cancellation_eligibility(invoice))
+        try:
+            from jarz_pos.services.invoice_return import get_invoice_return_eligibility
+
+            data.update(get_invoice_return_eligibility(invoice))
+        except Exception:
+            data.update({
+                "can_return": False,
+                "return_block_code": "unavailable",
+                "return_block_reason": None,
+            })
         return _success(data=data)
     except Exception as e:
         error_msg = f"Error getting invoice details: {str(e)}"
@@ -2385,7 +2397,7 @@ def get_kanban_filters() -> Dict[str, Any]:
         frappe.logger().debug("KANBAN API: get_kanban_filters called")
         customers = frappe.get_all(
             "Sales Invoice",
-            filters={"docstatus": 1, "is_pos": 1},
+            filters={"docstatus": 1, "is_pos": 1, "is_return": 0},
             fields=["customer", "customer_name"],
             distinct=True,
             order_by="customer_name"

@@ -474,7 +474,11 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
     # Base filters for POS invoices
     filter_conditions = {
         "docstatus": 1,  # Only submitted invoices
-        "is_pos": 1      # Only POS invoices
+        "is_pos": 1,     # Only POS invoices
+        # Credit notes are accounting corrections, not board work. They inherit
+        # is_pos from the invoice they reverse, so without this a return would
+        # render as a negative-total card in whatever column it inherited.
+        "is_return": 0,
     }
     
     if not filters:
