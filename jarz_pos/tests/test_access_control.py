@@ -177,7 +177,8 @@ class TestShiftEnforcement(unittest.TestCase):
             access_control,
             "get_open_shift_for_profile",
             return_value={"name": "POS-OPE-002", "user": "colleague@example.com"},
-        ), patch.object(frappe.session, "user", "me@example.com"):
+        ):
+            # The shift is owned by somebody else and the call still goes through.
             ensure_open_shift("Branch A", action_label="testing")
 
     def test_blank_profile_is_a_no_op(self):
