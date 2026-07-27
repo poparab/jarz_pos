@@ -261,7 +261,13 @@ doc_events = {
         # before validate so calculate_taxes_and_totals picks up discount_amount.
         "before_validate": "jarz_pos.services.promo_codes.apply_promo_codes_before_validate",
         # Seed custom_kanban_profile from pos_profile on drafts; preserve submitted reassignments
-        "validate": "jarz_pos.events.sales_invoice.sync_kanban_profile",
+        "validate": [
+            "jarz_pos.events.sales_invoice.sync_kanban_profile",
+            # ERPNext's set_pos_fields() re-applies the POS Profile's own
+            # update_stock during validate, and every profile here has it on —
+            # so stock must be re-suppressed on EVERY save, not just at creation.
+            "jarz_pos.events.sales_invoice.suppress_pos_invoice_stock_update",
+        ],
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
     "on_submit": [
         "jarz_pos.events.sales_invoice.publish_new_invoice",

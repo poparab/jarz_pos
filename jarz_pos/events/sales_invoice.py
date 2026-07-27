@@ -72,6 +72,41 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 			frappe.log_error(frappe.get_traceback(), "sync_shipping_expense failed")
 
 
+def suppress_pos_invoice_stock_update(doc: Any, method: Optional[str] = None) -> None:
+    """Force ``update_stock = 0`` on every POS Sales Invoice.
+
+    Stock leaves the warehouse through the Delivery Note and nothing else. The
+    entire delivery, settlement and return design depends on that: a return
+    reverses stock with a Sales Return Delivery Note, so an invoice that also
+    moved stock would be reversed once and deducted twice.
+
+    ``services.invoice_creation`` already sets this before saving, but that only
+    protects the POS API. ERPNext's ``set_pos_fields()`` re-applies the POS
+    Profile's own ``update_stock`` during ``validate`` for *any* document that
+    carries ``is_pos``, and every POS Profile on this site has it enabled. So a
+    document that acquires ``is_pos`` and is then saved through a normal
+    validate — a Woo-initiated amendment is the path that actually did this —
+    silently picks the flag back up and books the stock a second time.
+
+    Enforcing it in ``validate`` closes the hole for every path at once: POS,
+    Woo, amendments, Desk. Non-POS invoices are untouched.
+    """
+    if not doc:
+        return
+    try:
+        if not int(getattr(doc, "is_pos", 0) or 0):
+            return
+        if int(getattr(doc, "update_stock", 0) or 0):
+            doc.update_stock = 0
+            if frappe:
+                frappe.logger().info(
+                    f"jarz_pos: suppressed update_stock on POS invoice {getattr(doc, 'name', '?')}"
+                )
+    except Exception:
+        if frappe:
+            frappe.log_error(frappe.get_traceback(), "suppress_pos_invoice_stock_update failed")
+
+
 def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
 	"""Notify listeners a Sales Invoice has been submitted."""
 	try:

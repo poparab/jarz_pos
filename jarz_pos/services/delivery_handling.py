@@ -750,6 +750,50 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
         shipping_override: Optional shipping amount override (e.g. doubled for double-shipping trips).
     """
     
+    # Serialise concurrent dispatches of the SAME invoice.
+    #
+    # Everything below is check-then-act: "is there already a Payment Entry to
+    # Courier Outstanding? no -> create one". Two requests for one invoice both
+    # read "no" before either inserts, and the invoice gets paid to Courier
+    # Outstanding twice — overstating what the courier owes and understating
+    # Debtors by the same amount, with both entries perfectly balanced so no
+    # double-entry check ever notices. Confirmed on real data: two invoices,
+    # duplicate pairs 15 and 5 seconds apart, 770 EGP of phantom courier debt.
+    #
+    # A double-tap in the client is the obvious trigger, but the server has to
+    # be the one that refuses — the client is not the authority on this.
+    _ofd_lock = f"jarz-ofd:{invoice_name}"
+    _ofd_lock_taken = False
+    try:
+        _ofd_lock_taken = bool(frappe.db.sql("SELECT GET_LOCK(%s, 10)", (_ofd_lock,))[0][0])
+    except Exception:
+        _ofd_lock_taken = False
+    if not _ofd_lock_taken:
+        frappe.throw(
+            _("This order is already being dispatched. Wait a moment and refresh."),
+            title=_("Dispatch In Progress"),
+        )
+
+    try:
+        return _mark_courier_outstanding_locked(
+            invoice_name, courier, party_type, party, delivery_trip, shipping_override
+        )
+    finally:
+        try:
+            frappe.db.sql("SELECT RELEASE_LOCK(%s)", (_ofd_lock,))
+        except Exception:
+            pass
+
+
+def _mark_courier_outstanding_locked(
+    invoice_name: str,
+    courier: str | None = None,
+    party_type: str | None = None,
+    party: str | None = None,
+    delivery_trip: str | None = None,
+    shipping_override: float | None = None,
+):
+    """Body of :func:`mark_courier_outstanding`, run under the per-invoice lock."""
     # PICKUP / NO-COURIER VALIDATION: Reject courier assignment when the order
     # purpose does not require courier delivery (pickup, or Employee / Sample-No-Courier
     # commercial policies that set custom_no_courier).

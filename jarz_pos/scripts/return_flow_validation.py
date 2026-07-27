@@ -260,7 +260,7 @@ def _teardown_dispatched_fixtures(ctx: RunContext) -> None:
                 invoice_name,
                 {
                     "custom_was_out_for_delivery": 0,
-                    "custom_sales_invoice_state": "Received",
+                    "custom_sales_invoice_state": "Recieved",
                     "custom_return_status": None,
                 },
                 update_modified=False,
