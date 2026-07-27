@@ -690,15 +690,28 @@ def _build_return_delivery_note(
     """Map the original Delivery Note to a return DN for the requested lines."""
     from erpnext.controllers.sales_and_purchase_return import make_return_doc
 
+    # ERPNext v16's mapper leaves `si_detail` EMPTY on the rows it produces and
+    # records the source row in `dn_detail` instead, so the invoice line has to
+    # be recovered by walking back through the original Delivery Note. Matching
+    # on `si_detail` directly silently matched nothing and every return failed
+    # with "no rows matching the selected lines".
+    source_rows = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": original_dn, "parenttype": "Delivery Note"},
+        fields=["name", "si_detail"],
+        limit_page_length=0,
+    ) or []
+    si_detail_by_dn_row = {r["name"]: r.get("si_detail") for r in source_rows}
+
     rdn = make_return_doc("Delivery Note", original_dn)
 
     keep = []
     for row in rdn.items:
-        source_row = row.get("si_detail")
+        source_row = row.get("si_detail") or si_detail_by_dn_row.get(row.get("dn_detail"))
         if source_row in requested:
             row.qty = -abs(requested[source_row])
-            # v16 requires the pair; make_return_doc carries both across, but be
-            # explicit so a partial map can never produce a half-linked row.
+            # v16 rejects `against_sales_invoice` without its paired `si_detail`,
+            # so stamp both explicitly rather than trusting the mapper.
             row.against_sales_invoice = inv_name
             row.si_detail = source_row
             keep.append(row)

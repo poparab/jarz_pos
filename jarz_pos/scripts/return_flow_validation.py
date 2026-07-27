@@ -218,6 +218,59 @@ def _absorb_return_artifacts(ctx: RunContext, result: Dict[str, Any]) -> None:
         ctx.courier_transactions.append(result["compensating_courier_transaction"])
 
 
+def _teardown_dispatched_fixtures(ctx: RunContext) -> None:
+    """Unwind dispatch state on this run's fixtures so cleanup can cancel them.
+
+    ``block_cancel_if_dispatched`` refuses to cancel a dispatched invoice, which
+    is exactly what it is for — and it means the shared ``_cleanup`` cannot
+    remove a fixture the harness pushed Out for Delivery.
+
+    The answer is emphatically NOT to add a bypass to the guard: its value comes
+    from having none. Instead the teardown removes the *conditions* the guard
+    looks at — cancel the Delivery Notes, clear the permanent OFD flag, reset
+    the operational state — for this run's fixtures only. Production code is
+    untouched.
+    """
+    for invoice_name in list(dict.fromkeys(ctx.invoices)):
+        try:
+            if not frappe.db.exists("Sales Invoice", invoice_name):
+                continue
+            customer = frappe.db.get_value("Sales Invoice", invoice_name, "customer") or ""
+            if CUSTOMER_PREFIX not in str(customer) and "_B2BVALID_" not in str(customer):
+                # Never touch anything that is not ours.
+                continue
+
+            for dn in frappe.get_all(
+                "Delivery Note Item",
+                filters={"against_sales_invoice": invoice_name, "docstatus": 1},
+                pluck="parent",
+                limit_page_length=50,
+            ) or []:
+                try:
+                    doc = frappe.get_doc("Delivery Note", dn)
+                    if int(doc.docstatus or 0) == 1:
+                        doc.flags.ignore_permissions = True
+                        doc.flags.ignore_links = True
+                        doc.cancel()
+                except Exception as exc:
+                    print(f"   teardown: could not cancel {dn}: {exc}")
+
+            frappe.db.set_value(
+                "Sales Invoice",
+                invoice_name,
+                {
+                    "custom_was_out_for_delivery": 0,
+                    "custom_sales_invoice_state": "Received",
+                    "custom_return_status": None,
+                },
+                update_modified=False,
+            )
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"teardown failed for {invoice_name}")
+
+    frappe.db.commit()
+
+
 def _full_lines(invoice_name: str) -> List[Dict[str, Any]]:
     rows = frappe.get_all(
         "Sales Invoice Item",
@@ -343,11 +396,13 @@ def _case_partial_then_complete(ctx: RunContext, env: Dict[str, Any]) -> None:
     frappe.db.commit()
 
     lines = _full_lines(invoice)
-    if not lines or lines[0]["qty"] < 2:
-        ctx.record(f"{case}.skipped", True, "needs a line with qty >= 2")
+    if len(lines) < 2:
+        ctx.record(f"{case}.skipped", True, "needs at least two invoice lines")
         return
 
-    first = [{"si_detail": lines[0]["si_detail"], "qty": 1.0}]
+    # Partial by LINE rather than by quantity: the fixtures carry qty 1, and
+    # "customer keeps some items, returns others" is the real B2B shape anyway.
+    first = [{"si_detail": lines[0]["si_detail"], "qty": lines[0]["qty"]}]
     result_a = ir.run_invoice_return(
         invoice_id=invoice, lines=first, reason="partial 1",
         return_type="Customer Return", refund_mode=ir.REFUND_CUSTOMER_CREDIT,
@@ -609,6 +664,7 @@ def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, An
     finally:
         if cleanup:
             try:
+                _teardown_dispatched_fixtures(ctx)
                 _cleanup(ctx)
             except Exception:
                 frappe.log_error(frappe.get_traceback(), "return_flow_validation cleanup failed")
