@@ -110,6 +110,24 @@ def _restore_returns(previous: bool) -> None:
 # Assertions specific to returns
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _normalize_courier(picked: Any) -> Optional[Dict[str, Any]]:
+    """`_pick_courier_party` yields a ``(party_type, party)`` tuple, or
+    ``(None, None)`` when the site has no courier bound to this branch.
+
+    Normalised to a dict (or None) so the cases can pass it straight through to
+    the dispatch helper and to the courier assertions.
+    """
+    if not picked:
+        return None
+    try:
+        party_type, party = picked
+    except Exception:
+        return None
+    if not party_type or not party:
+        return None
+    return {"party_type": party_type, "party": party}
+
+
 def _stock_qty(item_code: str, warehouse: str) -> float:
     try:
         return flt(frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse}, "actual_qty"))
@@ -543,7 +561,7 @@ def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, An
             "company": company,
             "territory": _ensure_territory(company),
             "customer_group": _ensure_customer_group(),
-            "courier": _pick_courier_party(pos_profile),
+            "courier": _normalize_courier(_pick_courier_party(pos_profile)),
         }
         _ensure_item_prices(ctx, items)
         _ensure_stock(ctx, items, pos_profile)
