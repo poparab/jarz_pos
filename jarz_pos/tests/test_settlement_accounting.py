@@ -820,7 +820,15 @@ class TestMarkCourierOutstanding(unittest.TestCase):
 # ===========================================================================
 
 class TestShippingExpenseJE(unittest.TestCase):
-    """Verify the shipping expense JE helper produces correct DR Freight / CR Creditors."""
+    """Verify the shipping expense JE helper produces correct DR Freight / CR Creditors.
+
+    Both tests must stub ``_find_existing_je_by_tag``. The helper starts with an
+    idempotency guard that reuses an already-tagged entry, and these tests mock
+    ``frappe`` wholesale — so the guard's ``frappe.get_all`` returns a truthy
+    MagicMock, the helper returns that "existing" entry, and no accounts are ever
+    appended. That is what made ``test_correct_structure`` fail with ``0 != 2``
+    and, more quietly, made ``test_balanced`` pass vacuously by comparing 0 to 0.
+    """
 
     def test_correct_structure(self):
         """Should create JE with DR Freight, CR Creditors with party."""
@@ -830,7 +838,7 @@ class TestShippingExpenseJE(unittest.TestCase):
             mf.new_doc.return_value = je_capture
             mf.utils.nowdate.return_value = "2026-03-14"
 
-            with patch("jarz_pos.services.delivery_handling.get_freight_expense_account", return_value=FREIGHT_ACC):
+            with patch("jarz_pos.services.delivery_handling.get_freight_expense_account", return_value=FREIGHT_ACC),                  patch("jarz_pos.services.delivery_handling._find_existing_je_by_tag", return_value=None):
                 from jarz_pos.services.delivery_handling import _create_shipping_expense_to_creditors_je
 
                 inv = _mock_invoice()
@@ -856,13 +864,15 @@ class TestShippingExpenseJE(unittest.TestCase):
             mf.new_doc.return_value = je_capture
             mf.utils.nowdate.return_value = "2026-03-14"
 
-            with patch("jarz_pos.services.delivery_handling.get_freight_expense_account", return_value=FREIGHT_ACC):
+            with patch("jarz_pos.services.delivery_handling.get_freight_expense_account", return_value=FREIGHT_ACC),                  patch("jarz_pos.services.delivery_handling._find_existing_je_by_tag", return_value=None):
                 from jarz_pos.services.delivery_handling import _create_shipping_expense_to_creditors_je
 
                 inv = _mock_invoice()
                 _create_shipping_expense_to_creditors_je(inv, 100.0, CREDITORS_ACC, "Employee", "EMP-X")
 
+        self.assertEqual(len(je_capture.accounts), 2, "guard against a vacuous 0 == 0 pass")
         self.assertAlmostEqual(je_capture.total_debit, je_capture.total_credit, places=2)
+        self.assertAlmostEqual(je_capture.total_debit, 100.0, places=2)
 
 
 # ===========================================================================
