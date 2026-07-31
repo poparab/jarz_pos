@@ -110,33 +110,91 @@ def _build_customer_shipping_address_book(customer: str, invoice: str | None = N
     }
 
 
-def _sync_customer_phone(customer_doc: Document, phone: str) -> None:
+def _apply_phone_to_contact(contact_doc: Document, phone: str) -> None:
+    """Write *phone* onto a Contact so it survives ``Contact.validate()``.
+
+    ``Contact.set_primary()`` rebuilds ``mobile_no``/``phone`` from the ``phone_nos``
+    child table on every save, so assigning those fields directly is silently blanked
+    back to "" — which is how the customer phone kept disappearing on address save.
+    """
     phone = str(phone or "").strip()
     if not phone:
         return
 
-    if frappe.db.has_column("Customer", "mobile_no"):
-        customer_doc.mobile_no = phone
-    if frappe.db.has_column("Customer", "phone"):
-        customer_doc.phone = phone
+    primary_row = None
+    for row in contact_doc.get("phone_nos") or []:
+        if primary_row is None and str(row.phone or "").strip() == phone:
+            primary_row = row
+    if primary_row is None:
+        primary_row = contact_doc.append("phone_nos", {"phone": phone})
 
-    if customer_doc.customer_primary_contact and frappe.db.exists("Contact", customer_doc.customer_primary_contact):
-        contact_doc = frappe.get_doc("Contact", customer_doc.customer_primary_contact)
-        contact_doc.mobile_no = phone
+    # Exactly one row may be primary, or Contact.set_primary() throws.
+    for row in contact_doc.get("phone_nos") or []:
+        is_primary = 1 if row is primary_row else 0
+        row.is_primary_phone = is_primary
+        row.is_primary_mobile_no = is_primary
+
+    contact_doc.mobile_no = phone
+    contact_doc.phone = phone
+
+
+def _sync_customer_contact(customer_doc: Document, phone: str) -> str | None:
+    """Push *phone* onto the customer's primary Contact, creating one when missing.
+
+    Returns the Contact name so the caller can stamp ``customer_primary_contact``
+    during its own — later, freshly read — Customer write.
+    """
+    phone = str(phone or "").strip()
+    if not phone:
+        return None
+
+    primary_contact = customer_doc.customer_primary_contact
+    if primary_contact and frappe.db.exists("Contact", primary_contact):
+        contact_doc = frappe.get_doc("Contact", primary_contact)
+        _apply_phone_to_contact(contact_doc, phone)
         contact_doc.save(ignore_permissions=True)
-    else:
-        contact_doc = frappe.get_doc({
-            "doctype": "Contact",
-            "first_name": customer_doc.customer_name,
-            "mobile_no": phone,
-            "is_primary_contact": 1,
-            "links": [{
-                "link_doctype": "Customer",
-                "link_name": customer_doc.name,
-            }],
-        })
-        contact_doc.insert(ignore_permissions=True)
-        customer_doc.customer_primary_contact = contact_doc.name
+        return contact_doc.name
+
+    contact_doc = frappe.get_doc({
+        "doctype": "Contact",
+        "first_name": customer_doc.customer_name,
+        "is_primary_contact": 1,
+        "links": [{
+            "link_doctype": "Customer",
+            "link_name": customer_doc.name,
+        }],
+    })
+    _apply_phone_to_contact(contact_doc, phone)
+    contact_doc.insert(ignore_permissions=True)
+    return contact_doc.name
+
+
+def _save_customer_fields(customer: str, apply_changes) -> Document:
+    """Apply *apply_changes* to a freshly read Customer, then save it.
+
+    Saving an Address or a Contact moves ``Customer.modified`` out from under any
+    Customer document loaded earlier in the request, and Frappe's optimistic-lock
+    check then aborts the whole save with ``TimestampMismatchError``. Read the row
+    immediately before writing it, and retry when a concurrent writer still wins.
+    """
+    last_error: Exception | None = None
+    for _attempt in range(3):
+        customer_doc = frappe.get_doc("Customer", customer)
+        apply_changes(customer_doc)
+        try:
+            customer_doc.save(ignore_permissions=True)
+            return customer_doc
+        except frappe.TimestampMismatchError as exc:
+            # check_if_latest() raises before writing anything, so retrying is safe.
+            # Drop the msgprint it queued, or the client shows it even when we win.
+            last_error = exc
+            frappe.clear_last_message()
+
+    frappe.log_error(
+        f"_save_customer_fields: giving up on {customer} after 3 timestamp conflicts",
+        frappe.get_traceback(),
+    )
+    raise last_error
 
 
 def _apply_phone_to_address(address_doc: Document, phone: str) -> None:
@@ -181,6 +239,7 @@ def save_customer_shipping_address(
         normalized_address_name = str(address_name or "").strip()
         normalized_address = str(address or "").strip()
         normalized_territory = str(territory or "").strip()
+        phone_value = str(phone or "").strip()
         use_as_primary = str(set_as_primary or "1").strip().lower() not in {"0", "false", "no", "off"}
 
         if normalized_address_name:
@@ -220,16 +279,29 @@ def save_customer_shipping_address(
                 address_doc = frappe.get_doc(address_payload)
                 address_doc.insert(ignore_permissions=True)
 
-        _apply_phone_to_address(address_doc, str(phone or "").strip())
+        _apply_phone_to_address(address_doc, phone_value)
         address_doc.save(ignore_permissions=True)
 
         ensure_shipping_address(address_doc.name)
         if use_as_primary:
             set_customer_primary_shipping_address(customer_doc.name, address_doc.name)
-            customer_doc.customer_primary_address = address_doc.name
 
-        _sync_customer_phone(customer_doc, str(phone or "").strip())
-        customer_doc.save(ignore_permissions=True)
+        # Every write above moves Customer.modified, so finish the Contact side first
+        # and only then read + save the Customer, inside one short window.
+        contact_name = _sync_customer_contact(customer_doc, phone_value)
+
+        def _apply_customer_changes(doc: Document) -> None:
+            if use_as_primary:
+                doc.customer_primary_address = address_doc.name
+            if contact_name:
+                doc.customer_primary_contact = contact_name
+            if phone_value:
+                if frappe.db.has_column("Customer", "mobile_no"):
+                    doc.mobile_no = phone_value
+                if frappe.db.has_column("Customer", "phone"):
+                    doc.phone = phone_value
+
+        customer_doc = _save_customer_fields(customer_doc.name, _apply_customer_changes)
 
         if invoice:
             link_shipping_address_to_invoice(invoice, address_doc.name)
@@ -243,13 +315,17 @@ def save_customer_shipping_address(
                 "name": address_doc.name,
                 "city": str(address_doc.city or "").strip(),
                 "full_address": format_address_text(address_doc.as_dict()),
-                "phone": _address_phone(address_doc.as_dict(), str(phone or "").strip()),
+                "phone": _address_phone(address_doc.as_dict(), phone_value),
             },
             "address_book": _build_customer_shipping_address_book(customer_doc.name, invoice=invoice),
         }
+    except frappe.ValidationError:
+        # Frappe's own message already names the real reason — masking it behind a
+        # generic string is what hid this bug from the POS floor for weeks.
+        raise
     except Exception as e:
         frappe.log_error(f"save_customer_shipping_address: {str(e)}", frappe.get_traceback())
-        frappe.throw(_("Failed to save customer shipping address."))
+        frappe.throw(_("Failed to save customer shipping address: {0}").format(str(e)))
 
 @frappe.whitelist()
 def get_customers(search=None):
@@ -835,9 +911,11 @@ def update_customer_shipping_address(
         frappe.db.commit()
 
         return _build_customer_shipping_address_book(customer)
+    except frappe.ValidationError:
+        raise
     except Exception as e:
         frappe.log_error(f"update_customer_shipping_address: {str(e)}", frappe.get_traceback())
-        frappe.throw(_("Failed to update address."))
+        frappe.throw(_("Failed to update address: {0}").format(str(e)))
 
 
 @frappe.whitelist()
