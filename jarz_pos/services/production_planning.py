@@ -60,13 +60,22 @@ def suggested_batches(
     make.  The epsilon is load-bearing: ``12.0 / 4.0`` can land on
     ``3.0000000000000004`` in float, and a naive ``ceil`` would then ask for a
     fourth batch nobody needs.
+
+    Negative stock does **not** inflate the suggestion.  ERPNext permits
+    negative Bin quantities, and for a finished good they almost always mean
+    unrecorded production or a stock-count lag rather than units genuinely owed
+    to customers.  Subtracting a negative would add the phantom hole on top of
+    real demand — on staging that was 81 of 183 suggested batches — and
+    over-producing perishables is the more expensive error.  The row flags the
+    negative separately so somebody counts the item.
     """
     bom_yield = float(bom_yield or 0)
     if bom_yield <= 0:
         return 0
 
     effective = float(velocity or 0) * float(season_multiplier or 1.0)
-    deficit = (float(target_days or 0) * effective) - float(on_hand or 0)
+    countable_on_hand = max(0.0, float(on_hand or 0))
+    deficit = (float(target_days or 0) * effective) - countable_on_hand
     if deficit <= 0:
         return 0
 
@@ -84,11 +93,21 @@ def days_of_cover(
     ``None`` rather than a sentinel: the stored ``jarz_days_of_stock`` field
     writes ``999`` for zero-velocity items, which makes "never sold" and "huge
     pile" indistinguishable downstream.
+
+    Stock at or below zero covers ``0.0`` days, never a negative number.
+    ERPNext permits negative Bin quantities and staging has several, which would
+    otherwise render as "-17 days of cover" — a figure with no meaning to
+    somebody deciding what to make. The on-hand quantity is shown beside this,
+    so the hole itself stays visible.
     """
     effective = float(velocity or 0) * float(season_multiplier or 1.0)
     if effective <= 0:
         return None
-    return float(on_hand or 0) / effective
+
+    on_hand = float(on_hand or 0)
+    if on_hand <= 0:
+        return 0.0
+    return on_hand / effective
 
 
 def status_for_days_of_cover(

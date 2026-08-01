@@ -124,6 +124,10 @@ def _build_suggestion(
         "target_days_source": target_source,
         "days_of_cover": cover,
         "status": status,
+        # Surfaced so the row can tell somebody to count the item. The
+        # suggestion deliberately ignores the negative rather than producing to
+        # fill what is nearly always a counting error.
+        "stock_is_negative": on_hand < 0,
         "suggested_batches": batches,
         "suggested_units": batches * bom_qty,
         "can_make_now_batches": (capacity or {}).get("can_make_now_batches"),

@@ -47,6 +47,15 @@ class TestSuggestedBatches(unittest.TestCase):
     def test_zero_velocity_suggests_nothing(self):
         self.assertEqual(0, self._call(velocity=0))
 
+    def test_negative_stock_does_not_inflate_the_suggestion(self):
+        # Subtracting a negative would add the phantom hole to real demand.
+        # Staging had Redvelvet Medium at -36 asking for 51 batches where seven
+        # days of actual sales needs 15.
+        with_hole = self._call(on_hand=-100.0)
+        empty = self._call(on_hand=0.0)
+        self.assertEqual(empty, with_hole)
+        self.assertEqual(5, with_hole)
+
     def test_float_noise_does_not_add_a_phantom_batch(self):
         # A 0.7 kg batch BOM selling 2.1/day on a 1-day target: the deficit is
         # 2.1 and 2.1 / 0.7 lands on 3.0000000000000004 in float, so a naive
@@ -78,6 +87,22 @@ class TestDaysOfCover(unittest.TestCase):
 
     def test_zero_stock_covers_nothing(self):
         self.assertEqual(0.0, self._call(on_hand=0))
+
+    def test_negative_stock_covers_zero_days_not_negative_days(self):
+        # ERPNext permits negative Bin quantities and staging has several.
+        # "-17 days of cover" means nothing to somebody deciding what to make;
+        # the on-hand figure shown beside it carries the hole.
+        self.assertEqual(0.0, self._call(on_hand=-137.0))
+        self.assertEqual(0.0, self._call(on_hand=-0.5))
+
+    def test_a_negative_stock_item_still_reads_as_critical(self):
+        from jarz_pos.services.production_planning import status_for_days_of_cover
+
+        days = self._call(on_hand=-137.0)
+        status = status_for_days_of_cover(
+            days, critical_days=5, watch_days=14, overstock_days=90
+        )
+        self.assertEqual("critical", status)
 
 
 class TestStatusForDaysOfCover(unittest.TestCase):
