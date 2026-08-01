@@ -1918,102 +1918,6 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
 
 
 @frappe.whitelist()
-def get_courier_balances():
-    """
-    Return outstanding balances grouped by unified delivery party
-    (Employee/Supplier) with a backward-compatible shape.
-
-    Important: Avoid referencing a non-existent "Courier" DocType. We derive
-    balances solely from `Courier Transaction` rows.
-
-    Output rows include both the new unified keys and legacy keys for UI
-    compatibility:
-      {
-        "party_type": "Employee"|"Supplier"|"",
-        "party": "EMP-0001"|"SUP-0001"|"",
-        "display_name": "John Doe"|"Vendor X"|"<Unknown>",
-        "balance": 1250.0,
-        "details": [ {"invoice": ..., "city": ..., "amount": ..., "shipping": ...}, ... ],
-        # Legacy (kept for older clients):
-        "courier": "<legacy courer id or party>",
-        "courier_name": "<display_name>"
-      }
-    """
-    # Fetch all unsettled transactions (party-based and legacy)
-    rows = frappe.get_all(
-        "Courier Transaction",
-        filters={"status": ["!=", "Settled"]},
-        fields=[
-            "name",
-            "reference_invoice",
-            "amount",
-            "shipping_amount",
-            "party_type",
-            "party",
-            "courier",  # legacy field, may be None
-        ],
-    )
-
-    # Group by party identity; fallback to legacy courier string
-    groups: dict[tuple[str, str], dict] = {}
-
-    def ensure_group(party_type: str, party: str, legacy_courier: str | None):
-        key = (party_type or "", party or legacy_courier or "")
-        if key not in groups:
-            # Resolve display label
-            label = None
-            if key[0] == "Employee" and key[1]:
-                try:
-                    label = frappe.db.get_value("Employee", key[1], "employee_name") or key[1]
-                except Exception:
-                    label = key[1]
-            elif key[0] == "Supplier" and key[1]:
-                try:
-                    label = frappe.db.get_value("Supplier", key[1], "supplier_name") or key[1]
-                except Exception:
-                    label = key[1]
-            else:
-                # Legacy or missing party – show the raw value or a placeholder
-                label = (legacy_courier or party or "<Unknown>")
-
-            groups[key] = {
-                "party_type": key[0],
-                "party": key[1],
-                "display_name": label,
-                # Legacy keys for older clients
-                "courier": legacy_courier or key[1],
-                "courier_name": label,
-                "balance": 0.0,
-                "details": [],
-            }
-        return groups[key]
-
-    for r in rows:
-        party_type = (r.get("party_type") or "").strip()
-        party = (r.get("party") or "").strip()
-        legacy_courier = (r.get("courier") or "").strip() or None
-
-        grp = ensure_group(party_type, party, legacy_courier)
-        amt = float(r.get("amount") or 0)
-        ship = float(r.get("shipping_amount") or 0)
-        grp["balance"] += amt - ship
-        inv = r.get("reference_invoice")
-        loc_label = _get_invoice_city(inv)
-        grp["details"].append({
-            "invoice": inv,
-            "city": loc_label,       # back-compat key kept
-            "territory": loc_label,  # new explicit key
-            "amount": amt,
-            "shipping": ship,
-        })
-
-    # Render list sorted by balance desc
-    data = list(groups.values())
-    data.sort(key=lambda d: d.get("balance", 0.0), reverse=True)
-    return data
-
-
-@frappe.whitelist()
 def settle_courier(courier: str, pos_profile: str | None = None):
     """Deprecated alias retained for compatibility. Uses party-based settlement when possible.
 
@@ -2575,8 +2479,6 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
-    if float(inv.outstanding_amount or 0) > 0.01:
-        frappe.throw("Invoice not fully paid; cannot one-by-one settle shipping")
 
     company = inv.company
     # Read shipping from the stored SI value first, fallback to territory calculation
@@ -2615,6 +2517,21 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     has_outstanding_mode = bool(outstanding_ct)
     order_amount = _child_row_amount(outstanding_ct[0], "amount") if outstanding_ct else 0.0
     ct_shipping = _child_row_amount(outstanding_ct[0], "shipping_amount") if outstanding_ct else 0.0
+
+    # Payment-status gate, applied ONLY to the outstanding branch.
+    #
+    # When the courier holds customer money (CT amount > 0) the settlement JE credits Courier
+    # Outstanding, which only balances if the receivable was moved there first — i.e. the invoice
+    # must not still be sitting unpaid on Debtors.
+    #
+    # When the courier holds NOTHING (CT amount == 0) this is a pure freight payment:
+    # DR Creditors / CR Cash. No line touches Debtors or Courier Outstanding, so the customer's
+    # payment status is irrelevant — the company owes the courier for the trip either way. That is
+    # exactly the unpaid online-intent (InstaPay / Mobile Wallet) case, and it is what the batch
+    # settle_delivery_party has always posted for these rows. Blanket-throwing here made the
+    # single-invoice button fail on orders the batch button settled fine.
+    if float(inv.outstanding_amount or 0) > 0.01 and has_outstanding_mode:
+        frappe.throw("Invoice not fully paid; cannot one-by-one settle shipping")
 
     if ct_shipping > 0.0001 and abs(ct_shipping - shipping_exp) > 0.0001:
         frappe.logger().info(
@@ -2860,7 +2777,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
             "party": party,
             "status": ["!=", "Settled"],
         },
-        fields=["name", "shipping_amount"],
+        fields=["name", "amount", "shipping_amount"],
         order_by="creation desc",
         limit=1,
     )
@@ -2872,6 +2789,26 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
             )
         if ct_shipping > 0.0001:
             shipping_exp = ct_shipping
+
+        # The courier collected exactly what was accrued on its transaction — not necessarily
+        # the invoice grand total. Reading grand_total here is how this path drifted from the
+        # batch settlement (which nets sum(amount) - sum(shipping_amount)).
+        ct_amount = float(pending_ct[0].get("amount") or 0)
+        if ct_amount <= 0.0001:
+            # Nothing was collected from the customer by the courier (e.g. an unpaid
+            # InstaPay / Mobile Wallet order that goes Out for Delivery with amount=0 and only
+            # freight accrued). Posting a "collected" settlement would invent a cash receipt and
+            # credit a Courier Outstanding balance that was never debited. Refuse loudly; the
+            # correct action is settle_single_invoice_paid (pay the courier the freight).
+            frappe.throw(
+                f"Courier collected nothing for {inv.name} (courier transaction amount is 0). "
+                "Use the pay-courier settlement to cover the freight instead."
+            )
+        if abs(ct_amount - order_amount) > 0.0001:
+            frappe.logger().info(
+                f"DEBUG settle_courier_collected_payment: using courier transaction amount {ct_amount} instead of invoice grand total {order_amount}"
+            )
+        order_amount = ct_amount
 
     if shipping_exp <= 0:
         frappe.throw("No shipping expense configured")

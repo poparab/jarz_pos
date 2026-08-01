@@ -604,15 +604,12 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         fields=["name", "amount", "shipping_amount", "party_type", "party"],
     )
 
-    order_amount = 0.0
-    any_ct_order = False
-    # pick first unsettled CT amount>0
-    for r in cts:
-        amt = float(r.get("amount") or 0)
-        if amt > 0:
-            order_amount = amt
-            any_ct_order = True
-            break
+    # Courier-side order amount = what the courier is actually holding for this invoice,
+    # summed over every unsettled Courier Transaction row — the SAME aggregation the batch
+    # path performs (get_courier_balances / _summarize_courier_transactions).
+    ct_order_total = sum(float(r.get("amount") or 0) for r in cts)
+    order_amount = ct_order_total
+    any_ct_order = ct_order_total > 0
 
     # Shipping MUST come from the SAME source the batch settlement (settle_delivery_party /
     # get_courier_balances) and the actual settlement JE (settle_single_invoice_paid /
@@ -693,18 +690,32 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         paid_after_ofd = True
         is_unpaid = True
 
-    if is_unpaid:
+    if has_ct_rows:
+        # AUTHORITATIVE: an unsettled Courier Transaction exists, so the courier's position on
+        # this invoice is already recorded. Take it verbatim — exactly like the batch path,
+        # whose per-party balance is sum(amount) - sum(shipping_amount).
+        #
+        # Re-deriving the order amount from the invoice's paid/unpaid status here is what made
+        # this preview contradict the batch "Settle All" view. The clearest case is an UNPAID
+        # online-intent order (InstaPay / Mobile Wallet) dispatched Out for Delivery: the courier
+        # collects NOTHING (the customer transfers online and a manager confirms it separately),
+        # so its CT is accrued with amount=0 and shipping_amount=<freight>. The batch view
+        # correctly reads that as "pay the courier the freight", while the old
+        # `is_unpaid -> order_amount = grand_total` override here reported "collect
+        # grand_total - freight" — and, worse, routed the operator into
+        # settle_courier_collected_payment, fabricating a cash receipt for money nobody ever
+        # collected and crediting a Courier Outstanding balance that was never debited.
+        order_amount = ct_order_total
+    elif is_unpaid:
+        # No transaction accrued yet (preview requested before Out for Delivery): anticipate a
+        # settle-now collection of the whole invoice.
         order_amount = invoice_total
+    elif has_customer_payment or is_paid:
+        # Customer paid -> shipping only
+        order_amount = 0.0
     else:
-        if any_ct_order:
-            # respect explicit CT order amount
-            pass
-        elif has_customer_payment or is_paid:
-            # Customer paid -> shipping only
-            order_amount = 0.0
-        else:
-            # No evidence of customer payment -> treat as settle-now
-            order_amount = invoice_total
+        # No evidence of customer payment -> treat as settle-now
+        order_amount = invoice_total
 
     net_amount = order_amount - shipping
     # Special case: pure shipping (order_amount == 0 < shipping)
@@ -727,6 +738,15 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         pass
 
     paid_note = "Paid" if (is_paid and not paid_after_ofd) else ("Unpaid" if is_unpaid else status_l.capitalize() or "Unknown")
+
+    # Flag the InstaPay / Mobile Wallet case so the client can explain WHY an unpaid invoice
+    # still nets to "pay the courier": the customer owes the money online, not to the courier.
+    try:
+        from jarz_pos.services.settlement_strategies import _is_online_intent
+
+        is_online_unconfirmed = bool(is_unpaid and _is_online_intent(inv))
+    except Exception:
+        is_online_unconfirmed = False
 
     if net_amount > 0:
         scenario = "collect"
@@ -761,6 +781,12 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     "payment_entries": pe_names,
     "payment_first_creation": pe_first_creation,
     "ofd_creation": ofd_creation,
+    # True when the amounts above came verbatim from the accrued Courier Transaction
+    # (the same rows the batch settlement aggregates) rather than the pre-OFD heuristic.
+    "has_courier_transaction": has_ct_rows,
+    "courier_order_amount": ct_order_total,
+    "courier_shipping_amount": ct_shipping_total,
+    "is_online_unconfirmed": is_online_unconfirmed,
     "message": msg,
     }
 

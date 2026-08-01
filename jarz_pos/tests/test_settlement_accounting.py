@@ -563,10 +563,12 @@ class TestSettleCourierCollectedPayment(unittest.TestCase):
             inv = _mock_invoice(grand_total=grand_total, outstanding=0.0)
             mf.get_doc.return_value = inv
 
-            # Pending CT with shipping amount
+            # Pending CT: the courier collected the full order and owes the freight.
+            # `amount` is what the courier actually holds and now drives the JE (it used to be
+            # re-read from the invoice grand total, which diverged from the batch settlement).
             mf.get_all.side_effect = [
                 # pending_ct
-                [{"name": "CT-PENDING", "shipping_amount": shipping_exp}],
+                [{"name": "CT-PENDING", "amount": grand_total, "shipping_amount": shipping_exp}],
                 # existing JE check → none
                 [],
                 # CTs to settle
@@ -1002,6 +1004,310 @@ class TestSalesPartnerFees(unittest.TestCase):
         self.assertAlmostEqual(result["base_fees"], 23.31, places=2)
         self.assertAlmostEqual(result["vat"], 3.26, places=2)
         self.assertAlmostEqual(result["total_fees"], 26.57, places=2)
+
+
+# ===========================================================================
+# TEST: single-invoice settlement agrees with the batch ("Settle All") view
+# ===========================================================================
+
+class TestSettlementPreviewMatchesBatch(unittest.TestCase):
+    """The two settlement surfaces must never disagree about who pays whom.
+
+    Regression for order ACC-SINV-2026-16919 (staging): an UNPAID Mobile Wallet order that
+    went Out for Delivery accrues a Courier Transaction with amount=0 (the courier collects
+    nothing — the customer transfers online) and shipping_amount=<freight>. The batch view read
+    that as "pay the courier 85"; the single-invoice preview overrode the transaction with the
+    invoice grand total and said "collect 935 from the courier".
+    """
+
+    # ── Batch side ────────────────────────────────────────────────────
+
+    def _batch_balance(self, ct_rows):
+        """Return the per-party balance get_courier_balances would show."""
+        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+            mf.db.get_table_columns.return_value = [
+                "name", "reference_invoice", "amount", "shipping_amount", "party_type", "party",
+                "is_partner_order",
+            ]
+            mf.get_all.return_value = list(ct_rows)
+
+            with patch("jarz_pos.services.delivery_handling._get_invoice_city", return_value="Madinaty"):
+                from jarz_pos.services.delivery_handling import get_courier_balances
+
+                data = get_courier_balances()
+
+        self.assertEqual(len(data), 1, f"Expected one party group, got {data}")
+        return data[0]["balance"]
+
+    # ── Single-invoice side ───────────────────────────────────────────
+
+    def _preview(self, ct_rows, *, grand_total, outstanding, status,
+                 payment_method="Cash", stored_shipping=0.0, payment_entries=()):
+        """Return get_invoice_settlement_preview's payload for one invoice."""
+        inv = _mock_invoice(
+            name="ACC-SINV-2026-16919",
+            grand_total=grand_total,
+            outstanding=outstanding,
+        )
+        inv.status = status
+        inv.custom_shipping_expense = stored_shipping
+        inv.custom_payment_method = payment_method
+
+        def fake_get_all(doctype, **kwargs):
+            if doctype == "Courier Transaction":
+                return [dict(r) for r in ct_rows]
+            if doctype == "Payment Entry Reference":
+                return list(payment_entries)
+            if doctype == "Payment Entry":
+                return [
+                    {"name": p, "creation": "2026-07-31 20:00:00", "posting_date": "2026-07-31",
+                     "reference_no": None}
+                    for p in payment_entries
+                ]
+            if doctype == "Journal Entry":
+                return []
+            return []
+
+        with patch("jarz_pos.api.invoices.frappe") as mf:
+            mf.get_doc.return_value = inv
+            mf.get_all.side_effect = fake_get_all
+            mf.throw.side_effect = Exception
+
+            with patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access"), \
+                 patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=0.0):
+
+                from jarz_pos.api.invoices import get_invoice_settlement_preview
+
+                return get_invoice_settlement_preview(
+                    invoice_name=inv.name, party_type="Employee", party="HR-EMP-000004"
+                )
+
+    @staticmethod
+    def _ct(amount, shipping):
+        return {
+            "name": "CT-16919",
+            "reference_invoice": "ACC-SINV-2026-16919",
+            "amount": amount,
+            "shipping_amount": shipping,
+            "party_type": "Employee",
+            "party": "HR-EMP-000004",
+            "creation": "2026-07-31 21:46:31",
+        }
+
+    # ── The reported bug ──────────────────────────────────────────────
+
+    def test_unpaid_online_order_previews_as_pay_courier(self):
+        """Unpaid Mobile Wallet + CT(amount=0, shipping=85) → pay the courier 85, not collect 935."""
+        preview = self._preview(
+            [self._ct(0.0, 85.0)],
+            grand_total=1020.0,
+            outstanding=1020.0,
+            status="Unpaid",
+            payment_method="Mobile Wallet",
+            stored_shipping=85.0,
+        )
+
+        self.assertAlmostEqual(preview["order_amount"], 0.0, places=2)
+        self.assertAlmostEqual(preview["shipping_amount"], 85.0, places=2)
+        self.assertAlmostEqual(preview["net_amount"], -85.0, places=2)
+        self.assertEqual(preview["branch_action"], "pay")
+        self.assertTrue(preview["is_online_unconfirmed"])
+
+    def test_unpaid_online_order_single_equals_batch(self):
+        """Same courier transaction → same signed net on both surfaces."""
+        rows = [self._ct(0.0, 85.0)]
+        preview = self._preview(
+            rows, grand_total=1020.0, outstanding=1020.0, status="Unpaid",
+            payment_method="Mobile Wallet", stored_shipping=85.0,
+        )
+        self.assertAlmostEqual(preview["net_amount"], self._batch_balance(rows), places=2)
+
+    def test_cod_settle_later_single_equals_batch(self):
+        """COD moved to Courier Outstanding: both surfaces collect order - shipping."""
+        rows = [self._ct(1020.0, 85.0)]
+        preview = self._preview(
+            rows, grand_total=1020.0, outstanding=0.0, status="Paid", stored_shipping=85.0,
+        )
+        self.assertAlmostEqual(preview["net_amount"], 935.0, places=2)
+        self.assertEqual(preview["branch_action"], "collect")
+        self.assertAlmostEqual(preview["net_amount"], self._batch_balance(rows), places=2)
+
+    def test_paid_order_shipping_only_single_equals_batch(self):
+        """Prepaid order: courier is owed freight only, on both surfaces."""
+        rows = [self._ct(0.0, 70.0)]
+        preview = self._preview(
+            rows, grand_total=500.0, outstanding=0.0, status="Paid", stored_shipping=70.0,
+        )
+        self.assertAlmostEqual(preview["net_amount"], -70.0, places=2)
+        self.assertEqual(preview["branch_action"], "pay")
+        self.assertAlmostEqual(preview["net_amount"], self._batch_balance(rows), places=2)
+
+    def test_courier_transaction_amount_beats_invoice_total(self):
+        """A CT accrued for less than the invoice total wins — the courier holds only that."""
+        rows = [self._ct(600.0, 85.0)]
+        preview = self._preview(
+            rows, grand_total=1020.0, outstanding=0.0, status="Paid", stored_shipping=85.0,
+        )
+        self.assertAlmostEqual(preview["order_amount"], 600.0, places=2)
+        self.assertAlmostEqual(preview["net_amount"], 515.0, places=2)
+        self.assertAlmostEqual(preview["net_amount"], self._batch_balance(rows), places=2)
+
+    def test_no_courier_transaction_falls_back_to_invoice(self):
+        """Before Out for Delivery there is no CT, so an unpaid invoice previews its own total."""
+        preview = self._preview(
+            [], grand_total=1020.0, outstanding=1020.0, status="Unpaid", stored_shipping=0.0,
+        )
+        self.assertAlmostEqual(preview["order_amount"], 1020.0, places=2)
+        self.assertFalse(preview["has_courier_transaction"])
+
+
+# ===========================================================================
+# TEST: settlement endpoints refuse / allow the zero-collection case
+# ===========================================================================
+
+class TestZeroCollectionSettlementGuards(unittest.TestCase):
+    """The courier collected nothing: pay the freight, never book a phantom cash receipt."""
+
+    def _settle_shipping_only(self, outstanding):
+        """settle_single_invoice_paid against a CT with amount=0."""
+        je_capture = _JournalEntryCapture()
+
+        def mock_new_doc(doctype):
+            if doctype == "Journal Entry":
+                return je_capture
+            if doctype == "Courier Transaction":
+                return _CourierTransactionCapture()
+            return MagicMock()
+
+        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+            mf.utils.nowdate.return_value = "2026-03-14"
+            mf.utils.flt = lambda v, precision=None: round(float(v or 0), precision or 2)
+            mf.flags = MagicMock()
+            mf.flags.in_test = True
+            mf.new_doc.side_effect = mock_new_doc
+            mf.db.sql.return_value = None
+            mf.throw.side_effect = Exception
+
+            inv = _mock_invoice(grand_total=1020.0, outstanding=outstanding)
+            inv.custom_shipping_expense = 85.0
+            mf.get_doc.return_value = inv
+
+            mf.get_all.side_effect = [
+                [],            # outstanding CT (amount > 0) → none
+                [],            # existing JE check → none
+                ["CT-16919"],  # CTs to mark Settled
+            ]
+
+            with patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=85.0), \
+                 patch("jarz_pos.services.delivery_handling.get_pos_cash_account", return_value=CASH_ACC), \
+                 patch("jarz_pos.services.delivery_handling.get_creditors_account", return_value=CREDITORS_ACC), \
+                 patch("jarz_pos.services.delivery_handling._get_courier_outstanding_account", return_value=COURIER_OUTSTANDING_ACC), \
+                 patch("jarz_pos.services.delivery_handling.validate_account_exists"), \
+                 patch("jarz_pos.services.delivery_handling._find_existing_je_by_tag", return_value=None):
+
+                from jarz_pos.services.delivery_handling import settle_single_invoice_paid
+
+                result = settle_single_invoice_paid(
+                    invoice_name=inv.name,
+                    pos_profile="POS-001",
+                    party_type="Employee",
+                    party="HR-EMP-000004",
+                )
+
+        return result, je_capture
+
+    def test_unpaid_invoice_can_still_pay_courier_freight(self):
+        """Freight payment touches neither Debtors nor Courier Outstanding, so unpaid is fine."""
+        result, je = self._settle_shipping_only(outstanding=1020.0)
+
+        self.assertEqual(result["mode"], "shipping_only_settlement")
+        cred = next(a for a in je.accounts if a["account"] == CREDITORS_ACC)
+        cash = next(a for a in je.accounts if a["account"] == CASH_ACC)
+        self.assertAlmostEqual(float(cred["debit_in_account_currency"]), 85.0, places=2)
+        self.assertAlmostEqual(float(cash["credit_in_account_currency"]), 85.0, places=2)
+        self.assertAlmostEqual(je.total_debit, je.total_credit, places=2)
+        # No Courier Outstanding line: nothing was ever moved there for this invoice.
+        self.assertEqual([a for a in je.accounts if a["account"] == COURIER_OUTSTANDING_ACC], [])
+
+    def test_paid_invoice_shipping_only_unchanged(self):
+        """The prepaid case keeps posting the same freight payment."""
+        result, je = self._settle_shipping_only(outstanding=0.0)
+        self.assertEqual(result["mode"], "shipping_only_settlement")
+        self.assertAlmostEqual(je.total_debit, 85.0, places=2)
+
+    def test_collected_payment_refuses_zero_amount_transaction(self):
+        """settle_courier_collected_payment must not invent cash the courier never held."""
+        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+            mf.utils.nowdate.return_value = "2026-03-14"
+            mf.flags = MagicMock()
+            mf.flags.in_test = True
+            mf.throw.side_effect = Exception
+
+            inv = _mock_invoice(grand_total=1020.0, outstanding=1020.0)
+            inv.custom_shipping_expense = 85.0
+            mf.get_doc.return_value = inv
+            mf.get_all.return_value = [
+                {"name": "CT-16919", "amount": 0.0, "shipping_amount": 85.0}
+            ]
+
+            with patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=85.0), \
+                 patch("jarz_pos.services.delivery_handling.get_pos_cash_account", return_value=CASH_ACC), \
+                 patch("jarz_pos.services.delivery_handling.get_creditors_account", return_value=CREDITORS_ACC), \
+                 patch("jarz_pos.services.delivery_handling._get_courier_outstanding_account", return_value=COURIER_OUTSTANDING_ACC), \
+                 patch("jarz_pos.services.delivery_handling.validate_account_exists"):
+
+                from jarz_pos.services.delivery_handling import settle_courier_collected_payment
+
+                with self.assertRaises(Exception):
+                    settle_courier_collected_payment(
+                        invoice_name=inv.name,
+                        pos_profile="POS-001",
+                        party_type="Employee",
+                        party="HR-EMP-000004",
+                    )
+
+    def test_collected_payment_uses_transaction_amount(self):
+        """A CT accrued below the invoice total drives the JE, matching the batch net."""
+        je_capture = _JournalEntryCapture()
+
+        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+            mf.utils.nowdate.return_value = "2026-03-14"
+            mf.flags = MagicMock()
+            mf.flags.in_test = True
+            mf.throw.side_effect = Exception
+            mf.new_doc.return_value = je_capture
+
+            inv = _mock_invoice(grand_total=1020.0, outstanding=0.0)
+            inv.custom_shipping_expense = 85.0
+            mf.get_doc.return_value = inv
+            mf.get_all.side_effect = [
+                [{"name": "CT-16919", "amount": 600.0, "shipping_amount": 85.0}],  # pending CT
+                ["CT-16919"],                                                       # CTs to settle
+            ]
+
+            with patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=85.0), \
+                 patch("jarz_pos.services.delivery_handling.get_pos_cash_account", return_value=CASH_ACC), \
+                 patch("jarz_pos.services.delivery_handling.get_creditors_account", return_value=CREDITORS_ACC), \
+                 patch("jarz_pos.services.delivery_handling._get_courier_outstanding_account", return_value=COURIER_OUTSTANDING_ACC), \
+                 patch("jarz_pos.services.delivery_handling.validate_account_exists"), \
+                 patch("jarz_pos.services.delivery_handling._find_existing_je_by_tag", return_value=None), \
+                 patch("jarz_pos.services.delivery_handling._publish_branch_event"):
+
+                from jarz_pos.services.delivery_handling import settle_courier_collected_payment
+
+                result = settle_courier_collected_payment(
+                    invoice_name=inv.name,
+                    pos_profile="POS-001",
+                    party_type="Employee",
+                    party="HR-EMP-000004",
+                )
+
+        self.assertAlmostEqual(result["order_amount"], 600.0, places=2)
+        cash = next(a for a in je_capture.accounts if a["account"] == CASH_ACC)
+        co = next(a for a in je_capture.accounts if a["account"] == COURIER_OUTSTANDING_ACC)
+        self.assertAlmostEqual(float(cash["debit_in_account_currency"]), 515.0, places=2)
+        self.assertAlmostEqual(float(co["credit_in_account_currency"]), 600.0, places=2)
+        self.assertAlmostEqual(je_capture.total_debit, je_capture.total_credit, places=2)
 
 
 if __name__ == "__main__":
