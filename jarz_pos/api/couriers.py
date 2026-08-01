@@ -204,6 +204,16 @@ def settle_delivery_party(party_type: str, party: str, pos_profile: str | None =
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None):
+    """Settle the courier position for a SINGLE invoice.
+
+    Scope is this invoice only. Internally this picks between the same two single-invoice
+    settlement paths the POS app uses (settle_courier_collected_payment /
+    settle_single_invoice_paid) by the sign of get_invoice_settlement_preview's net_amount.
+
+    To settle a courier's ENTIRE outstanding balance in one journal entry, call
+    settle_delivery_party() (or legacy settle_courier()) instead — until 2026-08-01 this
+    endpoint did that despite its name.
+    """
     _guard_invoice_action(invoice_name, action_label="settling a courier for this order")
     return _settle_courier_for_invoice(invoice_name, pos_profile)
 

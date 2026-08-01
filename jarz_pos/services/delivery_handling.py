@@ -2025,34 +2025,126 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
 
 @frappe.whitelist()
 def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None):
-    """Settle courier outstanding for a single invoice."""
+    """Settle the courier position for ONE invoice — and only that invoice.
+
+    Routes to the same pair of single-invoice settlement functions the POS app uses,
+    chosen by the same rule the app applies: the sign of the settlement preview's
+    ``net_amount`` (what the courier collected on this invoice, minus the freight
+    accrued to it on this invoice).
+
+        net > 0  -> settle_courier_collected_payment  (courier hands over the excess)
+        net < 0  -> settle_single_invoice_paid        (branch pays the courier its freight)
+        net == 0 -> nothing to post
+
+    Both the preview and those two functions read the invoice's Courier Transaction
+    verbatim, so this endpoint agrees with the batch "Settle All" view by construction.
+
+    NOTE ON SCOPE (changed): this previously delegated to ``settle_delivery_party()``,
+    which settles EVERY unsettled Courier Transaction for the party — the courier's whole
+    balance in one journal entry, not the named invoice. The name, the docstring and every
+    plausible caller say per-invoice, so the scope now matches the name. Party-wide
+    settlement is still available, explicitly, via ``settle_delivery_party()`` /
+    ``settle_courier()``.
+    """
+    invoice_name = (invoice_name or "").strip()
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+
+    # This function is whitelisted directly (and re-exported by the custom_pos Desk page),
+    # so it is reachable without passing through jarz_pos.api.couriers and its
+    # _guard_invoice_action wrapper. Apply the same branch-scope and shift gate here so
+    # every route in is guarded. Re-running it behind the API wrapper is harmless: these
+    # are read-only checks.
+    from jarz_pos.utils.access_control import (
+        ensure_open_shift_for_invoice,
+        ensure_profile_scoped_invoice_access,
+    )
+
+    _ACTION = "settling a courier for this order"
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+    ensure_profile_scoped_invoice_access(inv, action_label=_ACTION)
+    ensure_open_shift_for_invoice(inv, action_label=_ACTION)
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted.")
-    
-    # Find related courier transactions
+
+    # The party is whatever THIS invoice's own courier transactions say it is.
     cts = frappe.get_all(
         "Courier Transaction",
         filters={
             "reference_invoice": invoice_name,
-            "status": ["!=", "Settled"]
+            "status": ["!=", "Settled"],
         },
         fields=["name", "courier", "amount", "shipping_amount", "party_type", "party"],
     )
-    
+
     if not cts:
         frappe.throw(f"No unsettled courier transactions found for invoice {invoice_name}")
-    
-    # Prefer unified party settlement if available
-    first = cts[0]
-    party_type = first.get("party_type")
-    party = first.get("party")
-    if party_type and party:
-        return settle_delivery_party(party_type=party_type, party=party, pos_profile=pos_profile)
-    
-    # Fallback to legacy label-based settlement
-    courier_label = first.get("courier") or ""
-    return settle_courier(courier_label, pos_profile)
+
+    parties = {
+        (r.get("party_type"), r.get("party"))
+        for r in cts
+        if r.get("party_type") and r.get("party")
+    }
+    if not parties:
+        # Legacy label-only rows (no party_type/party) can only be settled by the
+        # label-wide legacy path, which sweeps every legacy row for that courier. Refuse
+        # rather than silently widening the scope back out — that widening is the bug this
+        # function used to have. The caller can invoke settle_courier() deliberately.
+        frappe.throw(
+            f"Courier transactions for {invoice_name} carry no party_type/party, so this "
+            "invoice cannot be settled on its own. Use settle_courier() to settle the "
+            "legacy courier label (settles that courier's whole balance)."
+        )
+    if len(parties) > 1:
+        listed = ", ".join(sorted(f"{pt}:{p}" for pt, p in parties))
+        frappe.throw(
+            f"Invoice {invoice_name} has unsettled courier transactions for more than one "
+            f"party ({listed}). Settle them per party with settle_delivery_party()."
+        )
+    party_type, party = next(iter(parties))
+
+    # Both single-invoice functions need a POS Profile to resolve the branch cash account.
+    # Fall back to the invoice's own operational profile so the historical
+    # pos_profile-optional signature keeps working.
+    pos_profile = (pos_profile or "").strip() or str(
+        inv.get("custom_kanban_profile") or inv.get("pos_profile") or ""
+    ).strip()
+    if not pos_profile:
+        frappe.throw(
+            f"pos_profile required to resolve the cash account (invoice {invoice_name} "
+            "carries no POS Profile of its own)."
+        )
+
+    # Imported here, not at module scope: jarz_pos.api.invoices imports this module.
+    from jarz_pos.api.invoices import get_invoice_settlement_preview
+
+    preview = get_invoice_settlement_preview(
+        invoice_name, party_type=party_type, party=party
+    )
+    net_amount = _safe_float(preview.get("net_amount"))
+
+    # 0.0001 is the tolerance used throughout this module; below it there is no money to
+    # move and a journal entry would round to zero anyway.
+    if net_amount > 0.0001:
+        return settle_courier_collected_payment(
+            invoice_name, pos_profile, party_type, party
+        )
+    if net_amount < -0.0001:
+        return settle_single_invoice_paid(invoice_name, pos_profile, party_type, party)
+
+    return {
+        "success": True,
+        "settled": False,
+        "reason": "nothing_to_settle",
+        "invoice": invoice_name,
+        "journal_entry": None,
+        "net_amount": net_amount,
+        "order_amount": _safe_float(preview.get("order_amount")),
+        "shipping_amount": _safe_float(preview.get("shipping_amount")),
+        "party_type": party_type,
+        "party": party,
+    }
 
 
 @frappe.whitelist()
