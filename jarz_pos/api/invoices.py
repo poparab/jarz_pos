@@ -615,14 +615,21 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     # get_courier_balances) and the actual settlement JE (settle_single_invoice_paid /
     # settle_courier_collected_payment) use: the freight accrued on the Courier Transaction.
     #
-    # Deriving shipping from the Sales Invoice / territory (below) diverges from the CT whenever
+    # Deriving shipping from the Sales Invoice / territory (above) diverges from the CT whenever
     # the accrued freight differs from the current territory value — e.g. a shipping override, a
     # doubled double-shipping trip, a territory that changed after OFD, or a stored expense that
-    # was never persisted. In those cases the SI/territory lookup can resolve to 0, so the single
-    # preview reports net = order_amount (shipping NOT subtracted) while the batch 'Settle All'
-    # path correctly nets order_amount - shipping. Prefer the CT's shipping to keep them equal.
+    # was never persisted.
+    #
+    # A CT that says zero means zero, and is taken verbatim rather than "corrected" from the
+    # territory. The freight payable is created by the accrual JE (DR Freight / CR Creditors)
+    # posted at Out for Delivery, and its amount IS the CT's shipping_amount. Where nothing was
+    # accrued there is no payable to clear, so deducting a territory-derived freight at settlement
+    # would debit Creditors against a credit that was never posted — leaving the courier carrying a
+    # phantom debit balance. This is the state the older free-shipping-bundle orders are in
+    # (deliberately not backfilled), and it is why the batch view showed a different net from the
+    # single-invoice view on them.
     ct_shipping_total = sum(float(r.get("shipping_amount") or 0) for r in cts)
-    if ct_shipping_total > 0:
+    if cts:
         shipping = ct_shipping_total
 
     invoice_total = float(inv.grand_total or 0)

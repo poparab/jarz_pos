@@ -2782,13 +2782,18 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         limit=1,
     )
     if pending_ct:
+        # Take the accrued freight verbatim, INCLUDING zero. The payable this settlement clears
+        # was created by the Out-for-Delivery accrual JE (DR Freight / CR Creditors) for exactly
+        # this amount; substituting a territory-derived figure where nothing was accrued debits
+        # Creditors against a credit that does not exist and leaves the courier holding a phantom
+        # debit balance — and made this path disagree with the batch settlement, which nets the
+        # CT's shipping_amount unconditionally.
         ct_shipping = float(pending_ct[0].get("shipping_amount") or 0)
-        if ct_shipping > 0.0001 and abs(ct_shipping - shipping_exp) > 0.0001:
+        if abs(ct_shipping - shipping_exp) > 0.0001:
             frappe.logger().info(
                 f"DEBUG settle_courier_collected_payment: using courier transaction shipping {ct_shipping} instead of territory-derived {shipping_exp}"
             )
-        if ct_shipping > 0.0001:
-            shipping_exp = ct_shipping
+        shipping_exp = ct_shipping
 
         # The courier collected exactly what was accrued on its transaction — not necessarily
         # the invoice grand total. Reading grand_total here is how this path drifted from the
@@ -2810,7 +2815,10 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
             )
         order_amount = ct_amount
 
-    if shipping_exp <= 0:
+    # A courier transaction that accrued no freight settles fine — the courier hands over the
+    # collected cash and is owed nothing for the trip (DR Cash / CR Courier Outstanding). Only
+    # demand a configured expense when there is no transaction to read the answer from.
+    if shipping_exp <= 0 and not pending_ct:
         frappe.throw("No shipping expense configured")
 
     cash_acc = get_pos_cash_account(pos_profile, company)
