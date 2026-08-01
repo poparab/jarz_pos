@@ -127,6 +127,9 @@ jobs:
             test_cancellation_guards
             test_invoice_return
             test_accounting_guards
+            test_api_manufacturing_precheck
+            test_production_planning
+            test_api_production
           )
           rc=0
           for m in "${MODULES[@]}"; do

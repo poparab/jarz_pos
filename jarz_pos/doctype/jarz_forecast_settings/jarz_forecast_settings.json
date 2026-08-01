@@ -9,6 +9,8 @@
   "watch_days_threshold",
   "overstock_days_threshold",
   "slow_mover_days",
+  "production_section",
+  "default_target_days_of_cover",
   "email_section",
   "digest_recipients",
   "digest_send_time",
@@ -50,6 +52,19 @@
    "label": "Slow Mover Window (Days)"
   },
   {
+   "fieldname": "production_section",
+   "fieldtype": "Section Break",
+   "label": "Production Planning"
+  },
+  {
+   "default": "7",
+   "description": "Days of demand a production batch should cover. Drives the suggested quantity on the Production Board. Per-item overrides live on Item → Target Days of Cover.",
+   "fieldname": "default_target_days_of_cover",
+   "fieldtype": "Int",
+   "label": "Default Target Days of Cover",
+   "non_negative": 1
+  },
+  {
    "fieldname": "email_section",
    "fieldtype": "Section Break",
    "label": "Email Settings"
@@ -82,7 +97,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-09 12:00:00",
+ "modified": "2026-08-01 00:00:00",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Forecast Settings",

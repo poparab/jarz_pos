@@ -371,6 +371,60 @@ def _assert_material_availability(line: Dict[str, Any], company: str) -> None:
     )
 
 
+def _resolve_build_basket_rollup():
+    """Deferred import keeps ``production_planning`` free to reach back here."""
+    from jarz_pos.services.production_planning import build_basket_rollup
+
+    return build_basket_rollup
+
+
+def _get_basket_shortages(lines: List[Dict[str, Any]], company: str) -> List[Dict[str, Any]]:
+    """Raw-material shortages across the WHOLE basket, not line by line.
+
+    ``_assert_material_availability`` measures each line against the same
+    available quantity, so two lines drawing on one pile of flour could both
+    pass and the pair still bust the warehouse.  Worse, the submit loop commits
+    per line — line 1 succeeds and consumes the stock, then line 2 fails with a
+    raw ERPNext error and the operator finds out from a "3 of 5" dialog.
+    """
+    try:
+        return _resolve_build_basket_rollup()(lines, company).get("shortages") or []
+    except Exception:
+        # Never let the aggregate check block a submit the per-line checks
+        # would have allowed — it is an extra guard, not a new gate.
+        frappe.log_error(
+            title="JARZ – basket precheck failed",
+            message=f"lines={lines}\ncompany={company}\n{frappe.get_traceback()}",
+        )
+        return []
+
+
+def _format_basket_shortage_message(shortages: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for row in shortages:
+        label = _format_precheck_issue(row.get("item_name") or row["item_code"], row["item_code"])
+        if row.get("reason") == "missing_source_warehouse":
+            parts.append(_("{0} has no source warehouse configured").format(label))
+            continue
+        parts.append(
+            _("{0} in Warehouse {1} is short by {2} {3} (required {4}, available {5})").format(
+                label,
+                row.get("source_warehouse") or "",
+                f"{float(row.get('missing_qty') or 0):.3f}",
+                row.get("uom") or DEFAULT_UOM,
+                f"{float(row.get('required_qty') or 0):.3f}",
+                f"{float(row.get('available_qty') or 0):.3f}",
+            )
+        )
+    return _("Combined material shortage across the batch: {0}").format("; ".join(parts))
+
+
+def _assert_basket_material_availability(lines: List[Dict[str, Any]], company: str) -> None:
+    shortages = _get_basket_shortages(lines, company)
+    if shortages:
+        frappe.throw(_format_basket_shortage_message(shortages))
+
+
 @frappe.whitelist()
 def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
     """List Items that have a default BOM, with basic info.
@@ -637,18 +691,58 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _coerce_flag(value: Any, *, default: bool) -> bool:
+    """Whitelisted args arrive as strings over HTTP, so ``"0"`` must be False."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("0", "false", "no", ""):
+        return False
+    if text in ("1", "true", "yes"):
+        return True
+    return default
+
+
 @frappe.whitelist()
-def submit_work_orders(lines: Any) -> Dict[str, Any]:
+def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
     """Create and submit Work Orders, then create Stock Entries for:
     - Material Transfer for Manufacture
     - Manufacture (to finish with same quantity)
 
     Args:
       lines: JSON/list of objects with keys: item_code, bom_name, item_qty, scheduled_at (optional ISO)
+      strict_basket: when true (default), reject the whole batch up front if the
+        lines are collectively short on a raw material, even where each line
+        passes on its own.
     Returns per-line results with created names or error.
     """
     _ensure_manager_access()
     lines = _coerce_lines(lines)
+
+    # Aggregate check first.  The per-line prechecks inside the loop below each
+    # measure against the same available stock, so a basket can pass line by
+    # line and still be short overall — and because the loop commits per line,
+    # discovering that halfway through leaves real stock consumed.
+    if _coerce_flag(strict_basket, default=True):
+        basket_company = _get_default_company()
+        for ln in lines:
+            company_for_line = _get_bom_company(ln.get("bom_name"))
+            if company_for_line:
+                basket_company = company_for_line
+                break
+
+        basket_shortages = _get_basket_shortages(lines, basket_company)
+        if basket_shortages:
+            message = _format_basket_shortage_message(basket_shortages)
+            return {
+                "results": [{"ok": False, "error": message, "line": ln} for ln in lines],
+                "basket_shortages": basket_shortages,
+            }
+
     results: List[Dict[str, Any]] = []
     release_savepoint = getattr(frappe.db, "release_savepoint", None)
     for index, ln in enumerate(lines):
@@ -739,7 +833,9 @@ def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, sch
         "item_qty": float(item_qty),
         "scheduled_at": scheduled_at,
     }
-    out = submit_work_orders([line])
+    # One line cannot conflict with itself, so the aggregate pass would only
+    # re-explode the same BOM the per-line precheck already handles.
+    out = submit_work_orders([line], strict_basket=False)
     try:
         if isinstance(out, dict) and isinstance(out.get("results"), list) and out["results"]:
             first = out["results"][0]

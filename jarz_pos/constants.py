@@ -42,6 +42,14 @@ class ROLES:
     JARZ_LINE_MANAGER = "jarz line manager"
     ADMINISTRATOR = "Administrator"
     SYSTEM_MANAGER = "System Manager"
+    PRODUCTION_OPERATOR = "Production Operator"
+    # Read-only access to the Production Board.  Deliberately WIDER than
+    # MANUFACTURING: the mobile screen has always been gated client-side on
+    # "JARZ Manager", which MANUFACTURING does not contain — so a
+    # JARZ-Manager-only user could open the screen and then hit
+    # PermissionError on every call.  Widening MANUFACTURING itself would
+    # change who may submit Work Orders, so the read path gets its own set.
+    PRODUCTION_VIEW = MANUFACTURING | {JARZ_MANAGER}
 
 
 # ── WebSocket / realtime event names ────────────────────────────────────

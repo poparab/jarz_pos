@@ -284,3 +284,161 @@ class TestManufacturingPrecheck(unittest.TestCase):
         self.assertTrue(result["results"][0]["ok"])
         self.assertEqual("WIP - J", result["results"][0]["wip_warehouse"])
         self.assertEqual("Goods In Transit - J", result["results"][0]["fg_warehouse"])
+
+
+class TestBasketPrecheck(unittest.TestCase):
+    """The aggregate check that closes the per-line shortage hole.
+
+    Two lines drawing on one pile of flour could each pass their own precheck
+    and still bust the warehouse — and because the submit loop commits per
+    line, line 1 would already have consumed stock by the time line 2 failed.
+    """
+
+    LINES = [
+        {"item_code": "CAKE-A", "bom_name": "BOM-A", "item_qty": 10},
+        {"item_code": "CAKE-B", "bom_name": "BOM-B", "item_qty": 10},
+    ]
+
+    SHORTAGE = {
+        "item_code": "FLOUR",
+        "item_name": "Flour",
+        "uom": "Kg",
+        "source_warehouse": "Raw Material - J",
+        "required_qty": 12.0,
+        "available_qty": 10.0,
+        "missing_qty": 2.0,
+        "reason": "insufficient_stock",
+    }
+
+    def test_short_basket_fails_every_line_without_creating_any_work_order(self):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_basket_shortages", return_value=[self.SHORTAGE]
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order"
+        ) as mock_ensure_wo, patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se"
+        ) as mock_se, patch(
+            "jarz_pos.api.manufacturing._", new=lambda msg: msg
+        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            result = manufacturing.submit_work_orders(self.LINES)
+
+        # Nothing was created and nothing was committed.
+        mock_ensure_wo.assert_not_called()
+        mock_se.assert_not_called()
+        mock_frappe.db.savepoint.assert_not_called()
+        mock_frappe.db.commit.assert_not_called()
+
+        self.assertEqual(2, len(result["results"]))
+        self.assertTrue(all(r["ok"] is False for r in result["results"]))
+        self.assertEqual([self.SHORTAGE], result["basket_shortages"])
+        self.assertIn("FLOUR", result["results"][0]["error"])
+
+    def test_feasible_basket_proceeds_to_the_per_line_loop(self):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_basket_shortages", return_value=[]
+        ), patch(
+            "jarz_pos.api.manufacturing._assert_material_availability"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_mfg_defaults", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_work_order_warehouses", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order", side_effect=["WO-1", "WO-2"]
+        ) as mock_ensure_wo, patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se", return_value="STE-1"
+        ), patch(
+            "jarz_pos.api.manufacturing._set_work_order_actual_dates"
+        ), patch("jarz_pos.api.manufacturing.frappe"):
+            result = manufacturing.submit_work_orders(self.LINES)
+
+        self.assertEqual(2, mock_ensure_wo.call_count)
+        self.assertNotIn("basket_shortages", result)
+
+    def test_strict_basket_can_be_switched_off(self):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_basket_shortages"
+        ) as mock_shortages, patch(
+            "jarz_pos.api.manufacturing._assert_material_availability"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_mfg_defaults", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_work_order_warehouses", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order", return_value="WO-1"
+        ), patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se", return_value="STE-1"
+        ), patch(
+            "jarz_pos.api.manufacturing._set_work_order_actual_dates"
+        ), patch("jarz_pos.api.manufacturing.frappe"):
+            manufacturing.submit_work_orders(self.LINES, strict_basket=False)
+            # HTTP hands whitelisted args over as strings, so "0" must also mean off.
+            manufacturing.submit_work_orders(self.LINES, strict_basket="0")
+
+        mock_shortages.assert_not_called()
+
+    def test_single_work_order_path_skips_the_aggregate_pass(self):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_basket_shortages"
+        ) as mock_shortages, patch(
+            "jarz_pos.api.manufacturing._assert_material_availability"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_mfg_defaults", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_work_order_warehouses", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order", return_value="WO-1"
+        ), patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se", return_value="STE-1"
+        ), patch(
+            "jarz_pos.api.manufacturing._set_work_order_actual_dates"
+        ), patch("jarz_pos.api.manufacturing.frappe"):
+            manufacturing.submit_single_work_order("CAKE-A", "BOM-A", 10)
+
+        # One line cannot conflict with itself; re-exploding its BOM would be
+        # pure duplicated work on top of the per-line precheck.
+        mock_shortages.assert_not_called()
+
+    def test_a_broken_rollup_degrades_to_allowing_the_submit(self):
+        from jarz_pos.api import manufacturing
+
+        with patch(
+            "jarz_pos.api.manufacturing._resolve_build_basket_rollup",
+            side_effect=Exception("BOM explosion blew up"),
+        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            shortages = manufacturing._get_basket_shortages(self.LINES, "Jarz Co")
+
+        # It is an extra guard, not a new gate: a failure here must never block
+        # a submit the per-line prechecks would have allowed.
+        self.assertEqual([], shortages)
+        mock_frappe.log_error.assert_called_once()
+
+
+class TestCoerceFlag(unittest.TestCase):
+    def test_string_forms_http_actually_sends(self):
+        from jarz_pos.api import manufacturing
+
+        for value in (False, 0, "0", "false", "False", "no", ""):
+            self.assertFalse(manufacturing._coerce_flag(value, default=True), value)
+        for value in (True, 1, "1", "true", "True", "yes"):
+            self.assertTrue(manufacturing._coerce_flag(value, default=False), value)
+
+    def test_none_and_nonsense_fall_back_to_the_default(self):
+        from jarz_pos.api import manufacturing
+
+        self.assertTrue(manufacturing._coerce_flag(None, default=True))
+        self.assertFalse(manufacturing._coerce_flag(None, default=False))
+        self.assertTrue(manufacturing._coerce_flag("maybe", default=True))
