@@ -7,6 +7,7 @@ Only handles cart items - never treats shipping as an item.
 from __future__ import annotations
 import frappe
 import json
+import logging
 
 # Import from the refactored services
 from jarz_pos.services.invoice_creation import create_pos_invoice as _create_invoice
@@ -734,7 +735,15 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     # and buried real errors on production. Keep every field: when the single preview and the
     # batch "Settle All" view disagree, this line is what shows which branch above was taken.
     try:
-        frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site).info(
+        # setLevel is required, not decoration. frappe.get_logger() applies
+        # `frappe.log_level or default_log_level`, and default_log_level is ERROR on anything
+        # that is not a dev server (frappe/utils/logger.py) — so on staging and production a
+        # bare .info() (and .warning()) is discarded and the trace would vanish entirely
+        # rather than move. Ask for INFO explicitly so it actually lands in
+        # sites/<site>/logs/jarz_pos.api.invoices.log.
+        _trace_logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
+        _trace_logger.setLevel(logging.INFO)
+        _trace_logger.info(
             f"Settlement Preview Trace | Invoice: {inv.name} | "
             f"Status: {status_l} | Outstanding: {outstanding} | "
             f"is_unpaid: {is_unpaid} | is_paid: {is_paid} | "
