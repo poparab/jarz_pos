@@ -729,19 +729,21 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     if order_amount == 0 and shipping > 0:
         net_amount = -shipping
 
-    # Debug trace for diagnostics
+    # Diagnostic trace. This fires on EVERY preview, so it belongs in the app log, not the
+    # Error Log — as frappe.log_error it wrote one Error Log row per preview opened in the POS
+    # and buried real errors on production. Keep every field: when the single preview and the
+    # batch "Settle All" view disagree, this line is what shows which branch above was taken.
     try:
-        frappe.log_error(
-            title="Settlement Preview Trace",
-            message=(
-                f"Invoice: {inv.name}\n"
-                f"Status: {status_l} | Outstanding: {outstanding}\n"
-                f"is_unpaid: {is_unpaid} | is_paid: {is_paid}\n"
-                f"invoice_total: {invoice_total} | order_amount: {order_amount} | shipping: {shipping}\n"
-                f"net_amount: {net_amount} | CTs: {len(cts)}"
-            ),
+        frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site).info(
+            f"Settlement Preview Trace | Invoice: {inv.name} | "
+            f"Status: {status_l} | Outstanding: {outstanding} | "
+            f"is_unpaid: {is_unpaid} | is_paid: {is_paid} | "
+            f"invoice_total: {invoice_total} | order_amount: {order_amount} | shipping: {shipping} | "
+            f"net_amount: {net_amount} | CTs: {len(cts)}"
         )
     except Exception:
+        # Guards only the emission of the trace above — no business result is being swallowed
+        # here, so this cannot hide a failure the way a bare except around real logic would.
         pass
 
     paid_note = "Paid" if (is_paid and not paid_after_ofd) else ("Unpaid" if is_unpaid else status_l.capitalize() or "Unknown")
