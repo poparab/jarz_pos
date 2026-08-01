@@ -1,0 +1,261 @@
+{
+ "doctype": "DocType",
+ "name": "Jarz Recurring Expense",
+ "module": "jarz pos",
+ "custom": 0,
+ "istable": 0,
+ "editable_grid": 0,
+ "track_changes": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "naming_rule": "Naming Series",
+ "autoname": "naming_series:",
+ "is_submittable": 0,
+ "allow_copy": 1,
+ "allow_rename": 1,
+ "show_name_in_global_search": 1,
+ "index_web_pages_for_search": 1,
+ "engine": "InnoDB",
+ "title_field": "expense_name",
+ "field_order": [
+  "naming_series",
+  "expense_name",
+  "category",
+  "column_break_main",
+  "status",
+  "company",
+  "section_break_amount",
+  "amount",
+  "currency",
+  "frequency",
+  "column_break_amount",
+  "monthly_equivalent",
+  "day_of_month",
+  "section_break_accounting",
+  "expense_account",
+  "cost_center",
+  "column_break_accounting",
+  "supplier",
+  "default_paying_account",
+  "section_break_period",
+  "start_date",
+  "end_date",
+  "column_break_period",
+  "auto_repeat",
+  "section_break_notes",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Data",
+   "label": "Series",
+   "default": "JREXP-.#####",
+   "read_only": 1
+  },
+  {
+   "fieldname": "expense_name",
+   "fieldtype": "Data",
+   "label": "Expense Name",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "e.g. Warehouse Rent — Nasr City, Internet Line, Accounting Retainer"
+  },
+  {
+   "fieldname": "category",
+   "fieldtype": "Select",
+   "label": "Category",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "options": "Rent\nUtilities\nTelecom & Internet\nSoftware & Subscriptions\nProfessional Services\nMarketing\nMaintenance\nInsurance\nGovernment & Licenses\nContract Labor\nOther",
+   "description": "Employee salaries are NOT entered here — they are read live from HRMS payroll (Salary Structure Assignment)."
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "reqd": 1,
+   "default": "Active",
+   "options": "Active\nPaused\nEnded",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_amount",
+   "fieldtype": "Section Break",
+   "label": "Amount & Cadence"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Amount per Occurrence",
+   "options": "currency",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency"
+  },
+  {
+   "fieldname": "frequency",
+   "fieldtype": "Select",
+   "label": "Frequency",
+   "reqd": 1,
+   "default": "Monthly",
+   "options": "Monthly\nQuarterly\nSemi-Annual\nAnnual",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "column_break_amount",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "monthly_equivalent",
+   "fieldtype": "Currency",
+   "label": "Monthly Equivalent",
+   "options": "currency",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "Amount normalised to a monthly run-rate."
+  },
+  {
+   "fieldname": "day_of_month",
+   "fieldtype": "Int",
+   "label": "Due Day of Month",
+   "description": "1–31. Day the payment is normally due. Leave blank if it varies."
+  },
+  {
+   "fieldname": "section_break_accounting",
+   "fieldtype": "Section Break",
+   "label": "Accounting"
+  },
+  {
+   "fieldname": "expense_account",
+   "fieldtype": "Link",
+   "label": "Expense Account",
+   "options": "Account",
+   "reqd": 1,
+   "in_standard_filter": 1,
+   "description": "Ledger account this expense is booked to. Used to reconcile against the GL."
+  },
+  {
+   "fieldname": "cost_center",
+   "fieldtype": "Link",
+   "label": "Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "column_break_accounting",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "supplier",
+   "fieldtype": "Link",
+   "label": "Supplier / Vendor",
+   "options": "Supplier"
+  },
+  {
+   "fieldname": "default_paying_account",
+   "fieldtype": "Link",
+   "label": "Default Paying Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "section_break_period",
+   "fieldtype": "Section Break",
+   "label": "Active Period"
+  },
+  {
+   "fieldname": "start_date",
+   "fieldtype": "Date",
+   "label": "Start Date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "end_date",
+   "fieldtype": "Date",
+   "label": "End Date",
+   "description": "Leave blank for open-ended."
+  },
+  {
+   "fieldname": "column_break_period",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "auto_repeat",
+   "fieldtype": "Link",
+   "label": "Auto Repeat",
+   "options": "Auto Repeat",
+   "read_only": 1,
+   "description": "Optional link to an ERPNext Auto Repeat that actually posts this expense."
+  },
+  {
+   "fieldname": "section_break_notes",
+   "fieldtype": "Section Break",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "JARZ Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  }
+ ],
+ "links": [],
+ "actions": [],
+ "allow_import": 1
+}

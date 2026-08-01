@@ -145,6 +145,13 @@ workspaces = [
                 "color": "#2980b9"
             },
             {
+                "label": "Recurring Expenses",
+                "link_to": "recurring-expenses",
+                "type": "Page",
+                "icon": "fa fa-repeat",
+                "color": "#8e44ad"
+            },
+            {
                 "label": "Inventory Forecast",
                 "link_to": "Jarz Forecast Settings",
                 "type": "DocType",
