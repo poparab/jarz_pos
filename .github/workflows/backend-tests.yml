@@ -125,6 +125,7 @@ jobs:
             test_access_control
             test_realtime_scoping
             test_cancellation_guards
+            test_amendment_cart
             test_invoice_return
             test_accounting_guards
             test_api_manufacturing_precheck
