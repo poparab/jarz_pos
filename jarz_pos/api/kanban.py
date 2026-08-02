@@ -1044,10 +1044,14 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             "woo_order_id",
         ]
 
-        # Append pickup-related fields ONLY if they exist in meta to avoid SQL errors
+        # Append pickup-related fields ONLY if they exist in meta to avoid SQL errors.
+        # custom_no_courier rides along: the card zeroes the shipping expense for
+        # no-courier orders, and without the field that check silently never fires.
         try:
             si_meta = frappe.get_meta("Sales Invoice")
-            pickup_candidates = ["custom_is_pickup", "is_pickup", "pickup", "custom_pickup"]
+            pickup_candidates = [
+                "custom_is_pickup", "is_pickup", "pickup", "custom_pickup", "custom_no_courier",
+            ]
             for fn in pickup_candidates:
                 if si_meta.get_field(fn):
                     fields.append(fn)
@@ -1266,9 +1270,13 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 terr_ship["expense"] = override_amount
             elif si_shipping_expense > 0:
                 terr_ship["expense"] = si_shipping_expense
-            # Detect pickup and zero shipping amounts accordingly
+            # Detect pickup and zero shipping amounts accordingly. A no-courier order
+            # (Employee / Sample - No Courier) will never be handed to a courier, so
+            # there is no expense to forecast — same rule as _get_invoice_shipping_values.
+            # Unlike income there is no invoice-side record to read here: until dispatch
+            # writes custom_shipping_expense, the territory rate IS the expected payout.
             is_pickup = _is_pickup_invoice(inv)
-            if is_pickup:
+            if is_pickup or bool(inv.get("custom_no_courier")):
                 terr_ship = {"income": 0.0, "expense": 0.0}
 
             # Income shown on the card = what the invoice actually charged, so an
