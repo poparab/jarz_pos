@@ -50,11 +50,15 @@ try:
     from jarz_pos.utils.invoice_utils import (
         assert_pos_profile_matches_territory,
         format_invoice_data,
+        read_invoice_shipping_income,
         resolve_order_territory,
     )
 except Exception:
     def format_invoice_data(invoice_doc):  # type: ignore
         return {"name": getattr(invoice_doc, "name", None)}
+
+    def read_invoice_shipping_income(invoice_doc):  # type: ignore
+        return 0.0
 
     def assert_pos_profile_matches_territory(*args, **kwargs):  # type: ignore
         return None
@@ -906,7 +910,57 @@ def _build_invoice_amendment_request_id(
     return f"amd-{invoice_id}-{digest[:16]}"
 
 
-def _find_existing_amendment_invoice(source_invoice_id: str) -> Optional[str]:
+def _territory_default_delivery_income(territory_name: Optional[str]) -> Optional[float]:
+    """Return a Territory's configured delivery income, or None when unresolvable.
+
+    Used to tell a genuine per-order override apart from an order that simply
+    charged its territory's standard rate.
+    """
+    name = str(territory_name or "").strip()
+    if not name:
+        return None
+    try:
+        value = frappe.db.get_value("Territory", name, "delivery_income")
+    except Exception:
+        return None
+    return frappe.utils.flt(value) if value is not None else None
+
+
+def _resolve_amendment_delivery_income(
+    source_invoice: Any,
+    requested: Union[float, str, None],
+) -> Optional[float]:
+    """Return the delivery income override to carry into the replacement invoice.
+
+    ``requested`` follows the API contract:
+      * ``None`` (key absent) → preserve what the source invoice actually charged
+      * ``''`` (empty string) → explicitly clear, reverting to the territory default
+      * numeric               → use it (0 = free delivery, >0 = custom amount)
+
+    ``None`` is returned when the replacement should re-derive the income from its
+    territory rather than carry a pinned override.
+    """
+    if requested is not None and str(requested).strip() != "":
+        return frappe.utils.flt(requested)
+    if requested is not None:
+        return None  # explicit clear
+
+    # Deliberately NOT source_invoice.custom_delivery_income: that column is NOT NULL
+    # DEFAULT 0, so "never overridden" and "overridden to free" are the same stored 0.
+    # Reading it made every amendment that omitted the key silently drop the shipping
+    # income to zero. The invoice's own Shipping Income tax row is the only
+    # unambiguous record of what it charged.
+    actual_income = frappe.utils.flt(read_invoice_shipping_income(source_invoice))
+    territory_income = _territory_default_delivery_income(source_invoice.get("territory"))
+    # Charging exactly the territory rate means nothing was ever overridden. Leave it
+    # unset so the replacement re-derives it — otherwise every amended order would pin
+    # a stale rate, and moving the address to another territory would keep the old price.
+    if territory_income is not None and abs(actual_income - territory_income) < 0.005:
+        return None
+    return actual_income
+
+
+def _territory_default_delivery_income(territory_name: Optional[str]) -> Optional[float]:
     """Return the existing replacement invoice for a cancelled source invoice when present."""
     try:
         rows = frappe.get_all(
@@ -1181,18 +1235,9 @@ def _run_invoice_amendment_job(
     )
     effective_required_delivery_datetime = required_delivery_datetime or _derive_required_delivery_datetime(source_invoice)
     effective_delivery_end_datetime = delivery_end_datetime or _derive_delivery_end_datetime(source_invoice)
-    # Resolve effective delivery income override:
-    #   None (key absent)   → preserve the source invoice's existing override
-    #   '' (empty string)   → explicitly clear (revert to territory default)
-    #   float/numeric str   → use this value (0 = free delivery, >0 = custom amount)
-    _cdi_raw = custom_delivery_income
-    if _cdi_raw is None:
-        src_override = source_invoice.get("custom_delivery_income")
-        effective_custom_delivery_income: Union[float, None] = frappe.utils.flt(src_override) if src_override is not None else None
-    elif str(_cdi_raw).strip() == "":
-        effective_custom_delivery_income = None  # explicit clear → territory default
-    else:
-        effective_custom_delivery_income = frappe.utils.flt(_cdi_raw)
+    effective_custom_delivery_income = _resolve_amendment_delivery_income(
+        source_invoice, custom_delivery_income
+    )
     woo_order_id = source_invoice.get("woo_order_id")
     # Preserve commercial-policy / order purpose on amendment. Without this a B2B /
     # Employee / Sample replacement would silently revert to Standard accounting

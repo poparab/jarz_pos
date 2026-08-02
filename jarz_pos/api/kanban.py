@@ -51,9 +51,19 @@ try:
         format_invoice_data,
         apply_invoice_filters,
         sanitize_printable_text,
+        read_invoice_shipping_income,
     )
 except ImportError:
     # Fallback implementations if utils don't exist
+    def read_invoice_shipping_income(invoice: Any) -> float:
+        try:
+            for row in invoice.get("taxes") or []:
+                if str(row.get("description") or "").strip().lower().startswith("shipping income"):
+                    return float(row.get("tax_amount") or 0)
+        except Exception:
+            pass
+        return 0.0
+
     def get_address_details(address_name: str) -> str:
         if not address_name:
             return ""
@@ -626,27 +636,14 @@ def _get_territory_shipping_values(territory_name: str) -> Dict[str, float]:
     return {"income": income, "expense": expense}
 
 
-def _read_shipping_income_from_taxes(invoice: frappe.Document) -> Optional[float]:
+def _read_shipping_income_from_taxes(invoice: frappe.Document) -> float:
     """Read the actual shipping-income amount from the SI taxes table.
 
-    Returns the amount if a matching 'Shipping Income' tax row exists,
-    0.0 if the invoice has other tax rows but none is a shipping-income row
-    (meaning shipping was suppressed on the original), or None when the invoice
-    has no taxes at all (caller should fall back to the territory default).
+    Thin alias over the shared helper so the board, the order details and the
+    amendment flow all answer "what did this invoice actually charge?" the same
+    way.  See :func:`jarz_pos.utils.invoice_utils.read_invoice_shipping_income`.
     """
-    try:
-        taxes = invoice.get("taxes") or []
-        for row in taxes:
-            desc = str(row.get("description") or "").strip().lower()
-            if desc.startswith("shipping income"):
-                return float(row.get("tax_amount") or 0)
-        # Invoice has tax rows but none is shipping income → was suppressed.
-        if taxes:
-            return 0.0
-        # No taxes at all → could be a legacy invoice; fall back to territory.
-        return None
-    except Exception:
-        return None
+    return read_invoice_shipping_income(invoice)
 
 
 def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, Any]:
@@ -675,10 +672,9 @@ def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, Any]:
     elif persisted_expense > 0:
         shipping["expense"] = persisted_expense
 
-    # Income side: use what the SI actually carried, not the territory default.
-    actual_income = _read_shipping_income_from_taxes(invoice)
-    if actual_income is not None:
-        shipping["income"] = actual_income
+    # Income side: what the SI actually carried, never the territory default —
+    # the same value the Kanban card shows.
+    shipping["income"] = _read_shipping_income_from_taxes(invoice)
 
     # was_free_shipping: income is zero AND at least one linked Jarz Bundle
     # has free_shipping=1.  This flag is propagated to the Flutter client so
@@ -1236,7 +1232,9 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         except Exception:
             pass
 
-        # Batch-fetch actual shipping income from invoice tax rows (avoids territory-default mismatch).
+        # Batch-fetch the shipping income each invoice actually carried. An invoice with
+        # no such row charged nothing — see read_invoice_shipping_income for why there is
+        # no territory fallback.
         actual_shipping_income_map: Dict[str, float] = {}
         try:
             if invoices:
@@ -1244,10 +1242,11 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                     "Sales Taxes and Charges",
                     filters={
                         "parent": ["in", [inv.name for inv in invoices]],
+                        "parenttype": "Sales Invoice",
                         "description": ["like", "Shipping Income%"],
                     },
                     fields=["parent", "tax_amount"],
-                    limit=QUERY_LIMITS.KANBAN_INVOICES,
+                    limit=0,
                 )
                 for row in si_tax_rows:
                     actual_shipping_income_map[row["parent"]] = float(row.get("tax_amount") or 0)
@@ -1271,6 +1270,13 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             is_pickup = _is_pickup_invoice(inv)
             if is_pickup:
                 terr_ship = {"income": 0.0, "expense": 0.0}
+
+            # Income shown on the card = what the invoice actually charged, so an
+            # amended delivery income (including a deliberate 0) shows up immediately.
+            # Mirrors _get_invoice_shipping_values, which backs the order-details
+            # dialog — the two must never disagree. Pickup / no-courier / free-delivery
+            # orders need no special case: they carry no shipping row, hence 0.
+            card_shipping_income = actual_shipping_income_map.get(inv.name, 0.0)
 
             # Resolve customer phone (Customer -> primary Contact -> primary Address -> any Contact)
             customer_phone = _resolve_customer_phone(inv.get("customer") or "")
@@ -1327,7 +1333,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "total_taxes_and_charges": float(inv.total_taxes_and_charges or 0),
                 "full_address": sanitize_printable_text(invoice_addresses.get(inv.name, "")),
                 "items": invoice_items.get(inv.name, []),
-                "shipping_income": actual_shipping_income_map.get(inv.name, terr_ship.get("income", 0.0)),
+                "shipping_income": card_shipping_income,
                 "shipping_expense": terr_ship.get("expense", 0.0),
                 "has_unsettled_courier_txn": bool(has_unsettled),
                 "customer_phone": sanitize_printable_text(customer_phone),

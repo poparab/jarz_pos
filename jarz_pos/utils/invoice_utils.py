@@ -267,6 +267,30 @@ def _safe_float(value, fallback: float = 0.0) -> float:
         return fallback
 
 
+def read_invoice_shipping_income(invoice: Any) -> float:
+    """Return the shipping income a Sales Invoice actually carried.
+
+    The ``Shipping Income (<territory>)`` tax row is the whole story: a zero
+    delivery income injects no row at all (free-delivery bundle, a 0 override,
+    pickup, a no-courier policy), so no row means the customer was charged
+    nothing.  There is no territory fallback — the territory rate is what an
+    order *would* cost today, not what this one billed, and on staging 2,337 of
+    the 2,338 row-less POS invoices charged nothing whatsoever.
+
+    ``custom_delivery_income`` is deliberately not consulted: it is a NOT NULL
+    Currency column defaulting to 0, so a stored 0 cannot be told apart from
+    "never set".
+    """
+    try:
+        for row in invoice.get("taxes") or []:
+            description = str(row.get("description") or "").strip().lower()
+            if description.startswith("shipping income"):
+                return float(row.get("tax_amount") or 0)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _derive_bundle_group_metadata(
     bundle_code: str,
     item_code: str,
