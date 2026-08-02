@@ -2,11 +2,41 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, List
+from datetime import date as _date_cls, datetime as _datetime_cls
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
 from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
+
+# Fallbacks for the Jarz POS Settings fields the floor flow reads.  The Single
+# row reads empty until somebody saves it after a migrate, so every read has to
+# survive a blank.
+DEFAULT_MAX_BACKDATE_DAYS = 3
+# Statuses a Work Order can hold while a batch is physically on the bench.
+RUNNING_WORK_ORDER_STATUSES = ("Not Started", "In Process")
+# Float slack shared with the material precheck so the two agree at the
+# boundary instead of disagreeing by a float hair.
+QTY_TOLERANCE = 1e-9
+# The floor board shows what is open now, not a history; a cap keeps a
+# misconfigured client from asking for the whole Work Order table.
+MAX_RUNNING_WORK_ORDERS = 200
+# Core Work Order columns the running-batch board needs.
+RUNNING_WORK_ORDER_FIELDS = [
+    "name",
+    "production_item",
+    "item_name",
+    "qty",
+    "produced_qty",
+    "bom_no",
+    "status",
+    "wip_warehouse",
+    "fg_warehouse",
+    "stock_uom",
+    "material_transferred_for_manufacturing",
+]
+# Custom fields that only exist once the fixture has migrated.
+JARZ_WORK_ORDER_FIELDS = ["jarz_started_by", "jarz_started_at"]
 try:
     from frappe import _dict as FrappeDict  # type: ignore
 except Exception:  # pragma: no cover
@@ -35,6 +65,21 @@ try:
     from erpnext.stock.utils import get_latest_stock_qty  # type: ignore
 except Exception:  # pragma: no cover
     get_latest_stock_qty = None  # type: ignore
+
+
+def _debug_log(message: str) -> None:
+    """Floor-volume tracing.
+
+    Deliberately NOT ``frappe.log_error``: these fired on *every* call and at
+    production-floor volume (dozens of batches a shift) they would bury the real
+    failures in the Error Log.  Note the site log level defaults to ERROR on
+    staging/production, so this is silent there until somebody raises it — which
+    is the point.
+    """
+    try:
+        frappe.logger().debug(f"JARZ Manufacturing: {message}")
+    except Exception:
+        pass
 
 
 def _get_default_company() -> str:
@@ -120,7 +165,387 @@ def _get_bom_company(bom_name: str) -> str:
 def _resolve_scheduled_datetime(scheduled_at: Any):
     if scheduled_at:
         return get_datetime(scheduled_at)
-    return get_datetime(frappe.utils.now_datetime())
+    return get_datetime(_resolve_now_datetime())
+
+
+# ── frappe / ERPNext resolvers ──────────────────────────────────────────
+# Everything the Production Board flow reads from the database sits behind one
+# of these so a test patches a single symbol instead of the world.  Same
+# contract ``services/production_planning.py`` follows.
+
+
+def _resolve_now_datetime():
+    """The **server's** clock.
+
+    Load-bearing for ``_assert_posting_date_allowed``: if "today" came from the
+    client payload, changing a phone's date would walk straight through the
+    backdating gate.
+    """
+    return frappe.utils.now_datetime()
+
+
+def _resolve_user_roles() -> set:
+    try:
+        return set(frappe.get_roles())
+    except Exception:
+        return set()
+
+
+def _resolve_work_order_doc(work_order: str, for_update: bool = False):
+    """Load a Work Order, optionally taking a ``SELECT ... FOR UPDATE`` lock.
+
+    The lock is not decoration: two operators finishing the same batch from two
+    tablets is an ordinary Tuesday, and without it both read the same
+    ``material_transferred_for_manufacturing`` and both post a Manufacture entry.
+    """
+    if for_update:
+        return frappe.get_doc("Work Order", work_order, for_update=True)
+    return frappe.get_doc("Work Order", work_order)
+
+
+def _resolve_valuation_rate(item_code: str, warehouse: Any = None) -> float:
+    """Valuation rate for a component, warehouse-specific where possible.
+
+    Returns ``0.0`` rather than raising for anything unpriced — the caller is
+    responsible for noticing that a whole batch valued at zero is suspicious.
+    """
+    if warehouse:
+        try:
+            rate = frappe.db.get_value(
+                "Bin", {"item_code": item_code, "warehouse": warehouse}, "valuation_rate"
+            )
+            if rate:
+                return float(rate)
+        except Exception:
+            pass
+    try:
+        return float(frappe.db.get_value("Item", item_code, "valuation_rate") or 0)
+    except Exception:
+        return 0.0
+
+
+def _resolve_stock_entry_detail_rows(work_order: str, purpose: str) -> List[Dict[str, Any]]:
+    """Submitted Stock Entry lines for one Work Order and one purpose."""
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT
+                se.name          AS stock_entry,
+                se.posting_date  AS posting_date,
+                sed.item_code    AS item_code,
+                sed.item_name    AS item_name,
+                sed.qty          AS qty,
+                sed.uom          AS uom,
+                sed.amount       AS amount,
+                sed.s_warehouse  AS s_warehouse,
+                sed.t_warehouse  AS t_warehouse
+            FROM `tabStock Entry Detail` sed
+            INNER JOIN `tabStock Entry` se ON se.name = sed.parent
+            WHERE se.work_order = %(work_order)s
+              AND se.docstatus = 1
+              AND se.purpose = %(purpose)s
+            ORDER BY se.posting_date, se.posting_time, sed.idx
+            """,
+            {"work_order": work_order, "purpose": purpose},
+            as_dict=True,
+        )
+        return [dict(r) for r in (rows or [])]
+    except Exception:
+        # Costing must never take the board down, but a silent zero would read
+        # as "this batch cost nothing" — so it is logged loudly.
+        frappe.log_error(
+            title="JARZ – batch cost query failed",
+            message=f"work_order={work_order} purpose={purpose}",
+        )
+        return []
+
+
+def _resolve_bom_cost(bom_name: Any) -> Optional[Dict[str, float]]:
+    """``{total_cost, quantity}`` for a BOM, or ``None`` when unreadable."""
+    if not bom_name:
+        return None
+    try:
+        row = frappe.db.get_value("BOM", bom_name, ["total_cost", "quantity"], as_dict=True)
+        if not row:
+            return None
+        return {
+            "total_cost": float(row.get("total_cost") or 0),
+            "quantity": float(row.get("quantity") or 0),
+        }
+    except Exception:
+        return None
+
+
+def _resolve_settings():
+    try:
+        return frappe.get_cached_doc("Jarz POS Settings")
+    except Exception:
+        return None
+
+
+def _resolve_update_work_order_status(work_order: str):
+    """Recompute and reload the Work Order status after a Stock Entry lands."""
+    doc = frappe.get_doc("Work Order", work_order)
+    if hasattr(doc, "update_status"):
+        doc.update_status()
+    doc.reload()
+    return doc
+
+
+def _resolve_wip_available_materials(work_order: str) -> List[Dict[str, Any]]:
+    """What is physically still sitting in WIP for this Work Order.
+
+    ERPNext already nets transferred-minus-consumed per (item, warehouse); no
+    reason to re-derive it and get the batch/serial handling subtly wrong.
+    """
+    getter = None
+    try:
+        getter = frappe.get_attr(
+            "erpnext.stock.doctype.stock_entry.stock_entry.get_available_materials"
+        )
+    except Exception:
+        getter = None
+    if not getter:
+        try:
+            import importlib
+
+            mod = importlib.import_module("erpnext.stock.doctype.stock_entry.stock_entry")
+            getter = getattr(mod, "get_available_materials", None)
+        except Exception:
+            getter = None
+    if not getter:
+        frappe.throw(_("Could not resolve ERPNext get_available_materials helper"))
+
+    rows: List[Dict[str, Any]] = []
+    for key, data in (getter(work_order) or {}).items():
+        try:
+            item_code, warehouse = key
+        except Exception:
+            continue
+        raw_qty = getattr(data, "qty", None)
+        if raw_qty is None and isinstance(data, dict):
+            raw_qty = data.get("qty")
+        qty = _flt(raw_qty)
+        if qty <= QTY_TOLERANCE:
+            continue
+        rows.append({"item_code": item_code, "warehouse": warehouse, "qty": qty})
+    return rows
+
+
+def _resolve_work_order_source_warehouses(work_order: str) -> Dict[str, str]:
+    """``item_code -> source_warehouse`` from the Work Order Item table."""
+    try:
+        rows = frappe.get_all(
+            "Work Order Item",
+            filters={"parent": work_order, "parenttype": "Work Order"},
+            fields=["item_code", "source_warehouse"],
+        )
+    except Exception:
+        return {}
+    out: Dict[str, str] = {}
+    for row in rows or []:
+        try:
+            if row.get("source_warehouse"):
+                out[row["item_code"]] = row["source_warehouse"]
+        except Exception:
+            continue
+    return out
+
+
+# ── Settings readers ────────────────────────────────────────────────────
+# Blank/unsaved Single rows and mocked frappe objects both have to degrade to
+# the documented default rather than blowing up mid-batch.
+
+
+def _setting_raw(fieldname: str) -> Any:
+    try:
+        return getattr(_resolve_settings(), fieldname, None)
+    except Exception:
+        return None
+
+
+def _setting_int(fieldname: str, default: int) -> int:
+    try:
+        return int(_setting_raw(fieldname))
+    except (TypeError, ValueError):
+        return default
+
+
+def _setting_float(fieldname: str, default: float) -> float:
+    try:
+        return float(_setting_raw(fieldname))
+    except (TypeError, ValueError):
+        return default
+
+
+def _setting_flag(fieldname: str, default: bool = False) -> bool:
+    raw = _setting_raw(fieldname)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes")
+    return default
+
+
+# ── Production Board access gates ───────────────────────────────────────
+
+
+def _ensure_production_view_access() -> None:
+    roles = _resolve_user_roles()
+    if not roles.intersection(ROLES.PRODUCTION_VIEW):
+        frappe.throw(_("Not permitted: production access required"), frappe.PermissionError)
+
+
+def _ensure_production_execute_access() -> None:
+    roles = _resolve_user_roles()
+    if not roles.intersection(ROLES.PRODUCTION_EXECUTE):
+        frappe.throw(_("Not permitted: production access required"), frappe.PermissionError)
+
+
+def _as_date(value: Any):
+    """Coerce anything date-ish to a ``datetime.date``, or ``None``.
+
+    Does not lean on ``frappe.utils.get_datetime`` alone: that import has a
+    fallback at the top of this module, and a posting-date guard that quietly
+    stops recognising dates would be a guard that stops guarding.
+    """
+    if isinstance(value, _datetime_cls):
+        return value.date()
+    if isinstance(value, _date_cls):
+        return value
+
+    try:
+        coerced = get_datetime(value)
+    except Exception:
+        coerced = None
+    if isinstance(coerced, _datetime_cls):
+        return coerced.date()
+    if isinstance(coerced, _date_cls):
+        return coerced
+
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return None
+    try:
+        return _datetime_cls.fromisoformat(text.replace(" ", "T")).date()
+    except ValueError:
+        return None
+
+
+def _assert_posting_date_allowed(scheduled_dt: Any) -> None:
+    """Gate *when* a batch may be posted.
+
+    Three rules, in order:
+      1. The future is never postable by anybody — stock that has not been made
+         must not exist, and a wrong tablet clock is the usual cause.
+      2. The past needs ``ROLES.PRODUCTION_BACKDATE``; operators are excluded.
+      3. Beyond ``production_max_backdate_days`` only a System Manager may go,
+         because that is the range that reaches a closed accounting period.
+
+    "Today" comes from ``_resolve_now_datetime()`` — the server clock — and never
+    from the caller's payload.
+    """
+    target = _as_date(scheduled_dt)
+    today = _as_date(_resolve_now_datetime())
+    if target is None or today is None:
+        frappe.throw(_("Could not resolve the production posting date"))
+        return
+
+    if target > today:
+        frappe.throw(
+            _("Production cannot be posted in the future (requested {0}, today is {1})").format(
+                target, today
+            )
+        )
+        return
+
+    if target == today:
+        return
+
+    roles = _resolve_user_roles()
+    if not roles.intersection(ROLES.PRODUCTION_BACKDATE):
+        frappe.throw(
+            _("Not permitted: backdated production requires a manager"), frappe.PermissionError
+        )
+        return
+
+    days_back = (today - target).days
+    max_days = max(0, _setting_int("production_max_backdate_days", DEFAULT_MAX_BACKDATE_DAYS))
+    if days_back > max_days and ROLES.SYSTEM_MANAGER not in roles:
+        frappe.throw(
+            _(
+                "Backdating more than {0} day(s) requires a System Manager "
+                "(requested {1} days back)"
+            ).format(max_days, days_back)
+        )
+
+
+def _price_batch_components(line: Dict[str, Any], company: str) -> Dict[str, Any]:
+    """Explode the BOM once and value it at current valuation rates."""
+    rows = _get_required_material_rows(line["bom_name"], company, float(line["item_qty"]))
+    priced: List[Dict[str, Any]] = []
+    total = 0.0
+    for row in rows:
+        rate = _resolve_valuation_rate(row["item_code"], row.get("source_warehouse"))
+        amount = float(row.get("required_qty") or 0) * rate
+        total += amount
+        priced.append(dict(row, valuation_rate=rate, estimated_amount=amount))
+    return {"components": priced, "total_value": total}
+
+
+def _assert_batch_value_within_threshold(
+    line: Dict[str, Any],
+    company: str,
+    priced: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Cap the material value one operator may commit in a single batch.
+
+    A limit of ``0`` means no limit.  Anybody in ``ROLES.MANUFACTURING`` bypasses
+    it outright — the cap exists to bound an operator mistake, not to slow a
+    manager down.
+
+    Returns the priced explosion so the caller does not pay for a second one.
+    """
+    if priced is None:
+        priced = _price_batch_components(line, company)
+
+    roles = _resolve_user_roles()
+    if roles.intersection(ROLES.MANUFACTURING):
+        return priced
+
+    limit = _setting_float("production_operator_batch_value_limit", 0.0)
+    if limit <= 0:
+        return priced
+
+    value = float(priced.get("total_value") or 0)
+    if value <= 0 and priced.get("components"):
+        # An item that has never been purchased carries valuation_rate 0, so a
+        # whole batch of them values at nothing and would sail under any
+        # threshold.  The check still passes (blocking production over missing
+        # master data would be worse) but it must not pass *quietly*.
+        frappe.log_error(
+            title="JARZ – batch value computed as zero",
+            message=(
+                f"item={line.get('item_code')} bom={line.get('bom_name')} "
+                f"qty={line.get('item_qty')} company={company}; "
+                f"{len(priced.get('components') or [])} component(s) all valued 0 — "
+                "the operator batch-value limit cannot bind on this batch."
+            ),
+        )
+        return priced
+
+    if value > limit:
+        frappe.throw(
+            _(
+                "This batch is worth {0} in materials, above the {1} limit for "
+                "operators. Ask a manager to start it."
+            ).format(f"{value:,.2f}", f"{limit:,.2f}")
+        )
+    return priced
 
 
 def _apply_posting_datetime(stock_entry: Any, scheduled_dt: Any) -> None:
@@ -574,10 +999,10 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt:
     creator = _resolve_make_stock_entry()
     if not creator:
         frappe.throw(_("Could not resolve ERPNext make_stock_entry helper"))
-    try:
-        frappe.log_error(title="JARZ – MFG debug", message=f"About to call make_stock_entry; creator={creator!r}; callable={callable(creator)}; purpose={purpose}; qty={qty}")
-    except Exception:
-        pass
+    _debug_log(
+        f"About to call make_stock_entry; creator={creator!r}; "
+        f"callable={callable(creator)}; purpose={purpose}; qty={qty}"
+    )
     try:
         se = creator(work_order, purpose, qty=qty)  # type: ignore
     except Exception as e:
@@ -593,13 +1018,9 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt:
         except Exception:
             pass
         raise
-    try:
-        frappe.log_error(
-            title="JARZ – MFG debug",
-            message=f"make_stock_entry() returned type={type(se)}; hasattr doctype={hasattr(se,'doctype')}"
-        )
-    except Exception:
-        pass
+    _debug_log(
+        f"make_stock_entry() returned type={type(se)}; hasattr doctype={hasattr(se, 'doctype')}"
+    )
     # Coerce return into a dict/document pair. frappe._dict has attribute access but is NOT a Document.
     is_document = isinstance(se, Document)
     is_mapping = isinstance(se, (dict, FrappeDict))
@@ -649,10 +1070,7 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt:
         except Exception:
             pass
         raise
-    try:
-        frappe.logger().info(f"JARZ Manufacturing: Submitted SE {name} for WO {work_order} ({purpose})")
-    except Exception:
-        pass
+    _debug_log(f"Submitted SE {name} for WO {work_order} ({purpose})")
     return name
 
 
@@ -749,10 +1167,7 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
         save_point = _build_submit_savepoint_name(index, ln)
         frappe.db.savepoint(save_point)
         try:
-            try:
-                frappe.log_error(title="JARZ – MFG start line", message=f"Line: {ln}")
-            except Exception:
-                pass
+            _debug_log(f"start line: {ln}")
             scheduled_dt = _resolve_scheduled_datetime(ln.get("scheduled_at"))
             # Always respect the BOM's company; fallback to default if missing
             company = _get_bom_company(ln["bom_name"]) or _get_default_company()
@@ -763,21 +1178,15 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
             resolved_defaults = _resolve_work_order_warehouses(ln, company, defaults)
 
             wo_name = _ensure_work_order(ln, company, defaults, scheduled_dt)
-            try:
-                frappe.log_error(title="JARZ – MFG WO created", message=f"WO: {wo_name}\nCompany: {company}\nWIP: {resolved_defaults.get('wip_warehouse')}\nFG: {resolved_defaults.get('fg_warehouse')}")
-            except Exception:
-                pass
+            _debug_log(
+                f"WO created: {wo_name}; company={company}; "
+                f"wip={resolved_defaults.get('wip_warehouse')}; fg={resolved_defaults.get('fg_warehouse')}"
+            )
             qty = float(ln["item_qty"])
             se1 = _make_and_submit_se(wo_name, "Material Transfer for Manufacture", qty, scheduled_dt)
-            try:
-                frappe.log_error(title="JARZ – MFG SE1 done", message=f"WO: {wo_name}\nSE1: {se1}")
-            except Exception:
-                pass
+            _debug_log(f"SE1 done for {wo_name}: {se1}")
             se2 = _make_and_submit_se(wo_name, "Manufacture", qty, scheduled_dt)
-            try:
-                frappe.log_error(title="JARZ – MFG SE2 done", message=f"WO: {wo_name}\nSE2: {se2}")
-            except Exception:
-                pass
+            _debug_log(f"SE2 done for {wo_name}: {se2}")
             # Refresh WO status; after Manufacture entry, it should be Completed when produced qty >= planned qty
             try:
                 _set_work_order_actual_dates(wo_name, scheduled_dt)
@@ -785,10 +1194,7 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
                 if hasattr(wo_doc, "update_status"):
                     wo_doc.update_status()
                 wo_doc.reload()
-                try:
-                    frappe.log_error(title="JARZ – MFG WO status", message=f"WO: {wo_name}\nStatus: {wo_doc.status}")
-                except Exception:
-                    pass
+                _debug_log(f"WO status for {wo_name}: {wo_doc.status}")
             except Exception:
                 pass
             results.append({
@@ -887,3 +1293,603 @@ def list_recent_work_orders(limit: int = 50) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Production Board — Stage 2: start / finish a batch on the floor
+# ══════════════════════════════════════════════════════════════════════════
+#
+# ``submit_work_orders`` / ``submit_single_work_order`` above stay exactly as
+# they are: they post the transfer AND the manufacture in one shot, which is
+# the "Quick produce" path for a manager recording something already made.
+#
+# The pair below splits that in two, because on a real floor the batch exists
+# for hours between those two events: the material is out of the store and the
+# cake is not made yet.  ``start`` posts the transfer only; ``finish`` posts
+# the manufacture, and only ``finish`` knows the quantity that actually came
+# out the other end.
+
+
+def _flt(value: Any, default: float = 0.0) -> float:
+    """``float()`` that degrades instead of raising on ``None``/junk/mocks."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_current_user() -> Any:
+    try:
+        return frappe.session.user
+    except Exception:
+        return None
+
+
+def _get_item_stock_uom(item_code: str) -> str:
+    try:
+        return _coerce_str(frappe.db.get_value("Item", item_code, "stock_uom")) or DEFAULT_UOM
+    except Exception:
+        return DEFAULT_UOM
+
+
+def _resolve_active_sop_stamp(item_code: str) -> str:
+    """``"SOP-0001#3"`` for the item's active SOP, or ``""`` when it has none.
+
+    Deferred import keeps this module independent of the SOP feature, and the
+    broad catch is deliberate: a batch must never fail to start because the SOP
+    lookup had a bad day.  The format comes from ``sop_rendering`` rather than
+    an f-string here so the writer and both readers cannot drift apart.
+    """
+    try:
+        from jarz_pos.services.sop_rendering import format_version_stamp
+
+        row = frappe.db.get_value(
+            "Jarz SOP",
+            {"item_code": item_code, "is_active": 1},
+            ["name", "version"],
+            as_dict=True,
+        )
+        if not row:
+            return ""
+        return format_version_stamp(row.get("name"), row.get("version"))
+    except Exception:
+        _debug_log(f"SOP stamp lookup failed for {item_code}")
+        return ""
+
+
+def _stamp_work_order(work_order: str, values: Dict[str, Any]) -> None:
+    """Write the Jarz floor-tracking fields onto a *submitted* Work Order.
+
+    ``db.set_value`` rather than a save: these are plain custom fields on a
+    submitted document, and ``update_modified=False`` keeps the write from
+    tripping a concurrent reader's timestamp check.
+
+    Failures are logged and swallowed on purpose.  By the time this runs the
+    Stock Entry is already submitted — raising here would hand the caller an
+    error for a batch that really did start, and the retry would transfer the
+    material twice.
+    """
+    try:
+        frappe.db.set_value("Work Order", work_order, values, update_modified=False)
+    except Exception:
+        frappe.log_error(
+            title="JARZ – work order stamp failed",
+            message=f"work_order={work_order} values={values}",
+        )
+
+
+def _elapsed_minutes(started_at: Any, now: Any = None) -> Optional[float]:
+    if not started_at:
+        return None
+    try:
+        start = get_datetime(started_at)
+        end = get_datetime(now if now is not None else _resolve_now_datetime())
+        return round((end - start).total_seconds() / 60.0, 1)
+    except Exception:
+        return None
+
+
+def _compute_batch_cost(
+    work_order: str,
+    produced_qty: Any = None,
+    bom_no: Any = None,
+) -> Dict[str, Any]:
+    """What the batch actually consumed, against what the BOM said it would.
+
+    ``material_cost`` is the sum of the submitted *transfer* Stock Entry lines —
+    everything that left the store for this Work Order.  Not the Manufacture
+    entry: that one is valued off the transfer anyway, and reading it would
+    double-count on a batch finished in two goes.
+
+    Every division is guarded.  ``produced_qty == 0`` (started, not yet
+    finished) and a BOM with no cost both return ``None`` rather than raising or
+    reporting a fake zero.
+    """
+    rows = _resolve_stock_entry_detail_rows(work_order, "Material Transfer for Manufacture")
+    material_cost = 0.0
+    for row in rows:
+        material_cost += _flt(row.get("amount"))
+
+    produced = _flt(produced_qty)
+    cost_per_unit = (material_cost / produced) if produced > 0 else None
+
+    standard_per_unit = None
+    bom = _resolve_bom_cost(bom_no)
+    if bom:
+        bom_qty = _flt(bom.get("quantity"))
+        bom_total = _flt(bom.get("total_cost"))
+        # A costed BOM is the whole point of the comparison; a BOM whose total
+        # cost is 0 has never been costed, and dividing it out would render as
+        # "100% over standard" on every batch.
+        if bom_qty > 0 and bom_total > 0:
+            standard_per_unit = bom_total / bom_qty
+
+    standard_cost = None
+    variance_amount = None
+    variance_pct = None
+    if standard_per_unit is not None and produced > 0:
+        standard_cost = standard_per_unit * produced
+        variance_amount = material_cost - standard_cost
+        if standard_cost > 0:
+            variance_pct = (variance_amount / standard_cost) * 100.0
+
+    return {
+        "work_order": work_order,
+        "bom_no": bom_no,
+        "produced_qty": produced,
+        "material_cost": material_cost,
+        "cost_per_unit": cost_per_unit,
+        "standard_per_unit": standard_per_unit,
+        "standard_cost": standard_cost,
+        "variance_amount": variance_amount,
+        "variance_pct": variance_pct,
+        "transfer_entries": sorted({r["stock_entry"] for r in rows if r.get("stock_entry")}),
+    }
+
+
+def _get_wip_leftover_rows(work_order: str) -> List[Dict[str, Any]]:
+    """Material still physically in WIP for this Work Order.
+
+    ERPNext's own reconciliation only counts the three manufacturing purposes,
+    so a plain ``Material Transfer`` back out of WIP stays invisible to it.  Our
+    own returns are therefore netted off here — otherwise a second call would
+    cheerfully try to move stock that already went back to the store.
+    """
+    returned: Dict[Any, float] = {}
+    for row in _resolve_stock_entry_detail_rows(work_order, "Material Transfer"):
+        key = (row.get("item_code"), row.get("s_warehouse"))
+        returned[key] = returned.get(key, 0.0) + _flt(row.get("qty"))
+
+    out: List[Dict[str, Any]] = []
+    for row in _resolve_wip_available_materials(work_order):
+        remaining = _flt(row.get("qty")) - returned.get((row.get("item_code"), row.get("warehouse")), 0.0)
+        if remaining > QTY_TOLERANCE:
+            out.append(dict(row, qty=remaining))
+    return out
+
+
+@frappe.whitelist()
+def start_production_batch(
+    item_code: str,
+    bom_name: str,
+    item_qty: Any,
+    scheduled_at: str | None = None,
+    wip_warehouse: str | None = None,
+    fg_warehouse: str | None = None,
+) -> Dict[str, Any]:
+    """Open a batch: create the Work Order and move its materials into WIP.
+
+    Posts **exactly one** Stock Entry — ``Material Transfer for Manufacture``.
+    The ``Manufacture`` entry belongs to :func:`finish_production_batch` and
+    posting it here would just re-create the quick-produce path this endpoint
+    exists to replace.
+    """
+    _ensure_production_execute_access()
+
+    item_code = _coerce_str(item_code)
+    bom_name = _coerce_str(bom_name)
+    if not item_code:
+        frappe.throw(_("item_code is required"))
+    if not bom_name:
+        frappe.throw(_("bom_name is required"))
+
+    qty = _flt(item_qty)
+    if qty <= 0:
+        frappe.throw(_("Quantity to produce must be greater than zero"))
+
+    line: Dict[str, Any] = {
+        "item_code": item_code,
+        "bom_name": bom_name,
+        "item_qty": qty,
+        "wip_warehouse": _coerce_str(wip_warehouse) or None,
+        "fg_warehouse": _coerce_str(fg_warehouse) or None,
+    }
+
+    company = _get_bom_company(bom_name) or _get_default_company()
+    if not company:
+        frappe.throw(_("Company is not configured on BOM and no Default Company set"))
+
+    scheduled_dt = _resolve_scheduled_datetime(scheduled_at)
+    _assert_posting_date_allowed(scheduled_dt)
+    _assert_material_availability(line, company)
+    # Priced once and reused for the response — a second BOM explosion here
+    # would double the cost of every start.
+    priced = _assert_batch_value_within_threshold(line, company)
+
+    defaults = _get_mfg_defaults(company)
+    resolved = _resolve_work_order_warehouses(line, company, defaults)
+    wo_name = _ensure_work_order(line, company, defaults, scheduled_dt)
+    _debug_log(f"batch start: WO {wo_name} for {item_code} x{qty}")
+
+    material_transfer = _make_and_submit_se(
+        wo_name, "Material Transfer for Manufacture", qty, scheduled_dt
+    )
+
+    stamp_values: Dict[str, Any] = {
+        "jarz_started_by": _resolve_current_user(),
+        "jarz_started_at": scheduled_dt,
+    }
+
+    # Pin the SOP version this batch was actually made by.
+    #
+    # Without it, `get_sop_for_work_order` falls back to whatever SOP is active
+    # *now*, so editing an SOP silently rewrites the method every past batch was
+    # made by — and `Jarz SOP.validate`'s "already used in production" guard,
+    # which matches on `jarz_sop_version LIKE '<name>#%'`, never fires either.
+    # Never fail a batch over this: an unstamped Work Order degrades to the
+    # active SOP, which is exactly the old behaviour.
+    sop_stamp = _resolve_active_sop_stamp(item_code)
+    if sop_stamp:
+        stamp_values["jarz_sop_version"] = sop_stamp
+
+    _stamp_work_order(wo_name, stamp_values)
+
+    try:
+        wo_doc = _resolve_work_order_doc(wo_name)
+    except Exception:
+        wo_doc = None
+
+    return {
+        "work_order": wo_name,
+        "material_transfer": material_transfer,
+        "status": getattr(wo_doc, "status", None),
+        "planned_qty": qty,
+        "uom": _get_item_stock_uom(item_code),
+        "wip_warehouse": getattr(wo_doc, "wip_warehouse", None) or resolved.get("wip_warehouse"),
+        "fg_warehouse": getattr(wo_doc, "fg_warehouse", None) or resolved.get("fg_warehouse"),
+        "estimated_material_cost": _flt(priced.get("total_value")),
+        "company": company,
+        "scheduled_at": str(scheduled_dt),
+        "components": [
+            {
+                "item_code": c["item_code"],
+                "item_name": c.get("item_name") or c["item_code"],
+                "uom": c.get("uom") or DEFAULT_UOM,
+                "required_qty": _flt(c.get("required_qty")),
+                "source_warehouse": c.get("source_warehouse"),
+                "valuation_rate": _flt(c.get("valuation_rate")),
+                "estimated_amount": _flt(c.get("estimated_amount")),
+            }
+            for c in (priced.get("components") or [])
+        ],
+    }
+
+
+@frappe.whitelist()
+def finish_production_batch(
+    work_order: str,
+    actual_qty: Any,
+    scrap_qty: Any = 0,
+    scheduled_at: str | None = None,
+    notes: str | None = None,
+) -> Dict[str, Any]:
+    """Close a batch: post the Manufacture entry for what was ACTUALLY made.
+
+    Scrap model, decided and implemented exactly as follows:
+
+    * ``actual_qty`` is the good output and is what drives the Manufacture
+      entry.  Not the planned quantity — a batch that yields 47 of a planned 50
+      must book 47, or finished-goods stock is a lie from the first shift.
+    * ``scrap_qty`` is recorded on the Work Order as a reported figure only.  It
+      posts no stock: routing it to a scrap warehouse needs per-item scrap items
+      that do not exist, and inventing them silently would be worse than a
+      number an operator can be asked about.
+    * Material transferred but not consumed stays in WIP and is surfaced as
+      ``wip_leftover_qty``.  :func:`return_wip_to_store` is how it gets home.
+    """
+    _ensure_production_execute_access()
+
+    work_order = _coerce_str(work_order)
+    if not work_order:
+        frappe.throw(_("work_order is required"))
+
+    # Row lock FIRST, before anything is read for a decision.  Two operators
+    # finishing the same batch from two tablets is an ordinary Tuesday; without
+    # the lock both read the same transferred quantity and both post.
+    wo = _resolve_work_order_doc(work_order, for_update=True)
+
+    if int(_flt(getattr(wo, "docstatus", 0))) != 1:
+        frappe.throw(_("Work Order {0} is not submitted").format(work_order))
+        return {}
+
+    transferred = _flt(getattr(wo, "material_transferred_for_manufacturing", 0))
+    if transferred <= 0:
+        frappe.throw(
+            _("Work Order {0} has no material in WIP — this batch was never started").format(
+                work_order
+            )
+        )
+        return {}
+
+    actual = _flt(actual_qty)
+    if actual <= 0:
+        frappe.throw(_("Produced quantity must be greater than zero"))
+        return {}
+
+    planned = _flt(getattr(wo, "qty", 0))
+    if (
+        planned > 0
+        and actual > planned + QTY_TOLERANCE
+        and not _setting_flag("production_allow_over_production", False)
+    ):
+        frappe.throw(
+            _(
+                "Produced quantity {0} is more than the planned {1}. "
+                "Over-production is switched off in Jarz POS Settings."
+            ).format(f"{actual:g}", f"{planned:g}")
+        )
+        return {}
+
+    produced_before = _flt(getattr(wo, "produced_qty", 0))
+    remaining = transferred - produced_before
+    if actual > remaining + QTY_TOLERANCE:
+        # Pre-validated here on purpose: ERPNext checks this deep inside the
+        # Stock Entry and throws a message about fg_completed_qty and
+        # over-production percentages that means nothing to somebody holding a
+        # tray. The operator gets ours instead.
+        frappe.throw(
+            _(
+                "Only {0} of this batch is still in WIP, but {1} was entered. "
+                "Transfer more material or reduce the quantity."
+            ).format(f"{remaining:g}", f"{actual:g}")
+        )
+        return {}
+
+    scrap = max(0.0, _flt(scrap_qty))
+    notes_text = notes if isinstance(notes, str) else None
+
+    scheduled_dt = _resolve_scheduled_datetime(scheduled_at)
+    _assert_posting_date_allowed(scheduled_dt)
+
+    # The ACTUAL quantity, never wo.qty.
+    manufacture_entry = _make_and_submit_se(work_order, "Manufacture", actual, scheduled_dt)
+    _debug_log(f"batch finish: WO {work_order} actual={actual} scrap={scrap}")
+
+    _stamp_work_order(
+        work_order,
+        {
+            "jarz_finished_by": _resolve_current_user(),
+            "jarz_finished_at": scheduled_dt,
+            "jarz_scrap_qty": scrap,
+            "jarz_batch_notes": notes_text,
+        },
+    )
+
+    try:
+        _set_work_order_actual_dates(work_order, scheduled_dt)
+    except Exception:
+        frappe.log_error(
+            title="JARZ – work order actual dates failed",
+            message=f"work_order={work_order}",
+        )
+
+    refreshed = None
+    try:
+        refreshed = _resolve_update_work_order_status(work_order)
+    except Exception:
+        frappe.log_error(
+            title="JARZ – work order status refresh failed",
+            message=f"work_order={work_order}",
+        )
+
+    produced_after = _flt(getattr(refreshed, "produced_qty", None)) or (produced_before + actual)
+    bom_no = getattr(refreshed, "bom_no", None) or getattr(wo, "bom_no", None)
+
+    return {
+        "work_order": work_order,
+        "manufacture_entry": manufacture_entry,
+        "actual_qty": actual,
+        "scrap_qty": scrap,
+        "status": getattr(refreshed, "status", None) or getattr(wo, "status", None),
+        "planned_qty": planned,
+        "produced_qty": produced_after,
+        "wip_leftover_qty": max(0.0, transferred - produced_after),
+        "cost": _compute_batch_cost(work_order, produced_qty=produced_after, bom_no=bom_no),
+    }
+
+
+@frappe.whitelist()
+def list_running_work_orders(limit: Any = 50) -> List[Dict[str, Any]]:
+    """Batches that are open on the floor right now.
+
+    "Running" means submitted, not yet complete, **and** with material actually
+    transferred into WIP.  That last clause is what separates a batch somebody
+    is standing over from a Work Order that was merely created.
+    """
+    _ensure_production_view_access()
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, MAX_RUNNING_WORK_ORDERS))
+
+    filters = {
+        "docstatus": 1,
+        "status": ["in", list(RUNNING_WORK_ORDER_STATUSES)],
+        "material_transferred_for_manufacturing": [">", 0],
+    }
+    rows = _fetch_running_work_orders(filters, limit)
+
+    now = _resolve_now_datetime()
+    out: List[Dict[str, Any]] = []
+    for r in rows or []:
+        transferred = _flt(r.get("material_transferred_for_manufacturing"))
+        produced = _flt(r.get("produced_qty"))
+        started_at = r.get("jarz_started_at")
+        out.append(
+            {
+                "name": r.get("name"),
+                "production_item": r.get("production_item"),
+                "item_name": r.get("item_name") or r.get("production_item"),
+                "qty": _flt(r.get("qty")),
+                "produced_qty": produced,
+                "bom_no": r.get("bom_no"),
+                "status": r.get("status"),
+                "jarz_started_by": r.get("jarz_started_by"),
+                "jarz_started_at": started_at,
+                "elapsed_minutes": _elapsed_minutes(started_at, now),
+                "wip_warehouse": r.get("wip_warehouse"),
+                "fg_warehouse": r.get("fg_warehouse"),
+                "stock_uom": r.get("stock_uom") or DEFAULT_UOM,
+                "material_transferred_qty": transferred,
+                # What is still sitting in WIP against this batch — the number
+                # that turns stranded material into something visible.
+                "wip_leftover_qty": max(0.0, transferred - produced),
+            }
+        )
+    return out
+
+
+def _fetch_running_work_orders(filters: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
+    try:
+        return frappe.get_all(
+            "Work Order",
+            filters=filters,
+            fields=RUNNING_WORK_ORDER_FIELDS + JARZ_WORK_ORDER_FIELDS,
+            order_by="jarz_started_at desc, modified desc",
+            limit=limit,
+        )
+    except Exception:
+        # The jarz_* custom fields land with a migrate.  A board that 500s in
+        # the window between deploy and migrate is worse than one missing two
+        # columns — but degrading silently is how a v16 rejection hid for a
+        # month last time, so this is logged loudly.
+        frappe.log_error(
+            title="JARZ – running work orders fell back",
+            message=f"jarz_* Work Order fields unavailable; filters={filters}",
+        )
+        return frappe.get_all(
+            "Work Order",
+            filters=filters,
+            fields=RUNNING_WORK_ORDER_FIELDS,
+            order_by="modified desc",
+            limit=limit,
+        )
+
+
+@frappe.whitelist()
+def get_batch_cost(work_order: str) -> Dict[str, Any]:
+    """Material cost of one batch against its BOM standard."""
+    _ensure_production_view_access()
+
+    work_order = _coerce_str(work_order)
+    if not work_order:
+        frappe.throw(_("work_order is required"))
+
+    wo = _resolve_work_order_doc(work_order)
+    return _compute_batch_cost(
+        work_order,
+        produced_qty=getattr(wo, "produced_qty", 0),
+        bom_no=getattr(wo, "bom_no", None),
+    )
+
+
+@frappe.whitelist()
+def return_wip_to_store(work_order: str) -> Dict[str, Any]:
+    """Send material that never got consumed back out of WIP.
+
+    Stranded WIP is the single biggest risk in splitting start from finish:
+    every short batch leaves the difference sitting in a warehouse nobody
+    counts, and without this it accumulates until someone does a stock take.
+    Manager-gated, because it is a stock correction rather than a floor action.
+
+    Posts a plain ``Material Transfer`` (WIP → each component's source
+    warehouse).  Deliberately NOT ``Material Consumption for Manufacture``: the
+    material is going back on the shelf, not into the product.
+    """
+    _ensure_manager_access()
+
+    work_order = _coerce_str(work_order)
+    if not work_order:
+        frappe.throw(_("work_order is required"))
+
+    wo = _resolve_work_order_doc(work_order, for_update=True)
+    if int(_flt(getattr(wo, "docstatus", 0))) != 1:
+        frappe.throw(_("Work Order {0} is not submitted").format(work_order))
+        return {}
+
+    leftover = _get_wip_leftover_rows(work_order)
+    if not leftover:
+        frappe.throw(_("Nothing is left in WIP for Work Order {0}").format(work_order))
+        return {}
+
+    sources = _resolve_work_order_source_warehouses(work_order)
+    fallback_source = _coerce_str(getattr(wo, "source_warehouse", "") or "")
+
+    items: List[Dict[str, Any]] = []
+    unplaced: List[str] = []
+    for row in leftover:
+        target = sources.get(row["item_code"]) or fallback_source
+        if not target:
+            unplaced.append(row["item_code"])
+            continue
+        if target == row["warehouse"]:
+            continue
+        items.append(
+            {
+                "item_code": row["item_code"],
+                "qty": row["qty"],
+                "s_warehouse": row["warehouse"],
+                "t_warehouse": target,
+            }
+        )
+
+    if unplaced:
+        frappe.throw(
+            _("No source warehouse is recorded for {0}, so it cannot be returned").format(
+                ", ".join(sorted(set(unplaced)))
+            )
+        )
+        return {}
+    if not items:
+        frappe.throw(_("Nothing is left in WIP for Work Order {0}").format(work_order))
+        return {}
+
+    now_dt = get_datetime(_resolve_now_datetime())
+    payload = {
+        "doctype": "Stock Entry",
+        "stock_entry_type": "Material Transfer",
+        "purpose": "Material Transfer",
+        "company": getattr(wo, "company", None),
+        # Linked for traceability. ERPNext explicitly preserves work_order on a
+        # plain Material Transfer, and leaves fg_completed_qty out of it, so the
+        # link changes no quantity on the Work Order.
+        "work_order": work_order,
+        "remarks": f"Jarz: WIP returned to store for Work Order {work_order}",
+        "items": items,
+    }
+    _apply_posting_datetime(payload, now_dt)
+
+    doc = frappe.get_doc(payload)
+    doc.flags.ignore_permissions = True
+    doc.insert()
+    doc.flags.ignore_permissions = True
+    doc.submit()
+    _debug_log(f"WIP return for {work_order}: {doc.name} ({len(items)} line(s))")
+
+    return {
+        "work_order": work_order,
+        "stock_entry": doc.name,
+        "returned_items": items,
+    }

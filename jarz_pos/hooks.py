@@ -8,7 +8,7 @@ app_license = "mit"
 # Fixtures
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
-        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead", "Opportunity"
+        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead", "Opportunity", "Work Order"
     ]]]},
     {"dt": "Jarz POS Settings"}
 ]
@@ -33,6 +33,12 @@ after_migrate = [
     "jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
     # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
     "jarz_pos.setup.crm_setup.ensure_crm_setup",
+    # Create the Production Operator role + role profile + doc perms (idempotent)
+    "jarz_pos.setup.production_setup.ensure_production_setup",
+    # Add the Production SOPs shortcut to the JARZ POS workspace (idempotent).
+    # The `workspaces` hook only applies at creation, so an existing workspace
+    # needs this the same way the forecast shortcut did.
+    "jarz_pos.utils.setup_production.ensure_production_workspace_shortcuts",
 ]
 
 # Apps

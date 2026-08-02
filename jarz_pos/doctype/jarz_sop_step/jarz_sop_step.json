@@ -1,0 +1,125 @@
+{
+ "actions": [],
+ "creation": "2026-08-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "step_no",
+  "title",
+  "instruction",
+  "image",
+  "section_break_timing",
+  "duration_mins",
+  "scaling_mode",
+  "column_break_timing",
+  "requires_confirmation",
+  "section_break_capture",
+  "capture_type",
+  "capture_label",
+  "column_break_capture",
+  "capture_min",
+  "capture_max"
+ ],
+ "fields": [
+  {
+   "description": "Renumbered automatically from the row order on every save.",
+   "fieldname": "step_no",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Step No",
+   "read_only": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title",
+   "reqd": 1
+  },
+  {
+   "description": "Use {{item:CODE}} for the live scaled quantity. Variants: {{item:CODE|qty}}, |name, |uom.",
+   "fieldname": "instruction",
+   "fieldtype": "Text Editor",
+   "label": "Instruction"
+  },
+  {
+   "fieldname": "image",
+   "fieldtype": "Attach Image",
+   "label": "Image"
+  },
+  {
+   "fieldname": "section_break_timing",
+   "fieldtype": "Section Break",
+   "label": "Timing"
+  },
+  {
+   "fieldname": "duration_mins",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Duration (mins)"
+  },
+  {
+   "default": "Fixed",
+   "description": "Fixed does not scale; Per Batch multiplies by the batch count; Per Unit multiplies by the units produced.",
+   "fieldname": "scaling_mode",
+   "fieldtype": "Select",
+   "label": "Scaling Mode",
+   "options": "Fixed\nPer Batch\nPer Unit"
+  },
+  {
+   "fieldname": "column_break_timing",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "requires_confirmation",
+   "fieldtype": "Check",
+   "label": "Requires Confirmation"
+  },
+  {
+   "fieldname": "section_break_capture",
+   "fieldtype": "Section Break",
+   "label": "Capture Point"
+  },
+  {
+   "default": "None",
+   "fieldname": "capture_type",
+   "fieldtype": "Select",
+   "label": "Capture Type",
+   "options": "None\nNumber\nPhoto\nTemperature"
+  },
+  {
+   "depends_on": "eval:doc.capture_type && doc.capture_type != 'None'",
+   "fieldname": "capture_label",
+   "fieldtype": "Data",
+   "label": "Capture Label"
+  },
+  {
+   "fieldname": "column_break_capture",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "A range is only enforced when Max is greater than Min; leave both at 0 for no bounds.",
+   "fieldname": "capture_min",
+   "fieldtype": "Float",
+   "label": "Capture Min"
+  },
+  {
+   "fieldname": "capture_max",
+   "fieldtype": "Float",
+   "label": "Capture Max"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz SOP Step",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

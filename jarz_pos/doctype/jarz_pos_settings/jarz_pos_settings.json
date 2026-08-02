@@ -34,7 +34,11 @@
   "column_break_vapid",
   "vapid_subject",
   "returns_section",
-  "enable_invoice_returns"
+  "enable_invoice_returns",
+  "production_section",
+  "production_max_backdate_days",
+  "production_operator_batch_value_limit",
+  "production_allow_over_production"
  ],
  "fields": [
   {
@@ -244,6 +248,34 @@
    "fieldname": "enable_invoice_returns",
    "fieldtype": "Check",
    "label": "Enable Invoice Returns"
+  },
+  {
+   "fieldname": "production_section",
+   "fieldtype": "Section Break",
+   "label": "Production Floor"
+  },
+  {
+   "default": "3",
+   "description": "How many days back a manager may post a production batch. Beyond this only a System Manager may go, because that is the range that reaches a closed accounting period. Operators can never backdate at all.",
+   "fieldname": "production_max_backdate_days",
+   "fieldtype": "Int",
+   "label": "Production Max Backdate Days",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "Largest material value (at valuation rate) one operator may commit in a single batch. 0 means no limit. Managers always bypass it.",
+   "fieldname": "production_operator_batch_value_limit",
+   "fieldtype": "Currency",
+   "label": "Operator Batch Value Limit",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "Allow finishing a batch with more good output than the Work Order planned. Off by default: a quantity above plan is far more often a typo than a genuine over-yield.",
+   "fieldname": "production_allow_over_production",
+   "fieldtype": "Check",
+   "label": "Allow Over-Production"
   }
  ],
  "index_web_pages_for_search": 0,

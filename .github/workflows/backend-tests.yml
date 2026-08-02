@@ -130,6 +130,12 @@ jobs:
             test_api_manufacturing_precheck
             test_production_planning
             test_api_production
+            test_api_manufacturing_start_finish
+            test_production_permissions
+            test_production_costing
+            test_sop_rendering
+            test_api_sop
+            test_doctype_jarz_sop
           )
           rc=0
           for m in "${MODULES[@]}"; do

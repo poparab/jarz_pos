@@ -49,7 +49,15 @@ class ROLES:
     # JARZ-Manager-only user could open the screen and then hit
     # PermissionError on every call.  Widening MANUFACTURING itself would
     # change who may submit Work Orders, so the read path gets its own set.
-    PRODUCTION_VIEW = MANUFACTURING | {JARZ_MANAGER}
+    PRODUCTION_VIEW = MANUFACTURING | {JARZ_MANAGER, PRODUCTION_OPERATOR}
+    # Start/finish a batch on the floor.  Same membership as PRODUCTION_VIEW
+    # today, but kept as its own name so tightening execution later (or opening
+    # the read path wider) does not require touching the other.
+    PRODUCTION_EXECUTE = MANUFACTURING | {JARZ_MANAGER, PRODUCTION_OPERATOR}
+    # Post a batch on an earlier date.  Operators are deliberately excluded:
+    # backdating is how stock and COGS land in a closed period, and the whole
+    # point of the floor role is that it cannot choose when a thing happened.
+    PRODUCTION_BACKDATE = MANUFACTURING | {JARZ_MANAGER}
 
 
 # ── WebSocket / realtime event names ────────────────────────────────────

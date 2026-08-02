@@ -1,0 +1,179 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-08-01 00:00:00.000000",
+ "description": "Standard Operating Procedure for producing one item. Steps are authored against a single BOM batch and scaled at read time.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "item_code",
+  "item_name",
+  "bom",
+  "column_break_head",
+  "version",
+  "is_active",
+  "yield_percent",
+  "section_break_process",
+  "prep_time_mins",
+  "column_break_process",
+  "equipment",
+  "section_break_steps",
+  "steps",
+  "section_break_notes",
+  "notes"
+ ],
+ "fields": [
+  {
+   "default": "SOP-.####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "SOP-.####",
+   "reqd": 1
+  },
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Item Code",
+   "options": "Item",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fetch_from": "item_code.item_name",
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Item Name",
+   "read_only": 1
+  },
+  {
+   "description": "Quantities in the instructions are exploded from this BOM. Leave blank to use the item's default BOM.",
+   "fieldname": "bom",
+   "fieldtype": "Link",
+   "label": "BOM",
+   "options": "BOM"
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "description": "Bump this and create a new record instead of editing a procedure that has already been run.",
+   "fieldname": "version",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Version",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "description": "Only one version per item stays active; activating this one deactivates the rest.",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Is Active"
+  },
+  {
+   "default": "100",
+   "description": "Expected good output as a percentage of the BOM quantity.",
+   "fieldname": "yield_percent",
+   "fieldtype": "Percent",
+   "label": "Yield %"
+  },
+  {
+   "fieldname": "section_break_process",
+   "fieldtype": "Section Break",
+   "label": "Process"
+  },
+  {
+   "description": "Set-up time before step 1, in minutes. Not included in the scaled step total.",
+   "fieldname": "prep_time_mins",
+   "fieldtype": "Int",
+   "label": "Prep Time (mins)"
+  },
+  {
+   "fieldname": "column_break_process",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Equipment needed for the whole procedure, one per line.",
+   "fieldname": "equipment",
+   "fieldtype": "Small Text",
+   "label": "Equipment"
+  },
+  {
+   "fieldname": "section_break_steps",
+   "fieldtype": "Section Break",
+   "label": "Steps"
+  },
+  {
+   "description": "Use {{item:CODE}} in an instruction to insert the live scaled quantity. Variants: {{item:CODE|qty}}, |name, |uom.",
+   "fieldname": "steps",
+   "fieldtype": "Table",
+   "label": "Steps",
+   "options": "Jarz SOP Step"
+  },
+  {
+   "fieldname": "section_break_notes",
+   "fieldtype": "Section Break",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Text Editor",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz SOP",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Manufacturing Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Production Operator"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "item_name",
+ "track_changes": 1
+}

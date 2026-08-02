@@ -1,0 +1,153 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-08-01 00:00:00.000000",
+ "description": "One operator capture (reading, photo, or confirmation) against one SOP step of one Work Order.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "work_order",
+  "sop",
+  "sop_version",
+  "column_break_head",
+  "step_no",
+  "title",
+  "section_break_capture",
+  "capture_type",
+  "value_float",
+  "value_text",
+  "attachment",
+  "column_break_capture",
+  "captured_by",
+  "captured_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "work_order",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Work Order",
+   "options": "Work Order",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "sop",
+   "fieldtype": "Link",
+   "label": "SOP",
+   "options": "Jarz SOP",
+   "search_index": 1
+  },
+  {
+   "description": "The exact stamped version the operator was reading, e.g. SOP-0001#3.",
+   "fieldname": "sop_version",
+   "fieldtype": "Data",
+   "label": "SOP Version"
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "step_no",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Step No"
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Step Title"
+  },
+  {
+   "fieldname": "section_break_capture",
+   "fieldtype": "Section Break",
+   "label": "Capture"
+  },
+  {
+   "fieldname": "capture_type",
+   "fieldtype": "Data",
+   "label": "Capture Type"
+  },
+  {
+   "fieldname": "value_float",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Value"
+  },
+  {
+   "fieldname": "value_text",
+   "fieldtype": "Data",
+   "label": "Value Text"
+  },
+  {
+   "fieldname": "attachment",
+   "fieldtype": "Attach",
+   "label": "Attachment"
+  },
+  {
+   "fieldname": "column_break_capture",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "captured_by",
+   "fieldtype": "Link",
+   "label": "Captured By",
+   "options": "User"
+  },
+  {
+   "fieldname": "captured_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Captured At"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz SOP Execution Log",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager"
+  },
+  {
+   "create": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Manufacturing Manager"
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Production Operator"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
