@@ -67,6 +67,8 @@ try:
 except Exception:
     _create_amendment_invoice = None  # type: ignore
 
+from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
+
 from jarz_pos.utils.access_control import (
     ensure_profile_scoped_invoice_access as _shared_ensure_profile_scoped_invoice_access,
     get_user_pos_profiles,
@@ -1585,7 +1587,7 @@ def _run_invoice_amendment_job(
 @frappe.whitelist(allow_guest=False)
 def submit_invoice_amendment(
     invoice_id: str,
-    cart_json: Any,
+    cart_json: Any = None,
     customer_name: Optional[str] = None,
     shipping_address_name: Optional[str] = None,
     pos_profile_name: Optional[str] = None,
@@ -1603,12 +1605,19 @@ def submit_invoice_amendment(
     expected_source_grand_total: Optional[float] = None,
     expected_source_item_count: Optional[int] = None,
     custom_delivery_income: Union[float, str, None] = None,
+    reuse_source_cart: Union[bool, int, str, None] = None,
 ) -> Dict[str, Any]:
-    """Supersede a submitted invoice and recreate it from the edited POS cart payload."""
+    """Supersede a submitted invoice and recreate it from the edited POS cart payload.
+
+    Pass ``reuse_source_cart`` (with no ``cart_json``) for amendments that change
+    only invoice-level data — delivery income, address, slot. The cart is then
+    rebuilt server-side from the persisted invoice rows, which reproduces bundles
+    exactly instead of relying on the client's lossy reconstruction.
+    """
     invoice_id = (invoice_id or "").strip()
     if not invoice_id:
         return {"success": False, "error": "invoice_id is required"}
-    if not cart_json:
+    if not cart_json and not _is_truthy_flag(reuse_source_cart):
         return {"success": False, "error": "cart_json is required"}
 
     source_invoice = frappe.get_doc("Sales Invoice", invoice_id)
@@ -1618,6 +1627,17 @@ def submit_invoice_amendment(
         action_label="invoice amendment",
         extra_profiles=[requested_profile] if requested_profile else None,
     )
+
+    if not cart_json:
+        try:
+            cart_json = json.dumps(build_amendment_cart_from_invoice(source_invoice))
+        except Exception as rebuild_error:
+            frappe.log_error(frappe.get_traceback(), f"Amendment cart rebuild failed for {invoice_id}")
+            return {
+                "success": False,
+                "error": str(rebuild_error) or _("This order could not be rebuilt automatically."),
+                "amendment_block_code": "cart_rebuild_failed",
+            }
 
     zero_shipping_override_enabled = _is_truthy_flag(zero_shipping_override)
     if zero_shipping_override_enabled:
