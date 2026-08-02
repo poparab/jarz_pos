@@ -960,7 +960,7 @@ def _resolve_amendment_delivery_income(
     return actual_income
 
 
-def _territory_default_delivery_income(territory_name: Optional[str]) -> Optional[float]:
+def _find_existing_amendment_invoice(source_invoice_id: str) -> Optional[str]:
     """Return the existing replacement invoice for a cancelled source invoice when present."""
     try:
         rows = frappe.get_all(

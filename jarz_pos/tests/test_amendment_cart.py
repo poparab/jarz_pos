@@ -8,6 +8,7 @@ rejected it with "expected 8 selection(s) from 'Medium', received 10".
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 def _row(**kwargs):
@@ -198,3 +199,36 @@ class TestAmendmentCartRebuild(unittest.TestCase):
 
         with self.assertRaises(frappe.ValidationError):
             build_amendment_cart_from_invoice(invoice)
+
+
+class TestAmendmentHelpers(unittest.TestCase):
+    """Test class for the small amendment helpers in jarz_pos.api.manager."""
+
+    def test_find_existing_amendment_invoice_returns_the_replacement(self):
+        """The idempotency guard: a retried amendment must find its earlier result."""
+        from jarz_pos.api import manager
+
+        with patch.object(manager.frappe, "get_all", return_value=["ACC-SINV-2026-17036"]):
+            found = manager._find_existing_amendment_invoice("ACC-SINV-2026-17035")
+
+        self.assertEqual(found, "ACC-SINV-2026-17036")
+
+    def test_find_existing_amendment_invoice_returns_none_when_unamended(self):
+        from jarz_pos.api import manager
+
+        with patch.object(manager.frappe, "get_all", return_value=[]):
+            self.assertIsNone(manager._find_existing_amendment_invoice("ACC-SINV-2026-17035"))
+
+    def test_territory_default_delivery_income_reads_the_territory(self):
+        from jarz_pos.api import manager
+
+        with patch.object(manager.frappe.db, "get_value", return_value=60.0) as get_value:
+            self.assertEqual(manager._territory_default_delivery_income("EGRSHEROUK"), 60.0)
+
+        get_value.assert_called_once_with("Territory", "EGRSHEROUK", "delivery_income")
+
+    def test_territory_default_delivery_income_handles_a_blank_territory(self):
+        from jarz_pos.api import manager
+
+        self.assertIsNone(manager._territory_default_delivery_income(""))
+        self.assertIsNone(manager._territory_default_delivery_income(None))
