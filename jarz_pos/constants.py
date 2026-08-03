@@ -58,6 +58,19 @@ class ROLES:
     # backdating is how stock and COGS land in a closed period, and the whole
     # point of the floor role is that it cannot choose when a thing happened.
     PRODUCTION_BACKDATE = MANUFACTURING | {JARZ_MANAGER}
+    # Raise an item request ("we're out of tomatoes").  Deliberately the widest
+    # set in this class: asking for stock commits no money and no stock, and a
+    # request flow only works if the people who actually notice a shortage —
+    # floor staff, line managers, cashiers — can file one.  Buying against a
+    # request stays on PURCHASE.
+    PURCHASE_REQUEST = (
+        PURCHASE
+        | PRODUCTION_VIEW
+        | {JARZ_MANAGER, JARZ_LINE_MANAGER, PRODUCTION_OPERATOR, "POS User", "POS Manager"}
+    )
+    # Review the whole request queue and reject entries.  Requesters see only
+    # their own branch's queue; this set sees and acts on everything.
+    PURCHASE_REQUEST_REVIEW = PURCHASE | {JARZ_MANAGER}
 
 
 # ── WebSocket / realtime event names ────────────────────────────────────

@@ -16,7 +16,11 @@ app_home = "/desk/jarz-pos"
 # Fixtures
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", [
-        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead", "Opportunity", "Work Order"
+        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead", "Opportunity", "Work Order",
+        # Purchasing: idempotency key on the invoice, requester/branch/note on
+        # the item request. Omitting a dt here means its fields silently never
+        # migrate, so this list must track the fixture file.
+        "Purchase Invoice", "Material Request"
     ]]]},
     {"dt": "Jarz POS Settings"}
 ]
@@ -45,6 +49,10 @@ after_migrate = [
     "jarz_pos.setup.crm_setup.ensure_crm_setup",
     # Create the Production Operator role + role profile + doc perms (idempotent)
     "jarz_pos.setup.production_setup.ensure_production_setup",
+    # Seed purchasing warehouse routing (idempotent, create-only). Keeps the
+    # "where does purchased stock land" table identical on staging and prod
+    # instead of being set by hand on each.
+    "jarz_pos.setup.purchase_setup.ensure_purchase_setup",
 ]
 
 # Apps

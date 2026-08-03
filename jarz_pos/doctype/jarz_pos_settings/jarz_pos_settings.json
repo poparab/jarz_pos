@@ -38,7 +38,14 @@
   "production_section",
   "production_max_backdate_days",
   "production_operator_batch_value_limit",
-  "production_allow_over_production"
+  "production_allow_over_production",
+  "purchase_section",
+  "default_purchase_warehouse",
+  "purchase_warehouse_routes",
+  "column_break_purchase",
+  "purchase_default_taxes_template",
+  "purchase_require_bill_no",
+  "purchase_request_schedule_days"
  ],
  "fields": [
   {
@@ -276,6 +283,51 @@
    "fieldname": "production_allow_over_production",
    "fieldtype": "Check",
    "label": "Allow Over-Production"
+  },
+  {
+   "fieldname": "purchase_section",
+   "fieldtype": "Section Break",
+   "label": "Purchasing"
+  },
+  {
+   "description": "Where purchased stock lands when nothing more specific applies. Resolution order per line: warehouse chosen on the line → the Item's own default warehouse for the company → the Item Group routes below → this warehouse. Set this to the raw-materials store, since that is what most purchases are.",
+   "fieldname": "default_purchase_warehouse",
+   "fieldtype": "Link",
+   "label": "Default Purchase Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "description": "Route purchases to a warehouse by Item Group — e.g. Raw Material → the raw-materials store, Consumable → the consumables store. The most specific matching group wins, so a child group overrides its parent.",
+   "fieldname": "purchase_warehouse_routes",
+   "fieldtype": "Table",
+   "label": "Purchase Warehouse Routes",
+   "options": "Jarz Purchase Warehouse Route"
+  },
+  {
+   "fieldname": "column_break_purchase",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Purchase Taxes and Charges Template applied to new purchases by default (e.g. the 14% VAT template). Leave blank for no default; the buyer can always change it.",
+   "fieldname": "purchase_default_taxes_template",
+   "fieldtype": "Link",
+   "label": "Default Purchase Taxes Template",
+   "options": "Purchase Taxes and Charges Template"
+  },
+  {
+   "default": "0",
+   "description": "Require the supplier's own invoice/bill number on every purchase. ERPNext already rejects a duplicate bill number for the same supplier, so turning this on makes that guard actually bite.",
+   "fieldname": "purchase_require_bill_no",
+   "fieldtype": "Check",
+   "label": "Require Supplier Bill Number"
+  },
+  {
+   "default": "3",
+   "description": "Default lead time in days for a team item request — used as the 'needed by' date when the requester does not pick one.",
+   "fieldname": "purchase_request_schedule_days",
+   "fieldtype": "Int",
+   "label": "Request Default Lead Days",
+   "non_negative": 1
   }
  ],
  "index_web_pages_for_search": 0,
