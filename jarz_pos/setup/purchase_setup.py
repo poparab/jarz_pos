@@ -101,6 +101,17 @@ def ensure_purchase_setup():
     if dirty:
         try:
             settings.flags.ignore_permissions = True
+            # Saving a Single revalidates *every* link on it, not just the two
+            # fields written here. Production's Jarz POS Settings carries a
+            # dangling cash_over_short_account (an account that exists on
+            # staging and not on prod), so a plain save raised
+            # LinkValidationError and this seeder silently did nothing there
+            # while succeeding on staging — the exact environment drift it was
+            # written to prevent. Every warehouse this function writes is
+            # existence- and usability-checked above, so skipping link
+            # validation here loses nothing and stops one unrelated stale field
+            # from blocking purchasing setup.
+            settings.flags.ignore_links = True
             settings.save()
         except Exception:
             frappe.log_error(frappe.get_traceback(), "purchase_setup: save failed")
