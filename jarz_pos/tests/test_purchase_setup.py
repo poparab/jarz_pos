@@ -118,7 +118,15 @@ def _exists(doctype, name):
 	return False
 
 
-def _get_value(doctype, name, fieldname=None, as_dict=False, **kwargs):
+def _get_value(doctype, name=None, fieldname=None, as_dict=False, filters=None, **kwargs):
+	# `name` is optional and `filters` is accepted as its alias because Frappe
+	# calls db.get_value both ways. The two failure-path tests below drive the
+	# code into frappe.log_error, which internally looks up the Error Log
+	# DocType as get_value(doctype=..., filters=..., fieldname="*") — a
+	# name-only signature raises TypeError there and the stub, not the code
+	# under test, becomes the thing that fails.
+	if name is None:
+		name = filters
 	if doctype == "Warehouse" and as_dict:
 		row = WAREHOUSES.get(name)
 		return dict(row) if row else None
@@ -130,6 +138,11 @@ class TestEnsurePurchaseSetup(unittest.TestCase):
 		patches = [
 			patch.object(purchase_setup.frappe.db, "exists", side_effect=_exists),
 			patch.object(purchase_setup.frappe.db, "get_value", side_effect=_get_value),
+			# The failure-path tests deliberately push the code into its except
+			# branch. Left unpatched, the real log_error would write an Error Log
+			# row to whatever site the suite is run against — a test asserting
+			# "this never raises" must not leave rows behind to prove it.
+			patch.object(purchase_setup.frappe, "log_error", lambda *a, **k: None),
 		]
 		for p in patches:
 			p.start()

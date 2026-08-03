@@ -139,6 +139,9 @@ jobs:
             test_sop_rendering
             test_api_sop
             test_doctype_jarz_sop
+            test_purchase_warehouse_utils
+            test_purchase_setup
+            test_purchase_request_links
           )
           rc=0
           for m in "${MODULES[@]}"; do
