@@ -78,6 +78,7 @@ from jarz_pos.utils.access_control import (
     get_user_pos_profiles,
     get_users_for_pos_profiles,
 )
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 from jarz_pos.utils.realtime import publish_invoice_event, publish_to_branches
 
 
@@ -2060,6 +2061,7 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
     fields = [
         "name", "customer", "customer_name", "posting_date", "posting_time", "grand_total", "net_total",
         "status", branch_filter_field, "custom_sales_invoice_state", "sales_invoice_state",
+        "woo_order_id",
     ]
     # Build filters
     filters: Dict[str, Any] = {
@@ -2096,6 +2098,7 @@ def get_manager_orders(branch: Optional[str] = None, state: Optional[str] = None
     for r in rows:
         invs.append({
             "name": r.get("name"),
+            "woo_order_id": normalize_woo_order_id(r.get("woo_order_id")),
             "customer": r.get("customer"),
             "customer_name": r.get("customer_name") or r.get("customer"),
             "posting_date": str(r.get("posting_date")),

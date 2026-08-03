@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import frappe
 from frappe import _
 from jarz_pos.constants import QUERY_LIMITS, STATUS, WS_EVENTS, ROLES
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 # Firebase Admin SDK for modern FCM V1 API
 try:
@@ -1326,6 +1327,7 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "invoice_id": invoice_id,
         "name": invoice_id,
+        "woo_order_id": normalize_woo_order_id(getattr(doc, "woo_order_id", None)),
         "customer_name": customer,
         "grand_total": float(getattr(doc, "grand_total", 0) or 0),
         "net_total": float(getattr(doc, "net_total", 0) or 0),
@@ -1838,6 +1840,12 @@ def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> D
         "title": display_payload.get("title", "") or "",
         "body": display_payload.get("body", "") or "",
     }
+
+    # FCM data values must all be strings, so the Woo id is stringified here and
+    # parsed back on the client. Omitted entirely for POS-native orders.
+    woo_order_id = normalize_woo_order_id(display_payload.get("woo_order_id"))
+    if woo_order_id is not None:
+        data["woo_order_id"] = str(woo_order_id)
 
     delivery_date = display_payload.get("delivery_date")
     if delivery_date:

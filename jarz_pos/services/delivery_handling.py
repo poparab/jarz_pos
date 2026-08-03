@@ -31,6 +31,7 @@ from jarz_pos.utils.courier_visibility import (
     resolve_assignment_pos_profile,
     resolve_courier_delivery_partner,
 )
+from jarz_pos.utils.invoice_utils import get_woo_order_ids, normalize_woo_order_id
 
 # ---------------------------------------------------------------------------
 # Delivery Note Auto-Creation Helper
@@ -1279,6 +1280,7 @@ def list_unconfirmed_online_orders(pos_profile: str | None = None) -> dict:
             "custom_courier_party",
             "pos_profile",
             "custom_kanban_profile",
+            "woo_order_id",
         ],
         order_by="custom_ofd_unconfirmed_since asc",
     )
@@ -1294,6 +1296,7 @@ def list_unconfirmed_online_orders(pos_profile: str | None = None) -> dict:
         orders.append(
             {
                 "invoice": row.get("name"),
+                "woo_order_id": normalize_woo_order_id(row.get("woo_order_id")),
                 "customer": row.get("customer"),
                 "customer_name": row.get("customer_name"),
                 "amount": float(row.get("grand_total") or 0),
@@ -1498,6 +1501,7 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
             WS_EVENTS.SALES_PARTNER_COLLECT_PROMPT,
             {
                 "invoice": inv.name,
+                "woo_order_id": normalize_woo_order_id(inv.get("woo_order_id")),
                 "sales_partner": sales_partner,
                 "amount": float(inv.grand_total or 0),
                 "outstanding": float(outstanding or 0),
@@ -3804,6 +3808,10 @@ def get_courier_balances():
             }
         return groups[key]
 
+    # Staff know these orders by their WooCommerce number, so every settlement
+    # screen labels the row with it. Fetched in one batch rather than per row.
+    woo_ids = get_woo_order_ids([r.get("reference_invoice") for r in rows])
+
     for r in rows:
         party_type = (r.get("party_type") or "").strip()
         party = (r.get("party") or "").strip()
@@ -3824,6 +3832,7 @@ def get_courier_balances():
         loc_label = _get_invoice_city(inv)
         grp["details"].append({
             "invoice": inv,
+            "woo_order_id": woo_ids.get(inv),
             "city": loc_label,
             "territory": loc_label,
             "amount": amt,

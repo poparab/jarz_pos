@@ -14,6 +14,7 @@ import frappe
 from frappe import _
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 
 def _ensure_elevated_access():
@@ -150,6 +151,7 @@ def get_master_orders(
         "status",
         branch_field,
         "pos_profile",
+        "woo_order_id",
     ]
     if state_field and state_field not in fields:
         fields.append(state_field)
@@ -163,6 +165,12 @@ def get_master_orders(
             ["customer_name", "like", f"%{search_term}%"],
             ["customer", "like", f"%{search_term}%"],
         ]
+        # Cards are labelled with the WooCommerce number, so that is what staff
+        # type. Exact match: woo_order_id is an Int, and a substring match on it
+        # would pull in unrelated orders.
+        woo_search = normalize_woo_order_id(search_term.lstrip("#").strip())
+        if woo_search is not None:
+            or_filters.append(["woo_order_id", "=", woo_search])
 
     # Count total and fetch paginated results
     offset = (page - 1) * page_size
@@ -211,6 +219,7 @@ def get_master_orders(
     for r in rows_raw:
         invoices.append({
             "name": r.get("name"),
+            "woo_order_id": normalize_woo_order_id(r.get("woo_order_id")),
             "customer": r.get("customer"),
             "customer_name": r.get("customer_name") or r.get("customer"),
             "posting_date": str(r.get("posting_date") or ""),

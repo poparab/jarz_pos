@@ -52,9 +52,16 @@ try:
         apply_invoice_filters,
         sanitize_printable_text,
         read_invoice_shipping_income,
+        normalize_woo_order_id,
     )
 except ImportError:
     # Fallback implementations if utils don't exist
+    def normalize_woo_order_id(value: Any) -> Optional[int]:
+        try:
+            return int(value or 0) or None
+        except (TypeError, ValueError):
+            return None
+
     def read_invoice_shipping_income(invoice: Any) -> float:
         try:
             for row in invoice.get("taxes") or []:
@@ -356,6 +363,13 @@ def _build_invoice_search_or_filters(
         {"customer_name": ["like", like]},
         {"customer": ["like", like]},
     ]
+
+    # The cards are labelled with the WooCommerce number, so that is what staff
+    # type in. Exact match, not LIKE: woo_order_id is an Int column and a
+    # substring match on it would surface unrelated orders.
+    woo_search = normalize_woo_order_id(search.lstrip("#").strip())
+    if woo_search is not None:
+        or_filters.append({"woo_order_id": woo_search})
 
     if customer_ids:
         or_filters.append({"customer": ["in", customer_ids]})

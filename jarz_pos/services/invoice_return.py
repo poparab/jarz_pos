@@ -64,6 +64,7 @@ from jarz_pos.services.delivery_handling import (
     _je_user_remark,
     update_submitted_sales_invoice_fields,
 )
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 # ── Journal Entry dedup types ────────────────────────────────────────────────
 # Deliberately distinct from every forward-flow token (OFD, COURIER_*,
@@ -358,6 +359,7 @@ def build_return_preview(invoice_id: str) -> Dict[str, Any]:
 
     return {
         "invoice_id": invoice_id,
+        "woo_order_id": normalize_woo_order_id(inv.get("woo_order_id")),
         "customer": inv.customer,
         "customer_name": inv.customer_name,
         "grand_total": flt(inv.grand_total),

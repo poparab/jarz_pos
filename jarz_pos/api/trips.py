@@ -22,6 +22,7 @@ from jarz_pos.utils.courier_visibility import (
     assert_courier_matches_pos_profile,
     assert_invoices_share_pos_profile,
 )
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 
 def _publish_trip_event(event: str, payload: dict, trip, *, pos_profile: str | None = None) -> None:
@@ -705,7 +706,7 @@ def get_trip_details(trip_name: str):
             "shipping_address_name", "customer_address",
             "custom_payment_method", "custom_delivery_date",
             "custom_delivery_time_from", "custom_delivery_duration",
-            "custom_delivery_slot_label",
+            "custom_delivery_slot_label", "woo_order_id",
         ]
         si_data = frappe.db.get_value(
             "Sales Invoice", row.invoice, si_fields, as_dict=True
@@ -763,6 +764,7 @@ def get_trip_details(trip_name: str):
         _st_name_ar = (_st_vals or {}).get("custom_territory_name_ar") or ""
         invoices.append({
             "invoice": row.invoice,
+            "woo_order_id": normalize_woo_order_id(si_data.get("woo_order_id")),
             "customer_name": row.customer_name,
             "territory": row.territory,
             "sub_territory": row.sub_territory,

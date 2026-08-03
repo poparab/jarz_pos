@@ -13,6 +13,7 @@ from frappe import _
 from frappe.utils import nowdate, get_first_day, get_last_day, getdate, date_diff
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.invoice_utils import get_woo_order_ids
 
 
 def _ensure_jarz_manager():
@@ -320,7 +321,10 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None):
     rejected = sum(1 for r in rows if r["status"] == "Rejected")
     pending = sum(1 for r in rows if r["status"] == "Pending")
 
+    woo_ids = get_woo_order_ids([r.get("invoice") for r in rows])
+
     for r in rows:
+        r["woo_order_id"] = woo_ids.get(r.get("invoice"))
         r["original_amount"] = float(r["original_amount"] or 0)
         r["requested_amount"] = float(r["requested_amount"] or 0)
         r["delta"] = float(r["delta"] or 0)

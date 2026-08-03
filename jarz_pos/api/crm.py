@@ -19,6 +19,8 @@ Design notes:
 
 import frappe
 
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
+
 # Canonical B2B stage options (must match the custom_b2b_stage Select field).
 B2B_STAGES = [
     "Lead",
@@ -251,7 +253,7 @@ def get_account(doctype, name):
             "customer": str | None,
             "predicted_next_order": str | None,
             "avg_order_cycle_days": float | None,
-            "recent_invoices": [ {"name","posting_date","grand_total","custom_order_purpose","status"} ],
+            "recent_invoices": [ {"name","woo_order_id","posting_date","grand_total","custom_order_purpose","status"} ],
             "open_todos": [ {"name","description","date"} ]
         }
     """
@@ -319,7 +321,7 @@ def _recent_b2b_invoices(customer, limit=10):
     try:
         if not _doctype_exists("Sales Invoice"):
             return []
-        fields = ["name", "posting_date", "grand_total", "status"]
+        fields = ["name", "posting_date", "grand_total", "status", "woo_order_id"]
         if _has_field("Sales Invoice", "custom_order_purpose"):
             fields.append("custom_order_purpose")
         rows = frappe.get_all(
@@ -339,6 +341,7 @@ def _recent_b2b_invoices(customer, limit=10):
             out.append(
                 {
                     "name": r.get("name"),
+                    "woo_order_id": normalize_woo_order_id(r.get("woo_order_id")),
                     "posting_date": _str_or_none(r.get("posting_date")),
                     "grand_total": r.get("grand_total"),
                     "custom_order_purpose": purpose,

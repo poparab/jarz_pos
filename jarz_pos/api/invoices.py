@@ -18,6 +18,7 @@ from jarz_pos.utils.access_control import (
     ensure_open_shift_for_invoice,
     ensure_profile_scoped_invoice_access,
 )
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +782,7 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
 
     return {
         "invoice": inv.name,
+        "woo_order_id": normalize_woo_order_id(inv.get("woo_order_id")),
         "party_type": party_type,
         "party": party,
     "order_amount": order_amount,

@@ -291,6 +291,51 @@ def read_invoice_shipping_income(invoice: Any) -> float:
     return 0.0
 
 
+def normalize_woo_order_id(value: Any) -> Optional[int]:
+    """Return the WooCommerce order id, or ``None`` when the order isn't a Woo order.
+
+    ``woo_order_id`` is an ``Int`` custom field on Sales Invoice, so an order that
+    never came from WooCommerce reads back as ``0``, not ``NULL``.  Every consumer
+    wants "no Woo id" to be absent rather than a zero that renders as ``#0``, so
+    the zero is collapsed here instead of at each call site.
+    """
+    try:
+        woo_id = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return woo_id or None
+
+
+def get_woo_order_ids(invoice_names) -> Dict[str, int]:
+    """Batch-map Sales Invoice name -> WooCommerce order id.
+
+    Only invoices that actually carry a Woo id appear in the result, so a plain
+    ``.get(name)`` yields ``None`` for POS-native orders.  Batched because the
+    callers are list endpoints (courier balances, trips, master orders) that
+    would otherwise issue one query per row.
+    """
+    names = [str(n).strip() for n in (invoice_names or []) if str(n or "").strip()]
+    if not names:
+        return {}
+
+    try:
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters={"name": ["in", list(set(names))]},
+            fields=["name", "woo_order_id"],
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Jarz POS get_woo_order_ids failed")
+        return {}
+
+    out: Dict[str, int] = {}
+    for row in rows:
+        woo_id = normalize_woo_order_id(row.get("woo_order_id"))
+        if woo_id is not None:
+            out[row.get("name")] = woo_id
+    return out
+
+
 def _derive_bundle_group_metadata(
     bundle_code: str,
     item_code: str,

@@ -9,6 +9,7 @@ from frappe import _
 from frappe.exceptions import PermissionError as FrappePermissionError
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 
 RECEIPT_STATUS_UNCONFIRMED = "Unconfirmed"
@@ -216,9 +217,11 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
                 invoice = frappe.get_doc('Sales Invoice', receipt['sales_invoice'])
                 receipt['customer_name'] = invoice.customer_name
                 receipt['invoice_id'] = invoice.name
+                receipt['woo_order_id'] = normalize_woo_order_id(invoice.get('woo_order_id'))
             except Exception:
                 receipt['customer_name'] = 'Unknown'
                 receipt['invoice_id'] = receipt['sales_invoice']
+                receipt['woo_order_id'] = None
 
             receipt['can_confirm'] = _has_payment_receipt_confirm_access(
                 receipt.get('pos_profile')
