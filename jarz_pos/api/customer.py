@@ -16,6 +16,7 @@ from jarz_pos.utils.customer_address_utils import (
     resolve_customer_shipping_address,
     set_customer_primary_shipping_address,
 )
+from jarz_pos.utils.invoice_utils import resolve_address_territory
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -1033,11 +1034,31 @@ def change_invoice_shipping_address(invoice_name, address_name):
 
         old_territory = str(inv.territory or "").strip()
         address_doc = frappe.get_doc("Address", address_name)
-        new_territory = str(address_doc.city or "").strip()  # city holds territory name by convention
 
-        # Validate the city/territory value actually exists as a Territory.
-        if new_territory and not frappe.db.exists("Territory", new_territory):
-            new_territory = old_territory  # fall back silently
+        # Resolve through the SAME helper order creation uses. Address.city only
+        # literally equals a Territory name when the POS wrote it; WooCommerce
+        # stores a free-text label ("Nasr City - مدينه نصر"), and the old
+        # `db.exists("Territory", city)` check failed on every one of those and
+        # silently kept the original territory — so the courier settled against
+        # the old address's rate after an address change.
+        resolved_territory = resolve_address_territory(address_name)
+        territory_resolved = bool(resolved_territory)
+        raw_city = str(address_doc.city or "").strip()
+
+        if territory_resolved:
+            new_territory = resolved_territory
+        else:
+            # Never silently pretend the territory is still right: keep the old
+            # value but tell the caller so the operator can fix the address.
+            new_territory = old_territory
+            # Error Log, not frappe.logger(): the default log level off a dev
+            # server is ERROR, so .warning() would never be seen.
+            frappe.log_error(
+                f"Invoice {invoice_name}: address {address_name} has city "
+                f"{raw_city!r}, which maps to no Territory. Kept "
+                f"{old_territory!r} and did NOT recompute shipping.",
+                "Address Territory Unresolved",
+            )
 
         territory_changed = bool(new_territory and new_territory != old_territory)
 
@@ -1129,6 +1150,8 @@ def change_invoice_shipping_address(invoice_name, address_name):
         return {
             "success": True,
             "territory_changed": territory_changed,
+            "territory_resolved": territory_resolved,
+            "unresolved_city": "" if territory_resolved else raw_city,
             "old_territory": old_territory,
             "new_territory": new_territory if territory_changed else old_territory,
             "old_expense": old_expense,

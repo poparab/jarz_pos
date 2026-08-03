@@ -603,6 +603,60 @@ def _territory_lookup_candidates(value: Any) -> list[str]:
     return candidates
 
 
+# Arabic orthography varies between the Territory master and the free-text city
+# WooCommerce sends: "مدينه نصر" vs "مدينة نصر", "حدائق أكتوبر" vs "حدائق اكتوبر".
+# Folding these away recovers 13 of the 18 address labels that no exact match
+# could reach. Applied only after exact matching fails, and only when the folded
+# form maps to exactly one Territory, so it can turn "no match" into a match but
+# can never change an existing one.
+_ARABIC_DIACRITICS_RE = re.compile(r"[ً-ْٰـ]")
+_ARABIC_FOLD_MAP = str.maketrans({
+    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا",
+    "ة": "ه", "ى": "ي", "ؤ": "و", "ئ": "ي",
+})
+
+
+def _fold_territory_lookup_text(value: Any) -> str:
+    """Return a spelling-insensitive key for matching territory labels."""
+    text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
+    text = _ARABIC_DIACRITICS_RE.sub("", text)
+    text = text.translate(_ARABIC_FOLD_MAP)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _folded_territory_index() -> Dict[str, Optional[str]]:
+    """Map folded label → Territory name, or → None where the label is ambiguous.
+
+    Cached per request: it is only built when exact matching has already failed.
+    """
+    cached = getattr(frappe.local, "_jarz_folded_territory_index", None)
+    if cached is not None:
+        return cached
+
+    index: Dict[str, Optional[str]] = {}
+    try:
+        fields = ["name"] + [f for f in _TERRITORY_LOOKUP_FIELDS if _territory_has_column(f)]
+        for row in frappe.get_all("Territory", fields=fields, limit=0):
+            for fieldname in fields:
+                raw = _normalize_territory_lookup_text(row.get(fieldname))
+                if not raw:
+                    continue
+                for part in [raw, *_TERRITORY_LABEL_SEPARATOR_RE.split(raw, maxsplit=1)]:
+                    key = _fold_territory_lookup_text(part)
+                    if not key:
+                        continue
+                    if key in index and index[key] != row["name"]:
+                        index[key] = None  # ambiguous → refuse to guess
+                    elif key not in index:
+                        index[key] = row["name"]
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Folded territory index build failed")
+        index = {}
+
+    frappe.local._jarz_folded_territory_index = index
+    return index
+
+
 def _territory_has_column(fieldname: str) -> bool:
     try:
         return bool(frappe.db.has_column("Territory", fieldname))
@@ -650,6 +704,13 @@ def resolve_territory_name(territory_value: Any) -> Optional[str]:
             territory_name = _lookup_territory_by_field(fieldname, candidate)
             if territory_name:
                 return territory_name
+
+    # Last resort: spelling-insensitive match (see _folded_territory_index).
+    index = _folded_territory_index()
+    for candidate in candidates:
+        territory_name = index.get(_fold_territory_lookup_text(candidate))
+        if territory_name:
+            return territory_name
 
     return None
 

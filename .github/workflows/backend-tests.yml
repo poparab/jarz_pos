@@ -127,6 +127,7 @@ jobs:
             test_cancellation_guards
             test_amendment_cart
             test_shipping_income_resolution
+            test_territory_resolution
             test_invoice_return
             test_accounting_guards
             test_api_manufacturing_precheck
