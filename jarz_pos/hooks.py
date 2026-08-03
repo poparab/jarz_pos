@@ -39,6 +39,12 @@ before_migrate = [
 ]
 
 after_migrate = [
+    # Create the POS ledger accounts Jarz POS Settings names (idempotent,
+    # create-only). Runs FIRST: a settings field pointing at a non-existent
+    # account fails link validation for every later full save of that Single,
+    # which is how the purchasing seeder below silently did nothing on
+    # production while succeeding on staging.
+    "jarz_pos.setup.accounts_setup.ensure_pos_accounts",
     # Rebuild every Jarz Desk surface from jarz_pos.utils.setup_workspace (idempotent):
     # the JARZ POS workspace, the Jarz POS sidebar, and the additive Home entry.
     "jarz_pos.utils.setup_workspace.ensure_jarz_desk",
