@@ -1,4 +1,25 @@
-"""Canonical builder for the JARZ POS desk workspace.
+"""Canonical builder for the Jarz presence in the Desk.
+
+Three things, all rebuilt on every ``bench migrate``:
+
+1. the ``JARZ POS`` **Workspace** — the landing page itself (shortcuts + cards),
+2. the ``Jarz POS`` **Workspace Sidebar** — the sectioned nav rail beside it,
+3. an additive **Home** workspace entry — a tile and a card on the Desk landing
+   page, so Jarz is visible before you know which sidebar to pick.
+
+The Workspace and the Workspace Sidebar are separate records that Frappe v16
+renders together, and confusing them wastes an afternoon. The page content comes
+from ``Workspace``. The nav rail comes from ``Workspace Sidebar``, and its
+nesting is driven by ``Section Break`` rows plus a ``child`` flag on the rows
+beneath them (``sidebar.js: find_nested_items``) — **not** by ``Workspace.parent_page``,
+which does nothing for sidebar grouping.
+
+Without an explicit ``Workspace Sidebar`` record, Frappe auto-generates one per
+Module Def (``auto_generate_sidebar_from_module``). Every stock ERPNext, HR and
+Frappe module ships a curated one; Jarz shipped none, so it got the fallback:
+the workspace link, three DocTypes picked by raw record count (Courier
+Transaction, Jarz Mobile Device, Jarz Promo Redemption), an empty Reports
+section, and a link to the ``custom-pos`` stub with a null label.
 
 Everything Jarz adds to the Desk — the analytics pages, the POS and delivery
 masters, the settings singles — hangs off this one workspace, so the Jarz entry
@@ -166,8 +187,120 @@ CARDS = [
     },
 ]
 
+# The nav rail beside the workspace. ``Workspace Sidebar`` autonames on
+# ``field:title``, so this string is the record name too. Declaring it is what
+# suppresses Frappe's auto-generated fallback for the module.
+SIDEBAR_NAME = "Jarz POS"
+SIDEBAR_ICON = "shopping-cart"
+
+# Rows under a "Section Break" need child=1 to nest beneath it. Order matters.
+SIDEBAR_SECTIONS = [
+    {
+        "label": "Dashboards",
+        "links": [
+            {"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
+            {"label": "Product Analytics", "link_type": "Page", "link_to": "product-analytics"},
+            {"label": "Shipping Analytics", "link_type": "Page", "link_to": "shipping-analytics"},
+            {"label": "Customer Analytics", "link_type": "Page", "link_to": "customer-analytics"},
+            {"label": "Inventory Intelligence", "link_type": "Page", "link_to": "inventory-analytics"},
+            {"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
+            {"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
+        ],
+    },
+    {
+        "label": "POS Operations",
+        "links": [
+            {"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
+            {"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
+            {"label": "POS Profile Timetable", "link_type": "DocType", "link_to": "POS Profile Timetable"},
+            {"label": "POS Payment Receipt", "link_type": "DocType", "link_to": "POS Payment Receipt"},
+            {"label": "Jarz Invoice Note", "link_type": "DocType", "link_to": "Jarz Invoice Note"},
+        ],
+    },
+    {
+        "label": "Delivery & Couriers",
+        "links": [
+            {"label": "Delivery Partner", "link_type": "DocType", "link_to": "Delivery Partner"},
+            {"label": "Delivery Trip", "link_type": "DocType", "link_to": "Delivery Trip"},
+            {"label": "Courier Transaction", "link_type": "DocType", "link_to": "Courier Transaction"},
+            {"label": "Custom Shipping Request", "link_type": "DocType", "link_to": "Custom Shipping Request"},
+            {"label": "Sales Partner Transactions", "link_type": "DocType", "link_to": "Sales Partner Transactions"},
+            {"label": "City", "link_type": "DocType", "link_to": "City"},
+        ],
+    },
+    {
+        "label": "Catalog & Promotions",
+        "links": [
+            {"label": "Jarz Bundle", "link_type": "DocType", "link_to": "Jarz Bundle"},
+            {"label": "Warehouse Count Profile", "link_type": "DocType", "link_to": "Warehouse Count Profile"},
+            {"label": "Jarz Promo Code", "link_type": "DocType", "link_to": "Jarz Promo Code"},
+            {"label": "Jarz Promo Redemption", "link_type": "DocType", "link_to": "Jarz Promo Redemption"},
+            {"label": "Jarz Promotion Rule", "link_type": "DocType", "link_to": "Jarz Promotion Rule"},
+        ],
+    },
+    {
+        "label": "B2B & CRM",
+        "links": [
+            {"label": "Jarz Commercial Policy", "link_type": "DocType", "link_to": "Jarz Commercial Policy"},
+            {"label": "Jarz Price List Category Rate", "link_type": "DocType", "link_to": "Jarz Price List Category Rate"},
+            {"label": "Lead", "link_type": "DocType", "link_to": "Lead"},
+            {"label": "Opportunity", "link_type": "DocType", "link_to": "Opportunity"},
+            {"label": "Jarz Lead Category", "link_type": "DocType", "link_to": "Jarz Lead Category"},
+        ],
+    },
+    {
+        "label": "Production",
+        "links": [
+            {"label": "Jarz SOP", "link_type": "DocType", "link_to": "Jarz SOP"},
+            {"label": "Jarz SOP Execution Log", "link_type": "DocType", "link_to": "Jarz SOP Execution Log"},
+        ],
+    },
+    {
+        "label": "Expenses",
+        "links": [
+            {"label": "Jarz Expense Request", "link_type": "DocType", "link_to": "Jarz Expense Request"},
+            {"label": "Jarz Recurring Expense", "link_type": "DocType", "link_to": "Jarz Recurring Expense"},
+        ],
+    },
+    {
+        "label": "Settings",
+        "links": [
+            {"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
+            {"label": "Jarz Forecast Settings", "link_type": "DocType", "link_to": "Jarz Forecast Settings"},
+            {"label": "Jarz Segmentation Settings", "link_type": "DocType", "link_to": "Jarz Segmentation Settings"},
+            {"label": "Custom Settings", "link_type": "DocType", "link_to": "Custom Settings"},
+            {"label": "Jarz Mobile Device", "link_type": "DocType", "link_to": "Jarz Mobile Device"},
+            {"label": "Jarz Web Push Subscription", "link_type": "DocType", "link_to": "Jarz Web Push Subscription"},
+        ],
+    },
+]
+
+# The Desk landing page is ERPNext's ``Home`` workspace. Jarz adds one tile and
+# one card to it and touches nothing else — see ``ensure_home_entry``.
+HOME_WORKSPACE = "Home"
+HOME_ENTRY_LABEL = "Jarz POS"
+HOME_CARD_LINKS = [
+    {"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
+    {"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
+    {"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
+    {"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
+    {"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
+    {"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
+]
+
 # ``link_type`` / shortcut ``type`` -> the DocType holding those records.
 _TARGET_DOCTYPE = {"DocType": "DocType", "Page": "Page", "Report": "Report"}
+
+
+def ensure_jarz_desk():
+    """Build every Jarz Desk surface. Single ``after_migrate`` entry point.
+
+    Each step is independently guarded so a failure in one does not cost the
+    others — a broken Home entry must not also lose you the sidebar.
+    """
+    ensure_jarz_workspace()
+    ensure_jarz_sidebar()
+    ensure_home_entry()
 
 
 def ensure_jarz_workspace():
@@ -242,6 +375,222 @@ def ensure_jarz_workspace():
         # Never let a cosmetic workspace problem fail a migration / deploy.
         frappe.db.rollback()
         frappe.log_error(frappe.get_traceback(), "ensure_jarz_workspace failed")
+
+
+def ensure_jarz_sidebar():
+    """Create or rebuild the ``Jarz POS`` Workspace Sidebar (the nav rail).
+
+    Declaring this record is also what stops Frappe auto-generating a sidebar
+    for the module — see the note at the top of this file for what the fallback
+    produced.
+
+    Sibling apps may contribute their own section to this record — the
+    WooCommerce integration adds one, writing it through plain Frappe document
+    APIs rather than importing anything from here, because the two apps are
+    kept fully independent. This rebuild wipes such a section; that is safe
+    because ``after_migrate`` hooks run in installed-app order, so jarz_pos
+    rebuilds first and the contributing app re-adds its section afterwards.
+    """
+    try:
+        sections = _resolve_sections()
+        if not sections:
+            return
+
+        is_new = not frappe.db.exists("Workspace Sidebar", SIDEBAR_NAME)
+        if is_new:
+            sb = frappe.new_doc("Workspace Sidebar")
+            sb.name = SIDEBAR_NAME
+        else:
+            sb = frappe.get_doc("Workspace Sidebar", SIDEBAR_NAME)
+
+        sb.title = SIDEBAR_NAME
+        sb.module = WORKSPACE_MODULE
+        sb.app = "jarz_pos"
+        sb.header_icon = SIDEBAR_ICON
+
+        sb.set("items", [])
+        # The hub page first, unnested, so the sidebar header links somewhere.
+        if frappe.db.exists("Workspace", WORKSPACE_NAME):
+            sb.append("items", {
+                "type": "Link",
+                "label": WORKSPACE_LABEL,
+                "link_type": "Workspace",
+                "link_to": WORKSPACE_NAME,
+                "icon": WORKSPACE_ICON,
+                "child": 0,
+                "collapsible": 1,
+            })
+        for section in sections:
+            _append_sidebar_section(sb, section)
+
+        sb.flags.ignore_mandatory = True
+        sb.flags.ignore_permissions = True
+        sb.flags.ignore_links = True
+        if is_new:
+            sb.insert(set_name=SIDEBAR_NAME)
+        else:
+            sb.save()
+        frappe.db.commit()
+        frappe.logger("jarz_workspace").info(
+            "[Sidebar] Rebuilt %s with %s sections", SIDEBAR_NAME, len(sections)
+        )
+    except Exception:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "ensure_jarz_sidebar failed")
+
+
+def _append_sidebar_section(sb, section):
+    sb.append("items", {
+        "type": "Section Break",
+        "label": section["label"],
+        "child": 0,
+        "collapsible": 1,
+        "keep_closed": section.get("keep_closed", 0),
+    })
+    for link in section["links"]:
+        sb.append("items", {
+            "type": "Link",
+            "label": link["label"],
+            "link_type": link["link_type"],
+            "link_to": link.get("link_to"),
+            "url": link.get("url"),
+            "icon": link.get("icon"),
+            # child=1 is what nests the row under the Section Break above it.
+            "child": 1,
+            "collapsible": 1,
+            "indent": 0,
+        })
+
+
+def _sidebar_target_exists(link):
+    """Sidebar links reach Workspaces and URLs too, which the card links cannot."""
+    kind = link["link_type"]
+    if kind == "URL":
+        return bool(link.get("url"))
+    if kind == "Workspace":
+        return bool(frappe.db.exists("Workspace", link["link_to"]))
+    return _target_exists(kind, link["link_to"])
+
+
+def _resolve_sections():
+    resolved = []
+    for section in SIDEBAR_SECTIONS:
+        links = [l for l in section["links"] if _sidebar_target_exists(l)]
+        if links:
+            resolved.append({"label": section["label"], "links": links})
+    return resolved
+
+
+def ensure_home_entry():
+    """Add a Jarz tile and card to ERPNext's ``Home`` workspace — additively.
+
+    Home belongs to ERPNext, so this only ever appends and only when the entry
+    is absent. It never rewrites Home's shortcuts, links or layout, because an
+    ERPNext upgrade is entitled to change them and a rebuild here would fight
+    it. Re-running after such an upgrade simply re-adds what went missing.
+    """
+    try:
+        if not frappe.db.exists("Workspace", HOME_WORKSPACE):
+            return
+        links = [l for l in HOME_CARD_LINKS if _target_exists(l["link_type"], l["link_to"])]
+        if not links:
+            return
+
+        ws = frappe.get_doc("Workspace", HOME_WORKSPACE)
+        changed = False
+
+        if not any(s.label == HOME_ENTRY_LABEL for s in (ws.shortcuts or [])):
+            ws.append("shortcuts", {
+                "label": HOME_ENTRY_LABEL,
+                "type": "URL",
+                "url": "/desk/jarz-pos",
+                "icon": WORKSPACE_ICON,
+                "color": "#FF6B35",
+            })
+            changed = True
+
+        if not any(l.type == "Card Break" and l.label == HOME_ENTRY_LABEL for l in (ws.links or [])):
+            ws.append("links", {
+                "type": "Card Break",
+                "label": HOME_ENTRY_LABEL,
+                "link_count": len(links),
+                "hidden": 0,
+                "onboard": 0,
+            })
+            for link in links:
+                ws.append("links", {
+                    "type": "Link",
+                    "label": link["label"],
+                    "link_type": link["link_type"],
+                    "link_to": link["link_to"],
+                    "hidden": 0,
+                    "onboard": 0,
+                    "is_query_report": 0,
+                    "dependencies": "",
+                })
+            changed = True
+
+        if _add_home_blocks(ws):
+            changed = True
+
+        if not changed:
+            return
+
+        ws.flags.ignore_mandatory = True
+        ws.flags.ignore_permissions = True
+        ws.flags.ignore_links = True
+        ws.save()
+        frappe.db.commit()
+        frappe.logger("jarz_workspace").info("[Home] Added the Jarz entry to the Home workspace")
+    except Exception:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "ensure_home_entry failed")
+
+
+def _add_home_blocks(ws):
+    """Slot the tile after Home's last shortcut and the card after its last card.
+
+    Appending both to the end would drop a lone tile below the card grid, which
+    reads as a rendering bug rather than a shortcut.
+    """
+    try:
+        blocks = json.loads(ws.content or "[]")
+    except (ValueError, TypeError):
+        return False
+
+    have_shortcut = any(
+        b.get("type") == "shortcut" and b.get("data", {}).get("shortcut_name") == HOME_ENTRY_LABEL
+        for b in blocks
+    )
+    have_card = any(
+        b.get("type") == "card" and b.get("data", {}).get("card_name") == HOME_ENTRY_LABEL
+        for b in blocks
+    )
+    if have_shortcut and have_card:
+        return False
+
+    if not have_card:
+        last_card = max(
+            (i for i, b in enumerate(blocks) if b.get("type") == "card"), default=len(blocks) - 1
+        )
+        blocks.insert(last_card + 1, {
+            "id": "jarz_home_card",
+            "type": "card",
+            "data": {"card_name": HOME_ENTRY_LABEL, "col": 4},
+        })
+
+    if not have_shortcut:
+        last_shortcut = max(
+            (i for i, b in enumerate(blocks) if b.get("type") == "shortcut"), default=-1
+        )
+        blocks.insert(last_shortcut + 1, {
+            "id": "jarz_home_shortcut",
+            "type": "shortcut",
+            "data": {"shortcut_name": HOME_ENTRY_LABEL, "col": 3},
+        })
+
+    ws.content = json.dumps(blocks)
+    return True
 
 
 def _load_or_new():

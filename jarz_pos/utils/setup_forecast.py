@@ -12,8 +12,8 @@ shortcuts to ``setup_workspace.SHORTCUTS``, not here.
 
 from __future__ import annotations
 
-from jarz_pos.utils.setup_workspace import WORKSPACE_NAME, ensure_jarz_workspace  # noqa: F401
+from jarz_pos.utils.setup_workspace import WORKSPACE_NAME, ensure_jarz_desk  # noqa: F401
 
-# Historical entry points. Both now build the full workspace.
-ensure_jarz_pos_workspace = ensure_jarz_workspace
-ensure_forecast_workspace_shortcuts = ensure_jarz_workspace
+# Historical entry points. Both now build every Jarz Desk surface.
+ensure_jarz_pos_workspace = ensure_jarz_desk
+ensure_forecast_workspace_shortcuts = ensure_jarz_desk

@@ -39,10 +39,9 @@ before_migrate = [
 ]
 
 after_migrate = [
-    # Rebuild the JARZ POS workspace from jarz_pos.utils.setup_workspace (idempotent).
-    # Single entry point: it owns the shortcuts, the card sections and the layout,
-    # and prunes anything not declared there.
-    "jarz_pos.utils.setup_workspace.ensure_jarz_workspace",
+    # Rebuild every Jarz Desk surface from jarz_pos.utils.setup_workspace (idempotent):
+    # the JARZ POS workspace, the Jarz POS sidebar, and the additive Home entry.
+    "jarz_pos.utils.setup_workspace.ensure_jarz_desk",
     # Seed B2B master data (idempotent, create-only)
     "jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
     # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
