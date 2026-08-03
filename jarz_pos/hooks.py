@@ -1,9 +1,17 @@
 app_name = "jarz_pos"
-app_title = "jarz pos"
+app_title = "Jarz POS"
 app_publisher = "Abdelrahman Mamdouh"
 app_description = "Customized POS for JARZ company."
 app_email = "abdelrahmanmamdouh1996@gmail.com"
 app_license = "mit"
+
+# Desk identity. In Frappe v16 the sidebar header shows the logo + title of the
+# app owning the current workspace, sourced from `bootinfo.app_data` — which is
+# built for every installed app whether or not it declares `add_to_apps_screen`.
+# Without these three hooks Jarz inherited the generic Frappe logo and rendered
+# as the raw module name.
+app_logo_url = "/assets/jarz_pos/images/jarz-pos-logo.svg"
+app_home = "/desk/jarz-pos"
 
 # Fixtures
 fixtures = [
@@ -27,18 +35,16 @@ before_migrate = [
 ]
 
 after_migrate = [
-    # Add Inventory Forecast shortcut to JARZ POS workspace (idempotent)
-    "jarz_pos.utils.setup_forecast.ensure_forecast_workspace_shortcuts",
+    # Rebuild the JARZ POS workspace from jarz_pos.utils.setup_workspace (idempotent).
+    # Single entry point: it owns the shortcuts, the card sections and the layout,
+    # and prunes anything not declared there.
+    "jarz_pos.utils.setup_workspace.ensure_jarz_workspace",
     # Seed B2B master data (idempotent, create-only)
     "jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
     # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
     "jarz_pos.setup.crm_setup.ensure_crm_setup",
     # Create the Production Operator role + role profile + doc perms (idempotent)
     "jarz_pos.setup.production_setup.ensure_production_setup",
-    # Add the Production SOPs shortcut to the JARZ POS workspace (idempotent).
-    # The `workspaces` hook only applies at creation, so an existing workspace
-    # needs this the same way the forecast shortcut did.
-    "jarz_pos.utils.setup_production.ensure_production_workspace_shortcuts",
 ]
 
 # Apps
@@ -46,16 +52,18 @@ after_migrate = [
 
 # required_apps = []
 
-# Each item in the list will be shown as an app in the apps page
-# add_to_apps_screen = [
-# 	{
-# 		"name": "jarz_pos",
-# 		"logo": "/assets/jarz_pos/logo.png",
-# 		"title": "jarz pos",
-# 		"route": "/jarz_pos",
-# 		"has_permission": "jarz_pos.api.permission.has_app_permission"
-# 	}
-# ]
+# Puts Jarz POS in the desk app switcher with its own logo, so the whole module
+# is one click from anywhere in the Desk. `route` must stay in sync with the
+# workspace name — Workspace autonames on its label, so "JARZ POS" slugs to
+# /desk/jarz-pos.
+add_to_apps_screen = [
+    {
+        "name": "jarz_pos",
+        "logo": "/assets/jarz_pos/images/jarz-pos-logo.svg",
+        "title": "Jarz POS",
+        "route": "/desk/jarz-pos",
+    }
+]
 
 # Includes in <head>
 # ------------------
@@ -81,93 +89,10 @@ page_js = {"point-of-sale": "public/js/point_of_sale_close_fix.js"}
 # Workspaces
 # ----------
 
-# List of workspaces that should be created
-workspaces = [
-    {
-        "name": "JARZ POS",
-        "category": "Modules",
-        "public": 1,
-        "icon": "fa fa-shopping-cart",
-        "color": "#FF6B35",
-        "sequence_id": 1,
-        "charts": [],
-        "shortcuts": [
-            {
-                "label": "Sales Invoice List",
-                "format": "{} List",
-                "link_to": "Sales Invoice",
-                "type": "DocType",
-                "icon": "fa fa-file-text",
-                "color": "#3498db"
-            },
-            {
-                "label": "POS Profile",
-                "format": "{} Settings",
-                "link_to": "POS Profile",
-                "type": "DocType",
-                "icon": "fa fa-cog",
-                "color": "#e74c3c"
-            },
-            {
-                "label": "Executive Overview",
-                "link_to": "executive-analytics",
-                "type": "Page",
-                "icon": "fa fa-dashboard",
-                "color": "#FF6B35"
-            },
-            {
-                "label": "Product Analytics",
-                "link_to": "product-analytics",
-                "type": "Page",
-                "icon": "fa fa-cube",
-                "color": "#7B61FF"
-            },
-            {
-                "label": "Shipping Analytics",
-                "link_to": "shipping-analytics",
-                "type": "Page",
-                "icon": "fa fa-truck",
-                "color": "#FF6B35"
-            },
-            {
-                "label": "Customer Analytics",
-                "link_to": "customer-analytics",
-                "type": "Page",
-                "icon": "fa fa-users",
-                "color": "#2980b9"
-            },
-            {
-                "label": "Inventory Intelligence",
-                "link_to": "inventory-analytics",
-                "type": "Page",
-                "icon": "fa fa-bar-chart",
-                "color": "#16a085"
-            },
-            {
-                "label": "B2B Sales & Clients",
-                "link_to": "b2b-analytics",
-                "type": "Page",
-                "icon": "fa fa-users",
-                "color": "#2980b9"
-            },
-            {
-                "label": "Recurring Expenses",
-                "link_to": "recurring-expenses",
-                "type": "Page",
-                "icon": "fa fa-repeat",
-                "color": "#8e44ad"
-            },
-            {
-                "label": "Inventory Forecast",
-                "link_to": "Jarz Forecast Settings",
-                "type": "DocType",
-                "icon": "fa fa-bar-chart",
-                "color": "#27ae60"
-            }
-        ],
-        "cards": []
-    }
-]
+# There is no `workspaces` hook in Frappe — nothing reads it. A 90-line one
+# lived here declaring the JARZ POS workspace and had never had any effect;
+# the workspace that exists was built entirely by the after_migrate hook.
+# The real definition is jarz_pos/utils/setup_workspace.py.
 
 # include js in doctype views
 doctype_js = {
