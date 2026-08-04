@@ -20,18 +20,24 @@ from unittest.mock import patch
 class TestNotificationReturnFilters(unittest.TestCase):
 
     @staticmethod
-    def _sales_invoice_filter_recorder(captured):
+    def _sales_invoice_filter_recorder(captured, result=None):
         """Record filters from Sales Invoice reads only.
 
         Patching ``frappe.get_all`` wholesale also catches the framework's own
         lookups — ``frappe.utils.now()`` alone pulls System Settings — so the
         recorder has to select by doctype rather than count calls.
+
+        *result* must match what the patched callable really returns: rows for
+        ``get_all``, an int for ``db.count``. Handing ``check_for_updates`` a
+        list makes its arithmetic raise, and it swallows that into
+        ``success: False`` — a green-looking filter assertion over a dead call.
         """
+        rows = [] if result is None else result
 
         def fake_get_all(doctype, filters=None, **kwargs):
             if doctype == "Sales Invoice":
                 captured.append(filters or {})
-            return []
+            return rows
 
         return fake_get_all
 
@@ -91,7 +97,7 @@ class TestNotificationReturnFilters(unittest.TestCase):
         with patch.object(
             notifications.frappe.db,
             "count",
-            side_effect=self._sales_invoice_filter_recorder(captured),
+            side_effect=self._sales_invoice_filter_recorder(captured, result=0),
         ):
             result = notifications.check_for_updates()
 
