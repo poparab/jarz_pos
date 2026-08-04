@@ -80,12 +80,63 @@ def _ensure_production_role_profile(log):
 		)
 
 
+def _custom_docperm_roles(doctype):
+	return set(frappe.get_all("Custom DocPerm", filters={"parent": doctype}, pluck="role"))
+
+
+def _standard_docperm_roles(doctype):
+	return set(frappe.get_all("DocPerm", filters={"parent": doctype}, pluck="role"))
+
+
+def _repair_displaced_standard_perms(doctype, log):
+	"""Undo the damage described in ``_ensure_production_docperms``.
+
+	Sites that migrated with the earlier version of this seeder have exactly one
+	Custom DocPerm row per target doctype — ours — and therefore no working
+	permissions for anybody else. Detect that precise signature and clear the
+	table so the ensure path below can rebuild it correctly.
+
+	The signature has to be exact. If any role other than ``Production Operator``
+	already has a Custom DocPerm row, a human customised this doctype and their
+	rows are the real permission set; wiping them would be a second outage on top
+	of the first.
+	"""
+	custom_roles = _custom_docperm_roles(doctype)
+	if not custom_roles:
+		return
+	if custom_roles - {ROLE_NAME}:
+		# Somebody else's customisation is in play — hands off.
+		return
+	if not _standard_docperm_roles(doctype) - {ROLE_NAME}:
+		# Nothing was displaced (doctype ships no other roles); leave it alone.
+		return
+
+	from frappe.permissions import reset_perms
+
+	reset_perms(doctype)
+	log["repaired"].append(doctype)
+
+
 def _ensure_production_docperms(log):
 	"""Grant the role read-only access to the doctypes the board renders.
 
 	Create-only and per-doctype guarded: an admin who has since tightened or
 	widened one of these by hand keeps their change, and one failure does not
 	stop the others.
+
+	``setup_custom_perms`` is the load-bearing call. Frappe resolves permissions
+	in ``get_valid_perms`` by discarding *every* standard DocPerm for any doctype
+	that has at least one Custom DocPerm row. So inserting a bare row here — as
+	this function used to — does not add a permission, it replaces the doctype's
+	entire permission set with the single row we just wrote. That is how one
+	read-only grant for the floor role silently revoked Item, BOM and Work Order
+	from System Manager and everyone else, surfacing as "Insufficient Permission
+	for Item" on any Desk form with an Item link field.
+
+	``setup_custom_perms`` copies the standard rows into Custom DocPerm first
+	(a no-op once they are there), so ours is genuinely additive. This is what
+	``frappe.permissions.add_permission`` does, and what the Role Permissions
+	Manager does; we insert by hand only to pin every flag explicitly.
 	"""
 	if not frappe.db.exists("Role", ROLE_NAME):
 		_logger().warning(f"Skipping Custom DocPerms: Role '{ROLE_NAME}' does not exist")
@@ -97,11 +148,20 @@ def _ensure_production_docperms(log):
 				# ERPNext not installed / stripped site — not our problem to fix.
 				_logger().warning(f"Skipping Custom DocPerm: DocType '{doctype}' not found")
 				continue
+
+			_repair_displaced_standard_perms(doctype, log)
+
 			if frappe.db.exists(
 				"Custom DocPerm", {"parent": doctype, "role": ROLE_NAME, "permlevel": 0}
 			):
 				log["existing"].append(f"Custom DocPerm: {ROLE_NAME} on {doctype}")
 				continue
+
+			# Preserve the doctype's standard permissions before adding to them.
+			from frappe.permissions import setup_custom_perms
+
+			setup_custom_perms(doctype)
+
 			doc = frappe.get_doc(
 				{
 					"doctype": "Custom DocPerm",
@@ -132,11 +192,18 @@ def _ensure_production_docperms(log):
 				f"Failed to ensure Custom DocPerm for '{ROLE_NAME}' on '{doctype}'",
 				exc_info=True,
 			)
+		finally:
+			# Permissions are cached per doctype; a repaired table that nobody
+			# re-reads is still an outage until the next restart.
+			try:
+				frappe.clear_cache(doctype=doctype)
+			except Exception:
+				_logger().error(f"Failed to clear permission cache for '{doctype}'", exc_info=True)
 
 
 def ensure_production_setup():
 	"""Idempotently seed production-floor roles and permissions."""
-	log = {"created": [], "existing": []}
+	log = {"created": [], "existing": [], "repaired": []}
 	logger = _logger()
 
 	try:
@@ -144,6 +211,14 @@ def ensure_production_setup():
 		_ensure_production_role(log)
 		_ensure_production_role_profile(log)
 		_ensure_production_docperms(log)
+
+		if log["repaired"]:
+			# Loud on purpose: this means the site had been running with the
+			# standard permissions on these doctypes revoked.
+			logger.error(
+				"Production setup RESTORED displaced standard permissions on: "
+				+ ", ".join(log["repaired"])
+			)
 
 		if log["created"]:
 			logger.info("Production setup created: " + "; ".join(log["created"]))
