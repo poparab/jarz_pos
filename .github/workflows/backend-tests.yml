@@ -130,6 +130,7 @@ jobs:
             test_territory_resolution
             test_woo_order_id_display
             test_invoice_return
+            test_api_notifications_return_filters
             test_accounting_guards
             test_api_manufacturing_precheck
             test_production_planning
