@@ -74,7 +74,11 @@ class ROLES:
 
 
 # ── WebSocket / realtime event names ────────────────────────────────────
-# Must match the Flutter ``WsEvents`` class exactly.
+# Every name Flutter listens to must exist verbatim in the Flutter ``WsEvents``
+# class.  The reverse does NOT hold and never has: this class carries events with
+# no Dart counterpart (the TRIP_* and CUSTOM_SHIPPING_* families), and ``WsEvents``
+# carries names with no Python counterpart.  The invariant is Python ⊆ Dart for
+# listened events — not set equality.  Do not write an equality test.
 
 class WS_EVENTS:
     NEW_INVOICE = "jarz_pos_new_invoice"
@@ -100,6 +104,13 @@ class WS_EVENTS:
     CUSTOM_SHIPPING_REJECTED = "jarz_pos_custom_shipping_rejected"
     SHIFT_STARTED = "jarz_pos_shift_started"
     SHIFT_ENDED = "jarz_pos_shift_ended"
+    # Courier app (see COURIER_CONTRACTS.md §7 — frozen 2026-08-05).
+    COURIER_STOP_ARRIVED = "jarz_pos_courier_stop_arrived"
+    COURIER_STOP_DELIVERED = "jarz_pos_courier_stop_delivered"
+    COURIER_STOP_FAILED = "jarz_pos_courier_stop_failed"
+    COURIER_DUTY_CHANGED = "jarz_pos_courier_duty_changed"
+    COURIER_DEPOSIT_DECLARED = "jarz_pos_courier_deposit_declared"
+    ADDRESS_PIN_UPDATED = "jarz_pos_address_pin_updated"
     TEST_EVENT = "test_event"
 
 

@@ -13,9 +13,21 @@ on:
       - "jarz_pos/**"
       - ".github/workflows/backend-tests.yml"
 
+# Serialised on the SHARED STAGING VOLUME, not on the ref.
+#
+# Both jobs below sync the branch under test into the live staging `erp_apps`
+# volume (`git archive HEAD | docker exec ... tar -xf -`) and restore it
+# afterwards with `git checkout -- .`. That volume is a single mutable resource
+# shared by every branch, so a per-ref group (`backend-${{ github.ref }}`, used
+# until 2026-08-05) let two feature branches run at once and interleave writes
+# into the same checkout — each seeing a mixture of the other's files.
+#
+# cancel-in-progress is deliberately FALSE: runs must QUEUE, not cancel. A
+# cancelled run can die between the sync and the `git checkout -- .` restore,
+# leaving the live staging app directory holding another branch's code.
 concurrency:
-  group: backend-${{ github.ref }}
-  cancel-in-progress: true
+  group: backend-staging-volume
+  cancel-in-progress: false
 
 jobs:
   # ---------------------------------------------------------------------------
