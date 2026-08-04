@@ -58,6 +58,12 @@ after_migrate = [
     # "where does purchased stock land" table identical on staging and prod
     # instead of being set by hand on each.
     "jarz_pos.setup.purchase_setup.ensure_purchase_setup",
+    # Park fully-returned orders in the "Returned" column (idempotent). Must run
+    # here rather than as a patch: post_model_sync patches execute BEFORE
+    # sync_fixtures(), so the "Returned" Select option would not exist yet.
+    # Re-running every migrate is deliberate — it also reconciles returns whose
+    # best-effort board move failed.
+    "jarz_pos.setup.return_board_state.ensure_returned_board_state",
 ]
 
 # Apps

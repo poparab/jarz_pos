@@ -181,6 +181,22 @@ def _assert_return_invariants(
         is_pos = int(frappe.db.get_value("Sales Invoice", credit_note, "is_pos") or 0)
         ctx.record(f"{case}.credit_note_off_board", is_pos == 0, f"is_pos={is_pos}")
 
+        # ...which includes never reading as a live card. Clearing the state
+        # before insert is not enough — insert() re-applies the Custom Field
+        # default ("Recieved") over the empty value — so this proves the
+        # post-insert stamp held. The value is the "Returned" sentinel rather
+        # than blank because the field is reqd: a NULL is never repaired by
+        # _set_defaults (it is gated on is_new()), so it would blow up the next
+        # full save of the credit note with MandatoryError.
+        cn_state = str(
+            frappe.db.get_value("Sales Invoice", credit_note, "custom_sales_invoice_state") or ""
+        ).strip()
+        ctx.record(
+            f"{case}.credit_note_board_state_terminal",
+            cn_state == "Returned",
+            f"custom_sales_invoice_state={cn_state!r} (expected 'Returned')",
+        )
+
         passed, detail = assert_gl_balanced("Sales Invoice", credit_note)
         ctx.record(f"{case}.credit_note_gl_balanced", passed, detail)
 
@@ -202,6 +218,27 @@ def _assert_return_invariants(
         status in {"Partially Returned", "Fully Returned"},
         f"custom_return_status={status!r}",
     )
+
+    # The board must agree with the accounting. A fully-returned order leaves the
+    # live columns for "Returned" (otherwise it still looks like work and can be
+    # dragged to Delivered); a partial one stays put, because the customer still
+    # has the rest of the goods. Note this is a *board* move only — the source
+    # invoice's docstatus is asserted above and stays 1 either way.
+    board_state = str(
+        frappe.db.get_value("Sales Invoice", source_invoice, "custom_sales_invoice_state") or ""
+    ).strip()
+    if status == "Fully Returned":
+        ctx.record(
+            f"{case}.board_state_is_returned",
+            board_state == "Returned",
+            f"custom_sales_invoice_state={board_state!r}",
+        )
+    else:
+        ctx.record(
+            f"{case}.board_state_untouched_on_partial",
+            board_state != "Returned",
+            f"custom_sales_invoice_state={board_state!r}",
+        )
 
 
 def _absorb_return_artifacts(ctx: RunContext, result: Dict[str, Any]) -> None:

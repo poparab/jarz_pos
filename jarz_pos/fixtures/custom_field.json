@@ -6477,7 +6477,7 @@
   "name": "Sales Invoice-custom_sales_invoice_state",
   "no_copy": 0,
   "non_negative": 0,
-  "options": "Recieved\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled",
+  "options": "Recieved\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled\nReturned",
   "permlevel": 0,
   "placeholder": null,
   "precision": "",

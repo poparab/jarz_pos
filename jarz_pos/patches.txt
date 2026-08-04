@@ -20,3 +20,9 @@ jarz_pos.Patches.v1_3.set_default_receipt_config
 jarz_pos.Patches.v1_4.seed_default_delivery_promotion_rule
 jarz_pos.Patches.v1_5.ensure_sales_invoice_item_bundle_fields
 jarz_pos.Patches.v1_6.backfill_bundle_group_metadata
+# NOTE: move_returned_invoices_to_returned_column is deliberately NOT listed here.
+# post_model_sync patches run in SiteMigration.run_schema_updates(), which is
+# BEFORE sync_fixtures() in post_schema_updates() — so the "Returned" Select
+# option would not exist yet, the patch would no-op, and patch_handler would
+# still log it as executed and never run it again. It is wired as an
+# after_migrate hook instead, where the fixture is already synced.

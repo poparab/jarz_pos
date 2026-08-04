@@ -91,6 +91,18 @@ RETURN_TYPES = {"Customer Return", "Failed Delivery", "Damaged", "Wrong Item"}
 #: Operational states from which a return makes sense — the order left the branch.
 _RETURNABLE_STATES = {"out_for_delivery", "delivered", "completed"}
 
+#: Every alias the operational board state has been stored under. The board
+#: itself probes exactly this order (``api.kanban._get_state_field_options``), so
+#: anything writing a state has to agree with it.
+_STATE_FIELD_ALIASES = (
+    "custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state",
+)
+
+#: Column a fully-returned order lands in. Must match the ``Returned`` option on
+#: ``Sales Invoice-custom_sales_invoice_state`` in ``fixtures/custom_field.json``;
+#: the board derives its columns from that field's options.
+RETURNED_BOARD_STATE = "Returned"
+
 #: Currency comparison tolerance, matching the settlement helpers.
 _TOL = 0.005
 
@@ -123,6 +135,20 @@ def _invoice_state(inv: Any) -> str:
         or inv.get("state")
         or ""
     )
+
+
+def _board_state_fields() -> List[str]:
+    """Whichever of the board-state aliases this site actually carries.
+
+    Returned in probe order, so a site with more than one of them keeps every
+    copy in step — the board reads the first one it finds and other callers may
+    read a different one.
+    """
+    try:
+        meta = frappe.get_meta("Sales Invoice")
+    except Exception:
+        return []
+    return [field for field in _STATE_FIELD_ALIASES if meta.get_field(field)]
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -675,9 +701,16 @@ def _build_credit_note(inv: Any, requested: Dict[str, float], request_id: str) -
     cn.flags.ignore_woo_outbound = True
 
     # Keep the credit note off the operational board entirely.
-    for field in ("custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"):
-        if cn.meta.get_field(field):
-            cn.set(field, None)
+    #
+    # Clearing the state HERE is necessary but not sufficient, and reading it as
+    # sufficient is the landmine: ``Document.insert()`` calls ``_set_defaults()``
+    # → ``update_if_missing()``, which re-applies every Custom Field default over
+    # an empty value — and ``Sales Invoice-custom_sales_invoice_state`` defaults
+    # to "Recieved". So a credit note built with ``None`` here still persists as
+    # a live "Recieved" card (confirmed on staging: ACC-SINV-2026-17056). The
+    # write that actually sticks is ``_set_credit_note_board_state`` after insert/submit.
+    for field in _board_state_fields():
+        cn.set(field, None)
 
     if cn.meta.get_field("custom_return_request_id"):
         cn.custom_return_request_id = request_id
@@ -861,6 +894,73 @@ def _create_refund_payment_entry(
     return pe.name
 
 
+def _set_credit_note_board_state(doc: Any) -> None:
+    """Stamp an inserted credit note with the ``Returned`` board state.
+
+    The companion to the pre-insert clear in :func:`_build_credit_note`: field
+    defaults are re-applied during ``insert()``, so the pre-insert ``None`` comes
+    back as ``"Recieved"`` and has to be overwritten once the document exists.
+
+    Writes the ``Returned`` sentinel rather than blanking the field. Blanking
+    looks tidier but is a trap: ``custom_sales_invoice_state`` is ``reqd``, and
+    ``_set_defaults`` is gated on ``is_new()``, so a NULL is never repaired — the
+    next full ``save()`` of the credit note (a user editing an allow-on-submit
+    field in Desk, say) would die on ``MandatoryError``. The sentinel satisfies
+    ``reqd``, is semantically true, and costs nothing: the credit note is already
+    excluded from the board twice over, by ``is_pos = 0`` on the document and by
+    the ``is_pos: 1, is_return: 0`` board filter.
+
+    Straight to the database because ``update_modified=False`` leaves the
+    in-memory document's timestamp valid for anything that saves it later.
+    """
+    name = str(getattr(doc, "name", "") or "").strip()
+    fields = _board_state_fields()
+    if not name or not fields:
+        return
+    try:
+        frappe.db.set_value(
+            "Sales Invoice",
+            name,
+            {field: RETURNED_BOARD_STATE for field in fields},
+            update_modified=False,
+        )
+        for field in fields:
+            try:
+                doc.set(field, RETURNED_BOARD_STATE)
+            except Exception:
+                pass
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(), f"Return: could not set board state on {name}"
+        )
+
+
+def _returned_column_updates(inv: Any) -> Dict[str, Any]:
+    """Field updates that park a fully-returned order in the ``Returned`` column.
+
+    Without these the card stays wherever the return found it — usually "Out for
+    Delivery" — looking like live work, while ``api.kanban.update_invoice_state``
+    now refuses to move a fully-returned order at all. Getting this wrong strands
+    the card rather than merely mislabelling it, which is why the caller applies
+    it in the *same* save as ``custom_return_status`` (see
+    :func:`_stamp_return_state`).
+    """
+    fields = _board_state_fields()
+    if not fields:
+        # Keyword form on purpose: Error Log's title is Data(140) and this
+        # message is longer than that.
+        frappe.log_error(
+            title="Return: board state field missing",
+            message=(
+                f"Sales Invoice carries none of {_STATE_FIELD_ALIASES}, so "
+                f"{str(getattr(inv, 'name', '') or '?')} was fully returned but "
+                f"stays on its old board column."
+            ),
+        )
+        return {}
+    return {field: RETURNED_BOARD_STATE for field in fields}
+
+
 def _stamp_return_state(
     inv: Any, *, requested: Dict[str, float], returned_before: Dict[str, float],
     reason: str, notes: Optional[str], return_total: float,
@@ -878,11 +978,48 @@ def _stamp_return_state(
     reason_text = reason if not notes else f"{reason}\nNotes: {notes}"
     prior = flt(inv.get("custom_returned_amount"))
 
-    update_submitted_sales_invoice_fields(inv, {
+    updates: Dict[str, Any] = {
         "custom_return_status": status,
         "custom_return_reason": reason_text,
         "custom_returned_amount": prior + abs(flt(return_total)),
-    })
+    }
+
+    # Only a FULL return leaves the board: a partial one still has goods with the
+    # customer, so the order keeps moving through its normal column.
+    #
+    # Applied in the SAME save as custom_return_status, deliberately. Split
+    # across two saves, a failure on the second one leaves "Fully Returned" with
+    # a live board column — and the kanban guard then refuses to move that card,
+    # so the order is stranded in exactly the state this feature exists to
+    # prevent.
+    board_updates = _returned_column_updates(inv) if fully else {}
+    try:
+        update_submitted_sales_invoice_fields(inv, {**updates, **board_updates})
+    except Exception:
+        if not board_updates:
+            raise
+        # Degrade rather than lose the return: every document that matters is
+        # already posted, and the caller's savepoint covers this call, so raising
+        # would roll back the credit note, the return Delivery Note and the
+        # journal entries over a cosmetic board field. Retry without the board
+        # state; setup.return_board_state.ensure_returned_board_state reconciles
+        # the column on the next migrate.
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Return: board state rejected on {str(getattr(inv, 'name', '') or '?')}",
+        )
+        # Reload before retrying. update_submitted_sales_invoice_fields normally
+        # works on a freshly fetched copy, but it degrades to mutating the doc it
+        # was handed if that fetch fails — and its no-op short-circuit compares
+        # against the in-memory values. Without this, a failed first attempt that
+        # already set the fields in memory would make the retry decide there was
+        # nothing to write and report success having written nothing.
+        try:
+            inv.reload()
+        except Exception:
+            pass
+        update_submitted_sales_invoice_fields(inv, updates)
+
     return status
 
 
@@ -1052,6 +1189,10 @@ def run_invoice_return(
             cn.flags.ignore_permissions = True
             cn.insert(ignore_permissions=True)
             cn.submit()
+            # insert() re-applied the "Recieved" field default over the None set
+            # in _build_credit_note, so the board state has to be corrected here —
+            # after the document exists — or the credit note reads as a live card.
+            _set_credit_note_board_state(cn)
 
             return_total = abs(flt(cn.grand_total))
             ratio = (return_total / flt(inv.grand_total)) if flt(inv.grand_total) else 1.0

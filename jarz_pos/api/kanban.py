@@ -921,13 +921,21 @@ def get_kanban_columns() -> Dict[str, Any]:
         if not options:
             return _failure("Field 'sales_invoice_state' not found or has no options on Sales Invoice")
         columns = []
-        # Color mapping for different states
+        # Colour per state. NOTE: every key below except "Returned" is stale —
+        # the real options are "Recieved" (sic) / In Progress / Ready / Out for
+        # Delivery / Delivered / Cancelled, none of which match, so those columns
+        # all fall through to the #F5F5F5 default. Left as-is rather than fixed
+        # here: the client themes its own columns and re-colouring five live
+        # columns is a UI change, not part of the return work.
         color_map = {
             "Received": "#E3F2FD",
             "Processing": "#FFF3E0",
             "Preparing": "#F3E5F5",
             "Out for delivery": "#E8F5E8",
-            "Completed": "#E0F2F1"
+            "Completed": "#E0F2F1",
+            # Pink, and the only key that actually matches a real option, so the
+            # terminal money-reversed column is the one that stands out.
+            "Returned": "#FCE4EC",
         }
         for i, option in enumerate(options):
             column_id = _state_key(option)
@@ -1067,6 +1075,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "custom_is_pickup", "is_pickup", "pickup", "custom_pickup", "custom_no_courier",
             ]
             for fn in pickup_candidates:
+                if si_meta.get_field(fn):
+                    fields.append(fn)
+            # Return badge fields, behind the same meta guard: a site that has not
+            # migrated the return fixtures yet would otherwise take an "unknown
+            # column" SQL error and lose the entire board.
+            for fn in ("custom_return_status", "custom_returned_amount"):
                 if si_meta.get_field(fn):
                     fields.append(fn)
         except Exception:
@@ -1333,6 +1347,23 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
             state_change_ts = getattr(inv, "modified", None)
 
+            # Return badge. A partially-returned order keeps moving through the
+            # live columns, so the card is the only place staff can see that part
+            # of it has already come back. Fully-returned orders sit in the
+            # "Returned" column and carry the same pair for the amount.
+            try:
+                card_return_status = sanitize_printable_text(
+                    inv.get("custom_return_status")
+                    or getattr(inv, "custom_return_status", None)
+                    or ""
+                )
+            except Exception:
+                card_return_status = ""
+            try:
+                card_returned_amount = float(inv.get("custom_returned_amount") or 0.0)
+            except Exception:
+                card_returned_amount = 0.0
+
             invoice_card = {
                 "name": inv.name,
                 "invoice_id_short": inv.name.split('-')[-1] if '-' in inv.name else inv.name,
@@ -1378,6 +1409,8 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "outstanding_amount": float(inv.get("outstanding_amount") or 0.0),
                 "docstatus_value": int(getattr(inv, "docstatus", 0) or 0),
                 "is_return": int(getattr(inv, "is_return", 0) or 0),
+                "return_status": card_return_status,
+                "returned_amount": card_returned_amount,
                 "woo_order_id": inv.get("woo_order_id") or None,
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
@@ -1512,6 +1545,24 @@ def update_invoice_state(
         if old_state == new_state:
             print(f"State unchanged; old_state == new_state == {new_state}")
             return _success(message="State unchanged (already set)", invoice_id=invoice_id, state=new_state)
+
+        # A fully-returned order is finished work: the stock is back in the
+        # warehouse, the revenue is reversed and the credit note is posted. Moving
+        # it anywhere — forward out of "Returned" to "Delivered", or back into the
+        # live columns — would put dead work on the board and invite a second
+        # dispatch, so the card is frozen where the return left it.
+        #
+        # Placed AFTER the no-op check on purpose: a client re-sending the state
+        # the card is already in (realtime echo, retry, offline replay) should get
+        # the benign "State unchanged", not an error.
+        #
+        # Compared through _state_key (lower-cased, spaces -> underscores) rather
+        # than a bare string equality: new_state above is matched
+        # case-insensitively, so a case-only variant must not be able to slip past
+        # this guard either. Partially-returned orders still have goods with the
+        # customer and keep moving normally.
+        if _state_key(str(invoice.get("custom_return_status") or "")) == "fully_returned":
+            return _failure("This order was fully returned and can no longer be moved.")
 
         meta = frappe.get_meta("Sales Invoice")
         fields_to_update: List[str] = []
@@ -2319,6 +2370,19 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
                 "return_block_code": "unavailable",
                 "return_block_reason": None,
             })
+        # What has already been returned, mirroring the kanban card so the board
+        # and the details dialog can never disagree about a partial return.
+        # Defensive on both reads: these fields are absent on an unmigrated site.
+        try:
+            data["return_status"] = sanitize_printable_text(
+                invoice.get("custom_return_status") or ""
+            )
+        except Exception:
+            data["return_status"] = ""
+        try:
+            data["returned_amount"] = float(invoice.get("custom_returned_amount") or 0.0)
+        except Exception:
+            data["returned_amount"] = 0.0
         return _success(data=data)
     except Exception as e:
         error_msg = f"Error getting invoice details: {str(e)}"
