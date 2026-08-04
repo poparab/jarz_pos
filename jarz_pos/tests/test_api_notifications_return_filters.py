@@ -19,6 +19,29 @@ from unittest.mock import patch
 
 class TestNotificationReturnFilters(unittest.TestCase):
 
+    @staticmethod
+    def _sales_invoice_filter_recorder(captured):
+        """Record filters from Sales Invoice reads only.
+
+        Patching ``frappe.get_all`` wholesale also catches the framework's own
+        lookups — ``frappe.utils.now()`` alone pulls System Settings — so the
+        recorder has to select by doctype rather than count calls.
+        """
+
+        def fake_get_all(doctype, filters=None, **kwargs):
+            if doctype == "Sales Invoice":
+                captured.append(filters or {})
+            return []
+
+        return fake_get_all
+
+    def _assert_pos_order_scoped(self, captured, expected_queries):
+        self.assertEqual(len(captured), expected_queries)
+        for filters in captured:
+            self.assertEqual(filters.get("docstatus"), 1)
+            self.assertEqual(filters.get("is_pos"), 1)
+            self.assertEqual(filters.get("is_return"), 0)
+
     # ── Query filters ────────────────────────────────────────────────────────
 
     def test_pos_order_filters_exclude_returns_and_non_pos(self):
@@ -34,55 +57,46 @@ class TestNotificationReturnFilters(unittest.TestCase):
 
         captured = []
 
-        def fake_get_all(doctype, filters=None, **kwargs):
-            captured.append(filters or {})
-            return []
-
-        with patch.object(notifications.frappe, "get_all", side_effect=fake_get_all):
+        with patch.object(
+            notifications.frappe,
+            "get_all",
+            side_effect=self._sales_invoice_filter_recorder(captured),
+        ):
             notifications._get_pending_alert_rows_for_profiles(["Nasr city"], "2026-08-05 00:00:00")
 
-        # Both the effective-profile query and the legacy pos_profile fallback.
-        self.assertEqual(len(captured), 2)
-        for filters in captured:
-            self.assertEqual(filters.get("is_return"), 0)
-            self.assertEqual(filters.get("is_pos"), 1)
-            self.assertEqual(filters.get("docstatus"), 1)
+        # The effective-profile query and the legacy pos_profile fallback.
+        self._assert_pos_order_scoped(captured, expected_queries=2)
 
     def test_recent_invoice_polling_filters_out_credit_notes(self):
         from jarz_pos.api import notifications
 
         captured = []
 
-        def fake_get_all(doctype, filters=None, **kwargs):
-            captured.append(filters or {})
-            return []
-
-        with patch.object(notifications.frappe, "get_all", side_effect=fake_get_all):
+        with patch.object(
+            notifications.frappe,
+            "get_all",
+            side_effect=self._sales_invoice_filter_recorder(captured),
+        ):
             result = notifications.get_recent_invoices(minutes=5)
 
         self.assertTrue(result["success"])
-        self.assertEqual(len(captured), 2)
-        for filters in captured:
-            self.assertEqual(filters.get("is_return"), 0)
-            self.assertEqual(filters.get("is_pos"), 1)
+        # Newly created and recently modified.
+        self._assert_pos_order_scoped(captured, expected_queries=2)
 
     def test_update_check_counts_match_the_recent_invoice_filters(self):
         from jarz_pos.api import notifications
 
         captured = []
 
-        def fake_count(doctype, filters=None, **kwargs):
-            captured.append(filters or {})
-            return 0
-
-        with patch.object(notifications.frappe.db, "count", side_effect=fake_count):
+        with patch.object(
+            notifications.frappe.db,
+            "count",
+            side_effect=self._sales_invoice_filter_recorder(captured),
+        ):
             result = notifications.check_for_updates()
 
         self.assertTrue(result["success"])
-        self.assertEqual(len(captured), 2)
-        for filters in captured:
-            self.assertEqual(filters.get("is_return"), 0)
-            self.assertEqual(filters.get("is_pos"), 1)
+        self._assert_pos_order_scoped(captured, expected_queries=2)
 
     # ── on_submit push path ──────────────────────────────────────────────────
 
