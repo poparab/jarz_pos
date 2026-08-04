@@ -37,6 +37,21 @@ _FIREBASE_INIT_STATE: Dict[str, Any] = {
 # Per-process set of tokens whose unexpected send-errors have already been Error-Logged.
 _FCM_LOGGED_ERROR_TOKENS: set = set()
 
+#: Every notification in this module is about a POS order. This is the same
+#: predicate ``utils.invoice_utils.apply_invoice_filters`` and
+#: ``api.kanban.get_kanban_invoices`` use, and it must be spread into EVERY
+#: Sales Invoice query here rather than reinvented per call site — the two
+#: polling endpoints below carried only ``docstatus`` for long enough that they
+#: reported B2B/Desk invoices and credit notes as POS activity.
+POS_ORDER_FILTERS: Dict[str, Any] = {
+    "docstatus": 1,
+    "is_pos": 1,
+    # Credit notes inherit is_pos and the branch fields from the invoice they
+    # reverse, so a post-dispatch return looks exactly like a new order to any
+    # query that omits this.
+    "is_return": 0,
+}
+
 
 @frappe.whitelist(allow_guest=False)
 def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
@@ -53,12 +68,12 @@ def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
     try:
         # Calculate cutoff time
         cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-minutes)
-        
+
         # Get newly created invoices
         new_invoices = frappe.get_all(
             "Sales Invoice",
             filters={
-                "docstatus": 1,
+                **POS_ORDER_FILTERS,
                 "creation": [">=", cutoff]
             },
             fields=[
@@ -72,9 +87,9 @@ def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
         
         # Get recently modified invoices (state changes, etc.)
         modified_invoices = frappe.get_all(
-            "Sales Invoice", 
+            "Sales Invoice",
             filters={
-                "docstatus": 1,
+                **POS_ORDER_FILTERS,
                 "modified": [">=", cutoff],
                 "creation": ["<", cutoff]  # Don't double-count new ones
             },
@@ -163,19 +178,22 @@ def check_for_updates(last_check: Optional[str] = None) -> Dict[str, Any]:
         else:
             cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-5)
         
-        # Quick count of new/modified invoices
+        # Quick count of new/modified invoices. Must stay filter-identical to
+        # get_recent_invoices: this endpoint exists to tell the client whether
+        # calling that one is worth it, so a wider count here means the app
+        # polls for updates it will never be shown.
         new_count = frappe.db.count(
             "Sales Invoice",
             filters={
-                "docstatus": 1,
+                **POS_ORDER_FILTERS,
                 "creation": [">=", cutoff]
             }
         )
-        
+
         modified_count = frappe.db.count(
             "Sales Invoice",
             filters={
-                "docstatus": 1,
+                **POS_ORDER_FILTERS,
                 "modified": [">=", cutoff],
                 "creation": ["<", cutoff]
             }
@@ -354,8 +372,16 @@ def _get_pending_alert_rows_for_profiles(
     if not filtered_profiles:
         return []
 
+    # POS_ORDER_FILTERS is load-bearing here, not decoration. Without its
+    # `is_return`, a credit note from the post-dispatch return workflow surfaces
+    # as a brand-new order awaiting acceptance: it inherits
+    # `custom_kanban_profile` and `custom_acceptance_status` (both no_copy: 0)
+    # from the invoice it reverses, so a return of an order nobody had accepted
+    # yet arrives carrying "Pending" and matches every remaining condition.
+    # `custom_sales_invoice_state` does not save us either — services.invoice_return
+    # stamps credit notes "Returned", and only "Cancelled" is excluded below.
     base_filters = {
-        "docstatus": 1,
+        **POS_ORDER_FILTERS,
         "status": ["!=", "Cancelled"],
         "custom_acceptance_status": ["in", [None, "", "Pending"]],
         "custom_sales_invoice_state": ["!=", "Cancelled"],
@@ -887,6 +913,12 @@ def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
     if doc.docstatus != 1:
         frappe.throw("Invoice must be submitted before acknowledgement")
 
+    # Belt and braces for the filters above: a client holding a cached alert
+    # from before this fix would otherwise stamp a credit note "Accepted" and
+    # push an "Order Accepted" notification for an order that never existed.
+    if int(getattr(doc, "is_return", 0) or 0):
+        frappe.throw(_("A credit note is not an order and cannot be accepted"))
+
     _ensure_user_can_accept(doc, user)
 
     current_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
@@ -957,6 +989,19 @@ def get_pending_alerts() -> Dict[str, Any]:
 
 def handle_invoice_submission(doc: Any) -> None:
     """Emit realtime and push notifications for a newly submitted invoice."""
+
+    # A credit note is an accounting correction, never an incoming order — and
+    # this hook is what actually reaches staff, unlike `get_pending_alerts`
+    # which they have to open the app to see.
+    #
+    # The acceptance-status filter that guards the pending-alerts query is no
+    # protection here: nothing downstream looks at it, so a credit note whose
+    # inherited status is "Accepted" still pushed a full "New Order" alert.
+    # Confirmed on staging: ACC-SINV-2026-17056 (a return of an Out for
+    # Delivery order) inherited custom_kanban_profile "Nasr city" and pushed to
+    # all 10 users on that branch.
+    if int(getattr(doc, "is_return", 0) or 0):
+        return
 
     effective_profile = _get_effective_profile_for_doc(doc)
 
