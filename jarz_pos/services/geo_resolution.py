@@ -283,6 +283,25 @@ def _coordinates_changed(
 # The write
 # ─────────────────────────────────────────────────────────────────────────────
 
+def accuracy_is_known(value: Any) -> bool:
+    """True when ``custom_geo_accuracy_m`` carries a real measurement.
+
+    The column is NOT NULL DEFAULT 0 (Frappe builds every Float that way), so
+    "no accuracy reported" and "accurate to 0 m" are indistinguishable in
+    storage. We resolve that ambiguity in favour of *unknown*: a parsed maps link
+    and a WooCommerce pin both arrive with no accuracy at all, whereas a genuine
+    0 m GPS fix does not exist.
+
+    Anything asking "was this delivered near the pin?" must call this first,
+    rather than reading 0 as a tight radius and drawing a confident wrong
+    conclusion.
+    """
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def set_address_pin(
     address_name: str,
     *,
@@ -334,10 +353,20 @@ def set_address_pin(
     # nobody took — a 5 m courier fix silently vouching for a 500 m viewport
     # centre, which is exactly backwards for anything that later asks "was this
     # delivered near the pin?". Preserved only when the coordinates are unchanged.
+    #
+    # Cleared to 0, NOT None. Frappe creates Float columns as NOT NULL DEFAULT 0,
+    # so writing None raises
+    #     (1048) Column 'custom_geo_accuracy_m' cannot be null
+    # and takes the whole pin write down with it. Every POS-link pin would have
+    # failed, since a parsed link never carries an accuracy — the only writes
+    # that survived were ones passing an explicit measurement.
+    #
+    # 0 therefore means "no accuracy reported", not "accurate to 0 m". Consumers
+    # must treat it as unknown; see accuracy_is_known() below.
     if decision.get("accuracy_m") is not None:
         updates["custom_geo_accuracy_m"] = decision["accuracy_m"]
     elif decision.get("coordinates_changed"):
-        updates["custom_geo_accuracy_m"] = None
+        updates["custom_geo_accuracy_m"] = 0.0
 
     if resolved_source == geo.SOURCE_COURIER_VERIFIED:
         updates["custom_geo_verified_on"] = now_datetime()

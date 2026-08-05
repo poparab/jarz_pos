@@ -128,13 +128,31 @@ trade here; importing across it is not. **Each app must carry a test asserting i
 `custom_geo_confidence` is always written in the same call as `custom_geo_source`; a test in each
 app asserts the two never disagree.
 
-### Accuracy must never outlive its pin
+### Accuracy must never outlive its pin — clear it to 0, never to NULL
 
 `custom_geo_accuracy_m` describes the point currently stored. Any write that changes the
-coordinates MUST also write the new accuracy — or explicitly NULL it when the incoming source
-carries none (Woo pins do not). Leaving the previous value behind produces a stale radius
-describing a point that is no longer there, which then silently corrupts any distance or
-consensus calculation that trusts it.
+coordinates MUST also write the new accuracy — or **clear it to `0`** when the incoming source
+carries none (a parsed maps link and a Woo pin never do). Leaving the previous value behind
+produces a stale radius describing a point that is no longer there, which then silently corrupts
+any distance or consensus calculation that trusts it.
+
+**Write `0`, not `None`.** Frappe creates every Float column as `NOT NULL DEFAULT 0`, so `None`
+raises:
+
+```
+(1048) Column 'custom_geo_accuracy_m' cannot be null
+```
+
+and takes the entire pin write down with it. The original wording of this rule said "NULL it",
+and both implementations followed it — which meant **every pin write lacking an accuracy failed**,
+i.e. every POS-link pin and every Woo pin. Only writes carrying an explicit measurement survived.
+
+Unit tests did not catch it: a mocked `frappe.db.set_value` accepts `None` without complaint. It
+surfaced the first time a real column rejected it, on staging.
+
+**`0` therefore means "no accuracy reported", not "accurate to 0 m".** Anything asking "was this
+delivered near the pin?" must treat 0 as unknown — use
+`services.geo_resolution.accuracy_is_known()` rather than comparing the raw number.
 
 ### Never rewrite `address_line2`
 
