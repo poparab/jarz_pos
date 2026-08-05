@@ -334,13 +334,32 @@ def ensure_courier_delivery_fields() -> None:
             no_copy=1,
             non_negative=1,
         )
+        # Small Text, NOT Link — deliberately, and it cannot be changed back.
+        #
+        # `tabSales Invoice` carries 247 columns and sits at MariaDB's hard
+        # 65,535-byte row limit. A Link is varchar(140), which in utf8mb4 is
+        # ~560 bytes inline, and the ALTER is rejected outright:
+        #
+        #   (1118) Row size too large ... You have to change some columns to
+        #   TEXT or BLOBs
+        #
+        # Every other field in this block is int/datetime/decimal — small and
+        # fixed-width — so they migrate cleanly. This was the only varchar, and
+        # the only one that failed. Small Text maps to a TEXT column, which
+        # stores an ~20-byte pointer inline and leaves the row budget alone.
+        #
+        # The referential integrity a Link would give is not lost: the value is
+        # a Delivery Failure Reason document name and
+        # services.courier_delivery._resolve_failure_reason resolves it against
+        # that DocType and rejects anything missing or inactive. What is lost is
+        # Desk click-through, which is a fair trade for a field that cannot
+        # otherwise exist at all.
         _ensure_custom_field(
             dt="Sales Invoice",
             fieldname="custom_delivery_failure_reason",
             label="Delivery Failure Reason",
-            fieldtype="Link",
+            fieldtype="Small Text",
             insert_after="custom_delivery_attempt_no",
-            options="Delivery Failure Reason",
             description="Why the last delivery attempt failed. Cleared on successful delivery.",
             allow_on_submit=1,
             no_copy=1,
