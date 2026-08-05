@@ -30,6 +30,12 @@ before_migrate = [
     "jarz_pos.utils.cleanup.remove_conflicting_territory_delivery_fields",
     # Remove any existing Custom Fields that collide with our fixtures by dt+fieldname
     "jarz_pos.utils.cleanup.remove_colliding_custom_fields_for_fixtures",
+    # Courier app schema (COURIER_CONTRACTS §2 and §3). Deliberately AFTER the
+    # collision sweep: that sweep deletes any Custom Field whose name differs
+    # from the fixture's, so seeding first would only hand it something to
+    # delete. Both seeders are create-only and swallow their own exceptions.
+    "jarz_pos.utils.cleanup.ensure_courier_delivery_fields",
+    "jarz_pos.utils.cleanup.ensure_address_geo_fields",
     # Ensure Territory has delivery_income and delivery_expense fields
     "jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
     # Ensure new delivery slot fields exist before fixtures import / migrations
@@ -54,6 +60,10 @@ after_migrate = [
     "jarz_pos.setup.crm_setup.ensure_crm_setup",
     # Create the Production Operator role + role profile + doc perms (idempotent)
     "jarz_pos.setup.production_setup.ensure_production_setup",
+    # Seed the courier app's Delivery Failure Reason master data (idempotent,
+    # create-only, swallows every exception so it can never abort the shared
+    # bench migrate).
+    "jarz_pos.setup.courier_setup.ensure_courier_setup",
     # Seed purchasing warehouse routing (idempotent, create-only). Keeps the
     # "where does purchased stock land" table identical on staging and prod
     # instead of being set by hand on each.
@@ -213,6 +223,13 @@ override_doctype_class = {
 # Hook on document methods and events
 
 doc_events = {
+    # Keep Address.custom_geo_confidence in step with custom_geo_source. This
+    # fires on EVERY Address save site-wide, including the WooCommerce bulk
+    # customer sync — so the handler makes zero DB queries, zero network calls,
+    # never raises, and never touches a field in Woo's outbound trigger set.
+    "Address": {
+        "before_save": "jarz_pos.events.address.clamp_geo_confidence",
+    },
     "Sales Invoice": {
         # Promo-code engine: single apply path for Woo / Desk invoices. Runs
         # before validate so calculate_taxes_and_totals picks up discount_amount.
@@ -356,6 +373,25 @@ try:
     _leads.set_lead_address
     _leads.get_lead_categories
     _leads.save_lead_category
+except Exception:
+    pass
+
+try:
+    # Courier app (COURIER_CONTRACTS): door-pin geo endpoints and the per-invoice
+    # delivery transitions. Touched here so their @frappe.whitelist() decorators
+    # register at startup like every other API module in this file.
+    from jarz_pos.api import geo as _geo_api
+    from jarz_pos.api import courier_delivery as _courier_api
+    _geo_api.preview_maps_link
+    _geo_api.get_address_pin
+    _geo_api.set_address_pin
+    _geo_api.dry_run_address_pin
+    _courier_api.get_delivery_failure_reasons
+    _courier_api.get_stop_outcome
+    _courier_api.get_my_courier_identity
+    _courier_api.mark_arrived
+    _courier_api.mark_delivered
+    _courier_api.mark_failed
 except Exception:
     pass
 

@@ -224,6 +224,229 @@ def ensure_delivery_slot_fields() -> None:
         _log(f"ensure_delivery_slot_fields error: {e}")
 
 
+def ensure_courier_delivery_fields() -> None:
+    """Ensure the Sales Invoice delivery-outcome fields exist (COURIER_CONTRACTS §2).
+
+    Belt and braces with ``fixtures/custom_field.json``: the fixture is the
+    canonical definition, but fixtures are synced at the *end* of ``bench
+    migrate`` while code deployed in the same release may already be running.
+    Creating the fields here (``before_migrate``) closes that window.
+
+    Every field carries ``allow_on_submit`` and ``no_copy``:
+
+    * without ``allow_on_submit`` Frappe rejects the write on a submitted
+      invoice, ``update_submitted_sales_invoice_fields`` filters the field out
+      and returns ``False`` **with no error** — a courier's "Delivered" tap
+      would vanish silently; and
+    * without ``no_copy`` a delivery outcome would carry over onto an amended
+      invoice.
+
+    Create-only: an existing field is never rewritten, so a hand edit in Desk
+    survives. Anchored on ``custom_courier_party`` so the block stays contiguous.
+    """
+    try:
+        if not frappe:
+            return
+
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_delivery_sequence",
+            label="Delivery Sequence",
+            fieldtype="Int",
+            insert_after="custom_courier_party",
+            description="Stop order within the courier's run. 0 means unsequenced.",
+            allow_on_submit=1,
+            no_copy=1,
+            non_negative=1,
+        )
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_arrived_at",
+            label="Arrived At",
+            fieldtype="Datetime",
+            insert_after="custom_delivery_sequence",
+            description="When the courier reported arriving at the customer's door.",
+            allow_on_submit=1,
+            no_copy=1,
+        )
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_delivered_at",
+            label="Delivered At",
+            fieldtype="Datetime",
+            insert_after="custom_arrived_at",
+            description=(
+                "When the courier reported the order handed over. Doubles as the "
+                "durable idempotency marker for the Delivered transition."
+            ),
+            allow_on_submit=1,
+            no_copy=1,
+        )
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_delivery_latitude",
+            label="Delivery Latitude",
+            fieldtype="Float",
+            insert_after="custom_delivered_at",
+            description="Latitude the courier's device reported at proof of delivery.",
+            allow_on_submit=1,
+            no_copy=1,
+            # Deliberately NOT non_negative: the southern hemisphere exists.
+            non_negative=0,
+            precision="6",
+        )
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_delivery_longitude",
+            label="Delivery Longitude",
+            fieldtype="Float",
+            insert_after="custom_delivery_latitude",
+            description="Longitude the courier's device reported at proof of delivery.",
+            allow_on_submit=1,
+            no_copy=1,
+            non_negative=0,
+            precision="6",
+        )
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_delivery_accuracy_m",
+            label="Delivery Accuracy (m)",
+            fieldtype="Float",
+            insert_after="custom_delivery_longitude",
+            description="GPS accuracy radius in metres reported with the delivery coordinates.",
+            allow_on_submit=1,
+            no_copy=1,
+            non_negative=1,
+            precision="2",
+        )
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_delivery_attempt_no",
+            label="Delivery Attempt No",
+            fieldtype="Int",
+            insert_after="custom_delivery_accuracy_m",
+            default="0",
+            description=(
+                "Incremented on every failed delivery attempt. A failure never "
+                "changes the board state."
+            ),
+            allow_on_submit=1,
+            no_copy=1,
+            non_negative=1,
+        )
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_delivery_failure_reason",
+            label="Delivery Failure Reason",
+            fieldtype="Link",
+            insert_after="custom_delivery_attempt_no",
+            options="Delivery Failure Reason",
+            description="Why the last delivery attempt failed. Cleared on successful delivery.",
+            allow_on_submit=1,
+            no_copy=1,
+            in_standard_filter=1,
+        )
+    except Exception as e:
+        _log(f"ensure_courier_delivery_fields error: {e}")
+
+
+def ensure_address_geo_fields() -> None:
+    """Ensure the Address geo fields exist (COURIER_CONTRACTS §3).
+
+    Mirrors ``fixtures/custom_field.json`` for the same reason as
+    :func:`ensure_courier_delivery_fields`.
+
+    ``jarz_pos.services.geo_resolution`` is the sole writer of all six.
+    ``custom_geo_confidence`` and ``custom_geo_verified_on`` are read-only in the
+    Desk form: the rank is derived from the source and must never be typed in by
+    hand, or the never-downgrade ladder can be defeated with a form edit.
+
+    None of these fields is in WooCommerce's Address outbound trigger set (which
+    lists no ``custom_*`` field at all), so writing them never fans out a sync.
+    That property is what makes the geo lane safe — and it evaporates the moment
+    anybody bundles an ``address_line1/2`` edit into the same save.
+    """
+    try:
+        if not frappe:
+            return
+
+        # ``gps_location`` is a core Frappe field on Address (last in field_order).
+        # Resolve defensively anyway: a site missing it would otherwise get an
+        # unanchored field, and ``ensure_delivery_slot_fields`` sets the precedent.
+        insert_after = "gps_location"
+        try:
+            meta = frappe.get_meta("Address")
+            if not meta.get_field("gps_location"):
+                insert_after = "city" if meta.get_field("city") else None
+        except Exception:
+            pass
+
+        _ensure_custom_field(
+            dt="Address",
+            fieldname="custom_latitude",
+            label="Latitude",
+            fieldtype="Float",
+            insert_after=insert_after,
+            description="Door pin latitude. Written only by jarz_pos.services.geo_resolution.",
+            non_negative=0,
+            precision="6",
+        )
+        _ensure_custom_field(
+            dt="Address",
+            fieldname="custom_longitude",
+            label="Longitude",
+            fieldtype="Float",
+            insert_after="custom_latitude",
+            description="Door pin longitude. Written only by jarz_pos.services.geo_resolution.",
+            non_negative=0,
+            precision="6",
+        )
+        _ensure_custom_field(
+            dt="Address",
+            fieldname="custom_geo_source",
+            label="Geo Source",
+            fieldtype="Select",
+            insert_after="custom_longitude",
+            # Leading blank is intentional: Frappe's convention for an optional
+            # Select. Order matches CONFIDENCE_RANK but is NOT what enforces the
+            # ladder — jarz_pos.utils.geo.CONFIDENCE_RANK is.
+            options="\nterritory_centroid\npos_link\ncustomer_pin\ncourier_verified\nmanual_override",
+            description="Where the pin came from; the label half of the confidence ladder.",
+            in_standard_filter=1,
+        )
+        _ensure_custom_field(
+            dt="Address",
+            fieldname="custom_geo_confidence",
+            label="Geo Confidence",
+            fieldtype="Int",
+            insert_after="custom_geo_source",
+            description="Integer rank of custom_geo_source. Derived, never written independently.",
+            read_only=1,
+            non_negative=1,
+        )
+        _ensure_custom_field(
+            dt="Address",
+            fieldname="custom_geo_accuracy_m",
+            label="Geo Accuracy (m)",
+            fieldtype="Float",
+            insert_after="custom_geo_confidence",
+            description="Accuracy radius in metres for the stored pin.",
+            non_negative=1,
+            precision="2",
+        )
+        _ensure_custom_field(
+            dt="Address",
+            fieldname="custom_geo_verified_on",
+            label="Geo Verified On",
+            fieldtype="Datetime",
+            insert_after="custom_geo_accuracy_m",
+            description="Set when the pin reaches courier_verified confidence.",
+            read_only=1,
+        )
+    except Exception as e:
+        _log(f"ensure_address_geo_fields error: {e}")
+
+
 def remove_required_delivery_datetime_field() -> None:
     """Remove legacy single datetime field if still present (safe no-op)."""
     try:

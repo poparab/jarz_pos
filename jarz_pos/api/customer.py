@@ -19,6 +19,94 @@ from jarz_pos.utils.customer_address_utils import (
 from jarz_pos.utils.invoice_utils import resolve_address_territory
 
 # ---------------------------------------------------------------------------
+# Door pin (COURIER_CONTRACTS §3, §4, §10a)
+# ---------------------------------------------------------------------------
+
+
+def _apply_address_geo(
+    address_name: str,
+    *,
+    location_link=None,
+    latitude=None,
+    longitude=None,
+    geo_source=None,
+) -> dict:
+    """Persist a POS-captured door pin onto *address_name*. Never raises.
+
+    Why this helper exists at all, and why it is wired into **both** customer
+    write endpoints:
+
+    Frappe binds request form keys to whitelisted-function parameter *names* and
+    silently discards every key the signature does not declare. So an endpoint
+    that omits ``latitude``/``longitude`` does not reject a pin — it accepts the
+    request, returns 200, and drops the coordinates on the floor. The POS shows a
+    saved address, the operator believes the pin is stored, and nothing is ever
+    logged. That is the most expensive failure mode this feature has, because it
+    is indistinguishable from success until somebody tries to navigate to a
+    delivery months of data later.
+
+    Rules this helper enforces:
+
+    * **Every write goes through ``services.geo_resolution``.** Writing the geo
+      fields straight from here would bypass the never-downgrade ladder, and a
+      POS re-save (``pos_link``, rank 20) would clobber a pin the customer set at
+      checkout (``customer_pin``, rank 30) or a courier verified at the door
+      (rank 40). The ladder already refuses that; the only way to get it wrong is
+      to go around it.
+    * **Coordinates win over the link.** If the client already resolved a pin,
+      that is the pin. The link is parsed server-side only when coordinates are
+      absent, which also makes the endpoint correct for any caller that never ran
+      the preview.
+    * **``address_line2`` is never touched.** It carries the legacy
+      ``"Location: <url>"`` text and sits in both the WooCommerce address-dedup
+      signature and the Woo outbound-push trigger set. Rewriting it forks
+      duplicate Addresses and fans a customer+invoice sync out to WooCommerce per
+      record.
+
+    Returns a result dict which the caller MUST surface in its response. A geo
+    failure must never abort saving the address — the address is the primary
+    thing being saved — but it must never be silent either.
+    """
+    from jarz_pos.services import geo_resolution
+    from jarz_pos.utils import geo as geo_utils
+
+    name = str(address_name or "").strip()
+    link = str(location_link or "").strip()
+    source = str(geo_source or "").strip().lower() or geo_utils.SOURCE_POS_LINK
+
+    has_coords = latitude not in (None, "") and longitude not in (None, "")
+    if not name or (not has_coords and not link):
+        return {"applied": False, "reason": "no_geo_supplied"}
+
+    if not geo_utils.normalize_source(source):
+        # An unrecognised label cannot be ranked, so the ladder cannot protect
+        # what it writes. Refuse loudly in the payload rather than silently
+        # storing an unrankable pin.
+        return {"applied": False, "reason": "unknown_geo_source", "geo_source": source}
+
+    try:
+        if has_coords:
+            result = geo_resolution.set_address_pin(
+                name,
+                latitude=latitude,
+                longitude=longitude,
+                source=source,
+            )
+        else:
+            result = geo_resolution.resolve_address_from_link(name, link, source=source)
+
+        return {"applied": bool(result.get("accepted")), **result}
+    except frappe.PermissionError:
+        raise
+    except Exception as exc:
+        # Loud, but non-fatal: the address itself saved fine.
+        frappe.log_error(
+            frappe.get_traceback(), f"_apply_address_geo failed for {name}"
+        )
+        return {"applied": False, "reason": "error", "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
@@ -230,8 +318,19 @@ def save_customer_shipping_address(
     address=None,
     territory=None,
     set_as_primary=1,
+    location_link=None,
+    latitude=None,
+    longitude=None,
+    geo_source=None,
 ):
-    """Select an existing shipping address or create a new one for a customer."""
+    """Select an existing shipping address or create a new one for a customer.
+
+    The four geo parameters are optional and carry the door pin (COURIER_CONTRACTS
+    §10a). They MUST be declared here even though this function does not use them
+    directly: Frappe binds request form keys to parameter names and silently drops
+    every key the signature does not declare, so omitting them makes the POS appear
+    to save a pin that is never stored.
+    """
     try:
         if not customer or not frappe.db.exists("Customer", customer):
             frappe.throw(_("Customer not found."))
@@ -287,6 +386,17 @@ def save_customer_shipping_address(
         if use_as_primary:
             set_customer_primary_shipping_address(customer_doc.name, address_doc.name)
 
+        # Door pin. Runs after the Address exists and is saved, and never aborts the
+        # save: the address is the primary thing being written here. The result is
+        # surfaced in the response so a rejected pin is visible rather than silent.
+        geo_result = _apply_address_geo(
+            address_doc.name,
+            location_link=location_link,
+            latitude=latitude,
+            longitude=longitude,
+            geo_source=geo_source,
+        )
+
         # Every write above moves Customer.modified, so finish the Contact side first
         # and only then read + save the Customer, inside one short window.
         contact_name = _sync_customer_contact(customer_doc, phone_value)
@@ -319,6 +429,7 @@ def save_customer_shipping_address(
                 "phone": _address_phone(address_doc.as_dict(), phone_value),
             },
             "address_book": _build_customer_shipping_address_book(customer_doc.name, invoice=invoice),
+            "geo": geo_result,
         }
     except frappe.ValidationError:
         # Frappe's own message already names the real reason — masking it behind a
@@ -594,7 +705,7 @@ def _contacts_block_lead_conversion(mobile_no, source_lead):
 
 
 @frappe.whitelist()
-def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None, customer_type=None, customer_group=None, source_lead=None):
+def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None, customer_type=None, customer_group=None, source_lead=None, latitude=None, longitude=None, geo_source=None):
     """Create a new customer quickly from POS with Territory integration.
 
     customer_type/customer_group default to "Individual" (unchanged retail behavior).
@@ -723,7 +834,20 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
             frappe.logger().info(f"Creating address")
             address_doc.insert(ignore_permissions=True)
             frappe.logger().info(f"Address created successfully: {address_doc.name}")
-        
+
+        # Door pin (COURIER_CONTRACTS §10a). Placed after the whole address block so
+        # it covers both the reuse and the create branch. address_line2 above keeps
+        # its legacy "Location: <url>" text untouched — that string is part of the
+        # WooCommerce dedup signature, and the structured fields written here are
+        # the real store from now on.
+        geo_result = _apply_address_geo(
+            address_doc.name,
+            location_link=location_link,
+            latitude=latitude,
+            longitude=longitude,
+            geo_source=geo_source,
+        )
+
         # Create contact
         contact_payload = {
             "doctype": "Contact",
@@ -762,9 +886,10 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
             "customer_primary_address": customer_doc.customer_primary_address,
             "customer_primary_contact": customer_doc.customer_primary_contact,
             "territory": customer_doc.territory,
-            "customer_group": customer_doc.customer_group
+            "customer_group": customer_doc.customer_group,
+            "geo": geo_result,
         }
-        
+
         # Add territory delivery info
         _augment_customer_with_territory(result)
         return result

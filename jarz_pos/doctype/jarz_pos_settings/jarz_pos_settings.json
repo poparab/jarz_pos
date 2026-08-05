@@ -35,6 +35,8 @@
   "vapid_subject",
   "returns_section",
   "enable_invoice_returns",
+  "courier_section",
+  "enable_courier_delivery_actions",
   "production_section",
   "production_max_backdate_days",
   "production_operator_batch_value_limit",
@@ -255,6 +257,18 @@
    "fieldname": "enable_invoice_returns",
    "fieldtype": "Check",
    "label": "Enable Invoice Returns"
+  },
+  {
+   "fieldname": "courier_section",
+   "fieldtype": "Section Break",
+   "label": "Courier App"
+  },
+  {
+   "default": "0",
+   "description": "Master switch for the per-invoice courier transitions (Arrived / Delivered / Failed). When off, the service refuses and the courier app hides the actions. Read in the service, not the API, so every caller — HTTP, harness, background job — hits the same gate. Instant rollback lever: no deploy, no restart.",
+   "fieldname": "enable_courier_delivery_actions",
+   "fieldtype": "Check",
+   "label": "Enable Courier Delivery Actions"
   },
   {
    "fieldname": "production_section",

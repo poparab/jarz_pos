@@ -1,0 +1,96 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:code",
+ "creation": "2026-08-05 00:00:00.000000",
+ "description": "Why a delivery attempt failed, and what should happen next. Seeded create-only by jarz_pos.setup.courier_setup; a failure never changes the invoice board state, it only sets this reason and increments the attempt counter.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "code",
+  "label_en",
+  "label_ar",
+  "column_break_main",
+  "next_action",
+  "is_active"
+ ],
+ "fields": [
+  {
+   "description": "Stable machine key. This is also the document name, so it is what Sales Invoice.custom_delivery_failure_reason stores — renaming one orphans every invoice that pointed at it.",
+   "fieldname": "code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Code",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "label_en",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label (English)",
+   "reqd": 1
+  },
+  {
+   "description": "Shown to couriers. The courier app is Arabic-first, so this is the string most users actually read.",
+   "fieldname": "label_ar",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label (Arabic)"
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Reschedule",
+   "description": "What dispatch should do with the order after this failure. Advisory: this app does not act on it automatically, because Return and Cancel both have accounting consequences that belong to the existing return / cancellation workflows.",
+   "fieldname": "next_action",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Next Action",
+   "options": "Reschedule\nReturn\nCancel",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "description": "Inactive reasons stay linked on historical invoices but are hidden from the courier's picker.",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Is Active"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-05 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Delivery Failure Reason",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "All"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

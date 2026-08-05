@@ -79,9 +79,34 @@ the Address layout; we do not use it — it is unstructured and not numerically 
 
 Fixture entries require `"module": "jarz pos"` and `"name": "Address-<fieldname>"`.
 
-**`services/geo_resolution.py` is the sole writer of all six.** Nothing else may write them —
-not the Woo sync, not the Desk form, not a patch. `custom_geo_confidence` is always written in the
-same call as `custom_geo_source`; a test asserts the two never disagree.
+### Authorised writers — there are exactly two
+
+Amended 2026-08-05. The original "sole writer" rule was unimplementable: the Woo app cannot import
+`jarz_pos` (domain isolation), and it writes with `frappe.db.set_value`, which bypasses the ORM and
+therefore bypasses the `before_save` ladder clamp in `jarz_pos/events/address.py`.
+
+| Writer | May write | Rank ceiling |
+|---|---|---|
+| `jarz_pos/services/geo_resolution.py` | all six fields, any source | up to `manual_override` (50) |
+| `jarz_woocommerce_integration/services/geo_passthrough.py` | all six fields | **`customer_pin` (30) only** |
+
+Nothing else writes them — not the Desk form, not a patch, not the POS API directly.
+
+Both writers implement the ladder **independently from §4 of this document**, which is the shared
+source of truth. Duplicating a five-entry constant table across a domain boundary is the correct
+trade here; importing across it is not. **Each app must carry a test asserting its own
+`CONFIDENCE_RANK` matches §4 exactly** — that is what catches drift.
+
+`custom_geo_confidence` is always written in the same call as `custom_geo_source`; a test in each
+app asserts the two never disagree.
+
+### Accuracy must never outlive its pin
+
+`custom_geo_accuracy_m` describes the point currently stored. Any write that changes the
+coordinates MUST also write the new accuracy — or explicitly NULL it when the incoming source
+carries none (Woo pins do not). Leaving the previous value behind produces a stale radius
+describing a point that is no longer there, which then silently corrupts any distance or
+consensus calculation that trusts it.
 
 ### Never rewrite `address_line2`
 
@@ -258,6 +283,58 @@ Template: `jarz_pos/api/returns.py`. Every endpoint module follows it exactly.
   deletes fields whose `name` differs; whichever app migrates second would win and silently drop
   the other's field. All shared schema is owned by lane P1, exclusively.
 - Every migrate hook swallows exceptions — a raising seeder aborts the shared `bench migrate`.
+
+---
+
+## 10a. Geo API wire contract (added 2026-08-05)
+
+This was missing from the original freeze and both sides had to guess. **Frappe silently drops form
+keys that are not in a whitelisted method's signature**, so a parameter-name mismatch does not
+raise — it manifests as "nothing ever resolves". Pin it here; both sides conform to this, not to
+each other.
+
+### `jarz_pos.api.geo.preview_maps_link`
+
+Request — the parameter is named **`link`**:
+
+```json
+{ "link": "<pasted text: long URL, maps.app.goo.gl short link, plus code, or bare lat,lng>" }
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "latitude": 30.0444,
+  "longitude": 31.2357,
+  "precision": "pin" | "viewport" | "query" | "plus_code",
+  "distance_from_branch_m": 4213.7,
+  "error": null
+}
+```
+
+- `precision` distinguishes a real pin (`!3d/!4d`) from a mere viewport centre (`@`), which can be
+  hundreds of metres off. The client may warn on `viewport`.
+- `distance_from_branch_m` is **optional**. When absent the client accepts the point — it applies
+  its own 150 km sanity ceiling as a backstop only. If the backend later returns its own
+  plausibility verdict, that verdict wins over the client ceiling.
+- On failure: `{"success": false, "error": "<english reason>"}`. The client shows a localised
+  generic message and logs the reason; server strings are English-only and would break the Arabic
+  UI if surfaced verbatim.
+
+### Address save payload
+
+`create_customer` and `save_customer_shipping_address` accept these optional keys:
+
+| key | type |
+|---|---|
+| `location_link` | string, the raw pasted text |
+| `latitude` | float |
+| `longitude` | float |
+| `geo_source` | one of §4's source labels |
+
+Same silent-drop property: until the fields are migrated, sending them is a harmless no-op.
 
 ---
 

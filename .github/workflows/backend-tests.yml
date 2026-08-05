@@ -156,6 +156,15 @@ jobs:
             test_purchase_warehouse_utils
             test_purchase_setup
             test_purchase_request_links
+            # Courier app (COURIER_CONTRACTS). A module that is not listed here
+            # is a module CI never runs — only a fraction of the test files in
+            # jarz_pos/tests are in this array, so assume no coverage unless the
+            # name appears below.
+            test_courier_custom_fields
+            test_state_options_frozen
+            test_geo_parser
+            test_geo_ladder
+            test_courier_delivery_transitions
           )
           rc=0
           for m in "${MODULES[@]}"; do
