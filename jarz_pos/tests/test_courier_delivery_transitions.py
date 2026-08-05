@@ -554,13 +554,25 @@ class TestAccessGate(unittest.TestCase):
                     cd.mark_invoice_delivered("ACC-SINV-2026-00001")
 
     def test_an_unexpected_error_becomes_an_envelope_not_a_500(self):
+        # Substituted with a plain function rather than a MagicMock with
+        # side_effect. Against a real site, frappe.get_traceback() walks the
+        # frames of the live exception, and a MagicMock sitting in those locals
+        # raises "Can't pickle <class 'MagicMock'>" while the original is being
+        # handled — so the envelope came back carrying the pickling error instead
+        # of the real reason. The mock was rewriting the very message this test
+        # exists to prove survives.
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
         inv = _invoice()
         with _Harness(inv):
             with patch.object(
-                cd, "update_submitted_sales_invoice_fields", side_effect=Exception("boom")
+                cd, "update_submitted_sales_invoice_fields", new=_boom
             ), patch.object(frappe, "log_error"):
                 result = cd.mark_invoice_delivered("ACC-SINV-2026-00001")
+
         self.assertFalse(result["success"])
+        self.assertTrue(str(result.get("error") or "").strip(), "error must not be empty")
         self.assertIn("boom", result["error"])
 
 
