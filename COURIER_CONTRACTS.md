@@ -48,7 +48,35 @@ one above it, so the block stays contiguous.
 | 5 | `custom_delivery_longitude` | Float (precision 6) | `custom_delivery_latitude` | |
 | 6 | `custom_delivery_accuracy_m` | Float (precision 2) | `custom_delivery_longitude` | GPS accuracy radius in metres |
 | 7 | `custom_delivery_attempt_no` | Int, default `0` | `custom_delivery_accuracy_m` | Incremented on every failure |
-| 8 | `custom_delivery_failure_reason` | Link → `Delivery Failure Reason` | `custom_delivery_attempt_no` | Cleared on successful delivery |
+| 8 | `custom_delivery_failure_reason` | **Small Text** (see below) | `custom_delivery_attempt_no` | Holds a `Delivery Failure Reason` name. Cleared on successful delivery |
+
+### Why field 8 is Small Text and not a Link
+
+Amended 2026-08-05 after the staging migrate failed on this column alone.
+
+`tabSales Invoice` carries **247 columns and is at MariaDB's hard 65,535-byte row
+limit**. A Link is `varchar(140)` — roughly 560 inline bytes at utf8mb4 — and the ALTER is
+rejected outright:
+
+```
+(1118) Row size too large. The maximum row size for the used table type, not counting
+BLOBs, is 65535 ... You have to change some columns to TEXT or BLOBs
+```
+
+Fields 1–7 are Int, Datetime and Float — small and fixed-width — so they migrated cleanly. This
+was the only varchar and the only failure. `Small Text` maps to a TEXT column, which stores an
+~20-byte pointer inline.
+
+`options` must stay **empty**. A leftover `"Delivery Failure Reason"` there would make Frappe
+treat a TEXT column as a link target and render a broken Desk control.
+
+Referential integrity is not lost: `services/courier_delivery._resolve_failure_reason` resolves the
+stored value against the DocType and rejects anything missing or inactive. Only Desk click-through
+is given up.
+
+> **This constrains every app, not just this feature.** No new varchar field can be added to
+> Sales Invoice by `jarz_pos`, the Woo app, or anything else until existing columns are converted
+> to TEXT to reclaim row budget. That is scheduled work against a live table, not a deploy-time fix.
 
 **Every one of these MUST carry `"allow_on_submit": 1`.** They are written on submitted invoices;
 without it, Frappe rejects the write and `update_submitted_sales_invoice_fields` filters the field

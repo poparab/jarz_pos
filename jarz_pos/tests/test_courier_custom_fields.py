@@ -45,7 +45,11 @@ SALES_INVOICE_FIELDS = {
     "custom_delivery_longitude": ("Float", "custom_delivery_latitude"),
     "custom_delivery_accuracy_m": ("Float", "custom_delivery_longitude"),
     "custom_delivery_attempt_no": ("Int", "custom_delivery_accuracy_m"),
-    "custom_delivery_failure_reason": ("Link", "custom_delivery_attempt_no"),
+    # Small Text, not Link. tabSales Invoice is at MariaDB's 65,535-byte row
+    # limit (247 columns), so a varchar(140) ALTER is rejected outright with
+    # error 1118. Small Text maps to TEXT, which costs ~20 inline bytes. See
+    # utils/cleanup.ensure_courier_delivery_fields for the full reasoning.
+    "custom_delivery_failure_reason": ("Small Text", "custom_delivery_attempt_no"),
 }
 
 ADDRESS_FIELDS = {
@@ -157,11 +161,20 @@ class TestSalesInvoiceOutcomeFields(unittest.TestCase):
     def test_attempt_counter_defaults_to_zero(self):
         self.assertEqual(str(self.fields["custom_delivery_attempt_no"].get("default")), "0")
 
-    def test_failure_reason_links_to_the_seeded_doctype(self):
-        self.assertEqual(
-            self.fields["custom_delivery_failure_reason"].get("options"),
-            "Delivery Failure Reason",
-        )
+    def test_failure_reason_carries_no_link_options(self):
+        """The field stores a Delivery Failure Reason name without being a Link.
+
+        It cannot be a Link: tabSales Invoice is at the InnoDB row-size limit and
+        rejects any new varchar. So `options` must stay empty — a stale
+        "Delivery Failure Reason" there would make Frappe treat a TEXT column as
+        a link target and render a broken control in Desk.
+
+        The integrity a Link would have enforced lives in
+        services.courier_delivery._resolve_failure_reason, which resolves the
+        stored value against the DocType and rejects anything missing or
+        inactive.
+        """
+        self.assertFalse(self.fields["custom_delivery_failure_reason"].get("options"))
 
 
 class TestAddressGeoFields(unittest.TestCase):
