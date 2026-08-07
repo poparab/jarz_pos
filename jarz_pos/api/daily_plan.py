@@ -29,6 +29,11 @@ PLAN_DOCTYPE = "Jarz Production Plan"
 # in the catalogue that happens to own a BOM.
 FINISHED_GOODS_GROUPS = ("Medium", "Large")
 
+# Mix ingredients that a jar may also use for something else entirely, so their
+# presence as a direct BOM line says nothing about whether the mix was migrated.
+# Powder sugar is the live case: Tiramisu sweetens its espresso with it.
+SHARED_WITH_OTHER_RECIPES = {"powder sugar"}
+
 
 def _ensure_view_access() -> None:
     roles = set(frappe.get_roles())
@@ -485,14 +490,22 @@ def check_bom_readiness(company: Optional[str] = None) -> Dict[str, Any]:
 def _flattened_mix_components_on(bom_name: str, mix_components: set) -> set:
     """Mix raw materials that a jar BOM lists directly.
 
-    Only counts a component that the mix BOM also uses; a jar legitimately
-    using cream somewhere else (Molten's ganache) sits behind its own
-    sub-assembly and never appears as a direct line, so this stays specific.
+    Restricted to components the mix uses *exclusively*.  A shared one proves
+    nothing: Tiramisu carries powder sugar for its espresso syrup as well as
+    inside the mix, so treating any direct powder-sugar line as evidence
+    reported both Tiramisu BOMs as double-counted when they were correct — a
+    red banner on the plan screen for the one flavour that had just been fixed.
+
+    Cream is shared too in principle, but only ever via Molten's ganache, which
+    sits behind its own sub-assembly and contributes no direct line.
     """
     if not bom_name or not mix_components:
         return set()
+    exclusive = set(mix_components) - SHARED_WITH_OTHER_RECIPES
+    if not exclusive:
+        return set()
     direct = set(frappe.db.get_all("BOM Item", filters={"parent": bom_name}, pluck="item_code"))
-    return direct.intersection(mix_components)
+    return direct.intersection(exclusive)
 
 
 def _serialise(doc) -> Dict[str, Any]:
