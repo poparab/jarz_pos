@@ -374,6 +374,18 @@ def deactivate_superseded(apply: bool) -> Dict[str, Any]:
 # ── Runner ──────────────────────────────────────────────────────────────
 
 
+def apply_now() -> Dict[str, Any]:
+    """Run the migration for real.
+
+    A no-argument entry point on purpose.  ``--kwargs "{'apply':True}"`` has to
+    survive PowerShell, ssh, bash and click before it reaches Python, and the
+    quoting is stripped somewhere in that chain often enough that the call
+    silently degrades to a dry run — or worse, dies with a NameError after the
+    operator believes it ran.  Naming the intent removes the question.
+    """
+    return run(apply=True)
+
+
 def run(apply: Any = False) -> Dict[str, Any]:
     apply = bool(apply)
     print("=" * 96)
