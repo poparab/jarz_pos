@@ -84,6 +84,11 @@ JAR_MIX_QTY: Dict[str, float] = {
     "Mango Large": 0.065135,
     "Tiramisu Medium": 0.067143,
     "Tiramisu Large": 0.091000,
+    # Molten carries no cheesecake mix at all, but it still needs rebuilding:
+    # its Fudge Cake and Chocolate ganache come out of the same freezer as
+    # everyone else's, and without the flag the planner explodes them to flour.
+    "Molten Medium": 0.0,
+    "Molten Large": 0.0,
 }
 
 # Held in the freezer, so the planner must see the sub-assembly, not its inputs.
@@ -213,6 +218,34 @@ def rebuild_mix_bom(apply: bool) -> Dict[str, Any]:
 # ── Step 2: rebuild the jar BOMs ────────────────────────────────────────
 
 
+def _already_migrated(doc, target_mix: float) -> bool:
+    """True when this BOM already looks the way the migration would leave it.
+
+    Makes a re-run cheap and safe.  Without it every run would stack another
+    BOM version on all 18 jars, which is not wrong but buries the one version
+    that actually changed under a pile of identical ones.
+    """
+    if any(r.item_code in MIX_ONLY_COMPONENTS for r in doc.items):
+        return False
+    if (doc.rm_cost_as_per or "") != COST_BASIS:
+        return False
+    if any(
+        r.item_code in FREEZER_SUB_ASSEMBLIES and not r.do_not_explode for r in doc.items
+    ):
+        return False
+
+    mix_row = next((r for r in doc.items if r.item_code == MIX_ITEM), None)
+    if target_mix > 0:
+        if mix_row is None or abs(flt(mix_row.stock_qty) - target_mix) > 1e-6:
+            return False
+        # Must still explode: the mix is never stocked.
+        if mix_row.do_not_explode:
+            return False
+    elif mix_row is not None:
+        return False
+    return True
+
+
 def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
     bom_name = _default_bom(item_code)
     if not bom_name:
@@ -220,6 +253,9 @@ def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
 
     doc = frappe.get_doc("BOM", bom_name)
     target_mix = JAR_MIX_QTY[item_code]
+
+    if _already_migrated(doc, target_mix):
+        return {"item_code": item_code, "skipped": "already migrated"}
 
     derived = _derive_mix_from_milkana(bom_name)
     warning = None
@@ -252,7 +288,10 @@ def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
         if row.item_code in MIX_ONLY_COMPONENTS:
             removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g")
         elif row.item_code == MIX_SHARED_COMPONENT:
-            if sugar_row is not None and row.name == sugar_row.name:
+            # Identity, not `.name`: copy_doc leaves every child row's name as
+            # None, so comparing names matched None == None on every sugar row
+            # and dropped Tiramisu's espresso syrup along with the mix share.
+            if sugar_row is not None and row is sugar_row:
                 removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g (mix share)")
             else:
                 adjusted.append(
@@ -312,7 +351,10 @@ def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
         if row.item_code == MIX_ITEM:
             continue  # re-added below at the canonical quantity
         if row.item_code == MIX_SHARED_COMPONENT:
-            if sugar_row is not None and row.name == sugar_row.name:
+            # Identity, not `.name`: copy_doc leaves every child row's name as
+            # None, so comparing names matched None == None on every sugar row
+            # and dropped Tiramisu's espresso syrup along with the mix share.
+            if sugar_row is not None and row is sugar_row:
                 continue  # the mix's share; the sub-assembly carries it now
             # Any other powder-sugar line belongs to something else and stays.
         if row.item_code in swaps:
