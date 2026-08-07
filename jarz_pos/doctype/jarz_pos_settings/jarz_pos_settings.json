@@ -41,6 +41,8 @@
   "production_max_backdate_days",
   "production_operator_batch_value_limit",
   "production_allow_over_production",
+  "production_mix_item",
+  "production_mixer_run_sizes",
   "purchase_section",
   "default_purchase_warehouse",
   "purchase_warehouse_routes",
@@ -297,6 +299,18 @@
    "fieldname": "production_allow_over_production",
    "fieldtype": "Check",
    "label": "Allow Over-Production"
+  },
+  {
+   "description": "Sub-assembly whose default BOM defines one batch for the Daily Production Plan. Deliberately Data and not Link: a stale Link on this Single blocks every full save of it, and a mistyped name here degrades to the built-in default rather than locking the Settings form. Leave blank to use 'Cheesecake Mix'.",
+   "fieldname": "production_mix_item",
+   "fieldtype": "Data",
+   "label": "Production Mix Item"
+  },
+  {
+   "description": "Batch sizes the mixer will accept in one run, comma separated. Leave blank for 1, 1.5, 2. The plan never schedules a run smaller than the smallest value here.",
+   "fieldname": "production_mixer_run_sizes",
+   "fieldtype": "Data",
+   "label": "Mixer Run Sizes"
   },
   {
    "fieldname": "purchase_section",

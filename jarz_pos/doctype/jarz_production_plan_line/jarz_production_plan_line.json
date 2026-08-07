@@ -1,0 +1,147 @@
+{
+ "actions": [],
+ "creation": "2026-08-08 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "item_name",
+  "column_break_item",
+  "item_group",
+  "default_bom",
+  "section_break_plan",
+  "planned_qty",
+  "column_break_plan",
+  "mix_qty_per_unit",
+  "mix_qty",
+  "jars_per_batch",
+  "section_break_actual",
+  "actual_qty",
+  "column_break_actual",
+  "variance_qty",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item",
+   "options": "Item",
+   "reqd": 1,
+   "columns": 2
+  },
+  {
+   "fetch_from": "item_code.item_name",
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "label": "Item Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_item",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fetch_from": "item_code.item_group",
+   "fieldname": "item_group",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Group",
+   "read_only": 1,
+   "columns": 1
+  },
+  {
+   "description": "Submitted default BOM this line was costed and exploded from.",
+   "fieldname": "default_bom",
+   "fieldtype": "Link",
+   "label": "Default BOM",
+   "options": "BOM",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_plan",
+   "fieldtype": "Section Break",
+   "label": "Plan"
+  },
+  {
+   "description": "Jars the floor intends to fill today.",
+   "fieldname": "planned_qty",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Planned Qty",
+   "columns": 1
+  },
+  {
+   "fieldname": "column_break_plan",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Mix consumed by one jar, read from the BOM. Zero for flavours that use none, such as Molten.",
+   "fieldname": "mix_qty_per_unit",
+   "fieldtype": "Float",
+   "label": "Mix per Unit",
+   "precision": "6",
+   "read_only": 1
+  },
+  {
+   "fieldname": "mix_qty",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Mix Qty",
+   "precision": "3",
+   "read_only": 1,
+   "columns": 1
+  },
+  {
+   "description": "Jars this flavour yields from one full batch of mix, per the BOM.",
+   "fieldname": "jars_per_batch",
+   "fieldtype": "Float",
+   "label": "Jars per Batch",
+   "precision": "1",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_actual",
+   "fieldtype": "Section Break",
+   "label": "End of Day"
+  },
+  {
+   "description": "Jars actually finished. Leave blank until counted - blank means not counted, zero means counted and none made.",
+   "fieldname": "actual_qty",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Actual Qty",
+   "columns": 1
+  },
+  {
+   "fieldname": "column_break_actual",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "variance_qty",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Variance",
+   "read_only": 1,
+   "columns": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-08 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Production Plan Line",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

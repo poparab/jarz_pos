@@ -1,0 +1,313 @@
+{
+ "actions": [],
+ "allow_copy": 1,
+ "allow_import": 1,
+ "allow_rename": 0,
+ "autoname": "naming_series:",
+ "creation": "2026-08-08 00:00:00.000000",
+ "custom": 0,
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "plan_date",
+  "column_break_head",
+  "company",
+  "status",
+  "section_break_lines",
+  "lines",
+  "section_break_mix",
+  "mix_item",
+  "mix_batch_qty",
+  "mix_uom",
+  "column_break_mix",
+  "total_mix_qty",
+  "required_batches",
+  "section_break_runs",
+  "mixer_runs",
+  "run_count",
+  "column_break_runs",
+  "planned_batches",
+  "overproduction_batches",
+  "overproduction_note",
+  "section_break_close",
+  "actual_batches_run",
+  "total_planned_units",
+  "total_actual_units",
+  "column_break_close",
+  "realised_units_per_batch",
+  "closed_on",
+  "closed_by",
+  "section_break_notes",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "JPP-.YYYY.-",
+   "reqd": 1,
+   "set_only_once": 1
+  },
+  {
+   "default": "Today",
+   "fieldname": "plan_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Plan Date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nPlanned\nClosed",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_lines",
+   "fieldtype": "Section Break",
+   "label": "Jars"
+  },
+  {
+   "fieldname": "lines",
+   "fieldtype": "Table",
+   "label": "Lines",
+   "options": "Jarz Production Plan Line"
+  },
+  {
+   "fieldname": "section_break_mix",
+   "fieldtype": "Section Break",
+   "label": "Mix Requirement"
+  },
+  {
+   "description": "Sub-assembly whose default BOM defines one batch.",
+   "fieldname": "mix_item",
+   "fieldtype": "Link",
+   "label": "Mix Item",
+   "options": "Item",
+   "read_only": 1
+  },
+  {
+   "description": "Yield of one full batch, from the mix BOM.",
+   "fieldname": "mix_batch_qty",
+   "fieldtype": "Float",
+   "label": "Batch Size",
+   "precision": "3",
+   "read_only": 1
+  },
+  {
+   "fieldname": "mix_uom",
+   "fieldtype": "Data",
+   "label": "Mix UOM",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_mix",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "total_mix_qty",
+   "fieldtype": "Float",
+   "label": "Total Mix Needed",
+   "precision": "3",
+   "read_only": 1
+  },
+  {
+   "description": "Exact fractional batches the jar plan implies, before mixer rounding.",
+   "fieldname": "required_batches",
+   "fieldtype": "Float",
+   "label": "Batches Needed",
+   "precision": "3",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_runs",
+   "fieldtype": "Section Break",
+   "label": "Mixer Runs"
+  },
+  {
+   "description": "How to split the mixing, largest run first.",
+   "fieldname": "mixer_runs",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Runs",
+   "read_only": 1
+  },
+  {
+   "fieldname": "run_count",
+   "fieldtype": "Int",
+   "label": "Number of Runs",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_runs",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "planned_batches",
+   "fieldtype": "Float",
+   "label": "Batches Planned",
+   "precision": "2",
+   "read_only": 1
+  },
+  {
+   "description": "Mix the rounding forces you to make beyond the jar plan.",
+   "fieldname": "overproduction_batches",
+   "fieldtype": "Float",
+   "label": "Overproduction",
+   "precision": "3",
+   "read_only": 1
+  },
+  {
+   "fieldname": "overproduction_note",
+   "fieldtype": "Small Text",
+   "label": "Overproduction Note",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_break_close",
+   "fieldtype": "Section Break",
+   "label": "End of Day"
+  },
+  {
+   "description": "Batches the floor actually mixed. Defaults to the plan; correct it if the day changed.",
+   "fieldname": "actual_batches_run",
+   "fieldtype": "Float",
+   "label": "Batches Actually Run",
+   "precision": "2"
+  },
+  {
+   "fieldname": "total_planned_units",
+   "fieldtype": "Int",
+   "label": "Jars Planned",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_actual_units",
+   "fieldtype": "Int",
+   "label": "Jars Made",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_close",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Jars obtained per batch actually run. Compare against the BOM figure to spot recipe drift.",
+   "fieldname": "realised_units_per_batch",
+   "fieldtype": "Float",
+   "label": "Realised Jars per Batch",
+   "precision": "1",
+   "read_only": 1
+  },
+  {
+   "fieldname": "closed_on",
+   "fieldtype": "Datetime",
+   "label": "Closed On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "closed_by",
+   "fieldtype": "Link",
+   "label": "Closed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_break_notes",
+   "fieldtype": "Section Break",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "is_submittable": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-08-08 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Production Plan",
+ "naming_rule": "Naming Series",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "Manufacturing Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "JARZ Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "Production Operator",
+   "read": 1,
+   "write": 1,
+   "create": 0,
+   "delete": 0,
+   "print": 1,
+   "email": 0,
+   "share": 0,
+   "export": 0,
+   "report": 1
+  }
+ ],
+ "show_name_in_global_search": 1,
+ "sort_field": "plan_date",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "plan_date",
+ "track_changes": 1
+}
