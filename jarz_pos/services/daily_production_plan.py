@@ -29,9 +29,36 @@ import frappe
 # touches Jarz POS Settings still works.
 DEFAULT_MIX_ITEM = "Cheesecake Mix"
 
-# What the mixer will accept in one run, in batches.  The floor works in halves
-# and will not run less than a full batch.
-DEFAULT_RUN_SIZES: Tuple[float, ...] = (1.0, 1.5, 2.0)
+# What the mixer will accept in one run, in batches, and how well each one
+# actually mixes.  Straight from the floor: 1.5 is the right quantity, 2
+# stretches the machine, and 1 does not mix well — too little in the bowl.
+#
+# The penalties encode that ordering rather than a measurement.  Their only job
+# is to rank candidate plans, so what matters is 1 being clearly worse than 2
+# and 1.5 being free; the absolute values carry no meaning on their own.
+QUALITY_PREFERRED = "preferred"
+QUALITY_ACCEPTABLE = "acceptable"
+QUALITY_POOR = "poor"
+
+QUALITY_PENALTY = {
+    QUALITY_PREFERRED: 0.0,
+    QUALITY_ACCEPTABLE: 1.0,
+    QUALITY_POOR: 3.0,
+}
+
+DEFAULT_RUN_QUALITY: Dict[float, str] = {
+    1.0: QUALITY_POOR,
+    1.5: QUALITY_PREFERRED,
+    2.0: QUALITY_ACCEPTABLE,
+}
+
+DEFAULT_RUN_SIZES: Tuple[float, ...] = tuple(sorted(DEFAULT_RUN_QUALITY))
+
+# What one wasted batch of mix costs, in the same units as the quality
+# penalties.  The mix is never stored, so spare mix is either thrown away or
+# forces jars nobody ordered — at 4.0 a full wasted batch outweighs any run
+# quality, while half a batch will not by itself justify a poor mix.
+DEFAULT_WASTE_WEIGHT = 4.0
 
 # Guard on the search below.  ~4600 combinations at 30 runs, still instant, and
 # 30 runs is already 60 batches — far past anything one day's mixer can do.
@@ -57,48 +84,43 @@ def batches_needed(*, total_mix_qty: float, batch_qty: float) -> float:
 def plan_mixer_runs(
     batches: float,
     *,
-    run_sizes: Sequence[float] = DEFAULT_RUN_SIZES,
+    run_quality: Optional[Dict[float, str]] = None,
+    waste_weight: float = DEFAULT_WASTE_WEIGHT,
 ) -> Dict[str, Any]:
     """Split a fractional batch requirement into concrete mixer runs.
 
-    Optimises for **fewest runs first, least overproduction second** — the order
-    the floor actually cares about, since every run costs a setup and a wash
-    regardless of how full it is.  5.0 batches becomes ``2 + 2 + 1``, not
-    ``2 + 1.5 + 1.5``: same three runs, same total, but the first fills the
-    mixer twice and only under-fills once.
+    Not every run size mixes equally well, so this is a quality decision before
+    it is an arithmetic one.  A 1.5 run is what the recipe is built around; a 2
+    stretches the machine; a 1 leaves too little in the bowl to come together.
+    Scheduling "fewest runs" would happily fill a day with the two sizes the
+    floor least wants.
 
-    ``batches`` is never rounded down.  Asking for 0.1 batches returns one full
-    run, because there is no such thing as a fifth of a mix — and the
-    ``overproduction_batches`` field says so out loud instead of quietly
-    pretending the plan was exact.
+    Scored as ``sum(quality penalty) + waste_weight * spare batches``, with run
+    count only as a tie-break.  That makes 5.0 batches come out as
+    ``2 + 1.5 + 1.5`` — exact coverage, one stretched run — rather than the
+    ``2 + 2 + 1`` a run-count-first rule would pick, or the ``1.5 x 4`` that
+    pure quality would pick at the cost of a whole wasted batch.
+
+    ``batches`` is never rounded down.  Asking for 0.1 batches returns one run,
+    because there is no such thing as a fifth of a mix — and
+    ``overproduction_batches`` says so out loud instead of quietly pretending
+    the plan was exact.
 
     Returns ``runs: []`` for a zero requirement, which is different from a
     requirement that cannot be met.
     """
-    sizes = sorted({float(s) for s in (run_sizes or ()) if float(s) > 0})
+    quality = dict(run_quality or DEFAULT_RUN_QUALITY)
+    sizes = sorted({float(s) for s in quality if float(s) > 0})
     batches = float(batches or 0)
+    waste_weight = float(waste_weight if waste_weight is not None else DEFAULT_WASTE_WEIGHT)
 
     if batches <= QTY_EPSILON:
-        return {
-            "runs": [],
-            "run_count": 0,
-            "planned_batches": 0.0,
-            "required_batches": 0.0,
-            "overproduction_batches": 0.0,
-            "capped": False,
-        }
+        return _empty_plan(0.0, capped=False)
 
     if not sizes:
         # No mixer configured: report the raw requirement rather than inventing
         # a run size, so the caller can surface a setup problem.
-        return {
-            "runs": [],
-            "run_count": 0,
-            "planned_batches": 0.0,
-            "required_batches": batches,
-            "overproduction_batches": 0.0,
-            "capped": True,
-        }
+        return _empty_plan(batches, capped=True)
 
     largest = sizes[-1]
     # The epsilon stops 4.0/2.0 landing on 2.0000000000000004 and asking for a
@@ -106,62 +128,96 @@ def plan_mixer_runs(
     min_runs = max(1, math.ceil((batches / largest) - QTY_EPSILON))
 
     best: Optional[Tuple[float, ...]] = None
-    for n in range(min_runs, MAX_RUNS + 1):
-        best = _cheapest_combination(n, batches, sizes)
-        if best is not None:
-            break
+    best_score = float("inf")
+
+    # Searching a few run counts past the minimum is what lets the optimiser
+    # trade an extra preferred run against a stretched one; stopping at the
+    # minimum would hard-code the run-count-first rule this is replacing.
+    for n in range(min_runs, min(min_runs + 3, MAX_RUNS) + 1):
+        combo, score = _best_combination(n, batches, sizes, quality, waste_weight)
+        if combo is None:
+            continue
+        if score < best_score - QTY_EPSILON:
+            best_score, best = score, combo
 
     if best is None:
         # Requirement exceeds MAX_RUNS runs of the largest size.  Return the
         # biggest plan we will schedule and flag it rather than looping forever.
         capped_runs = tuple([largest] * MAX_RUNS)
-        planned = float(sum(capped_runs))
         return {
-            "runs": list(capped_runs),
-            "run_count": len(capped_runs),
-            "planned_batches": planned,
-            "required_batches": batches,
-            "overproduction_batches": 0.0,
+            **_plan_payload(capped_runs, batches, quality),
             "capped": True,
         }
 
-    planned = float(sum(best))
+    return {**_plan_payload(best, batches, quality), "capped": False}
+
+
+def _empty_plan(required: float, *, capped: bool) -> Dict[str, Any]:
     return {
-        # Biggest runs first — the mixer gets filled while the team is fresh,
-        # and a short final run is the one easiest to drop if the day changes.
-        "runs": sorted(best, reverse=True),
-        "run_count": len(best),
-        "planned_batches": planned,
-        "required_batches": batches,
-        "overproduction_batches": max(0.0, planned - batches),
-        "capped": False,
+        "runs": [],
+        "run_detail": [],
+        "run_count": 0,
+        "planned_batches": 0.0,
+        "required_batches": required,
+        "overproduction_batches": 0.0,
+        "quality_penalty": 0.0,
+        "capped": capped,
     }
 
 
-def _cheapest_combination(
+def _plan_payload(
+    combo: Sequence[float],
+    batches: float,
+    quality: Dict[float, str],
+) -> Dict[str, Any]:
+    # Biggest runs first: the mixer gets filled while the team is fresh, and a
+    # short final run is the one easiest to drop if the day changes.
+    runs = sorted(combo, reverse=True)
+    planned = float(sum(runs))
+    return {
+        "runs": list(runs),
+        "run_detail": [
+            {"size": run, "quality": quality.get(run, QUALITY_ACCEPTABLE)} for run in runs
+        ],
+        "run_count": len(runs),
+        "planned_batches": planned,
+        "required_batches": batches,
+        "overproduction_batches": max(0.0, planned - batches),
+        "quality_penalty": sum(
+            QUALITY_PENALTY.get(quality.get(run, QUALITY_ACCEPTABLE), 1.0) for run in runs
+        ),
+    }
+
+
+def _best_combination(
     n: int,
     batches: float,
     sizes: Sequence[float],
-) -> Optional[Tuple[float, ...]]:
-    """Least-total combination of exactly ``n`` runs covering ``batches``.
+    quality: Dict[float, str],
+    waste_weight: float,
+) -> Tuple[Optional[Tuple[float, ...]], float]:
+    """Best-scoring combination of exactly ``n`` runs covering ``batches``.
 
     Enumerated rather than solved: with three run sizes the candidate count is
     ``C(n+2, 2)`` — 496 at n=30 — so the exhaustive answer is both instant and
-    obviously correct, which a greedy fill would not be for an unevenly spaced
-    run-size list.
+    obviously correct, which no greedy fill would be once run quality and waste
+    are traded against each other.
     """
     best: Optional[Tuple[float, ...]] = None
-    best_total = float("inf")
+    best_score = float("inf")
 
     for combo in combinations_with_replacement(sizes, n):
         total = float(sum(combo))
         if total + QTY_EPSILON < batches:
             continue
-        if total < best_total:
-            best_total = total
-            best = combo
+        penalty = sum(
+            QUALITY_PENALTY.get(quality.get(size, QUALITY_ACCEPTABLE), 1.0) for size in combo
+        )
+        score = penalty + waste_weight * (total - batches)
+        if score < best_score - QTY_EPSILON:
+            best_score, best = score, combo
 
-    return best
+    return best, best_score
 
 
 def aggregate_mix_demand(lines: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -299,28 +355,44 @@ def _resolve_mix_item() -> str:
     return (configured or DEFAULT_MIX_ITEM).strip() or DEFAULT_MIX_ITEM
 
 
-def _resolve_run_sizes() -> Tuple[float, ...]:
-    """Mixer run sizes, from Settings as a comma list, falling back to 1/1.5/2."""
+def _resolve_run_quality() -> Dict[float, str]:
+    """Mixer run sizes and how well each mixes, from Settings.
+
+    Accepts ``1:poor, 1.5:preferred, 2:acceptable``.  A bare number is treated
+    as ``acceptable`` so the older size-only setting keeps working — but a
+    site that never states its preferences gets the floor's own ordering from
+    ``DEFAULT_RUN_QUALITY`` rather than a flat one, because "all run sizes are
+    equally good" is the one thing we know is false.
+    """
     try:
         raw = frappe.db.get_single_value("Jarz POS Settings", "production_mixer_run_sizes")
     except Exception:
         raw = None
     if not raw:
-        return DEFAULT_RUN_SIZES
+        return dict(DEFAULT_RUN_QUALITY)
 
-    sizes: List[float] = []
+    parsed: Dict[float, str] = {}
     for part in str(raw).split(","):
         part = part.strip()
         if not part:
             continue
+        size_text, _, quality_text = part.partition(":")
         try:
-            value = float(part)
+            size = float(size_text.strip())
         except ValueError:
             continue
-        if value > 0:
-            sizes.append(value)
+        if size <= 0:
+            continue
 
-    return tuple(sorted(set(sizes))) or DEFAULT_RUN_SIZES
+        quality = (quality_text or "").strip().lower()
+        if quality not in QUALITY_PENALTY:
+            # Fall back to the known preference for that size before assuming
+            # "acceptable" — a site listing plain sizes still gets 1 ranked
+            # below 1.5 rather than level with it.
+            quality = DEFAULT_RUN_QUALITY.get(size, QUALITY_ACCEPTABLE)
+        parsed[size] = quality
+
+    return parsed or dict(DEFAULT_RUN_QUALITY)
 
 
 def _resolve_mix_batch_qty(mix_item: str) -> Tuple[float, str, Optional[str]]:

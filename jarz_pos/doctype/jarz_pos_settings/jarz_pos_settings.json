@@ -307,7 +307,7 @@
    "label": "Production Mix Item"
   },
   {
-   "description": "Batch sizes the mixer will accept in one run, comma separated. Leave blank for 1, 1.5, 2. The plan never schedules a run smaller than the smallest value here.",
+   "description": "Batch sizes the mixer accepts in one run and how well each mixes, e.g. '1:poor, 1.5:preferred, 2:acceptable'. Quality is what the plan optimises: a preferred run is free, acceptable costs a little, poor costs a lot, and a wasted batch of mix outweighs any of them. Leave blank for the default above. A bare size with no quality keeps its known ranking.",
    "fieldname": "production_mixer_run_sizes",
    "fieldtype": "Data",
    "label": "Mixer Run Sizes"

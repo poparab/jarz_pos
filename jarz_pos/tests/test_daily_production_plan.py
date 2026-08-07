@@ -4,7 +4,6 @@ Everything under test is a pure function over plain numbers, so these tests
 patch nothing — same contract as ``test_production_planning``.
 """
 
-import math
 import unittest
 
 
@@ -14,32 +13,45 @@ class TestPlanMixerRuns(unittest.TestCase):
 
         return plan_mixer_runs(batches, **kwargs)
 
-    def test_five_batches_fills_the_mixer_first(self):
-        # The case the floor described: 5 batches on a 2-batch mixer.  Three
-        # runs either way, but 2+2+1 under-fills once where 2+1.5+1.5 does twice.
+    def test_five_batches_prefers_the_size_that_mixes_properly(self):
+        # The floor's rule: 1.5 is the right quantity, 2 stretches the mixer,
+        # 1 does not mix well.  A fewest-runs rule would answer 2+2+1 here —
+        # same three runs and the same total, but it schedules the one size
+        # that comes out badly for no gain at all.
         result = self._call(5.0)
-        self.assertEqual([2.0, 2.0, 1.0], result["runs"])
+        self.assertEqual([2.0, 1.5, 1.5], result["runs"])
         self.assertEqual(5.0, result["planned_batches"])
         self.assertEqual(0.0, result["overproduction_batches"])
 
-    def test_fractional_requirement_rounds_up_to_a_half(self):
-        result = self._call(5.2)
-        self.assertEqual([2.0, 2.0, 1.5], result["runs"])
-        self.assertAlmostEqual(0.3, result["overproduction_batches"], places=9)
+    def test_exact_cover_by_preferred_runs_beats_fewer_stretched_runs(self):
+        # 6.0 is four clean 1.5s.  Fewest-runs would say 2+2+2.
+        result = self._call(6.0)
+        self.assertEqual([1.5, 1.5, 1.5, 1.5], result["runs"])
+        self.assertEqual(0.0, result["overproduction_batches"])
+        self.assertEqual(0.0, result["quality_penalty"])
 
-    def test_prefers_less_overproduction_at_equal_run_count(self):
-        # 2.2 fits in two runs as either 1.5+1 (2.5) or 2+1 (3.0).
-        self.assertEqual([1.5, 1.0], self._call(2.2)["runs"])
+    def test_never_schedules_a_poor_run_when_demand_is_realistic(self):
+        value = 0.05
+        while value <= 20.0:
+            runs = self._call(value)["runs"]
+            self.assertNotIn(
+                1.0, runs, f"scheduled a 1.0 run at {value} batches: {runs}"
+            )
+            value = round(value + 0.05, 2)
+
+    def test_a_whole_wasted_batch_outweighs_run_quality(self):
+        # 4.0 is two stretched runs exactly, or three preferred runs with half
+        # a batch thrown away.  Mix is never stored, so the waste wins.
+        self.assertEqual([2.0, 2.0], self._call(4.0)["runs"])
 
     def test_exact_multiple_does_not_add_a_phantom_run(self):
         # 4.0/2.0 lands on 2.0000000000000004 without the epsilon.
-        self.assertEqual([2.0, 2.0], self._call(4.0)["runs"])
-        self.assertEqual([2.0, 2.0, 2.0], self._call(6.0)["runs"])
+        self.assertEqual(2, self._call(4.0)["run_count"])
 
     def test_sub_batch_requirement_still_costs_a_whole_run(self):
         result = self._call(0.1)
-        self.assertEqual([1.0], result["runs"])
-        self.assertAlmostEqual(0.9, result["overproduction_batches"], places=9)
+        self.assertEqual([1.5], result["runs"])
+        self.assertAlmostEqual(1.4, result["overproduction_batches"], places=9)
 
     def test_zero_plans_nothing(self):
         result = self._call(0)
@@ -48,36 +60,39 @@ class TestPlanMixerRuns(unittest.TestCase):
         self.assertFalse(result["capped"])
 
     def test_no_run_sizes_configured_is_flagged_not_guessed(self):
-        result = self._call(3.0, run_sizes=())
+        result = self._call(3.0, run_quality={})
         self.assertEqual([], result["runs"])
         self.assertTrue(result["capped"])
         self.assertEqual(3.0, result["required_batches"])
 
-    def test_custom_run_sizes_are_honoured(self):
-        result = self._call(4.0, run_sizes=(1.0, 3.0))
-        self.assertEqual([3.0, 1.0], result["runs"])
+    def test_custom_run_quality_is_honoured(self):
+        result = self._call(
+            4.0, run_quality={1.0: "preferred", 3.0: "poor"}
+        )
+        self.assertEqual([1.0, 1.0, 1.0, 1.0], result["runs"])
+
+    def test_run_detail_labels_each_run(self):
+        detail = self._call(5.0)["run_detail"]
+        self.assertEqual(
+            [("2", "acceptable"), ("1.5", "preferred"), ("1.5", "preferred")],
+            [(f"{d['size']:g}", d["quality"]) for d in detail],
+        )
 
     def test_runs_are_returned_largest_first(self):
         runs = self._call(7.5)["runs"]
         self.assertEqual(sorted(runs, reverse=True), runs)
 
-    def test_never_under_produces_and_always_uses_fewest_runs(self):
-        step = 0.05
-        value = step
+    def test_never_under_produces(self):
+        value = 0.05
         while value <= 20.0:
             result = self._call(value)
             self.assertGreaterEqual(
                 result["planned_batches"] + 1e-9, value, f"under-produced at {value}"
             )
-            self.assertEqual(
-                max(1, math.ceil(value / 2.0 - 1e-9)),
-                result["run_count"],
-                f"not the minimum run count at {value}",
-            )
             self.assertTrue(
                 all(run >= 1.0 for run in result["runs"]), f"sub-batch run at {value}"
             )
-            value = round(value + step, 2)
+            value = round(value + 0.05, 2)
 
 
 class TestBatchesNeeded(unittest.TestCase):

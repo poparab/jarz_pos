@@ -129,7 +129,10 @@ def get_plan_template(company: Optional[str] = None, plan_date: Optional[str] = 
             "default_bom": mix_bom,
             "batch_qty": batch_qty,
             "uom": mix_uom,
-            "run_sizes": list(planning._resolve_run_sizes()),
+            "run_quality": [
+                {"size": size, "quality": quality}
+                for size, quality in sorted(planning._resolve_run_quality().items())
+            ],
         },
         "items": items,
         "existing_plan": _find_open_plan(company, plan_date),
@@ -226,7 +229,7 @@ def preview_plan(
     required = planning.batches_needed(
         total_mix_qty=demand["total_mix_qty"], batch_qty=batch_qty
     )
-    split = planning.plan_mixer_runs(required, run_sizes=planning._resolve_run_sizes())
+    split = planning.plan_mixer_runs(required, run_quality=planning._resolve_run_quality())
 
     payload: Dict[str, Any] = {
         "company": company,
@@ -241,6 +244,7 @@ def preview_plan(
         "required_batches": split["required_batches"],
         "planned_batches": split["planned_batches"],
         "runs": split["runs"],
+        "run_detail": split["run_detail"],
         "run_count": split["run_count"],
         "overproduction_batches": split["overproduction_batches"],
         "capped": split["capped"],
