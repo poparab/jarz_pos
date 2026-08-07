@@ -44,10 +44,20 @@ MIX_YIELD_KG = 9.520
 # be dropped outright once the sub-assembly carries them.
 MIX_ONLY_COMPONENTS = ("milkana cheese", "Remas cheese", "dr baker cream", "kamina vanilla")
 
-# Powder sugar is the exception: Tiramisu uses it twice, once inside the mix and
-# once to sweeten the espresso. Only the mix share may be removed.
+# Powder sugar is the exception: Tiramisu carries it on two separate lines, one
+# inside the mix and one to sweeten the espresso. Only the mix line may go.
+#
+# Identified by picking the line closest to the computed mix share rather than
+# by subtracting that share from every powder-sugar line — the subtracting
+# version destroyed Tiramisu's 4 g syrup line and left a 0.03 g stub behind on
+# the mix line, because it treated each line as if it were the only one.
 MIX_SHARED_COMPONENT = "powder sugar"
 MIX_SUGAR_KG_PER_BATCH = 1.5
+
+# How far a powder-sugar line may sit from the computed mix share and still be
+# taken as the mix line. The real ones land within a rounding hair; the syrup
+# lines are 2-3x away, so there is a wide gap to sit in.
+SUGAR_MATCH_TOLERANCE = 0.15
 
 # Fraction of a batch that is milkana — used to re-derive each jar's mix content
 # from its existing BOM and check it against the figure below.
@@ -109,12 +119,36 @@ COST_BASIS = "Valuation Rate"
 # tight enough that a transcription slip cannot pass.
 MIX_DERIVATION_TOLERANCE = 0.03
 
-# Tiramisu Large is the one BOM where the derivation is *supposed* to disagree:
-# it carries the mix twice today, once as a sub-assembly line and once flattened,
-# so reading its milkana line gives ~2x the real content. Exempted by name with
-# the expected factor, so the guard still fires if the drift is anything else.
-DOUBLE_COUNTED_JARS = {"Tiramisu Large": 2.0}
+# No exemptions. Tiramisu Large looks like it needs one — it carries the mix
+# twice today — but the derivation reads the milkana *BOM Item line*, which
+# holds only the flattened half; the other half is inside the sub-assembly line
+# and contributes no milkana row. So it derives at 1.0x like everything else,
+# and an exemption here would make the guard fire on a BOM that is fine.
+DOUBLE_COUNTED_JARS: Dict[str, float] = {}
 DOUBLE_COUNT_TOLERANCE = 0.05
+
+
+def _mix_sugar_line(doc, target_mix: float):
+    """The powder-sugar row that represents the mix share, or ``None``.
+
+    Returns the single closest match within tolerance so a jar carrying sugar
+    for something else — Tiramisu's espresso syrup — keeps it.
+    """
+    share = target_mix * (MIX_SUGAR_KG_PER_BATCH / MIX_YIELD_KG)
+    if share <= 0:
+        return None
+
+    best = None
+    best_drift = None
+    for row in doc.items:
+        if row.item_code != MIX_SHARED_COMPONENT:
+            continue
+        drift = abs(flt(row.stock_qty) - share) / share
+        if drift > SUGAR_MATCH_TOLERANCE:
+            continue
+        if best_drift is None or drift < best_drift:
+            best, best_drift = row, drift
+    return best
 
 
 def _default_bom(item_code: str) -> Optional[str]:
@@ -213,17 +247,16 @@ def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
     swapped: List[str] = []
     corrected: List[str] = []
 
+    sugar_row = _mix_sugar_line(doc, target_mix)
     for row in doc.items:
         if row.item_code in MIX_ONLY_COMPONENTS:
             removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g")
         elif row.item_code == MIX_SHARED_COMPONENT:
-            keep = flt(row.stock_qty) - target_mix * (MIX_SUGAR_KG_PER_BATCH / MIX_YIELD_KG)
-            if keep <= 1e-6:
-                removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g (all of it)")
+            if sugar_row is not None and row.name == sugar_row.name:
+                removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g (mix share)")
             else:
                 adjusted.append(
-                    f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g -> "
-                    f"{flt(keep * 1000, 3)}g (mix share removed)"
+                    f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g kept (not the mix share)"
                 )
 
     for old, new in PACKAGING_SWAPS.get(item_code, {}).items():
@@ -267,9 +300,10 @@ def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
     new.is_default = 1
 
     target_mix = plan["mix_qty"]
-    sugar_share = target_mix * (MIX_SUGAR_KG_PER_BATCH / MIX_YIELD_KG)
     swaps = PACKAGING_SWAPS.get(plan["item_code"], {})
     corrections = QTY_CORRECTIONS.get(plan["item_code"], {})
+    # Matched on the copy, so the row identity lines up with what is iterated.
+    sugar_row = _mix_sugar_line(new, target_mix)
 
     kept = []
     for row in new.items:
@@ -278,12 +312,9 @@ def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
         if row.item_code == MIX_ITEM:
             continue  # re-added below at the canonical quantity
         if row.item_code == MIX_SHARED_COMPONENT:
-            keep = flt(row.stock_qty) - sugar_share
-            if keep <= 1e-6:
-                continue
-            row.qty = keep
-            row.uom = "Kg"
-            row.stock_qty = keep
+            if sugar_row is not None and row.name == sugar_row.name:
+                continue  # the mix's share; the sub-assembly carries it now
+            # Any other powder-sugar line belongs to something else and stays.
         if row.item_code in swaps:
             row.item_code = swaps[row.item_code]
             row.item_name = frappe.db.get_value("Item", row.item_code, "item_name")
