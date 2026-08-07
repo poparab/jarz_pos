@@ -837,13 +837,19 @@ def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_t
         if not frappe.has_permission("Sales Invoice", "write", inv):
             frappe.throw("Insufficient permissions to update this invoice")
         
-        # Update delivery slot fields
-        inv.db_set("custom_delivery_date", delivery_date, update_modified=False)
-        inv.db_set("custom_delivery_time_from", delivery_time_from, update_modified=False)
-        inv.db_set("custom_delivery_duration", int(delivery_duration), update_modified=False)
+        # Update delivery slot fields.
+        #
+        # This deliberately goes through save() rather than db_set(): db_set skips
+        # the post-submit document lifecycle, so a reschedule never fired
+        # on_update_after_submit and the new slot silently never reached the
+        # linked WooCommerce order. All four fields are allow_on_submit.
+        inv.custom_delivery_date = delivery_date
+        inv.custom_delivery_time_from = delivery_time_from
+        inv.custom_delivery_duration = int(delivery_duration)
         if delivery_slot_label:
-            inv.db_set("custom_delivery_slot_label", delivery_slot_label, update_modified=False)
-        
+            inv.custom_delivery_slot_label = delivery_slot_label
+        inv.save(ignore_permissions=True)
+
         frappe.db.commit()
         
         frappe.logger().info(f"Successfully updated delivery slot for {invoice_id}")
