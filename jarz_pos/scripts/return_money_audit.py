@@ -216,15 +216,23 @@ def _courier_shipping_expense(invoice: str) -> float:
 
 
 def _setup_order(ctx: RunContext, env: Dict[str, Any], case: str, *, prepay: bool,
-                 courier: Optional[Dict[str, Any]]) -> str:
+                 courier: Optional[Dict[str, Any]],
+                 pos_profile: Optional[str] = None) -> str:
+    """Create -> (pay) -> dispatch, on *pos_profile* or the environment default.
+
+    The override exists for the partner case: couriers are branch-scoped, and
+    dispatching through a profile the courier does not belong to is refused by
+    design (``Courier X belongs to POS Profile A, not B``).
+    """
+    profile = pos_profile or env["pos_profile"]
     customer = _ensure_customer(ctx, case, env["territory"], env["customer_group"])
     invoice = _create_invoice(
-        ctx, customer=customer, pos_profile=env["pos_profile"], items=env["items"],
+        ctx, customer=customer, pos_profile=profile, items=env["items"],
         order_purpose=None, commercial_policy=None, policy_reason=None, pickup=False,
     )
     if prepay:
-        _pay_invoice_full_cash(ctx, invoice, env["pos_profile"])
-    _dispatch_invoice(invoice, env["pos_profile"], courier)
+        _pay_invoice_full_cash(ctx, invoice, profile)
+    _dispatch_invoice(invoice, profile, courier)
     frappe.db.commit()
     return invoice
 
@@ -435,9 +443,20 @@ def _case_partner_return(ctx: RunContext, env: Dict[str, Any]) -> None:
         return
     party_type = "Supplier" if frappe.db.exists("Supplier", party) else "Employee"
 
-    acc: Accounts = env["accounts"]
+    # Couriers are branch-scoped, so the order has to be raised on the profile the
+    # partner's courier actually belongs to, not whichever profile came first.
+    from jarz_pos.utils.courier_visibility import resolve_courier_branch
+
+    profile = resolve_courier_branch(party_type, party) or env["pos_profile"]
+    if not frappe.db.exists("POS Profile", profile):
+        ctx.record(f"{case}.skipped", True, f"courier branch {profile!r} is not a POS Profile")
+        return
+
+    company = frappe.db.get_value("POS Profile", profile, "company")
+    acc = Accounts(company, profile)
     invoice = _setup_order(
-        ctx, env, case, prepay=False, courier={"party_type": party_type, "party": party}
+        ctx, env, case, prepay=False,
+        courier={"party_type": party_type, "party": party}, pos_profile=profile,
     )
     is_partner = int(frappe.db.get_value("Sales Invoice", invoice, "custom_is_partner_order") or 0)
     ctx.record(f"{case}.dispatched_as_partner_order", is_partner == 1, f"custom_is_partner_order={is_partner}")
@@ -498,18 +517,34 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
         print(f"\nEnvironment: profile={env['pos_profile']} company={env['company']} "
               f"items={env['items']} courier={courier}")
 
-        _case_cod_full_return(ctx, env, case="MONEY-COD-PAY-COURIER",
-                              pay_courier=True, courier=courier)
-        _case_cod_full_return(ctx, env, case="MONEY-COD-NO-COURIER-FEE",
-                              pay_courier=False, courier=courier)
-        _case_prepaid_full_return(ctx, env, case="MONEY-PREPAID-REFUND",
-                                  refund_mode=ir.REFUND_NOW)
-        _case_prepaid_full_return(ctx, env, case="MONEY-PREPAID-CREDIT",
-                                  refund_mode=ir.REFUND_CUSTOMER_CREDIT)
-        _case_partial_shipping(ctx, env, courier)
-        _case_partial_twice_never_exceeds_invoice(ctx, env, courier)
-        _case_settle_after_return(ctx, env, courier)
-        _case_partner_return(ctx, env)
+        # Each case is isolated: one that blows up records a failure and the rest
+        # still run. A single unhandled error used to abort the whole run before
+        # the report was printed, which threw away every result already gathered.
+        cases = [
+            ("MONEY-COD-PAY-COURIER",
+             lambda: _case_cod_full_return(ctx, env, case="MONEY-COD-PAY-COURIER",
+                                           pay_courier=True, courier=courier)),
+            ("MONEY-COD-NO-COURIER-FEE",
+             lambda: _case_cod_full_return(ctx, env, case="MONEY-COD-NO-COURIER-FEE",
+                                           pay_courier=False, courier=courier)),
+            ("MONEY-PREPAID-REFUND",
+             lambda: _case_prepaid_full_return(ctx, env, case="MONEY-PREPAID-REFUND",
+                                               refund_mode=ir.REFUND_NOW)),
+            ("MONEY-PREPAID-CREDIT",
+             lambda: _case_prepaid_full_return(ctx, env, case="MONEY-PREPAID-CREDIT",
+                                               refund_mode=ir.REFUND_CUSTOMER_CREDIT)),
+            ("MONEY-PARTIAL-SHIPPING", lambda: _case_partial_shipping(ctx, env, courier)),
+            ("MONEY-PARTIAL-TWICE",
+             lambda: _case_partial_twice_never_exceeds_invoice(ctx, env, courier)),
+            ("MONEY-SETTLE-AFTER-RETURN", lambda: _case_settle_after_return(ctx, env, courier)),
+            ("MONEY-PARTNER-RETURN", lambda: _case_partner_return(ctx, env)),
+        ]
+        for name, run_case in cases:
+            try:
+                run_case()
+            except Exception as exc:
+                ctx.record(f"{name}.case_raised", False, f"{type(exc).__name__}: {exc}")
+                frappe.log_error(frappe.get_traceback(), f"return_money_audit case {name}")
 
     finally:
         if cleanup:
