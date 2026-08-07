@@ -498,10 +498,15 @@ def _case_partner_return(ctx: RunContext, env: Dict[str, Any]) -> None:
 
     ship_expense = _courier_shipping_expense(invoice)
     actual = _net_by_account(_vouchers_for(invoice))
+    # Dispatch left the partner owing us (order - fee) and expensed the fee. A full
+    # return with the trip paid for cancels the order side and nothing else, so the
+    # partner ends up owed exactly the fee — a payable, hence negative — and the
+    # freight expense stands. Courier Outstanding stays untouched throughout, which
+    # is the whole point of the partner path and is asserted separately below.
     expected = {
         acc.receivable: 0.0,
         acc.courier_outstanding: 0.0,
-        partner["settlement_account"]: 0.0,
+        partner["settlement_account"]: -ship_expense,
         acc.freight: ship_expense,
     }
     _record_expectation(ctx, case, actual, expected)
