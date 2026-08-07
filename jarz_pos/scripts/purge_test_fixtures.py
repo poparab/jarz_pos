@@ -57,6 +57,15 @@ def _guard_environment() -> None:
 
 
 def _fixture_customers() -> List[str]:
+    """Fixture customer names, from the Customer table *and* from documents.
+
+    Deliberately not just the Customer table. A run that deletes the Customer
+    records but fails to cancel some of their invoices would otherwise be
+    un-rerunnable: the second pass finds no customers, therefore no invoices, and
+    reports a clean sweep over documents that are still sitting there. Reading the
+    name off the documents as well makes the purge idempotent and lets it finish a
+    job it started.
+    """
     names: List[str] = []
     for prefix in FIXTURE_PREFIXES:
         names += frappe.get_all(
@@ -65,6 +74,13 @@ def _fixture_customers() -> List[str]:
             pluck="name",
             limit_page_length=0,
         ) or []
+        for doctype in ("Sales Invoice", "Delivery Note"):
+            names += frappe.get_all(
+                doctype,
+                filters={"customer": ["like", f"{prefix}%"]},
+                pluck="customer",
+                limit_page_length=0,
+            ) or []
     return sorted(set(names))
 
 
@@ -209,7 +225,22 @@ def run(dry_run: bool = True) -> Dict[str, Any]:
     for name in plan["source_invoices"]:
         _cancel_and_delete("Sales Invoice", name, report)
 
+    # A customer only goes once nothing references it any more. The delete runs
+    # with force=True, which skips link validation — so deleting a customer whose
+    # invoice survived the cancel leaves that invoice pointing at a row that no
+    # longer exists. That happened on the first real run: ten dispatched invoices
+    # failed to cancel and their customers were removed anyway, stranding the
+    # links. Checking first is what keeps force=True honest.
     for name in customers:
+        survivors = frappe.get_all(
+            "Sales Invoice", filters={"customer": name}, pluck="name", limit_page_length=1,
+        ) or []
+        if survivors:
+            report["failed"].append({
+                "doctype": "Customer", "name": name,
+                "error": f"kept: still referenced by {survivors[0]} (and possibly others)",
+            })
+            continue
         for address in frappe.get_all(
             "Dynamic Link",
             filters={"link_doctype": "Customer", "link_name": name, "parenttype": "Address"},
