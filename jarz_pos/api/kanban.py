@@ -2070,8 +2070,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
             return _failure("Cancellation reason is required")
 
         roles = {str(r or "").strip().lower() for r in frappe.get_roles(frappe.session.user)}
-        allowed_roles = {ROLES.ADMINISTRATOR.lower(), ROLES.JARZ_LINE_MANAGER}
-        if roles.isdisjoint(allowed_roles):
+        if roles.isdisjoint(ROLES.LINE_MANAGER_TIER_LOWER):
             return _failure("You are not permitted to cancel orders")
 
         invoice = frappe.get_doc("Sales Invoice", invoice_id)

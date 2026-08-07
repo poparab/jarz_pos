@@ -39,11 +39,7 @@ from jarz_pos.utils.account_utils import (
 )
 
 
-_MANAGER_PRICING_ROLES = {
-    ROLES.JARZ_MANAGER,
-    "JARZ line manager",
-    ROLES.JARZ_LINE_MANAGER,
-}
+_MANAGER_PRICING_ROLES = ROLES.LINE_MANAGER_TIER
 
 
 def _has_manager_pricing_access() -> bool:
@@ -62,14 +58,7 @@ def _ensure_manager_pricing_access() -> None:
 
 # Roles that grant retail/cashier (B2C) access — a user with any of these is
 # allowed to place Standard orders even if they also hold "B2B Sales Rep".
-_B2C_RETAIL_ROLES = {
-    "Jarz POS Staff",
-    "System Manager",
-    "Administrator",
-    ROLES.JARZ_MANAGER,
-    ROLES.JARZ_LINE_MANAGER,
-    "JARZ line manager",
-}
+_B2C_RETAIL_ROLES = ROLES.LINE_MANAGER_TIER | {"Jarz POS Staff"}
 
 
 def _ensure_can_place_standard_order(order_purpose) -> None:

@@ -4,9 +4,9 @@ Thin transport layer only: every rule lives in
 ``jarz_pos.services.invoice_return`` so the service can be exercised directly by
 the staging harness without going through HTTP.
 
-Gated to the same role as cancellation (``Administrator`` / ``jarz line
-manager``) plus branch scoping, so a manager can only return their own branch's
-orders.
+Gated to the same tier as cancellation (``ROLES.LINE_MANAGER_TIER`` — line
+manager, JARZ Manager, System Manager, Administrator) plus branch scoping, so a
+manager can only return their own branch's orders.
 """
 from __future__ import annotations
 
@@ -21,8 +21,7 @@ from jarz_pos.services import invoice_return as _returns
 
 def _ensure_return_permission() -> None:
     roles = {str(r or "").strip().lower() for r in frappe.get_roles(frappe.session.user)}
-    allowed = {ROLES.ADMINISTRATOR.lower(), ROLES.JARZ_LINE_MANAGER}
-    if roles.isdisjoint(allowed):
+    if roles.isdisjoint(ROLES.LINE_MANAGER_TIER_LOWER):
         frappe.throw(_("You are not permitted to return orders"), frappe.PermissionError)
 
 

@@ -80,12 +80,7 @@ WOO_TRIGGER_FIELDS = frozenset(
 #: Roles allowed to plant a ``manual_override`` pin. Highest rank on the ladder,
 #: so it beats a courier-verified consensus — that is the point, and it is why it
 #: is gated and logged rather than open to every POS user.
-MANUAL_OVERRIDE_ROLES = {
-    ROLES.ADMINISTRATOR.lower(),
-    ROLES.SYSTEM_MANAGER.lower(),
-    ROLES.JARZ_MANAGER.lower(),
-    ROLES.JARZ_LINE_MANAGER.lower(),
-}
+MANUAL_OVERRIDE_ROLES = ROLES.LINE_MANAGER_TIER_LOWER
 
 
 # ─────────────────────────────────────────────────────────────────────────────

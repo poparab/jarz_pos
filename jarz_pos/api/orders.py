@@ -20,7 +20,7 @@ from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 def _ensure_elevated_access():
     """Raise if the current user is not at least a Moderator."""
     roles = set(frappe.get_roles(frappe.session.user))
-    allowed = {ROLES.JARZ_MANAGER, ROLES.JARZ_LINE_MANAGER, ROLES.ADMINISTRATOR, ROLES.SYSTEM_MANAGER, "Moderator"}
+    allowed = ROLES.LINE_MANAGER_TIER | {"Moderator"}
     if not (roles & allowed):
         frappe.throw(_("Access denied"), frappe.PermissionError)
 

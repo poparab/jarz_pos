@@ -105,7 +105,7 @@ def _current_user_allowed_profiles() -> List[str]:
 
 def _has_manager_dashboard_access() -> bool:
     roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
-    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, "JARZ line manager", ROLES.JARZ_LINE_MANAGER}
+    allowed = ROLES.ADMIN | ROLES.LINE_MANAGER_TIER
     return bool(roles.intersection(allowed))
 
 
@@ -117,7 +117,7 @@ def _ensure_manager_dashboard_access() -> None:
 
 def _has_shift_monitor_access() -> bool:
     roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
-    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, ROLES.ADMINISTRATOR, ROLES.JARZ_LINE_MANAGER, "JARZ line manager"}
+    allowed = ROLES.ADMIN | ROLES.LINE_MANAGER_TIER
     return bool(roles.intersection(allowed))
 
 

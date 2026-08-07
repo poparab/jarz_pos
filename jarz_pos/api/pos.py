@@ -7,11 +7,7 @@ from jarz_pos.constants import QUERY_LIMITS, ROLES
 from jarz_pos.utils.invoice_utils import sanitize_printable_text
 
 
-_MANAGER_PRICING_ROLES = {
-    ROLES.JARZ_MANAGER,
-    "JARZ line manager",
-    ROLES.JARZ_LINE_MANAGER,
-}
+_MANAGER_PRICING_ROLES = ROLES.LINE_MANAGER_TIER
 
 
 def _has_manager_pricing_access() -> bool:

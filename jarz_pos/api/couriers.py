@@ -373,7 +373,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
 
 def _ensure_collection_change_access() -> None:
     roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
-    allowed = ROLES.ADMIN | {ROLES.JARZ_MANAGER, ROLES.JARZ_LINE_MANAGER, "JARZ line manager"}
+    allowed = ROLES.ADMIN | ROLES.LINE_MANAGER_TIER
     if not roles.intersection(allowed):
         frappe.throw("Not permitted: Manager access required", frappe.PermissionError)
 

@@ -127,10 +127,12 @@ def _current_user_roles() -> set[str]:
 def _has_payment_receipt_confirm_access(pos_profile: str | None = None) -> bool:
     roles = _current_user_roles()
 
+    # Admin tier confirms anywhere; the rest of the line-manager tier is scoped
+    # to the profiles they are actually assigned to.
     if ROLES.ADMIN.intersection(roles) or ROLES.JARZ_MANAGER in roles:
         return True
 
-    if "JARZ line manager" not in roles and ROLES.JARZ_LINE_MANAGER not in roles:
+    if roles.isdisjoint(ROLES.LINE_MANAGER_TIER):
         return False
 
     if not pos_profile:

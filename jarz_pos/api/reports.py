@@ -24,10 +24,9 @@ def _ensure_jarz_manager():
 
 
 def _ensure_materials_report_access():
-    """Materials & Consumables — JARZ Manager, Administrator, or JARZ line manager."""
+    """Materials & Consumables — the line-manager tier (line manager and above)."""
     roles = set(frappe.get_roles(frappe.session.user))
-    allowed = {ROLES.JARZ_MANAGER, ROLES.ADMINISTRATOR, ROLES.JARZ_LINE_MANAGER, "JARZ line manager"}
-    if not roles.intersection(allowed):
+    if not roles.intersection(ROLES.LINE_MANAGER_TIER):
         frappe.throw(_("You are not permitted to access this report"), frappe.PermissionError)
 
 

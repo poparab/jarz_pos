@@ -43,6 +43,24 @@ class ROLES:
     ADMINISTRATOR = "Administrator"
     SYSTEM_MANAGER = "System Manager"
     PRODUCTION_OPERATOR = "Production Operator"
+    # Everything a JARZ line manager may do, the manager tier and the
+    # Administrator may do too.  The line manager is a *narrower* manager — a
+    # floor supervisor — never the holder of an authority its own manager
+    # lacks.  Gate on this set instead of naming the line manager by hand: the
+    # hand-written sets drifted (cancel and return were line-manager-only for
+    # months, so a JARZ Manager was refused on their own branch's orders).
+    # Both spellings of the line-manager role are carried because both exist as
+    # real Role records on staging and production.
+    LINE_MANAGER_TIER = {
+        JARZ_LINE_MANAGER,
+        "JARZ line manager",
+        JARZ_MANAGER,
+        ADMINISTRATOR,
+        SYSTEM_MANAGER,
+    }
+    #: Same membership, lowercased — for the gates that compare case-folded
+    #: role names.  Keep the two in lockstep.
+    LINE_MANAGER_TIER_LOWER = {role.lower() for role in LINE_MANAGER_TIER}
     # Read-only access to the Production Board.  Deliberately WIDER than
     # MANUFACTURING: the mobile screen has always been gated client-side on
     # "JARZ Manager", which MANUFACTURING does not contain — so a
