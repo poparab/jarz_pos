@@ -111,6 +111,16 @@ PACKAGING_SWAPS: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Components a jar must carry that have nothing to do with the mix, declared so
+# the migration can both restore them and refuse to call a BOM done without
+# them.  This exists because the first apply deleted Tiramisu's espresso sugar
+# and nothing downstream could tell: the sugar shares an item code with the mix
+# share, so its absence looked like a successful removal.
+REQUIRED_EXTRA_COMPONENTS: Dict[str, Dict[str, Tuple[float, str]]] = {
+    "Tiramisu Medium": {"powder sugar": (0.004, "Kg")},
+    "Tiramisu Large": {"powder sugar": (0.006, "Kg")},
+}
+
 # (qty, uom) corrections that survive the mix rebuild.
 QTY_CORRECTIONS: Dict[str, Dict[str, Tuple[float, str]]] = {
     # Entered as 0.020 Gram where every sibling uses 0.020 Kg.
@@ -218,7 +228,18 @@ def rebuild_mix_bom(apply: bool) -> Dict[str, Any]:
 # ── Step 2: rebuild the jar BOMs ────────────────────────────────────────
 
 
-def _already_migrated(doc, target_mix: float) -> bool:
+def _missing_required_extras(doc, item_code: str) -> List[str]:
+    """Declared non-mix components this BOM is missing or carrying at the wrong qty."""
+    missing: List[str] = []
+    for code, (qty, _uom) in REQUIRED_EXTRA_COMPONENTS.get(item_code, {}).items():
+        rows = [r for r in doc.items if r.item_code == code]
+        if not any(abs(flt(r.stock_qty) - qty) <= 1e-6 for r in rows):
+            present = ", ".join(f"{flt(r.stock_qty * 1000, 3)}g" for r in rows) or "absent"
+            missing.append(f"{code} (need {qty * 1000:g}g, have {present})")
+    return missing
+
+
+def _already_migrated(doc, target_mix: float, item_code: str = "") -> bool:
     """True when this BOM already looks the way the migration would leave it.
 
     Makes a re-run cheap and safe.  Without it every run would stack another
@@ -228,6 +249,8 @@ def _already_migrated(doc, target_mix: float) -> bool:
     if any(r.item_code in MIX_ONLY_COMPONENTS for r in doc.items):
         return False
     if (doc.rm_cost_as_per or "") != COST_BASIS:
+        return False
+    if item_code and _missing_required_extras(doc, item_code):
         return False
     if any(
         r.item_code in FREEZER_SUB_ASSEMBLIES and not r.do_not_explode for r in doc.items
@@ -254,8 +277,10 @@ def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
     doc = frappe.get_doc("BOM", bom_name)
     target_mix = JAR_MIX_QTY[item_code]
 
-    if _already_migrated(doc, target_mix):
+    if _already_migrated(doc, target_mix, item_code):
         return {"item_code": item_code, "skipped": "already migrated"}
+
+    restored = _missing_required_extras(doc, item_code)
 
     derived = _derive_mix_from_milkana(bom_name)
     warning = None
@@ -326,6 +351,7 @@ def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
         "swapped": swapped,
         "corrected": corrected,
         "do_not_explode": explode_fixes,
+        "restored": restored,
         "warning": warning,
         "note": note,
     }
@@ -373,6 +399,14 @@ def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
     new.set("items", [])
     for row in kept:
         new.append("items", row.as_dict())
+
+    # Restore any declared non-mix component this BOM has lost.
+    for code, (qty, uom) in REQUIRED_EXTRA_COMPONENTS.get(plan["item_code"], {}).items():
+        if not any(abs(flt(r.stock_qty) - qty) <= 1e-6 for r in new.items if r.item_code == code):
+            new.append(
+                "items",
+                {"item_code": code, "qty": qty, "uom": uom, "stock_qty": qty},
+            )
 
     if target_mix > 0:
         new.append(
@@ -454,7 +488,7 @@ def run(apply: Any = False) -> Dict[str, Any]:
             continue
         print(f"  {plan['item_code']}  [{plan['from_bom']}]  cost {plan['old_cost']}")
         print(f"      mix line: {plan['mix_line']} {plan['mix_qty']:.6f} Kg")
-        for label in ("removed", "adjusted", "swapped", "corrected"):
+        for label in ("removed", "adjusted", "swapped", "corrected", "restored"):
             for entry in plan[label]:
                 print(f"      {label}: {entry}")
         if plan["do_not_explode"]:
