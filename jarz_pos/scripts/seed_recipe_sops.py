@@ -40,18 +40,20 @@ CHEESECAKE_MIX = {
     "prep_time_mins": 12,
     "equipment": "Planetary mixer, paddle (كف) attachment",
     "notes": (
-        "Batch = 9.518 Kg, which fills about 120 medium or 77 large jars.\n"
-        "Manual states 20 g vanilla; the BOM and the Carrot Cake manual both "
-        "state 18 g. 18 g is what the BOM bills — confirm which is correct."
+        "Batch = 9.520 Kg, which fills 120 medium or 77 large jars.\n"
+        "Vanilla is 20 g, confirmed by the owner 2026-08-08. BOM-Cheesecake "
+        "Mix-006 still bills 18 g and a yield of 9.518 Kg — both need "
+        "correcting. 9.520 is also what the jar BOMs already assume: the medium "
+        "carries exactly 9.520/120 = 79.333 g of mix."
     ),
     "steps": [
         {
             "title": "Weigh cheese, powder sugar and vanilla",
             "instruction": (
                 "Weigh into the mixer bowl: 2.5 kg Milkana + 2.5 kg Remas "
-                "(5 kg cheese total), 1.5 kg powder sugar, 18 g vanilla.\n"
+                "(5 kg cheese total), 1.5 kg powder sugar, 20 g vanilla.\n"
                 "يوزن في حلة المضرب: 2.5 كيلو ميلكانا + 2.5 كيلو ريماس "
-                "(إجمالي 5 كيلو جبنة)، 1.5 كيلو سكر بودر، 18 جرام فانيليا."
+                "(إجمالي 5 كيلو جبنة)، 1.5 كيلو سكر بودر، 20 جرام فانيليا."
             ),
             "duration_mins": 4,
             "scaling_mode": "Per Batch",
@@ -504,22 +506,24 @@ TIRAMISU_ASSEMBLY = {
     "prep_time_mins": 30,
     "equipment": "Espresso machine, scales, jars",
     "notes": (
-        "Espresso syrup ratios per the owner, 2026-08-08.\n"
-        "Two figures here disagree with what is on file and need settling:\n"
-        "  * BOM bills 8 g coffee beans per large jar and 6 g per medium; the "
-        "Tiramisu manual says 18 g of espresso per jar. At a 1:3 brew ratio, "
-        "8 g of beans makes 24 g of espresso, not 18 g.\n"
-        "  * The manual also notes '11 g sugar per double shot', which is a "
-        "23% sugar ratio, against the 300 g per litre (30%) below."
+        "Espresso ratios per the owner, 2026-08-08.\n"
+        "Each jar takes HALF a shot's yield, which is why the BOM figures are "
+        "right: 8 g of beans per large jar is half a 16 g dose, and half of the "
+        "48 g yield is 24 g of espresso. The medium takes 6 g of beans and so "
+        "18 g of espresso — which is the figure the Tiramisu manual quotes.\n"
+        "The manual's '11 g sugar per double shot' (23%) is superseded by the "
+        "30% below."
     ),
     "steps": [
         {
-            "title": "Pull the espresso — 16 g in, 48 g out",
+            "title": "Pull the espresso — 16 g in, 48 g out, half a shot per jar",
             "instruction": (
                 "Dose 16 g of coffee and pull to three times the dose — 48 g of "
-                "liquid espresso per shot.\n"
+                "liquid espresso per shot. Each jar takes half that yield: "
+                "24 g for a large jar, 18 g for a medium.\n"
                 "يتم استخدام 16 جرام قهوة و استخراج 3 اضعاف الوزن اي 48 جرام "
-                "اسبريسو."
+                "اسبريسو. كل برطمان بياخد نص الكمية دي: 24 جرام للكبير و 18 "
+                "جرام للوسط."
             ),
             "duration_mins": 5,
             "scaling_mode": "Per Batch",
