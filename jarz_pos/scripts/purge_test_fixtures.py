@@ -95,6 +95,42 @@ def _fixture_invoices(customers: List[str]) -> List[Dict[str, Any]]:
     ) or []
 
 
+def _restore_missing_customers(customers: List[str], report: Dict[str, Any]) -> None:
+    """Recreate fixture Customer rows that documents still point at.
+
+    Cancelling a submitted Sales Invoice revalidates its party, so an invoice
+    whose customer has been deleted cannot be cancelled at all — it fails with
+    "Could not find Party". An earlier version of this script deleted customers
+    while their invoices survived and produced exactly that deadlock: the
+    documents could not be removed because the row they needed was already gone.
+
+    Restoring a minimal stub is what breaks it. The stub only has to exist long
+    enough for the cancel to validate; it is deleted again at the end of the run
+    once nothing references it.
+    """
+    group = frappe.db.get_value("Customer Group", {"is_group": 0}, "name")
+    territory = frappe.db.get_value("Territory", {"is_group": 0}, "name")
+    for name in customers:
+        if frappe.db.exists("Customer", name):
+            continue
+        try:
+            doc = frappe.new_doc("Customer")
+            doc.customer_name = name
+            doc.customer_type = "Company"
+            if group:
+                doc.customer_group = group
+            if territory:
+                doc.territory = territory
+            doc.flags.ignore_permissions = True
+            doc.insert(ignore_permissions=True)
+            report.setdefault("restored", []).append(doc.name)
+        except Exception as exc:
+            report["failed"].append({
+                "doctype": "Customer", "name": name,
+                "error": f"could not restore stub: {str(exc)[:200]}",
+            })
+
+
 def _cancel_and_delete(doctype: str, name: str, report: Dict[str, Any]) -> None:
     """Cancel if submitted, then delete. Failures are recorded, never raised."""
     try:
@@ -185,6 +221,11 @@ def run(dry_run: bool = True) -> Dict[str, Any]:
         print(json.dumps(report["plan"], indent=2))
         print(f"\nDRY RUN — {len(customers)} fixture customers, nothing written.")
         return report
+
+    # A cancel revalidates the party, so any fixture customer a surviving document
+    # still points at has to exist before anything is unwound. Stubs restored here
+    # are removed again at the end, once nothing references them.
+    _restore_missing_customers(customers, report)
 
     # Order matters: money vouchers, then the operational artifacts that block
     # invoice cancellation, then the credit notes, then the invoices themselves.
