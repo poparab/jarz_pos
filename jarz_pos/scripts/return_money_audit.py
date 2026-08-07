@@ -215,13 +215,32 @@ def _courier_shipping_expense(invoice: str) -> float:
     return round(flt(row[0]["shipping_amount"]), 2) if row else 0.0
 
 
+def _dispatch_as_partner(invoice: str, profile: str, courier: Dict[str, Any]) -> None:
+    """Dispatch through the delivery-partner path.
+
+    ``handle_out_for_delivery_transition`` sends every unpaid order to
+    ``mark_courier_outstanding``, which is the generic courier flow — it never
+    stamps ``custom_is_partner_order`` however partner-linked the courier is. The
+    partner strategies hang off ``dispatch_settlement``, which detects the link
+    itself, so the partner case has to go in that way or it silently tests the
+    ordinary path instead.
+    """
+    from jarz_pos.services.settlement_strategies import dispatch_settlement
+
+    dispatch_settlement(
+        invoice, mode="later", pos_profile=profile,
+        party_type=courier.get("party_type"), party=courier.get("party"),
+    )
+
+
 def _setup_order(ctx: RunContext, env: Dict[str, Any], case: str, *, prepay: bool,
                  courier: Optional[Dict[str, Any]],
-                 pos_profile: Optional[str] = None) -> str:
+                 pos_profile: Optional[str] = None,
+                 dispatch_fn: Optional[Any] = None) -> str:
     """Create -> (pay) -> dispatch, on *pos_profile* or the environment default.
 
-    The override exists for the partner case: couriers are branch-scoped, and
-    dispatching through a profile the courier does not belong to is refused by
+    The profile override exists for the partner case: couriers are branch-scoped,
+    and dispatching through a profile the courier does not belong to is refused by
     design (``Courier X belongs to POS Profile A, not B``).
     """
     profile = pos_profile or env["pos_profile"]
@@ -232,7 +251,7 @@ def _setup_order(ctx: RunContext, env: Dict[str, Any], case: str, *, prepay: boo
     )
     if prepay:
         _pay_invoice_full_cash(ctx, invoice, profile)
-    _dispatch_invoice(invoice, profile, courier)
+    (dispatch_fn or _dispatch_invoice)(invoice, profile, courier)
     frappe.db.commit()
     return invoice
 
@@ -413,11 +432,16 @@ def _case_settle_after_return(ctx: RunContext, env: Dict[str, Any],
         # than posting a wrong entry — so this is recorded, not failed.
         ctx.record(f"{case}.settlement_refused", True, f"settlement declined: {exc}")
 
+    # The courier was paid for the trip, so once the settlement runs the fee has
+    # left the till: freight is expensed and cash is down by the same amount. What
+    # must NOT happen is the settlement releasing Courier Outstanding a second
+    # time, or the branch banking the order value on returned goods — both are
+    # pinned at zero here.
     expected = {
         acc.receivable: 0.0,
         acc.courier_outstanding: 0.0,
         acc.freight: ship_expense,
-        acc.cash: 0.0,
+        acc.cash: -ship_expense,
     }
     _record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
 
@@ -457,6 +481,7 @@ def _case_partner_return(ctx: RunContext, env: Dict[str, Any]) -> None:
     invoice = _setup_order(
         ctx, env, case, prepay=False,
         courier={"party_type": party_type, "party": party}, pos_profile=profile,
+        dispatch_fn=_dispatch_as_partner,
     )
     is_partner = int(frappe.db.get_value("Sales Invoice", invoice, "custom_is_partner_order") or 0)
     ctx.record(f"{case}.dispatched_as_partner_order", is_partner == 1, f"custom_is_partner_order={is_partner}")
