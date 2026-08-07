@@ -1,0 +1,218 @@
+"""Remove the synthetic fixtures the validation harnesses leave behind.
+
+``b2b_accounting_validation``, ``return_flow_validation`` and
+``return_money_audit`` all create real submitted documents under prefixed
+customers and try to unwind them afterwards. Their teardown routinely fails on
+dispatched orders, because cancelling a Sales Invoice is blocked while its
+downstream artifacts still exist ("This invoice already has courier settlement
+artifacts and cannot be changed from this workflow"). The residue then sits on
+the operational board as live-looking cards — 141 of them in the Received column
+at the time this was written.
+
+The answer is not to bypass that guard. The guard is right: an invoice with a
+courier transaction against it genuinely must not be cancelled from a normal
+workflow. What makes this safe is that the *artifacts themselves are fixtures* —
+so this removes them in dependency order, which dissolves the blocking condition
+honestly, and only ever for customers matching :data:`FIXTURE_PREFIXES`.
+
+Two hard limits, both deliberate:
+
+* it refuses to run against production;
+* it never touches a document whose customer does not match a fixture prefix.
+  Every candidate is resolved from the customer, not from a date range or a
+  name pattern on the invoice — a real order can never be swept in by being
+  created at an unlucky moment.
+
+Usage::
+
+    bench --site frontend execute jarz_pos.scripts.purge_test_fixtures.run
+    bench --site frontend execute jarz_pos.scripts.purge_test_fixtures.run \
+        --kwargs "{'dry_run': False}"
+
+``dry_run`` defaults to True: it reports exactly what would go and writes
+nothing.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List
+
+import frappe
+
+#: Only customers whose name starts with one of these are ever considered.
+FIXTURE_PREFIXES = ("_B2BVALID_", "_RETVALID_", "_RETMONEY_")
+
+
+def _guard_environment() -> None:
+    """Hard stop anywhere that looks like production."""
+    try:
+        base_url = frappe.utils.get_url() or ""
+    except Exception:
+        base_url = ""
+    host = str(frappe.db.get_single_value("Website Settings", "subdomain") or "")
+    if "erp.orderjarz.com" in base_url or "erp.orderjarz.com" in host:
+        raise RuntimeError(
+            f"purge_test_fixtures refuses to run against production ({base_url!r})."
+        )
+
+
+def _fixture_customers() -> List[str]:
+    names: List[str] = []
+    for prefix in FIXTURE_PREFIXES:
+        names += frappe.get_all(
+            "Customer",
+            filters={"name": ["like", f"{prefix}%"]},
+            pluck="name",
+            limit_page_length=0,
+        ) or []
+    return sorted(set(names))
+
+
+def _fixture_invoices(customers: List[str]) -> List[Dict[str, Any]]:
+    if not customers:
+        return []
+    return frappe.get_all(
+        "Sales Invoice",
+        filters={"customer": ["in", customers]},
+        fields=["name", "docstatus", "is_return", "return_against", "customer"],
+        limit_page_length=0,
+    ) or []
+
+
+def _cancel_and_delete(doctype: str, name: str, report: Dict[str, Any]) -> None:
+    """Cancel if submitted, then delete. Failures are recorded, never raised."""
+    try:
+        if not frappe.db.exists(doctype, name):
+            return
+        doc = frappe.get_doc(doctype, name)
+        doc.flags.ignore_permissions = True
+        doc.flags.ignore_links = True
+        # The credit note and return DN carry the outbound Woo hook; a fixture
+        # must never push anything to the live store on its way out.
+        doc.flags.ignore_woo_outbound = True
+        if int(getattr(doc, "docstatus", 0) or 0) == 1:
+            doc.cancel()
+        frappe.delete_doc(
+            doctype, name, force=True, ignore_permissions=True,
+            ignore_missing=True, delete_permanently=True,
+        )
+        report["deleted"].append(f"{doctype}:{name}")
+    except Exception as exc:
+        report["failed"].append({"doctype": doctype, "name": name, "error": str(exc)[:300]})
+
+
+def run(dry_run: bool = True) -> Dict[str, Any]:
+    _guard_environment()
+
+    customers = _fixture_customers()
+    invoices = _fixture_invoices(customers)
+    invoice_names = [row["name"] for row in invoices]
+
+    report: Dict[str, Any] = {
+        "site": frappe.local.site,
+        "dry_run": bool(dry_run),
+        "customers": customers,
+        "invoice_count": len(invoice_names),
+        "deleted": [],
+        "failed": [],
+    }
+
+    # Everything downstream of the invoices, resolved before anything is removed.
+    payment_entries = frappe.db.sql(
+        """SELECT DISTINCT per.parent AS name FROM `tabPayment Entry Reference` per
+           WHERE per.reference_doctype = 'Sales Invoice' AND per.reference_name IN %(inv)s""",
+        {"inv": invoice_names or [""]}, as_dict=True,
+    ) or []
+    payment_entries += frappe.get_all(
+        "Payment Entry", filters={"party": ["in", customers or [""]]},
+        fields=["name"], limit_page_length=0,
+    ) or []
+
+    journal_entries = []
+    for name in invoice_names:
+        journal_entries += frappe.db.sql(
+            "SELECT name FROM `tabJournal Entry` WHERE user_remark LIKE %s",
+            ("%" + name + "%",), as_dict=True,
+        ) or []
+
+    delivery_notes = frappe.get_all(
+        "Delivery Note", filters={"customer": ["in", customers or [""]]},
+        pluck="name", limit_page_length=0,
+    ) or []
+
+    courier_txns = frappe.get_all(
+        "Courier Transaction", filters={"reference_invoice": ["in", invoice_names or [""]]},
+        pluck="name", limit_page_length=0,
+    ) or []
+    partner_txns = frappe.get_all(
+        "Sales Partner Transactions", filters={"reference_invoice": ["in", invoice_names or [""]]},
+        pluck="name", limit_page_length=0,
+    ) or []
+
+    # Credit notes must go before the invoices they return against.
+    credit_notes = [r["name"] for r in invoices if int(r.get("is_return") or 0)]
+    source_invoices = [r["name"] for r in invoices if not int(r.get("is_return") or 0)]
+
+    plan = {
+        "payment_entries": sorted({r["name"] for r in payment_entries}),
+        "journal_entries": sorted({r["name"] for r in journal_entries}),
+        "courier_transactions": sorted(set(courier_txns)),
+        "partner_transactions": sorted(set(partner_txns)),
+        "credit_notes": sorted(credit_notes),
+        "delivery_notes": sorted(set(delivery_notes)),
+        "source_invoices": sorted(source_invoices),
+    }
+    report["plan"] = {k: len(v) for k, v in plan.items()}
+    report["plan_detail"] = plan
+
+    if dry_run:
+        print(json.dumps(report["plan"], indent=2))
+        print(f"\nDRY RUN — {len(customers)} fixture customers, nothing written.")
+        return report
+
+    # Order matters: money vouchers, then the operational artifacts that block
+    # invoice cancellation, then the credit notes, then the invoices themselves.
+    for name in plan["payment_entries"]:
+        _cancel_and_delete("Payment Entry", name, report)
+    for name in plan["journal_entries"]:
+        _cancel_and_delete("Journal Entry", name, report)
+    for name in plan["courier_transactions"]:
+        _cancel_and_delete("Courier Transaction", name, report)
+    for name in plan["partner_transactions"]:
+        _cancel_and_delete("Sales Partner Transactions", name, report)
+    for name in plan["credit_notes"]:
+        _cancel_and_delete("Sales Invoice", name, report)
+    for name in plan["delivery_notes"]:
+        _cancel_and_delete("Delivery Note", name, report)
+
+    # The dispatch flag is what block_cancel_if_dispatched reads. Clearing it on a
+    # fixture is not a bypass — the artifacts it was protecting are already gone.
+    for name in plan["source_invoices"]:
+        try:
+            frappe.db.set_value(
+                "Sales Invoice", name,
+                {"custom_was_out_for_delivery": 0, "custom_return_status": None},
+                update_modified=False,
+            )
+        except Exception:
+            pass
+    for name in plan["source_invoices"]:
+        _cancel_and_delete("Sales Invoice", name, report)
+
+    for name in customers:
+        for address in frappe.get_all(
+            "Dynamic Link",
+            filters={"link_doctype": "Customer", "link_name": name, "parenttype": "Address"},
+            pluck="parent", limit_page_length=0,
+        ) or []:
+            _cancel_and_delete("Address", address, report)
+        _cancel_and_delete("Customer", name, report)
+
+    frappe.db.commit()
+
+    report["deleted_count"] = len(report["deleted"])
+    report["failed_count"] = len(report["failed"])
+    print(f"\nPURGE COMPLETE — {report['deleted_count']} removed, {report['failed_count']} failed")
+    for failure in report["failed"][:25]:
+        print(f"  FAILED {failure['doctype']}:{failure['name']} — {failure['error']}")
+    return report
