@@ -185,15 +185,25 @@ def run(dry_run: bool = True) -> Dict[str, Any]:
     for name in plan["delivery_notes"]:
         _cancel_and_delete("Delivery Note", name, report)
 
-    # The dispatch flag is what block_cancel_if_dispatched reads. Clearing it on a
-    # fixture is not a bypass — the artifacts it was protecting are already gone.
+    # block_cancel_if_dispatched refuses on `was_ofd OR state_dispatched` — the
+    # permanent flag *or* the board column. Clearing only the flag leaves the
+    # state saying "Out for Delivery" and the cancel still fails, which is exactly
+    # how the first run of this script left ten invoices behind. Reset both, and
+    # reset the state on every alias the site carries, because the guard reads the
+    # first one it finds and a site may carry more than one.
+    state_fields = [
+        field for field in
+        ("custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state")
+        if frappe.get_meta("Sales Invoice").get_field(field)
+    ]
     for name in plan["source_invoices"]:
         try:
-            frappe.db.set_value(
-                "Sales Invoice", name,
-                {"custom_was_out_for_delivery": 0, "custom_return_status": None},
-                update_modified=False,
-            )
+            updates: Dict[str, Any] = {
+                "custom_was_out_for_delivery": 0,
+                "custom_return_status": None,
+            }
+            updates.update({field: "Recieved" for field in state_fields})
+            frappe.db.set_value("Sales Invoice", name, updates, update_modified=False)
         except Exception:
             pass
     for name in plan["source_invoices"]:
