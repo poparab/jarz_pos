@@ -2597,22 +2597,53 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     except Exception:
         pass
 
-    # Determine if we have an outstanding-type courier transaction (amount > 0)
-    outstanding_ct = frappe.get_all(
+    # Net EVERY open Courier Transaction row for this invoice+party — never a
+    # single row.
+    #
+    # A return inserts a compensating negative row (`RET::<credit note>`) beside
+    # the original. Reading one row with `amount > 0` saw only the original and
+    # settled a fully-returned order at face value: Courier Outstanding was
+    # credited by the return AND again by the settlement against a single debit,
+    # leaving a permanent phantom balance while the branch banked cash for goods
+    # that had come back. Observed on staging as ACC-SINV-2026-17055-1 — Courier
+    # Outstanding -960 and +935 in branch cash on a fully-returned order. The
+    # batch sweep (`settle_courier`) always summed and was never affected; this
+    # one-by-one path is the one that needed it.
+    open_cts = frappe.get_all(
         "Courier Transaction",
         filters={
             "reference_invoice": inv.name,
             "party_type": party_type,
             "party": party,
             "status": ["!=", "Settled"],
-            "amount": [">", 0],
         },
         fields=["name", "amount", "shipping_amount"],
-        limit=1,
-    )
-    has_outstanding_mode = bool(outstanding_ct)
-    order_amount = _child_row_amount(outstanding_ct[0], "amount") if outstanding_ct else 0.0
-    ct_shipping = _child_row_amount(outstanding_ct[0], "shipping_amount") if outstanding_ct else 0.0
+        limit_page_length=0,
+    ) or []
+    ct_rows_exist = bool(open_cts)
+    order_amount = round(sum(_child_row_amount(r, "amount") for r in open_cts), 2)
+    ct_shipping = round(sum(_child_row_amount(r, "shipping_amount") for r in open_cts), 2)
+    has_outstanding_mode = order_amount > 0.005
+
+    # Rows that already cancel out are a settled story, not an error: the return
+    # released the liability and the trip fee was either reversed or already
+    # accounted for. Close the rows so they stop showing on the courier's list.
+    if ct_rows_exist and abs(order_amount) <= 0.005 and abs(ct_shipping) <= 0.005:
+        for row in open_cts:
+            frappe.db.set_value(
+                "Courier Transaction", row["name"], {"status": "Settled"},
+                update_modified=False,
+            )
+        frappe.db.commit()
+        return {
+            "success": True,
+            "invoice": inv.name,
+            "settled_rows": [r["name"] for r in open_cts],
+            "order_amount": 0.0,
+            "shipping_amount": 0.0,
+            "journal_entry": None,
+            "message": "Nothing left to settle — the courier balance for this order already nets to zero.",
+        }
 
     # Payment-status gate, applied ONLY to the outstanding branch.
     #
@@ -2629,35 +2660,22 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     if float(inv.outstanding_amount or 0) > 0.01 and has_outstanding_mode:
         frappe.throw("Invoice not fully paid; cannot one-by-one settle shipping")
 
-    if ct_shipping > 0.0001 and abs(ct_shipping - shipping_exp) > 0.0001:
-        frappe.logger().info(
-            f"DEBUG settle_single_invoice_paid: using courier transaction shipping {ct_shipping} instead of territory-derived {shipping_exp}"
-        )
-    if ct_shipping > 0.0001:
+    if ct_rows_exist:
+        # The netted rows are authoritative once they exist. Falling back to the
+        # territory rate here would re-pay a trip fee a return had just reversed:
+        # the rows net to zero shipping precisely because the operator chose not
+        # to pay the courier for the trip.
+        if abs(ct_shipping - shipping_exp) > 0.0001:
+            frappe.logger().info(
+                f"DEBUG settle_single_invoice_paid: using netted courier transaction shipping "
+                f"{ct_shipping} instead of territory-derived {shipping_exp}"
+            )
         shipping_exp = ct_shipping
     elif shipping_exp <= 0:
-        other_ct = frappe.get_all(
-            "Courier Transaction",
-            filters={
-                "reference_invoice": inv.name,
-                "party_type": party_type,
-                "party": party,
-                "status": ["!=", "Settled"],
-            },
-            fields=["name", "shipping_amount"],
-            order_by="creation desc",
-            limit=1,
-        )
-        if other_ct:
-            alt_shipping = _child_row_amount(other_ct[0], "shipping_amount")
-            if alt_shipping > 0.0001:
-                frappe.logger().info(
-                    f"DEBUG settle_single_invoice_paid: fallback courier transaction shipping {alt_shipping}"
-                )
-                shipping_exp = alt_shipping
-
-    if shipping_exp <= 0:
         frappe.throw("No shipping expense configured for this invoice's territory")
+
+    if abs(order_amount) <= 0.005 and abs(shipping_exp) <= 0.005:
+        frappe.throw("Nothing to settle for this invoice — order and shipping both net to zero.")
 
     frappe.logger().info(f"DEBUG settle_single_invoice_paid: has_outstanding_mode={has_outstanding_mode}, order_amount={order_amount}, shipping_exp={shipping_exp}")
 

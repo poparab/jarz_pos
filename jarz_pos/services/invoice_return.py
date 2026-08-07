@@ -211,6 +211,53 @@ def _returned_qty_by_row(invoice_name: str) -> Dict[str, float]:
     return returned
 
 
+def _completes_the_order(
+    inv: Any, requested: Dict[str, float], returned_before: Dict[str, float]
+) -> bool:
+    """Whether *requested* brings every line of *inv* fully back.
+
+    The single source of truth for "is this the last return on this order",
+    shared by the tax rule in :func:`_build_credit_note` and the status stamp in
+    :func:`_stamp_return_state`. They have to agree: if the tax rule thought the
+    order was complete and the status stamp did not, the delivery charge would be
+    credited on an order still marked partially returned, and the *next* return
+    would credit it again.
+    """
+    for row in inv.items:
+        sold = flt(row.qty)
+        done = flt(returned_before.get(row.name)) + flt(requested.get(row.name, 0.0))
+        if done < sold - _TOL:
+            return False
+    return True
+
+
+def _fixed_charges_already_credited(invoice_name: str) -> Dict[Tuple[str, str], float]:
+    """Absolute fixed-amount charge already credited per (account, description).
+
+    Only ``Actual`` rows are tracked. Percentage rows need no bookkeeping — they
+    are recomputed from the credit note's own net total, so they scale with the
+    goods automatically.
+    """
+    credited: Dict[Tuple[str, str], float] = {}
+    prior_notes = frappe.get_all(
+        "Sales Invoice",
+        filters={"return_against": invoice_name, "docstatus": 1},
+        pluck="name", limit_page_length=0,
+    ) or []
+    if not prior_notes:
+        return credited
+    for row in frappe.get_all(
+        "Sales Taxes and Charges",
+        filters={"parent": ["in", prior_notes], "parenttype": "Sales Invoice",
+                 "charge_type": "Actual"},
+        fields=["account_head", "description", "tax_amount"],
+        limit_page_length=0,
+    ) or []:
+        key = (row.get("account_head") or "", row.get("description") or "")
+        credited[key] = credited.get(key, 0.0) + abs(flt(row.get("tax_amount")))
+    return credited
+
+
 def _original_delivery_note(invoice_name: str) -> Optional[str]:
     """The submitted, non-return Delivery Note this invoice shipped on."""
     rows = frappe.get_all(
@@ -241,6 +288,49 @@ def _unsettled_courier_transactions(invoice_name: str) -> List[Dict[str, Any]]:
         ) or []
     except Exception:
         return []
+
+
+def _partner_context(inv: Any) -> Optional[Dict[str, Any]]:
+    """The partner ledger this order was dispatched against, if it is one.
+
+    Delivery-partner orders never touch Courier Outstanding. Dispatch moves the
+    receivable to the partner's own ``settlement_account`` against a per-partner
+    Supplier (``settlement_strategies.handle_partner_*``), and the trip fee is
+    accrued there too. A return therefore has to unwind *that* account — crediting
+    Courier Outstanding instead leaves a permanent balance on an account this
+    order never debited, while the partner still shows as owing us for goods that
+    came back.
+
+    Returns ``None`` for ordinary courier orders, which keeps the generic path
+    exactly as it was.
+    """
+    if not int(inv.get("custom_is_partner_order") or 0):
+        return None
+    partner = inv.get("custom_delivery_partner")
+    if not partner:
+        return None
+    try:
+        from jarz_pos.services.delivery_handling import (
+            _get_partner_settlement_account,
+            get_delivery_partner_supplier,
+        )
+
+        account = _get_partner_settlement_account(partner)
+        supplier = get_delivery_partner_supplier(partner)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Return: could not resolve partner ledger for {inv.get('name')}",
+        )
+        return None
+    if not account or not supplier:
+        return None
+    return {
+        "delivery_partner": partner,
+        "account": account,
+        "party_type": "Supplier",
+        "party": supplier,
+    }
 
 
 def _money_state(inv: Any) -> str:
@@ -383,6 +473,21 @@ def build_return_preview(invoice_id: str) -> Dict[str, Any]:
     is_pickup = bool(int(inv.get("custom_is_pickup") or 0))
     refund_available = money_state in {MONEY_PREPAID, MONEY_COURIER_SETTLED}
 
+    # What the delivery charge would add if this return closes the order out.
+    # The dialog needs it to show the operator the figure that will actually be
+    # credited: a fixed charge rides along only on the return that completes the
+    # order (see _apply_fixed_charge_rule), so a per-line qty x rate total alone
+    # understates a completing return and overstates nothing.
+    already_credited = _fixed_charges_already_credited(invoice_id)
+    fixed_charges_remaining = 0.0
+    for tax_row in inv.get("taxes") or []:
+        if str(tax_row.charge_type or "") != "Actual":
+            continue
+        key = (tax_row.account_head or "", tax_row.description or "")
+        fixed_charges_remaining += max(
+            abs(flt(tax_row.tax_amount)) - flt(already_credited.get(key, 0.0)), 0.0
+        )
+
     return {
         "invoice_id": invoice_id,
         "woo_order_id": normalize_woo_order_id(inv.get("woo_order_id")),
@@ -393,6 +498,7 @@ def build_return_preview(invoice_id: str) -> Dict[str, Any]:
         "branch": branch,
         "money_state": money_state,
         "is_pickup": is_pickup,
+        "fixed_charges_remaining": round(fixed_charges_remaining, 2),
         "lines": lines,
         "delivery_note": _original_delivery_note(invoice_id),
         "courier": {
@@ -533,6 +639,7 @@ def plan_return_journal_legs(
     company = inv.company
     customer = inv.customer
     receivable = get_company_receivable_account(company)
+    partner = _partner_context(inv)
     plans: List[Dict[str, Any]] = []
 
     if money_state == MONEY_UNPAID:
@@ -557,22 +664,33 @@ def plan_return_journal_legs(
         })
 
     elif money_state == MONEY_COURIER_OUTSTANDING:
-        # The receivable was moved to Courier Outstanding at dispatch and the
-        # courier never remitted. Give the customer their credit and release the
-        # courier's liability in one entry.
+        # The receivable was moved off Debtors at dispatch and the carrier never
+        # remitted. Give the customer their credit and release the carrier's
+        # liability in one entry — against whichever ledger actually holds it:
+        # Courier Outstanding for an ordinary courier, the partner's own
+        # settlement account for a delivery-partner order.
+        if partner:
+            release_leg = {
+                "account": partner["account"], "amount": return_total, "debit": False,
+                "party_type": partner["party_type"], "party": partner["party"],
+            }
+            human = f"Return partner reversal – {inv.name} / {credit_note_name}"
+        else:
+            release_leg = {
+                "account": _get_courier_outstanding_account(company),
+                "amount": return_total, "debit": False,
+            }
+            human = f"Return courier reversal – {inv.name} / {credit_note_name}"
         plans.append({
             "je_type": JE_COURIER_OUTSTANDING,
-            "human": f"Return courier reversal – {inv.name} / {credit_note_name}",
+            "human": human,
             "legs": [
                 {
                     "account": receivable, "amount": return_total, "debit": True,
                     "party_type": "Customer", "party": customer,
                     "reference_type": "Sales Invoice", "reference_name": credit_note_name,
                 },
-                {
-                    "account": _get_courier_outstanding_account(company),
-                    "amount": return_total, "debit": False,
-                },
+                release_leg,
             ],
         })
 
@@ -583,14 +701,24 @@ def plan_return_journal_legs(
     if not pay_courier_for_trip and courier:
         shipping = flt(courier.get("shipping_amount"))
         if shipping > _TOL:
-            party_type = courier.get("party_type")
-            party = courier.get("party")
+            # The accrual has to be reversed where it was made. A partner order
+            # accrued the trip fee on the partner's settlement account, not on
+            # Creditors — debiting Creditors here would leave the partner's
+            # payable standing and put a phantom debit on a courier's ledger.
+            if partner:
+                accrual_account = partner["account"]
+                party_type = partner["party_type"]
+                party = partner["party"]
+            else:
+                accrual_account = get_creditors_account(company)
+                party_type = courier.get("party_type")
+                party = courier.get("party")
             plans.append({
                 "je_type": JE_FREIGHT_REVERSAL,
                 "human": f"Return freight reversal – {inv.name} / {credit_note_name}",
                 "legs": [
                     {
-                        "account": get_creditors_account(company), "amount": shipping, "debit": True,
+                        "account": accrual_account, "amount": shipping, "debit": True,
                         "party_type": party_type, "party": party,
                     },
                     {
@@ -663,8 +791,14 @@ def dry_run_return_postings(invoice_id: str) -> Dict[str, Any]:
 # Document builders
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_credit_note(inv: Any, requested: Dict[str, float], request_id: str) -> Any:
-    """Map the source invoice to a credit note limited to the requested lines."""
+def _build_credit_note(
+    inv: Any, requested: Dict[str, float], request_id: str, *, completes_order: bool
+) -> Any:
+    """Map the source invoice to a credit note limited to the requested lines.
+
+    *completes_order* decides what happens to the fixed charges — in practice the
+    Shipping Income row. See :func:`_apply_fixed_charge_rule`.
+    """
     from erpnext.controllers.sales_and_purchase_return import make_return_doc
 
     cn = make_return_doc("Sales Invoice", inv.name)
@@ -715,8 +849,45 @@ def _build_credit_note(inv: Any, requested: Dict[str, float], request_id: str) -
     if cn.meta.get_field("custom_return_request_id"):
         cn.custom_return_request_id = request_id
 
+    _apply_fixed_charge_rule(cn, inv, completes_order=completes_order)
+
     cn.run_method("calculate_taxes_and_totals")
     return cn
+
+
+def _apply_fixed_charge_rule(cn: Any, inv: Any, *, completes_order: bool) -> None:
+    """Decide how much of the order's fixed charges this credit note gives back.
+
+    ``make_return_doc`` copies the taxes table wholesale and negates it. For
+    percentage rows that is right — ``calculate_taxes_and_totals`` recomputes them
+    from the credit note's own (smaller) net total, so they scale with the goods.
+    For ``Actual`` rows it is not: the amount is fixed, so a partial return would
+    hand back the *entire* delivery charge for one line out of several, and the
+    next partial return would hand it back again. Two partials on a 630 order
+    (600 goods + 30 delivery) credited 390 + 270 = 660 — thirty pounds more than
+    the customer ever paid — and on a bundle order whose parent line carries zero
+    value, returning that line alone credited the full delivery charge for nothing
+    at all.
+
+    The rule: a fixed charge is credited **only by the return that completes the
+    order**, and only the part not already credited. The delivery happened, so
+    while the customer keeps any of the goods they keep the delivery charge with
+    them; once everything is back, the whole order is undone and the charge goes
+    back with it. Total credited across any number of partial returns therefore
+    lands exactly on the invoice total, whichever order the lines come back in.
+    """
+    already = _fixed_charges_already_credited(inv.name)
+    for row in cn.get("taxes") or []:
+        if str(row.charge_type or "") != "Actual":
+            continue
+        key = (row.account_head or "", row.description or "")
+        # The mapper already negated the row, so its magnitude is the original.
+        original = abs(flt(row.tax_amount))
+        remaining = max(original - flt(already.get(key, 0.0)), 0.0)
+        target = remaining if completes_order else 0.0
+        # Credit notes carry negative charges; keep the sign the mapper set.
+        row.tax_amount = -target
+        row.tax_amount_after_discount_amount = -target
 
 
 def _build_return_delivery_note(
@@ -791,6 +962,13 @@ def _compensating_courier_transaction(
         ct.notes = f"Return reversal for {inv.name} (credit note {credit_note_name})"
         if courier.get("delivery_partner"):
             ct.delivery_partner = courier.get("delivery_partner")
+        # Mirror the source row's partner flag. The two settlement sweeps select on
+        # it and are mutually exclusive — settle_delivery_partner takes
+        # is_partner_order = 1, settle_courier takes 0/NULL — so a reversal that
+        # leaves it at the default lands in the wrong sweep twice over: the partner
+        # settlement never sees the reversal and still collects for returned goods,
+        # while a generic courier settlement picks up an orphan negative row.
+        ct.is_partner_order = 1 if courier.get("is_partner_order") else 0
         ct.flags.ignore_permissions = True
         ct.insert(ignore_permissions=True)
         return ct.name
@@ -966,14 +1144,7 @@ def _stamp_return_state(
     reason: str, notes: Optional[str], return_total: float,
 ) -> str:
     """Record the return on the source invoice and say whether it is now complete."""
-    fully = True
-    for row in inv.items:
-        sold = flt(row.qty)
-        done = flt(returned_before.get(row.name)) + flt(requested.get(row.name, 0.0))
-        if done < sold - _TOL:
-            fully = False
-            break
-
+    fully = _completes_the_order(inv, requested, returned_before)
     status = "Fully Returned" if fully else "Partially Returned"
     reason_text = reason if not notes else f"{reason}\nNotes: {notes}"
     prior = flt(inv.get("custom_returned_amount"))
@@ -1177,7 +1348,14 @@ def run_invoice_return(
             rdn.submit()
 
             # 2. Revenue reversal + customer credit.
-            cn = _build_credit_note(inv, requested, request_id)
+            #
+            # Whether this return closes the order out decides whether the credit
+            # note carries the delivery charge, so it is computed once here and
+            # reused by the status stamp in step 6 — the two must not disagree.
+            completes_order = _completes_the_order(inv, requested, returned_before)
+            cn = _build_credit_note(
+                inv, requested, request_id, completes_order=completes_order
+            )
             if cn.meta.get_field("custom_return_type"):
                 cn.custom_return_type = return_type
             if cn.meta.get_field("custom_return_courier_paid"):
@@ -1232,10 +1410,25 @@ def run_invoice_return(
             )
 
             # 5. Refund or leave as credit.
+            #
+            # Never hand back more cash than the customer actually put in.
+            # ``_money_state`` reads anything with a non-full outstanding balance
+            # as "prepaid", so a half-paid order would otherwise refund the whole
+            # return total out of the till. Whatever the cap withholds simply stays
+            # on the credit note as customer credit, which is where an
+            # over-refund's difference belonged in the first place.
             refund_pe = None
+            refund_amount = 0.0
             if refund_mode == REFUND_NOW:
+                collected = max(flt(inv.grand_total) - flt(inv.outstanding_amount), 0.0)
+                refund_amount = min(return_total, collected)
+                if refund_amount < return_total - _TOL:
+                    logger.warning(
+                        f"return refund capped on {inv.name}: requested {return_total}, "
+                        f"collected {collected}; remainder left as customer credit"
+                    )
                 refund_pe = _create_refund_payment_entry(
-                    inv, credit_note_name=cn.name, amount=return_total, branch=branch
+                    inv, credit_note_name=cn.name, amount=refund_amount, branch=branch
                 )
 
             # 6. Source-invoice state.
@@ -1285,6 +1478,7 @@ def run_invoice_return(
                 "compensating_courier_transaction": compensating_ct,
                 "compensating_sales_partner_transaction": compensating_spt,
                 "refund_payment_entry": refund_pe,
+                "refund_amount": refund_amount,
                 "return_status": return_status,
                 "money_state": money_state,
                 "return_total": return_total,
