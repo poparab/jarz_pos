@@ -97,6 +97,30 @@ _LEAD_FLAT_FIELDS = [
     "custom_not_suitable_by",
 ]
 
+# Fields that only exist once the not-suitable migration has run. Code is
+# deployed before ``bench migrate`` completes, so a query naming them would fail
+# with "Unknown column" during that window — every read filters through
+# :func:`_lead_query_fields` and every filter through :func:`_has_verdict_field`.
+_VERDICT_FIELDS = (
+    "custom_not_suitable",
+    "custom_not_suitable_reason",
+    "custom_not_suitable_notes",
+    "custom_not_suitable_on",
+    "custom_not_suitable_by",
+)
+
+
+def _has_verdict_field():
+    """Whether the site has migrated the not-suitable fields. Guarded -> False."""
+    return _has_field("Lead", "custom_not_suitable")
+
+
+def _lead_query_fields():
+    """``_LEAD_FLAT_FIELDS`` minus anything this site has not migrated yet."""
+    if _has_verdict_field():
+        return _LEAD_FLAT_FIELDS
+    return [f for f in _LEAD_FLAT_FIELDS if f not in _VERDICT_FIELDS]
+
 # Child-row (Jarz Lead Branch) fields returned in lead detail.
 _BRANCH_FIELDS = (
     "branch_name",
@@ -230,13 +254,13 @@ def get_leads(category=None, status=None, not_suitable=None):
         filters["custom_lead_category"] = category
     if status:
         filters["status"] = status
-    if not_suitable not in (None, ""):
+    if not_suitable not in (None, "") and _has_verdict_field():
         filters["custom_not_suitable"] = 1 if _bool(not_suitable) else 0
 
     rows = frappe.get_all(
         "Lead",
         filters=filters or None,
-        fields=_LEAD_FLAT_FIELDS,
+        fields=_lead_query_fields(),
         order_by="custom_fit_score desc",
         limit_page_length=0,
     )
@@ -267,7 +291,7 @@ def get_lead(name):
 
     # Build the flat catalog shape from the loaded doc (reuse the row mapper by
     # feeding it a dict view of the doc fields).
-    flat = {f: doc.get(f) for f in _LEAD_FLAT_FIELDS}
+    flat = {f: doc.get(f) for f in _lead_query_fields()}
     flat["name"] = doc.name
     result = _map_lead_row(flat)
 
@@ -563,6 +587,11 @@ def set_lead_suitability(name, not_suitable=1, reason=None, notes=None):
     """
     _ensure_b2b_access()
 
+    if not _has_verdict_field():
+        frappe.throw(
+            "This site has not migrated the not-suitable fields yet. "
+            "Run `bench migrate` and try again."
+        )
     if not frappe.db.exists("Lead", name):
         frappe.throw(f"Lead '{name}' not found.")
 
@@ -606,7 +635,7 @@ def set_lead_suitability(name, not_suitable=1, reason=None, notes=None):
     # one starts clean rather than firing every missed reminder at once.
     _clear_followup(doc)
 
-    flat = {f: doc.get(f) for f in _LEAD_FLAT_FIELDS}
+    flat = {f: doc.get(f) for f in _lead_query_fields()}
     flat["name"] = doc.name
     return {"lead": _map_lead_row(flat)}
 
