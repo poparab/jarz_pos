@@ -95,6 +95,9 @@ _LEAD_FLAT_FIELDS = [
     "custom_not_suitable_notes",
     "custom_not_suitable_on",
     "custom_not_suitable_by",
+    "custom_merged_into",
+    "custom_merged_on",
+    "custom_merged_by",
 ]
 
 # Fields that only exist once the not-suitable migration has run. Code is
@@ -109,17 +112,34 @@ _VERDICT_FIELDS = (
     "custom_not_suitable_by",
 )
 
+# Same deal for the duplicate-merge bookkeeping.
+_MERGE_FIELDS = (
+    "custom_merged_into",
+    "custom_merged_on",
+    "custom_merged_by",
+)
+
 
 def _has_verdict_field():
     """Whether the site has migrated the not-suitable fields. Guarded -> False."""
     return _has_field("Lead", "custom_not_suitable")
 
 
+def _has_merge_field():
+    """Whether the site has migrated the merge fields. Guarded -> False."""
+    return _has_field("Lead", "custom_merged_into")
+
+
 def _lead_query_fields():
     """``_LEAD_FLAT_FIELDS`` minus anything this site has not migrated yet."""
-    if _has_verdict_field():
+    skip = set()
+    if not _has_verdict_field():
+        skip.update(_VERDICT_FIELDS)
+    if not _has_merge_field():
+        skip.update(_MERGE_FIELDS)
+    if not skip:
         return _LEAD_FLAT_FIELDS
-    return [f for f in _LEAD_FLAT_FIELDS if f not in _VERDICT_FIELDS]
+    return [f for f in _LEAD_FLAT_FIELDS if f not in skip]
 
 # Child-row (Jarz Lead Branch) fields returned in lead detail.
 _BRANCH_FIELDS = (
@@ -225,6 +245,10 @@ def _map_lead_row(row):
         "not_suitable_notes": row.get("custom_not_suitable_notes") or "",
         "not_suitable_on": _str_or_none(row.get("custom_not_suitable_on")),
         "not_suitable_by": row.get("custom_not_suitable_by") or "",
+        # Duplicate-merge bookkeeping (see merge_leads).
+        "merged_into": row.get("custom_merged_into") or "",
+        "merged_on": _str_or_none(row.get("custom_merged_on")),
+        "merged_by": row.get("custom_merged_by") or "",
     }
 
 
@@ -232,7 +256,7 @@ def _map_lead_row(row):
 # List
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
-def get_leads(category=None, status=None, not_suitable=None):
+def get_leads(category=None, status=None, not_suitable=None, include_merged=0):
     """Return the whole leads catalog (coarse server-side filtering only).
 
     Optional coarse filters: ``category`` -> custom_lead_category,
@@ -245,6 +269,12 @@ def get_leads(category=None, status=None, not_suitable=None):
       - falsy ("0"/0/False) -> only leads NOT marked not-suitable
       - truthy ("1"/1/True) -> only leads marked not-suitable
 
+    ``include_merged`` defaults to false: a Lead that was merged into another as
+    a duplicate is not a prospect any more, it is an audit record, so it is
+    excluded unless explicitly asked for. This one is NOT client-side like the
+    not-suitable filter — a merged duplicate should never reach the cache at
+    all, because showing it would re-offer the very row a rep just eliminated.
+
     Returns: ``{"leads": [<mapped row>, ...], "count": <int>}``.
     """
     _ensure_b2b_access()
@@ -256,6 +286,8 @@ def get_leads(category=None, status=None, not_suitable=None):
         filters["status"] = status
     if not_suitable not in (None, "") and _has_verdict_field():
         filters["custom_not_suitable"] = 1 if _bool(not_suitable) else 0
+    if not _bool(include_merged) and _has_merge_field():
+        filters["custom_merged_into"] = ["is", "not set"]
 
     rows = frappe.get_all(
         "Lead",
@@ -666,6 +698,381 @@ def _clear_followup(doc):
     except Exception:
         frappe.log_error(
             title="leads.set_lead_suitability: close ToDos failed",
+            message=frappe.get_traceback(),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Merge duplicates
+# ---------------------------------------------------------------------------
+# The catalog was scraped per-location, so one brand with branches in several
+# areas can arrive as several Leads. Merging folds the duplicates' branches and
+# contact details into one surviving Lead and parks the others.
+#
+# Sources are NEVER deleted. A Lead can be referenced by Opportunities, ToDos,
+# Addresses and Contacts, so deletion would either fail or orphan them; and a
+# merge is a judgement call someone may need to audit or undo. Branch rows are
+# COPIED, not moved, so clearing custom_merged_into in Desk restores a usable
+# source record.
+
+_MERGE_CONTACT_FIELDS = (
+    "phone",
+    "mobile_no",
+    "email_id",
+    "website",
+    "custom_instagram",
+    "custom_facebook",
+    "custom_maps_url",
+    "custom_primary_area",
+    "custom_price_band",
+    "custom_confidence",
+    "custom_open_status",
+    "custom_latitude",
+    "custom_longitude",
+)
+
+
+def _branch_key(row):
+    """Identity of a branch row for dedup: name+area, else the maps URL."""
+    def norm(value):
+        return " ".join(str(value or "").split()).strip().lower()
+
+    name = norm(row.get("branch_name"))
+    area = norm(row.get("area"))
+    if name or area:
+        return f"{name}|{area}"
+    return f"url|{norm(row.get('maps_url'))}"
+
+
+def _branch_dict(row):
+    """A Jarz Lead Branch row reduced to the fields we copy."""
+    return {f: row.get(f) for f in _BRANCH_FIELDS}
+
+
+@frappe.whitelist()
+def get_merge_candidates(name, query=None, limit=25):
+    """Leads that could be duplicates of ``name`` (or a free-text search).
+
+    With no ``query`` this suggests likely duplicates, matched on the signals
+    that actually identify a brand across scraped locations: an identical
+    normalized brand name, or a shared phone / Instagram handle / website.
+    With a ``query`` it is a plain name search, because the rep sometimes knows
+    the duplicate the heuristics miss (a spelling variant, an Arabic name).
+
+    Never returns the lead itself, anything already merged away, or anything
+    that has other leads merged INTO it (merging a target into a third lead
+    would strand the first merge's audit trail).
+
+    Returns: ``{"candidates": [{name, lead_name, category, branch_count,
+    primary_area, phone, instagram, score, reasons: [...]}, ...]}``.
+    """
+    _ensure_b2b_access()
+
+    if not frappe.db.exists("Lead", name):
+        frappe.throw(f"Lead '{name}' not found.")
+
+    try:
+        limit = max(1, min(int(limit or 25), 100))
+    except (ValueError, TypeError):
+        limit = 25
+
+    fields = [
+        "name",
+        "lead_name",
+        "custom_lead_category",
+        "custom_branch_count",
+        "custom_primary_area",
+        "phone",
+        "mobile_no",
+        "website",
+        "custom_instagram",
+    ]
+
+    base_filters = {"name": ["!=", name]}
+    if _has_merge_field():
+        base_filters["custom_merged_into"] = ["is", "not set"]
+
+    query = (query or "").strip()
+    if query:
+        rows = frappe.get_all(
+            "Lead",
+            filters={**base_filters, "lead_name": ["like", f"%{query}%"]},
+            fields=fields,
+            order_by="lead_name asc",
+            limit_page_length=limit,
+        )
+        candidates = [
+            dict(_map_candidate(r), score=0, reasons=["Name search"]) for r in rows
+        ]
+        return {"candidates": _drop_merge_targets(candidates)}
+
+    source = frappe.db.get_value(
+        "Lead",
+        name,
+        ["lead_name", "phone", "mobile_no", "website", "custom_instagram"],
+        as_dict=True,
+    ) or {}
+
+    # Each signal is queried separately and the results are unioned, so a lead
+    # matching on two signals scores higher than one matching on either alone.
+    signals = []
+    lead_name = (source.get("lead_name") or "").strip()
+    if lead_name:
+        signals.append(("Same brand name", {"lead_name": lead_name}))
+    for field, label in (
+        ("phone", "Same phone"),
+        ("mobile_no", "Same mobile"),
+        ("custom_instagram", "Same Instagram"),
+        ("website", "Same website"),
+    ):
+        value = (source.get(field) or "").strip()
+        if value:
+            signals.append((label, {field: value}))
+
+    by_name = {}
+    for label, extra in signals:
+        try:
+            rows = frappe.get_all(
+                "Lead",
+                filters={**base_filters, **extra},
+                fields=fields,
+                limit_page_length=limit,
+            )
+        except Exception:
+            continue
+        for row in rows:
+            entry = by_name.setdefault(
+                row["name"], dict(_map_candidate(row), score=0, reasons=[])
+            )
+            entry["score"] += 1
+            entry["reasons"].append(label)
+
+    candidates = sorted(
+        by_name.values(),
+        key=lambda c: (-c["score"], c.get("lead_name") or ""),
+    )[:limit]
+    return {"candidates": _drop_merge_targets(candidates)}
+
+
+def _map_candidate(row):
+    return {
+        "name": row.get("name"),
+        "lead_name": row.get("lead_name") or "",
+        "category": row.get("custom_lead_category") or "",
+        "branch_count": _int(row.get("custom_branch_count")),
+        "primary_area": row.get("custom_primary_area") or "",
+        "phone": row.get("phone") or row.get("mobile_no") or "",
+        "instagram": row.get("custom_instagram") or "",
+    }
+
+
+def _drop_merge_targets(candidates):
+    """Remove candidates that already have other leads merged into them."""
+    if not candidates or not _has_merge_field():
+        return candidates
+    names = [c["name"] for c in candidates]
+    try:
+        taken = {
+            r["custom_merged_into"]
+            for r in frappe.get_all(
+                "Lead",
+                filters={"custom_merged_into": ["in", names]},
+                fields=["custom_merged_into"],
+                limit_page_length=0,
+            )
+        }
+    except Exception:
+        return candidates
+    return [c for c in candidates if c["name"] not in taken]
+
+
+@frappe.whitelist()
+def merge_leads(target, sources):
+    """Fold duplicate Leads into ``target``. Returns the refreshed target row.
+
+    Copies every source branch the target does not already have, unions the
+    area/region/governorate lists, fills BLANK target contact fields from the
+    sources (never overwrites a value the target already has — the target is
+    the record the rep chose to keep), appends source notes with attribution,
+    and recomputes branch_count / total_reviews / avg_rating.
+
+    Each source is then stamped with ``custom_merged_into`` and parked at the
+    Lost/On-hold stage, which takes it out of the catalog and off the board.
+
+    Returns: ``{"lead": <mapped target row>, "merged": [<source name>, ...]}``.
+    """
+    _ensure_b2b_access()
+
+    if not _has_merge_field():
+        frappe.throw(
+            "This site has not migrated the merge fields yet. "
+            "Run `bench migrate` and try again."
+        )
+
+    if isinstance(sources, str):
+        try:
+            parsed = json.loads(sources)
+        except (ValueError, TypeError):
+            parsed = [s.strip() for s in sources.split(",")]
+        sources = parsed
+    if isinstance(sources, str) or not isinstance(sources, (list, tuple)):
+        frappe.throw("sources must be a list of Lead names.")
+
+    sources = [str(s).strip() for s in sources if str(s or "").strip()]
+    sources = list(dict.fromkeys(sources))  # de-dup, keep order
+    if not sources:
+        frappe.throw("Select at least one lead to merge.")
+    if not frappe.db.exists("Lead", target):
+        frappe.throw(f"Lead '{target}' not found.")
+    if target in sources:
+        frappe.throw("A lead cannot be merged into itself.")
+    for source in sources:
+        if not frappe.db.exists("Lead", source):
+            frappe.throw(f"Lead '{source}' not found.")
+        if frappe.db.get_value("Lead", source, "custom_merged_into"):
+            frappe.throw(f"Lead '{source}' has already been merged.")
+    # Merging INTO a lead that is itself a duplicate would hide the result.
+    if frappe.db.get_value("Lead", target, "custom_merged_into"):
+        frappe.throw(
+            f"Lead '{target}' has itself been merged into another lead; "
+            "merge into the surviving lead instead."
+        )
+
+    doc = frappe.get_doc("Lead", target)
+    seen_branches = {
+        _branch_key(row) for row in (doc.get("custom_branches") or [])
+    }
+    areas = {v for v in _json_list(doc.get("custom_areas")) if v}
+    regions = {v for v in _json_list(doc.get("custom_regions")) if v}
+    governorates = {v for v in _json_list(doc.get("custom_governorates")) if v}
+    note_blocks = []
+    sahel = _int(doc.get("custom_sahel_branches"))
+    # Seed the rating pool with the target's own aggregate so a target that has
+    # no branch rows still contributes its rating to the merged average.
+    rating_pool = _rating_pool_from_lead(doc)
+
+    for source_name in sources:
+        source = frappe.get_doc("Lead", source_name)
+
+        for row in (source.get("custom_branches") or []):
+            key = _branch_key(row)
+            if key in seen_branches:
+                continue
+            seen_branches.add(key)
+            doc.append("custom_branches", _branch_dict(row))
+
+        areas.update(v for v in _json_list(source.get("custom_areas")) if v)
+        regions.update(v for v in _json_list(source.get("custom_regions")) if v)
+        governorates.update(
+            v for v in _json_list(source.get("custom_governorates")) if v
+        )
+        sahel += _int(source.get("custom_sahel_branches"))
+        rating_pool.extend(_rating_pool_from_lead(source))
+
+        for field in _MERGE_CONTACT_FIELDS:
+            if not doc.get(field) and source.get(field):
+                doc.set(field, source.get(field))
+
+        source_notes = (source.get("custom_notes") or "").strip()
+        if source_notes:
+            label = source.get("lead_name") or source_name
+            note_blocks.append(f"[merged from {label}] {source_notes}")
+
+    doc.set("custom_areas", json.dumps(sorted(areas)))
+    doc.set("custom_regions", json.dumps(sorted(regions)))
+    doc.set("custom_governorates", json.dumps(sorted(governorates)))
+    doc.set("custom_sahel_branches", sahel)
+
+    branches = doc.get("custom_branches") or []
+    if branches:
+        doc.set("custom_branch_count", len(branches))
+        reviews = sum(_int(b.get("reviews")) for b in branches)
+        if reviews:
+            doc.set("custom_total_reviews", reviews)
+
+    average = _weighted_average(rating_pool)
+    if average is not None:
+        doc.set("custom_avg_rating", average)
+
+    if note_blocks:
+        existing = (doc.get("custom_notes") or "").strip()
+        doc.set(
+            "custom_notes",
+            "\n\n".join([b for b in [existing, *note_blocks] if b]),
+        )
+
+    doc.save(ignore_permissions=True)
+
+    stamp = frappe.utils.now()
+    for source_name in sources:
+        values = {
+            "custom_merged_into": target,
+            "custom_merged_on": stamp,
+            "custom_merged_by": frappe.session.user,
+        }
+        if _has_field("Lead", "custom_b2b_stage"):
+            values["custom_b2b_stage"] = _NOT_SUITABLE_STAGE
+        frappe.db.set_value("Lead", source_name, values, update_modified=True)
+        _close_source_followups(source_name)
+
+    flat = {f: doc.get(f) for f in _lead_query_fields()}
+    flat["name"] = doc.name
+    return {"lead": _map_lead_row(flat), "merged": sources}
+
+
+def _rating_pool_from_lead(doc):
+    """(rating, weight) pairs for a lead's average-rating contribution.
+
+    Prefers the branch rows, because after a merge the branches ARE the brand;
+    falls back to the lead's own aggregate when it carries no branch ratings,
+    so a lead imported without branch detail is not silently dropped from the
+    average. Weight is the review count, or 1 when reviews are unknown, so an
+    unreviewed location still counts for something but never dominates.
+    """
+    pool = []
+    for row in (doc.get("custom_branches") or []):
+        rating = _float_or_none(row.get("rating"))
+        if rating is None:
+            continue
+        pool.append((rating, _int(row.get("reviews")) or 1))
+    if pool:
+        return pool
+    rating = _float_or_none(doc.get("custom_avg_rating"))
+    if rating is None:
+        return []
+    return [(rating, _int(doc.get("custom_total_reviews")) or 1)]
+
+
+def _weighted_average(pool):
+    """Review-weighted mean of (rating, weight) pairs, rounded to 2dp."""
+    if not pool:
+        return None
+    weight = sum(w for _, w in pool)
+    if weight <= 0:
+        return None
+    return round(sum(r * w for r, w in pool) / weight, 2)
+
+
+def _close_source_followups(source_name):
+    """A merged-away duplicate must stop generating its own reminders."""
+    try:
+        if _has_field("Lead", "custom_next_followup_date"):
+            frappe.db.set_value(
+                "Lead", source_name, "custom_next_followup_date", None,
+                update_modified=False,
+            )
+    except Exception:
+        frappe.log_error(
+            title="leads.merge_leads: clear source follow-up date failed",
+            message=frappe.get_traceback(),
+        )
+    try:
+        from jarz_pos.api.crm import _close_open_todos
+
+        _close_open_todos("Lead", source_name)
+    except Exception:
+        frappe.log_error(
+            title="leads.merge_leads: close source ToDos failed",
             message=frappe.get_traceback(),
         )
 

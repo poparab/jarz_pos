@@ -622,7 +622,186 @@ class TestLeadSuitability(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 9) importer idempotency + rep-owned field preservation
+# 9) merging duplicate leads
+# ---------------------------------------------------------------------------
+class TestLeadMerge(unittest.TestCase):
+    """merge_leads folds duplicates into one surviving Lead.
+
+    Skipped on a site that has not migrated ``custom_merged_into`` yet, for the
+    same reason as TestLeadSuitability — the CI logic gate does not migrate.
+    """
+
+    def setUp(self):
+        if not _has_lead_field("custom_merged_into"):
+            self.skipTest("Lead.custom_merged_into not migrated on this site yet.")
+        _ensure_category(_COFFEE)
+        _ensure_b2b_role()
+
+        self.target = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Brand",
+                "category": _COFFEE,
+                "phone": "0100000100",
+                "areas": ["Maadi"],
+                "regions": ["Cairo"],
+                "avg_rating": 4.0,
+                "total_reviews": 100,
+                "notes": "target notes",
+                "branches": [{"branch_name": "Maadi", "area": "Maadi",
+                              "rating": 4.0, "reviews": 100}],
+            }
+        )["name"]
+        self.duplicate = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Brand",
+                "category": _COFFEE,
+                "phone": "0100000100",
+                "instagram": "@brand",
+                "areas": ["Zamalek"],
+                "governorates": ["Cairo"],
+                "avg_rating": 5.0,
+                "total_reviews": 300,
+                "notes": "duplicate notes",
+                "branches": [{"branch_name": "Zamalek", "area": "Zamalek",
+                              "rating": 5.0, "reviews": 300}],
+            }
+        )["name"]
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    def test_merge_unions_branches_and_lists(self):
+        leads_api.merge_leads(self.target, [self.duplicate])
+
+        doc = frappe.get_doc("Lead", self.target)
+        names = sorted(b.branch_name for b in doc.custom_branches)
+        self.assertEqual(names, ["Maadi", "Zamalek"])
+        self.assertEqual(int(doc.custom_branch_count), 2)
+        self.assertEqual(int(doc.custom_total_reviews), 400)
+        self.assertEqual(sorted(json.loads(doc.custom_areas)), ["Maadi", "Zamalek"])
+        self.assertEqual(json.loads(doc.custom_regions), ["Cairo"])
+        self.assertEqual(json.loads(doc.custom_governorates), ["Cairo"])
+
+    def test_avg_rating_is_weighted_by_reviews_not_a_plain_mean(self):
+        # 4.0 over 100 reviews + 5.0 over 300 = 4.75, NOT the naive 4.5.
+        leads_api.merge_leads(self.target, [self.duplicate])
+        self.assertEqual(
+            float(frappe.db.get_value("Lead", self.target, "custom_avg_rating")),
+            4.75,
+        )
+
+    def test_blank_target_fields_are_filled_but_set_ones_are_kept(self):
+        leads_api.merge_leads(self.target, [self.duplicate])
+        doc = frappe.get_doc("Lead", self.target)
+        # Target had no instagram -> takes the duplicate's.
+        self.assertEqual(doc.custom_instagram, "@brand")
+        # Target already had a phone -> keeps its own.
+        self.assertEqual(doc.phone, "0100000100")
+
+    def test_source_notes_are_appended_with_attribution(self):
+        leads_api.merge_leads(self.target, [self.duplicate])
+        notes = frappe.db.get_value("Lead", self.target, "custom_notes")
+        self.assertIn("target notes", notes)
+        self.assertIn("duplicate notes", notes)
+        self.assertIn("merged from", notes)
+
+    def test_source_is_parked_and_stamped_but_never_deleted(self):
+        leads_api.merge_leads(self.target, [self.duplicate])
+
+        self.assertTrue(frappe.db.exists("Lead", self.duplicate))
+        source = frappe.get_doc("Lead", self.duplicate)
+        self.assertEqual(source.custom_merged_into, self.target)
+        self.assertTrue(source.custom_merged_on)
+        self.assertEqual(source.custom_merged_by, frappe.session.user)
+        self.assertEqual(source.custom_b2b_stage, "Lost/On-hold")
+        # Branches were COPIED, not moved, so the source stays restorable.
+        self.assertEqual(len(source.custom_branches), 1)
+
+    def test_merged_source_leaves_the_catalog_and_the_board(self):
+        leads_api.merge_leads(self.target, [self.duplicate])
+
+        catalog = {r["name"] for r in leads_api.get_leads()["leads"]}
+        self.assertIn(self.target, catalog)
+        self.assertNotIn(self.duplicate, catalog)
+
+        # ...but is still reachable when explicitly asked for, and by name.
+        with_merged = {
+            r["name"] for r in leads_api.get_leads(include_merged=1)["leads"]
+        }
+        self.assertIn(self.duplicate, with_merged)
+        self.assertEqual(
+            leads_api.get_lead(self.duplicate)["merged_into"], self.target
+        )
+
+        board = crm_api.get_b2b_pipeline()
+        on_board = {c["name"] for col in board["columns"].values() for c in col}
+        self.assertNotIn(self.duplicate, on_board)
+
+    def test_rejects_self_merge_and_unknown_and_empty_input(self):
+        with self.assertRaises(Exception):
+            leads_api.merge_leads(self.target, [self.target])
+        with self.assertRaises(Exception):
+            leads_api.merge_leads(self.target, [])
+        with self.assertRaises(Exception):
+            leads_api.merge_leads(self.target, ["Lead-does-not-exist"])
+        with self.assertRaises(Exception):
+            leads_api.merge_leads("Lead-does-not-exist", [self.duplicate])
+
+    def test_a_source_cannot_be_merged_twice(self):
+        leads_api.merge_leads(self.target, [self.duplicate])
+        other = leads_api.save_lead({"lead_name": "_TEST Third"})["name"]
+        with self.assertRaises(Exception):
+            leads_api.merge_leads(other, [self.duplicate])
+
+    def test_cannot_merge_into_a_lead_that_was_itself_merged_away(self):
+        """Otherwise the result would be hidden along with its new target."""
+        leads_api.merge_leads(self.target, [self.duplicate])
+        other = leads_api.save_lead({"lead_name": "_TEST Fourth"})["name"]
+        with self.assertRaises(Exception):
+            leads_api.merge_leads(self.duplicate, [other])
+
+    def test_merging_is_idempotent_on_branches(self):
+        """Re-merging an identical branch does not duplicate the row."""
+        same = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Brand Copy",
+                "branches": [{"branch_name": "Maadi", "area": "Maadi"}],
+            }
+        )["name"]
+        leads_api.merge_leads(self.target, [same])
+        doc = frappe.get_doc("Lead", self.target)
+        self.assertEqual(len(doc.custom_branches), 1)
+
+    def test_sources_accepts_a_json_string(self):
+        """Frappe delivers list args as JSON strings over HTTP."""
+        out = leads_api.merge_leads(self.target, json.dumps([self.duplicate]))
+        self.assertEqual(out["merged"], [self.duplicate])
+
+    def test_candidates_surface_the_duplicate_with_its_reasons(self):
+        res = leads_api.get_merge_candidates(self.target)
+        by_name = {c["name"]: c for c in res["candidates"]}
+        self.assertIn(self.duplicate, by_name)
+        # Matched on BOTH the brand name and the shared phone.
+        self.assertGreaterEqual(by_name[self.duplicate]["score"], 2)
+        self.assertIn("Same brand name", by_name[self.duplicate]["reasons"])
+
+    def test_candidates_exclude_self_and_already_merged(self):
+        res = leads_api.get_merge_candidates(self.target)
+        self.assertNotIn(self.target, {c["name"] for c in res["candidates"]})
+
+        leads_api.merge_leads(self.target, [self.duplicate])
+        res = leads_api.get_merge_candidates(self.target)
+        self.assertNotIn(self.duplicate, {c["name"] for c in res["candidates"]})
+
+    def test_candidates_search_by_name(self):
+        res = leads_api.get_merge_candidates(self.target, query="_TEST Brand")
+        self.assertIn(self.duplicate, {c["name"] for c in res["candidates"]})
+        res = leads_api.get_merge_candidates(self.target, query="_TEST No Such")
+        self.assertEqual(res["candidates"], [])
+
+
+# ---------------------------------------------------------------------------
+# 10) importer idempotency + rep-owned field preservation
 # ---------------------------------------------------------------------------
 class TestImportIdempotency(unittest.TestCase):
     """import_leads_catalog.run is idempotent on custom_source_brand_id.

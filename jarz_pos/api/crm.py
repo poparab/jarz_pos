@@ -148,6 +148,10 @@ def get_b2b_pipeline():
         # board. Guarded on the field so a pre-migrate site still returns cards.
         if _has_field("Lead", "custom_not_suitable"):
             lead_filters["custom_not_suitable"] = 0
+        # Nor does a duplicate that has been merged into another lead — its
+        # branches now live on the surviving card.
+        if _has_field("Lead", "custom_merged_into"):
+            lead_filters["custom_merged_into"] = ["is", "not set"]
         try:
             leads = frappe.get_all(
                 "Lead",

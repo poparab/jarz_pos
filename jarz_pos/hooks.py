@@ -417,6 +417,8 @@ try:
     _leads.save_lead_category
     _leads.get_not_suitable_reasons
     _leads.set_lead_suitability
+    _leads.get_merge_candidates
+    _leads.merge_leads
 except Exception:
     pass
 
