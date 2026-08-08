@@ -750,6 +750,15 @@ def courier_last_known_position(branch: str, party: str) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
+    # A mocked fix must never reach a customer. jarz_courier already refuses to
+    # store one, so this should be unreachable — which is exactly why it is here.
+    # This is the LAST hop before a coordinate is rendered on a public page to a
+    # member of the public, and "the writer filters it" is a guarantee that holds
+    # only until someone adds a second writer. Showing a spoofed position to a
+    # customer waiting at their door is not a bug we get to explain away.
+    if payload.get("is_mocked"):
+        return {}
+
     lat = payload.get("lat", payload.get("latitude"))
     lng = payload.get("lng", payload.get("longitude"))
     if not is_valid_coordinate(lat, lng):
