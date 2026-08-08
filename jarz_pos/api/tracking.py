@@ -155,9 +155,21 @@ def get_tracking_link(invoice_id: str) -> Dict[str, Any]:
     Never guest-callable — it takes an invoice name, so allowing guests would
     hand out a link for any order number.
 
-    Returns ``{"success": True, "url": None}`` when the order has no token yet
-    (i.e. it has not been dispatched), which the client should render as "the
-    link appears once the order goes out" rather than as an error.
+    Returns ``{"success": True, "url": None}`` when the order has not been
+    dispatched, which the client should render as "the link appears once the
+    order goes out" rather than as an error.
+
+    **Mints on demand for an already-dispatched order.** The normal mint point is
+    the OFD transition, but that only fires for orders dispatched *after* this
+    code shipped — so every order already out with a courier would otherwise
+    never have a link, and neither would one whose hook did not fire. Since this
+    endpoint exists precisely to produce a sendable link, returning None for a
+    van that is already on the road makes it useless exactly when it is needed.
+
+    Gated on ``custom_was_out_for_delivery``, the permanent one-way stamp set by
+    ``events.sales_invoice.stamp_out_for_delivery_flag``. Without that gate this
+    would mint a public token for an order nobody has dispatched yet, which is a
+    live endpoint for an order still being picked.
     """
     _ensure_tracking_link_permission()
     try:
@@ -168,11 +180,21 @@ def get_tracking_link(invoice_id: str) -> Dict[str, Any]:
         # this one says "may read THIS invoice", which is what branch scoping and
         # user permissions hang off.
         frappe.has_permission("Sales Invoice", ptype="read", doc=name, throw=True)
+
+        dispatched = False
+        try:
+            dispatched = bool(
+                frappe.db.get_value("Sales Invoice", name, "custom_was_out_for_delivery")
+            )
+        except Exception:
+            dispatched = False
+
         return {
             "success": True,
             "invoice_id": name,
-            "url": _tracking.get_tracking_url(name),
+            "url": _tracking.get_tracking_url(name, ensure=dispatched),
             "enabled": _tracking.tracking_enabled(),
+            "dispatched": dispatched,
         }
     except frappe.PermissionError:
         raise
