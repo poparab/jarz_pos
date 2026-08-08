@@ -16,6 +16,10 @@ Design notes:
     Python lists on read (guarded -> ``[]`` for empty / non-JSON values).
   - Addresses are standard ERPNext ``Address`` records linked to the Lead via a
     ``Dynamic Link`` child row (``link_doctype="Lead", link_name=<lead>``).
+  - "Not suitable" is the manual-inspection verdict: a rep who has looked at a
+    prospect and judged it not worth pursuing marks it here. It is a separate
+    axis from ``custom_b2b_stage`` (which tracks a live deal) and is written
+    only through :func:`set_lead_suitability`, never through ``save_lead``.
 """
 
 import json
@@ -31,6 +35,29 @@ from jarz_pos.api.crm import (
 )
 
 DEFAULT_LEAD_CATEGORY = "Coffee"
+
+# Canonical "why is this prospect not worth pursuing" reasons. Kept in lockstep
+# with the ``custom_not_suitable_reason`` Select options in the custom_field
+# fixture; served to the client by :func:`get_not_suitable_reasons` so the app
+# never hard-codes its own copy.
+NOT_SUITABLE_REASONS = [
+    "Out of Business",
+    "Wrong Category",
+    "Too Small",
+    "No Contact Info",
+    "Unreachable",
+    "Already Supplied",
+    "Price Mismatch",
+    "Outside Delivery Area",
+    "Duplicate",
+    "Not Interested",
+    "Other",
+]
+
+# Stage a lead is parked at when it is marked not suitable, and the stage it is
+# returned to when the verdict is reverted.
+_NOT_SUITABLE_STAGE = "Lost/On-hold"
+_DEFAULT_STAGE = "Lead"
 
 # Flat DocType fields fetched for both list and detail responses.
 _LEAD_FLAT_FIELDS = [
@@ -63,6 +90,11 @@ _LEAD_FLAT_FIELDS = [
     "custom_last_verified",
     "custom_latitude",
     "custom_longitude",
+    "custom_not_suitable",
+    "custom_not_suitable_reason",
+    "custom_not_suitable_notes",
+    "custom_not_suitable_on",
+    "custom_not_suitable_by",
 ]
 
 # Child-row (Jarz Lead Branch) fields returned in lead detail.
@@ -163,6 +195,12 @@ def _map_lead_row(row):
         "last_verified": _str_or_none(row.get("custom_last_verified")),
         "latitude": _float_or_none(row.get("custom_latitude")),
         "longitude": _float_or_none(row.get("custom_longitude")),
+        # Manual-inspection verdict (see set_lead_suitability).
+        "not_suitable": _bool(row.get("custom_not_suitable")),
+        "not_suitable_reason": row.get("custom_not_suitable_reason") or "",
+        "not_suitable_notes": row.get("custom_not_suitable_notes") or "",
+        "not_suitable_on": _str_or_none(row.get("custom_not_suitable_on")),
+        "not_suitable_by": row.get("custom_not_suitable_by") or "",
     }
 
 
@@ -170,12 +208,18 @@ def _map_lead_row(row):
 # List
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
-def get_leads(category=None, status=None):
+def get_leads(category=None, status=None, not_suitable=None):
     """Return the whole leads catalog (coarse server-side filtering only).
 
     Optional coarse filters: ``category`` -> custom_lead_category,
     ``status`` -> status. Fine-grained filtering is client-side, so the full
     matching set is returned (no pagination).
+
+    ``not_suitable`` is tri-state and defaults to "return everything" so the
+    client keeps one complete cache and hides the rejected prospects itself:
+      - ``None`` / "" -> both suitable and not-suitable leads (default)
+      - falsy ("0"/0/False) -> only leads NOT marked not-suitable
+      - truthy ("1"/1/True) -> only leads marked not-suitable
 
     Returns: ``{"leads": [<mapped row>, ...], "count": <int>}``.
     """
@@ -186,6 +230,8 @@ def get_leads(category=None, status=None):
         filters["custom_lead_category"] = category
     if status:
         filters["status"] = status
+    if not_suitable not in (None, ""):
+        filters["custom_not_suitable"] = 1 if _bool(not_suitable) else 0
 
     rows = frappe.get_all(
         "Lead",
@@ -466,6 +512,133 @@ def _assign_to_caller(lead_name):
         )
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Not suitable (manual-inspection verdict)
+# ---------------------------------------------------------------------------
+@frappe.whitelist()
+def get_not_suitable_reasons():
+    """Return the canonical not-suitable reasons for the client dropdown.
+
+    Prefers the live ``custom_not_suitable_reason`` Select options so a reason
+    added in Desk shows up without an app release; falls back to the module
+    constant when the field is missing (fresh site / pre-migrate).
+
+    Returns: ``{"reasons": [<str>, ...]}``.
+    """
+    _ensure_b2b_access()
+    return {"reasons": _not_suitable_reason_options()}
+
+
+def _not_suitable_reason_options():
+    """Live Select options for custom_not_suitable_reason. Guarded -> constant."""
+    try:
+        field = frappe.get_meta("Lead").get_field("custom_not_suitable_reason")
+        options = [
+            opt.strip()
+            for opt in str((field.options if field else "") or "").split("\n")
+            if opt.strip()
+        ]
+        if options:
+            return options
+    except Exception:
+        pass
+    return list(NOT_SUITABLE_REASONS)
+
+
+@frappe.whitelist()
+def set_lead_suitability(name, not_suitable=1, reason=None, notes=None):
+    """Mark a Lead as not suitable after manual inspection, or clear the verdict.
+
+    Marking (``not_suitable`` truthy) stamps the reason, the free-text notes,
+    the timestamp and the acting user, and parks the lead at the
+    ``Lost/On-hold`` B2B stage so it leaves the pipeline board. Clearing wipes
+    all five fields and returns the lead to the ``Lead`` stage.
+
+    ``reason`` is required when marking and must be one of the values served by
+    :func:`get_not_suitable_reasons`.
+
+    Returns the refreshed catalog row: ``{"lead": <mapped row>}``.
+    """
+    _ensure_b2b_access()
+
+    if not frappe.db.exists("Lead", name):
+        frappe.throw(f"Lead '{name}' not found.")
+
+    marking = _bool(not_suitable)
+    reason = (reason or "").strip()
+    notes = (notes or "").strip()
+
+    if marking:
+        if not reason:
+            frappe.throw("A reason is required to mark a lead not suitable.")
+        allowed = _not_suitable_reason_options()
+        if reason not in allowed:
+            frappe.throw(
+                f"'{reason}' is not a valid reason. Expected one of: "
+                + ", ".join(allowed)
+            )
+
+    doc = frappe.get_doc("Lead", name)
+
+    if marking:
+        doc.custom_not_suitable = 1
+        doc.custom_not_suitable_reason = reason
+        doc.custom_not_suitable_notes = notes or None
+        doc.custom_not_suitable_on = frappe.utils.now()
+        doc.custom_not_suitable_by = frappe.session.user
+        doc.custom_b2b_stage = _NOT_SUITABLE_STAGE
+    else:
+        doc.custom_not_suitable = 0
+        doc.custom_not_suitable_reason = None
+        doc.custom_not_suitable_notes = None
+        doc.custom_not_suitable_on = None
+        doc.custom_not_suitable_by = None
+        # Only pull the stage back if it is still parked where marking put it;
+        # a lead someone has since moved on keeps whatever stage it now has.
+        if (doc.get("custom_b2b_stage") or "") == _NOT_SUITABLE_STAGE:
+            doc.custom_b2b_stage = _DEFAULT_STAGE
+
+    doc.save(ignore_permissions=True)
+
+    # A not-suitable lead should stop generating follow-up reminders; a revived
+    # one starts clean rather than firing every missed reminder at once.
+    _clear_followup(doc)
+
+    flat = {f: doc.get(f) for f in _LEAD_FLAT_FIELDS}
+    flat["name"] = doc.name
+    return {"lead": _map_lead_row(flat)}
+
+
+def _clear_followup(doc):
+    """Clear the pending follow-up date on a lead and close its open ToDos.
+
+    Guarded: a missing field or a failing ToDo query must never fail the
+    suitability write that already committed to the document.
+    """
+    try:
+        if doc.meta.get_field("custom_next_followup_date") and doc.get(
+            "custom_next_followup_date"
+        ):
+            frappe.db.set_value(
+                "Lead", doc.name, "custom_next_followup_date", None,
+                update_modified=False,
+            )
+    except Exception:
+        frappe.log_error(
+            title="leads.set_lead_suitability: clear follow-up date failed",
+            message=frappe.get_traceback(),
+        )
+    try:
+        from jarz_pos.api.crm import _close_open_todos
+
+        _close_open_todos("Lead", doc.name)
+    except Exception:
+        frappe.log_error(
+            title="leads.set_lead_suitability: close ToDos failed",
+            message=frappe.get_traceback(),
+        )
 
 
 # ---------------------------------------------------------------------------

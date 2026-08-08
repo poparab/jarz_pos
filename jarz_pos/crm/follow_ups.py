@@ -151,6 +151,9 @@ def _pass_lead_followups(summary):
             "custom_next_followup_date": ["<=", today],
             "custom_followup_done": 0,
         }
+        # A lead manually judged not suitable must stop nagging its owner.
+        if _has_field("Lead", "custom_not_suitable"):
+            filters["custom_not_suitable"] = 0
         select = ["name", "owner"]
         if _has_field("Lead", "lead_name"):
             select.append("lead_name")
@@ -246,12 +249,16 @@ def _pass_reengagement(summary):
             and _has_field("Lead", "custom_next_followup_date")
             and _has_field("Lead", "status")
         ):
+            reengage_filters = {
+                "status": "Lost Quotation",
+                "custom_next_followup_date": ["<=", today],
+            }
+            # Never try to re-engage a prospect judged not suitable.
+            if _has_field("Lead", "custom_not_suitable"):
+                reengage_filters["custom_not_suitable"] = 0
             leads = frappe.get_all(
                 "Lead",
-                filters={
-                    "status": "Lost Quotation",
-                    "custom_next_followup_date": ["<=", today],
-                },
+                filters=reengage_filters,
                 fields=["name", "owner"],
                 limit_page_length=0,
             )

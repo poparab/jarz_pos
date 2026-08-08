@@ -463,7 +463,147 @@ class TestLeadInPipeline(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 8) importer idempotency + rep-owned field preservation
+# 8) not-suitable verdict (manual inspection)
+# ---------------------------------------------------------------------------
+class TestLeadSuitability(unittest.TestCase):
+    """set_lead_suitability marks/clears the verdict and hides the lead."""
+
+    def setUp(self):
+        _ensure_category(_COFFEE)
+        _ensure_b2b_role()
+        self.name = leads_api.save_lead(
+            {"lead_name": "_TEST Unsuitable", "category": _COFFEE, "score": 60}
+        )["name"]
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    def test_reasons_endpoint_returns_options(self):
+        reasons = leads_api.get_not_suitable_reasons()["reasons"]
+        self.assertTrue(reasons)
+        self.assertIn("Out of Business", reasons)
+        self.assertIn("Other", reasons)
+
+    def test_mark_stamps_all_five_fields_and_parks_stage(self):
+        out = leads_api.set_lead_suitability(
+            self.name, 1, reason="Out of Business", notes="shutters down"
+        )
+        row = out["lead"]
+        self.assertTrue(row["not_suitable"])
+        self.assertEqual(row["not_suitable_reason"], "Out of Business")
+        self.assertEqual(row["not_suitable_notes"], "shutters down")
+        self.assertTrue(row["not_suitable_on"])
+        self.assertEqual(row["not_suitable_by"], frappe.session.user)
+        self.assertEqual(row["b2b_stage"], "Lost/On-hold")
+
+        doc = frappe.get_doc("Lead", self.name)
+        self.assertEqual(int(doc.custom_not_suitable), 1)
+        self.assertEqual(doc.custom_not_suitable_reason, "Out of Business")
+        self.assertEqual(doc.custom_b2b_stage, "Lost/On-hold")
+
+    def test_mark_requires_a_valid_reason(self):
+        with self.assertRaises(Exception):
+            leads_api.set_lead_suitability(self.name, 1)
+        with self.assertRaises(Exception):
+            leads_api.set_lead_suitability(self.name, 1, reason="_TEST Nope")
+        # Nothing was written by either rejected call.
+        self.assertEqual(
+            int(frappe.db.get_value("Lead", self.name, "custom_not_suitable") or 0), 0
+        )
+
+    def test_unknown_lead_throws(self):
+        with self.assertRaises(Exception):
+            leads_api.set_lead_suitability(
+                "Lead-does-not-exist", 1, reason="Duplicate"
+            )
+
+    def test_clear_wipes_the_verdict_and_restores_the_stage(self):
+        leads_api.set_lead_suitability(self.name, 1, reason="Too Small", notes="n")
+        row = leads_api.set_lead_suitability(self.name, 0)["lead"]
+
+        self.assertFalse(row["not_suitable"])
+        self.assertEqual(row["not_suitable_reason"], "")
+        self.assertEqual(row["not_suitable_notes"], "")
+        self.assertIsNone(row["not_suitable_on"])
+        self.assertEqual(row["not_suitable_by"], "")
+        self.assertEqual(row["b2b_stage"], "Lead")
+
+    def test_clear_keeps_a_stage_moved_on_since_marking(self):
+        leads_api.set_lead_suitability(self.name, 1, reason="Unreachable")
+        # Someone advanced the lead while it was parked.
+        frappe.db.set_value("Lead", self.name, "custom_b2b_stage", "Qualify")
+        row = leads_api.set_lead_suitability(self.name, 0)["lead"]
+        self.assertEqual(row["b2b_stage"], "Qualify")
+
+    def test_get_leads_tri_state_filter(self):
+        keeper = leads_api.save_lead(
+            {"lead_name": "_TEST Suitable", "category": _COFFEE}
+        )["name"]
+        leads_api.set_lead_suitability(self.name, 1, reason="Duplicate")
+
+        all_names = {r["name"] for r in leads_api.get_leads()["leads"]}
+        self.assertIn(self.name, all_names)   # default: everything
+        self.assertIn(keeper, all_names)
+
+        suitable = {r["name"] for r in leads_api.get_leads(not_suitable=0)["leads"]}
+        self.assertNotIn(self.name, suitable)
+        self.assertIn(keeper, suitable)
+
+        rejected = {r["name"] for r in leads_api.get_leads(not_suitable=1)["leads"]}
+        self.assertIn(self.name, rejected)
+        self.assertNotIn(keeper, rejected)
+
+    def test_marked_lead_drops_off_the_pipeline_board(self):
+        board = crm_api.get_b2b_pipeline()
+        self.assertIn(
+            self.name, {c["name"] for c in board["columns"]["Lead"]}
+        )
+
+        leads_api.set_lead_suitability(self.name, 1, reason="Wrong Category")
+
+        board = crm_api.get_b2b_pipeline()
+        on_board = {
+            card["name"]
+            for column in board["columns"].values()
+            for card in column
+        }
+        self.assertNotIn(self.name, on_board)
+
+    def test_advancing_the_stage_clears_the_verdict(self):
+        """Putting a lead back into a live stage overrides an earlier verdict."""
+        leads_api.set_lead_suitability(self.name, 1, reason="Not Interested")
+        crm_api.advance_stage("Lead", self.name, "Qualify")
+
+        doc = frappe.get_doc("Lead", self.name)
+        self.assertEqual(int(doc.custom_not_suitable or 0), 0)
+        self.assertFalse(doc.custom_not_suitable_reason)
+        self.assertEqual(doc.custom_b2b_stage, "Qualify")
+        # And it is back on the board.
+        board = crm_api.get_b2b_pipeline()
+        self.assertIn(self.name, {c["name"] for c in board["columns"]["Qualify"]})
+
+    def test_moving_to_lost_keeps_the_verdict(self):
+        """Lost/On-hold is where marking parks the lead; re-setting it is a no-op."""
+        leads_api.set_lead_suitability(self.name, 1, reason="Duplicate")
+        crm_api.advance_stage("Lead", self.name, "Lost/On-hold")
+
+        doc = frappe.get_doc("Lead", self.name)
+        self.assertEqual(int(doc.custom_not_suitable), 1)
+        self.assertEqual(doc.custom_not_suitable_reason, "Duplicate")
+
+    def test_save_lead_cannot_write_the_verdict(self):
+        """The verdict is owned by set_lead_suitability; save_lead ignores it."""
+        leads_api.save_lead(
+            {"not_suitable": True, "not_suitable_reason": "Too Small"},
+            name=self.name,
+        )
+        self.assertEqual(
+            int(frappe.db.get_value("Lead", self.name, "custom_not_suitable") or 0), 0
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9) importer idempotency + rep-owned field preservation
 # ---------------------------------------------------------------------------
 class TestImportIdempotency(unittest.TestCase):
     """import_leads_catalog.run is idempotent on custom_source_brand_id.

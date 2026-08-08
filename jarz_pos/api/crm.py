@@ -143,10 +143,15 @@ def get_b2b_pipeline():
         for f in ("lead_name", "company_name", "custom_fit_score"):
             if _has_field("Lead", f):
                 lead_fields.append(f)
+        lead_filters = {"custom_b2b_stage": ["in", list(_PRE_SAMPLE_STAGES)]}
+        # Prospects a rep has manually judged unsuitable never belong on the
+        # board. Guarded on the field so a pre-migrate site still returns cards.
+        if _has_field("Lead", "custom_not_suitable"):
+            lead_filters["custom_not_suitable"] = 0
         try:
             leads = frappe.get_all(
                 "Lead",
-                filters={"custom_b2b_stage": ["in", list(_PRE_SAMPLE_STAGES)]},
+                filters=lead_filters,
                 fields=lead_fields,
                 order_by=(
                     "custom_fit_score desc"
@@ -417,6 +422,16 @@ def advance_stage(doctype, name, stage, reason=None, follow_up_date=None):
         doctype, name, "custom_b2b_stage", stage, update_modified=True
     )
 
+    # Deliberately putting a Lead back into a live stage overrides an earlier
+    # "not suitable" verdict — otherwise the lead would sit in a working stage
+    # while still hidden from the catalog and the board. Guarded on the field.
+    if (
+        doctype == "Lead"
+        and stage != _LOST_STAGE
+        and _has_field("Lead", "custom_not_suitable")
+    ):
+        _clear_not_suitable(name)
+
     if follow_up_date:
         # Explicit date wins on every stage (including Lost/On-hold): stamp it and
         # re-open the follow-up loop so the daily reminders re-surface it.
@@ -425,6 +440,30 @@ def advance_stage(doctype, name, stage, reason=None, follow_up_date=None):
         _schedule_reengage(doctype, name, reason)
 
     return {"doctype": doctype, "name": name, "stage": stage}
+
+
+def _clear_not_suitable(name):
+    """Wipe the not-suitable verdict on a Lead. No-op when it is not set."""
+    try:
+        if not frappe.db.get_value("Lead", name, "custom_not_suitable"):
+            return
+        frappe.db.set_value(
+            "Lead",
+            name,
+            {
+                "custom_not_suitable": 0,
+                "custom_not_suitable_reason": None,
+                "custom_not_suitable_notes": None,
+                "custom_not_suitable_on": None,
+                "custom_not_suitable_by": None,
+            },
+            update_modified=True,
+        )
+    except Exception:
+        frappe.log_error(
+            title="crm.advance_stage: clear not-suitable failed",
+            message=frappe.get_traceback(),
+        )
 
 
 def _stamp_followup_date(doctype, name, follow_up_date):

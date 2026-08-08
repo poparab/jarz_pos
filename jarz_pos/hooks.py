@@ -415,6 +415,8 @@ try:
     _leads.set_lead_address
     _leads.get_lead_categories
     _leads.save_lead_category
+    _leads.get_not_suitable_reasons
+    _leads.set_lead_suitability
 except Exception:
     pass
 
