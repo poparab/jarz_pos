@@ -165,6 +165,15 @@ jobs:
             test_geo_parser
             test_geo_ladder
             test_courier_delivery_transitions
+            # A6 — the OFD pin gate. The "both call sites enforce it" cases are
+            # the reason this must be in CI: the failure mode is somebody editing
+            # one of the two _build_ofd_preview_errors copies.
+            test_ofd_pin_gate
+            # Customer delivery tracking. test_tracking_public_status guards the
+            # response allow-list on the app's ONLY guest-callable endpoint, so a
+            # run without it is a run with no check on what leaks publicly.
+            test_tracking_token
+            test_tracking_public_status
           )
           rc=0
           for m in "${MODULES[@]}"; do

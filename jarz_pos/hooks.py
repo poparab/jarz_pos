@@ -22,7 +22,17 @@ fixtures = [
         # migrate, so this list must track the fixture file.
         "Purchase Invoice", "Material Request"
     ]]]},
-    {"dt": "Jarz POS Settings"}
+    # "Jarz POS Settings" is deliberately NOT a fixture. Frappe imports a Single
+    # fixture with force=True + delete_old_doc, i.e. it REBUILDS the document from
+    # the JSON — so every field absent from that file reverted to its doctype
+    # default on every `bench migrate`. The file listed no feature flags, so every
+    # flag on this Single was silently switched off by every backend deploy,
+    # including enable_invoice_returns, whose own description calls it "the instant
+    # rollback lever — it needs no deploy and no restart".
+    #
+    # Seeding now happens in setup.settings_defaults.ensure_settings_defaults
+    # (after_migrate), which fills only fields that are EMPTY and never overwrites
+    # an operator's choice.
 ]
 
 # Ensure conflicting Custom Fields are removed before fixtures import
@@ -36,6 +46,10 @@ before_migrate = [
     # delete. Both seeders are create-only and swallow their own exceptions.
     "jarz_pos.utils.cleanup.ensure_courier_delivery_fields",
     "jarz_pos.utils.cleanup.ensure_address_geo_fields",
+    # Customer tracking token. Kept out of ensure_courier_delivery_fields because
+    # COURIER_CONTRACTS §2 freezes that block at eight fields and a guard test
+    # asserts the set.
+    "jarz_pos.utils.cleanup.ensure_tracking_fields",
     # Ensure Territory has delivery_income and delivery_expense fields
     "jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
     # Ensure new delivery slot fields exist before fixtures import / migrations
@@ -51,6 +65,12 @@ after_migrate = [
     # which is how the purchasing seeder below silently did nothing on
     # production while succeeding on staging.
     "jarz_pos.setup.accounts_setup.ensure_pos_accounts",
+    # Fill ONLY the empty fields on Jarz POS Settings. Replaces the Single
+    # fixture, which rebuilt the doc every migrate and reverted every feature
+    # flag. Must run after ensure_pos_accounts so the account names it seeds
+    # already exist — a Link to a missing record fails validation on every later
+    # full save of this Single.
+    "jarz_pos.setup.settings_defaults.ensure_settings_defaults",
     # Rebuild every Jarz Desk surface from jarz_pos.utils.setup_workspace (idempotent):
     # the JARZ POS workspace, the Jarz POS sidebar, and the additive Home entry.
     "jarz_pos.utils.setup_workspace.ensure_jarz_desk",
@@ -147,6 +167,23 @@ doctype_js = {
 # role_home_page = {
 # 	"Role": "home_page"
 # }
+
+# Website routes
+# --------------
+#
+# The customer-facing delivery tracking page. `/track/<token>` resolves to
+# `jarz_pos/www/track.html` (+ `track.py`), and werkzeug puts the captured
+# `token` segment into `frappe.form_dict` — which is what the controller reads.
+#
+# The dynamic segment MUST be a route rule rather than a query string: the link
+# goes into an SMS/WhatsApp message, and `?token=` gets mangled by link
+# shorteners and truncated by preview crawlers far more often than a path does.
+#
+# Keep the prefix in step with `jarz_pos.services.tracking.TRACKING_ROUTE_PREFIX`,
+# which is what builds the absolute URL the Woo app and the POS both hand out.
+website_route_rules = [
+    {"from_route": "/track/<token>", "to_route": "track"},
+]
 
 # Generators
 # ----------
@@ -255,6 +292,11 @@ doc_events = {
         "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
         "jarz_pos.services.consumable_deduction.deduct_consumables_on_ofd",
         "jarz_pos.events.sales_invoice.stamp_out_for_delivery_flag",
+        # Customer delivery tracking: mint the opaque /track token on the first
+        # Out for Delivery move. Here rather than in api/kanban + api/trips
+        # because every dispatch path saves the submitted invoice, so one hook
+        # covers all of them (never raises).
+        "jarz_pos.events.sales_invoice.mint_tracking_token_on_ofd",
         # CRM: Sample/Trial delivery -> feedback / check-up follow-up (never raises)
         "jarz_pos.crm.pos_bridge.create_delivery_followup_on_state",
     ],
@@ -392,6 +434,17 @@ try:
     _courier_api.mark_arrived
     _courier_api.mark_delivered
     _courier_api.mark_failed
+except Exception:
+    pass
+
+try:
+    # Customer delivery tracking. get_public_status is the ONLY allow_guest
+    # endpoint in this app; touching it here registers its whitelist entry at
+    # startup like every other API module, so the public page never 404s because
+    # of lazy import order.
+    from jarz_pos.api import tracking as _tracking_api
+    _tracking_api.get_public_status
+    _tracking_api.get_tracking_link
 except Exception:
     pass
 

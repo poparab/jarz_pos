@@ -600,23 +600,57 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
             filter_conditions["docstatus"] = 2
             filter_conditions.pop("status", None)
         elif status == 'return':
-            filter_conditions["is_return"] = 1
+            # "Returned" on the board means an order that came back, and that is
+            # recorded on the order itself. Selecting is_return=1 here would list
+            # the credit notes instead — documents that carry no kanban state, so
+            # the board rendered them as phantom "Received" cards or, once branch
+            # scoping arrived, as nothing at all.
+            if _has_si_field("custom_return_status"):
+                filter_conditions["custom_return_status"] = [
+                    "in", ["Partially Returned", "Fully Returned"]
+                ]
+            else:
+                filter_conditions["is_return"] = 1
             filter_conditions["docstatus"] = 1
         elif status == 'draft':
             filter_conditions["docstatus"] = 0
             filter_conditions.pop("status", None)
-        
-    # Apply amount filters
-    if filters.get('amountFrom'):
-        filter_conditions["grand_total"] = [">=", filters['amountFrom']]
-        
-    if filters.get('amountTo'):
-        if "grand_total" in filter_conditions:
-            filter_conditions["grand_total"] = ["between", [filters['amountFrom'], filters['amountTo']]]
-        else:
-            filter_conditions["grand_total"] = ["<=", filters['amountTo']]
-            
+
+    # Apply amount filters. `is not None` rather than truthiness: 0 is a
+    # legitimate lower bound (free / fully-discounted orders).
+    amount_from = _coerce_amount(filters.get('amountFrom'))
+    amount_to = _coerce_amount(filters.get('amountTo'))
+
+    if amount_from is not None and amount_to is not None:
+        filter_conditions["grand_total"] = ["between", [amount_from, amount_to]]
+    elif amount_from is not None:
+        filter_conditions["grand_total"] = [">=", amount_from]
+    elif amount_to is not None:
+        filter_conditions["grand_total"] = ["<=", amount_to]
+
     return filter_conditions
+
+
+def _coerce_amount(value: Any) -> Optional[float]:
+    """Parse a client-supplied amount bound, treating blanks as "no bound"."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_si_field(fieldname: str) -> bool:
+    """Whether Sales Invoice actually carries `fieldname` on this site.
+
+    Guards the optional jarz fixtures: a site that has not migrated them yet
+    would otherwise take an "unknown column" SQL error and lose the whole board.
+    """
+    try:
+        return bool(frappe.get_meta("Sales Invoice").get_field(fieldname))
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ from jarz_pos.utils.access_control import (
     get_users_for_pos_profiles,
 )
 from jarz_pos.utils.realtime import publish_invoice_event
+from jarz_pos.services import ofd_pin_gate
 from jarz_pos.services.delivery_handling import (
     DN_LOGIC_VERSION,
     build_ofd_shortage_field_values,
@@ -257,12 +258,49 @@ def _parse_filter_payload(filters: Optional[Union[str, Dict[str, Any]]]) -> Dict
             return {}
     return {}
 
+#: Filter keys that narrow the board to a deliberate subset. When any of these
+#: is set the caller is hunting for specific orders, so the convenience defaults
+#: that keep the *unfiltered* board fast (a recent-posting-date window and the
+#: Delivered-column trim) must step aside — otherwise a search for a three-month
+#: old order silently returns nothing and reads as "the filter is broken".
+_NARROWING_FILTER_KEYS = (
+    "searchTerm",
+    "customer",
+    "status",
+    "dateFrom",
+    "dateTo",
+    "amountFrom",
+    "amountTo",
+)
+
+
+def _has_narrowing_filters(raw_filters: Dict[str, Any]) -> bool:
+    for key in _NARROWING_FILTER_KEYS:
+        value = raw_filters.get(key)
+        if value in (None, "", []):
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False
+
+
+def _like_pattern(search: str) -> str:
+    """Build a contains-pattern with SQL wildcards in the input neutralised.
+
+    Without this a customer typing "%" matches every order, and "_" quietly
+    matches any single character — the results look arbitrary rather than wrong.
+    """
+    escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _find_customer_search_matches(search_term: str) -> List[str]:
     search = sanitize_printable_text(search_term)
     if not search:
         return []
 
-    like = f"%{search}%"
+    like = _like_pattern(search)
     customer_ids = set()
 
     try:
@@ -357,7 +395,7 @@ def _build_invoice_search_or_filters(
     if not search:
         return []
 
-    like = f"%{search}%"
+    like = _like_pattern(search)
     or_filters: List[Dict[str, Any]] = [
         {"name": ["like", like]},
         {"customer_name": ["like", like]},
@@ -848,6 +886,14 @@ def _build_ofd_preview_errors(preview: Dict[str, Any]) -> List[str]:
             )
         )
 
+    # A6 — the Out-for-Delivery pin gate. THE SAME LINE EXISTS IN
+    # api/trips.py::_build_ofd_preview_errors and both are required: this
+    # function is duplicated, so a rule added here alone leaves the Delivery
+    # Trip bulk-send path dispatching pinless orders. The rule itself lives in
+    # services/ofd_pin_gate so the two call sites cannot drift apart, and it
+    # returns [] unless Jarz POS Settings.require_delivery_pin_for_ofd is on.
+    errors.extend(ofd_pin_gate.build_missing_pin_errors(preview))
+
     return errors
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1013,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
         raw_filters = _parse_filter_payload(filters)
         filter_conditions = apply_invoice_filters(raw_filters)
+        is_filtered = _has_narrowing_filters(raw_filters)
         search_term = sanitize_printable_text(raw_filters.get("searchTerm") or "")
         search_customer_ids = _find_customer_search_matches(search_term) if search_term else []
         search_or_filters = _build_invoice_search_or_filters(
@@ -981,10 +1028,15 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         # Performance guardrails:
         # - Default to POS invoices and a recent date window when client doesn't specify
         # - Allow overriding via explicit filters
+        #
+        # The recent-date window is a convenience for the *unfiltered* board only.
+        # Once staff have narrowed the board — searched an order number, picked a
+        # customer, set an amount range — they are deliberately looking outside
+        # today's work, and clamping them to 60 days made those searches come
+        # back empty. The row limit below is what actually bounds the payload.
         try:
             if isinstance(filter_conditions, dict):
-                # If no explicit posting_date filter, restrict to last 60 days
-                if "posting_date" not in filter_conditions:
+                if "posting_date" not in filter_conditions and not is_filtered:
                     filter_conditions["posting_date"] = [">=", frappe.utils.add_days(frappe.utils.today(), -60)]
                 # Default to POS only unless caller provided is_pos explicitly (True/False)
                 if "is_pos" not in filter_conditions:
@@ -1459,21 +1511,29 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
         kanban_data = _sort_kanban_columns(kanban_data)
 
-        # Trim "Delivered" column: keep only last 2 days + today, max 30 cards
+        # Trim "Delivered" column: keep only last 2 days + today, max 30 cards.
+        # Skipped once the board is filtered — the trim is there to stop a
+        # finished-work column from dominating the *live* board, but applying it
+        # to a search meant a delivered order older than two days could never be
+        # found, no matter what was typed.
         delivered_key = "delivered"
-        if delivered_key in kanban_data and kanban_data[delivered_key]:
+        if not is_filtered and delivered_key in kanban_data and kanban_data[delivered_key]:
             cutoff = str(frappe.utils.add_days(frappe.utils.today(), -2))
             kanban_data[delivered_key] = [
                 c for c in kanban_data[delivered_key]
                 if (c.get("posting_date") or "") >= cutoff
             ][:30]
 
-        # Return unified success
+        # Return unified success. `card_count` is what the board actually shows
+        # after column trimming, so a filtered board can honestly say how many
+        # orders matched instead of leaving staff to count cards by eye.
         return _success(
             data=kanban_data,
             truncated=board_truncated,
             total_matching=total_matching,
             limit=QUERY_LIMITS.KANBAN_INVOICES,
+            filtered=is_filtered,
+            card_count=sum(len(cards) for cards in kanban_data.values()),
         )
     except Exception as e:
         error_msg = f"Error getting kanban invoices: {str(e)}"
@@ -2486,14 +2546,44 @@ def get_kanban_filters() -> Dict[str, Any]:
     """
     try:
         frappe.logger().debug("KANBAN API: get_kanban_filters called")
+
+        # Scope the picker to the branches this user actually works and to the
+        # last six months. Unbounded, this was a DISTINCT over every POS invoice
+        # ever raised — slow enough on production to time the request out, which
+        # left the customer filter permanently empty and looking broken.
+        customer_filters: Dict[str, Any] = {
+            "docstatus": 1,
+            "is_pos": 1,
+            "is_return": 0,
+            "posting_date": [">=", frappe.utils.add_days(frappe.utils.today(), -180)],
+        }
+        allowed_profiles = _get_current_user_pos_profiles()
+        if allowed_profiles:
+            try:
+                branch_field = (
+                    "custom_kanban_profile"
+                    if frappe.get_meta("Sales Invoice").get_field("custom_kanban_profile")
+                    else "pos_profile"
+                )
+            except Exception:
+                branch_field = "pos_profile"
+            customer_filters[branch_field] = ["in", allowed_profiles]
+
         customers = frappe.get_all(
             "Sales Invoice",
-            filters={"docstatus": 1, "is_pos": 1, "is_return": 0},
+            filters=customer_filters,
             fields=["customer", "customer_name"],
             distinct=True,
-            order_by="customer_name"
+            order_by="customer_name",
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
         )
-        customer_options = [{"value": c.customer, "label": c.customer_name or c.customer} for c in customers]
+        # DISTINCT is over the pair, so one customer renamed mid-period yields two
+        # rows; collapse on the id and keep the first (alphabetical) label.
+        seen: Dict[str, str] = {}
+        for c in customers:
+            if c.customer and c.customer not in seen:
+                seen[c.customer] = c.customer_name or c.customer
+        customer_options = [{"value": k, "label": v} for k, v in seen.items()]
         state_options = [{"value": s, "label": s} for s in _get_state_field_options()]
         return _success(customers=customer_options, states=state_options)
     except Exception as e:

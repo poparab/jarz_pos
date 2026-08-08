@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<!--
+  Customer delivery tracking page.
+
+  A DELIBERATELY STANDALONE DOCUMENT. It does not extend templates/web.html and
+  it does not load the Flutter POS bundle. Frappe only wraps a www template in a
+  base template when the source contains neither a Jinja "extends" tag nor a
+  closing body tag (see TemplatePage.set_properties_from_source), so the closing
+  body tag below is load-bearing: remove it and this page silently starts pulling
+  the whole website asset bundle. Note also that a Jinja tag written literally
+  anywhere in this file — even inside an HTML comment — is still parsed by Jinja,
+  which is why this paragraph spells the tag out in prose.
+
+  Why that matters: the audience is a customer on mobile data who tapped a link
+  in a WhatsApp message to see whether their order is close. Handing them a
+  multi-megabyte SPA to answer a one-line question is the wrong trade, and a POS
+  app shipped to the public is also an attack surface nobody asked for.
+
+  Maps are MapLibre GL JS + OpenStreetMap raster tiles, never the Google Maps
+  JavaScript API — that one bills per map load, and this page is polled by every
+  customer of every order.
+
+  `<meta name="referrer" content="no-referrer">` is a security control, not
+  hygiene. Without it every tile request and every CDN request carries
+  `Referer: https://.../track/<token>`, handing the order's only credential to
+  third parties in their access logs.
+
+  No server-rendered order data and no server-rendered token: the page cache
+  keys on the resolved route ("track"), which is identical for every customer.
+  See www/track.py.
+-->
+<html lang="en" dir="ltr">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+	<meta name="referrer" content="no-referrer">
+	<meta name="robots" content="noindex, nofollow, noarchive">
+	<meta name="theme-color" content="#111827">
+	<title>Track your order</title>
+	<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+	<style>
+		:root {
+			--bg: #0f172a;
+			--card: #ffffff;
+			--ink: #111827;
+			--muted: #6b7280;
+			--line: #e5e7eb;
+			--accent: #16a34a;
+			--warn: #b45309;
+			--radius: 16px;
+		}
+		* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+		html, body { height: 100%; margin: 0; }
+		body {
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+				"Helvetica Neue", "Noto Sans Arabic", Arial, sans-serif;
+			background: var(--bg);
+			color: var(--ink);
+			display: flex;
+			flex-direction: column;
+		}
+		header {
+			flex: 0 0 auto;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			padding: 12px 16px;
+			background: var(--bg);
+			color: #f9fafb;
+		}
+		header .brand { font-weight: 700; font-size: 15px; letter-spacing: .02em; }
+		#lang-toggle {
+			background: rgba(255,255,255,.14);
+			color: #f9fafb;
+			border: 0;
+			border-radius: 999px;
+			padding: 8px 14px;
+			font-size: 13px;
+			font-weight: 600;
+			min-height: 40px;
+			cursor: pointer;
+		}
+		#map {
+			flex: 1 1 auto;
+			min-height: 42vh;
+			background: #1f2937;
+		}
+		#map-fallback {
+			display: none;
+			flex: 1 1 auto;
+			min-height: 42vh;
+			align-items: center;
+			justify-content: center;
+			padding: 24px;
+			color: #cbd5e1;
+			font-size: 14px;
+			text-align: center;
+		}
+		main {
+			flex: 0 0 auto;
+			background: var(--card);
+			border-radius: var(--radius) var(--radius) 0 0;
+			margin-top: -16px;
+			padding: 18px 16px 24px;
+			box-shadow: 0 -8px 24px rgba(0,0,0,.18);
+		}
+		.status {
+			display: flex;
+			align-items: center;
+			gap: 12px;
+		}
+		.dot {
+			flex: 0 0 auto;
+			width: 12px; height: 12px;
+			border-radius: 50%;
+			background: var(--accent);
+		}
+		.dot.pulse { animation: pulse 1.6s infinite; }
+		@keyframes pulse {
+			0%   { box-shadow: 0 0 0 0 rgba(22,163,74,.55); }
+			70%  { box-shadow: 0 0 0 12px rgba(22,163,74,0); }
+			100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); }
+		}
+		#status-label { font-size: 20px; font-weight: 700; line-height: 1.3; }
+		#status-note { color: var(--muted); font-size: 13px; margin-top: 4px; }
+		.rows { margin-top: 16px; border-top: 1px solid var(--line); }
+		.row {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			padding: 12px 0;
+			border-bottom: 1px solid var(--line);
+			font-size: 15px;
+		}
+		.row .k { color: var(--muted); font-size: 13px; }
+		.row .v { font-weight: 600; text-align: end; }
+		.row.hidden { display: none; }
+		a.call {
+			display: inline-flex;
+			align-items: center;
+			min-height: 44px;
+			padding: 0 16px;
+			border-radius: 999px;
+			background: var(--accent);
+			color: #fff;
+			text-decoration: none;
+			font-weight: 700;
+			font-size: 14px;
+		}
+		#error {
+			display: none;
+			padding: 28px 8px;
+			text-align: center;
+		}
+		#error .big { font-size: 17px; font-weight: 700; }
+		#error .small { color: var(--muted); font-size: 13px; margin-top: 8px; }
+		footer { padding: 14px 16px 22px; color: #94a3b8; font-size: 11px; text-align: center; }
+		html[dir="rtl"] .row .v { text-align: start; }
+		@media (min-width: 720px) {
+			body { align-items: center; }
+			header, main, footer { width: 100%; max-width: 620px; margin-inline: auto; }
+			main { border-radius: var(--radius); margin-top: -16px; }
+			#map, #map-fallback { width: 100%; max-width: 620px; margin-inline: auto; border-radius: var(--radius); }
+		}
+	</style>
+</head>
+<body>
+	<header>
+		<span class="brand" id="brand">Jarz</span>
+		<button id="lang-toggle" type="button">العربية</button>
+	</header>
+
+	<div id="map"></div>
+	<div id="map-fallback"><span id="map-fallback-text"></span></div>
+
+	<main>
+		<section id="card">
+			<div class="status">
+				<span class="dot" id="status-dot"></span>
+				<div>
+					<div id="status-label">&nbsp;</div>
+					<div id="status-note"></div>
+				</div>
+			</div>
+
+			<div class="rows">
+				<div class="row hidden" id="row-courier">
+					<span class="k" id="k-courier"></span>
+					<span class="v" id="v-courier"></span>
+				</div>
+				<div class="row hidden" id="row-phone">
+					<span class="k" id="k-phone"></span>
+					<a class="call" id="v-phone" href="#"></a>
+				</div>
+				<div class="row hidden" id="row-items">
+					<span class="k" id="k-items"></span>
+					<span class="v" id="v-items"></span>
+				</div>
+				<div class="row hidden" id="row-total">
+					<span class="k" id="k-total"></span>
+					<span class="v" id="v-total"></span>
+				</div>
+			</div>
+		</section>
+
+		<section id="error">
+			<div class="big" id="error-big"></div>
+			<div class="small" id="error-small"></div>
+		</section>
+	</main>
+
+	<footer>
+		<span id="attribution">© OpenStreetMap contributors</span>
+	</footer>
+
+	<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+	<script>
+	(function () {
+		"use strict";
+
+		// The token is read from the URL, never from the server-rendered HTML.
+		// The page cache keys on the resolved route ("track") and is therefore
+		// shared by every customer, so a server-embedded token would be handed to
+		// whoever loaded the page next. See www/track.py.
+		var TOKEN = (function () {
+			var parts = window.location.pathname.split("/").filter(function (p) { return p; });
+			return parts.length ? decodeURIComponent(parts[parts.length - 1]) : "";
+		})();
+
+		var ENDPOINT = "{{ status_endpoint or '/api/method/jarz_pos.api.tracking.get_public_status' }}";
+		var DEFAULT_POLL_MS = {{ poll_interval_sec or 15 }} * 1000;
+
+		var TERMINAL = { delivered: 1, cancelled: 1, returned: 1 };
+
+		var STRINGS = {
+			en: {
+				brand: "Track your order",
+				toggle: "العربية",
+				courier: "Courier",
+				phone: "Call the courier",
+				call: "Call",
+				items: "Items",
+				itemsValue: function (lines, units) {
+					return lines + (lines === 1 ? " item" : " items") + " · " + units + " units";
+				},
+				total: "Order total",
+				notFoundBig: "This tracking link is not available",
+				notFoundSmall: "It may have expired, or the address is incorrect. Please check the link in your order message.",
+				busyBig: "One moment",
+				busySmall: "Too many refreshes. This page will retry on its own.",
+				offlineSmall: "Connection lost — retrying.",
+				noMap: "The map could not load, but your order status above is up to date.",
+				waitingForCourier: "We will show the courier on the map as soon as the order leaves the branch.",
+				liveNote: "Live position, refreshed every few seconds.",
+				noLive: "The courier is on the way. Live position is not available right now."
+			},
+			ar: {
+				brand: "تتبع طلبك",
+				toggle: "English",
+				courier: "المندوب",
+				phone: "اتصل بالمندوب",
+				call: "اتصال",
+				items: "المنتجات",
+				itemsValue: function (lines, units) {
+					return lines + " منتج · " + units + " وحدة";
+				},
+				total: "إجمالي الطلب",
+				notFoundBig: "رابط التتبع غير متاح",
+				notFoundSmall: "قد يكون الرابط منتهي الصلاحية أو غير صحيح. من فضلك راجع الرابط في رسالة الطلب.",
+				busyBig: "لحظة واحدة",
+				busySmall: "تم تحديث الصفحة كثيرًا. سيتم إعادة المحاولة تلقائيًا.",
+				offlineSmall: "انقطع الاتصال — جاري إعادة المحاولة.",
+				noMap: "لم يتم تحميل الخريطة، لكن حالة طلبك بالأعلى محدّثة.",
+				waitingForCourier: "سنعرض المندوب على الخريطة بمجرد خروج الطلب من الفرع.",
+				liveNote: "الموقع مباشر ويتم تحديثه كل عدة ثوانٍ.",
+				noLive: "المندوب في الطريق. الموقع المباشر غير متاح حاليًا."
+			}
+		};
+
+		// Default to Arabic for an Arabic-configured phone, English otherwise.
+		// Most customers are Egyptian; a link forwarded to an English phone still
+		// reads correctly, and the toggle is one tap either way.
+		var lang = (function () {
+			var q = new URLSearchParams(window.location.search).get("lang");
+			if (q === "ar" || q === "en") { return q; }
+			var nav = (navigator.language || "").toLowerCase();
+			return nav.indexOf("ar") === 0 ? "ar" : "en";
+		})();
+
+		var el = function (id) { return document.getElementById(id); };
+		var map = null;
+		var mapReady = false;
+		var destMarker = null;
+		var courierMarker = null;
+		var fittedOnce = false;
+		var pollTimer = null;
+		var lastPayload = null;
+
+		function t() { return STRINGS[lang]; }
+
+		function applyLanguage() {
+			document.documentElement.lang = lang;
+			document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
+			el("brand").textContent = t().brand;
+			el("lang-toggle").textContent = t().toggle;
+			el("k-courier").textContent = t().courier;
+			el("k-phone").textContent = t().phone;
+			el("k-items").textContent = t().items;
+			el("k-total").textContent = t().total;
+			el("map-fallback-text").textContent = t().noMap;
+			document.title = t().brand;
+			if (lastPayload) { render(lastPayload); }
+		}
+
+		el("lang-toggle").addEventListener("click", function () {
+			lang = lang === "ar" ? "en" : "ar";
+			applyLanguage();
+		});
+
+		function show(node, visible) {
+			node.classList[visible ? "remove" : "add"]("hidden");
+		}
+
+		function showError(big, small) {
+			el("card").style.display = "none";
+			el("error").style.display = "block";
+			el("error-big").textContent = big;
+			el("error-small").textContent = small;
+		}
+
+		function clearError() {
+			el("card").style.display = "block";
+			el("error").style.display = "none";
+		}
+
+		function formatMoney(value, currency) {
+			var n = Number(value || 0);
+			try {
+				return new Intl.NumberFormat(lang === "ar" ? "ar-EG" : "en-EG", {
+					style: currency ? "currency" : "decimal",
+					currency: currency || undefined,
+					maximumFractionDigits: 2
+				}).format(n);
+			} catch (e) {
+				return n.toFixed(2) + (currency ? " " + currency : "");
+			}
+		}
+
+		function initMap() {
+			if (mapReady || typeof maplibregl === "undefined") { return; }
+			try {
+				map = new maplibregl.Map({
+					container: "map",
+					// Raster OSM, declared inline: no style-server round trip and no
+					// API key to leak in a public page.
+					style: {
+						version: 8,
+						sources: {
+							osm: {
+								type: "raster",
+								tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+								tileSize: 256,
+								maxzoom: 19,
+								attribution: "© OpenStreetMap contributors"
+							}
+						},
+						layers: [ { id: "osm", type: "raster", source: "osm" } ]
+					},
+					center: [31.2357, 30.0444],
+					zoom: 11,
+					attributionControl: true
+				});
+				map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+				mapReady = true;
+			} catch (e) {
+				mapReady = false;
+				el("map").style.display = "none";
+				el("map-fallback").style.display = "flex";
+			}
+		}
+
+		function marker(existing, lngLat, color) {
+			if (!mapReady) { return existing; }
+			if (existing) {
+				existing.setLngLat(lngLat);
+				return existing;
+			}
+			return new maplibregl.Marker({ color: color }).setLngLat(lngLat).addTo(map);
+		}
+
+		function updateMap(data) {
+			var hasDest = data.destination_latitude != null && data.destination_longitude != null;
+			var hasCourier = data.courier_latitude != null && data.courier_longitude != null;
+
+			if (!hasDest && !hasCourier) {
+				if (mapReady) { el("map").style.display = "none"; }
+				return;
+			}
+			initMap();
+			if (!mapReady) { return; }
+			el("map").style.display = "block";
+
+			if (hasDest) {
+				destMarker = marker(destMarker, [data.destination_longitude, data.destination_latitude], "#111827");
+			}
+			if (hasCourier) {
+				courierMarker = marker(courierMarker, [data.courier_longitude, data.courier_latitude], "#16a34a");
+			} else if (courierMarker) {
+				courierMarker.remove();
+				courierMarker = null;
+			}
+
+			// Fit once, then follow the courier. Re-fitting on every poll fights
+			// the customer's own pan/zoom, which is the single most annoying thing
+			// a tracking map can do.
+			if (hasDest && hasCourier && !fittedOnce) {
+				try {
+					var b = new maplibregl.LngLatBounds(
+						[data.destination_longitude, data.destination_latitude],
+						[data.destination_longitude, data.destination_latitude]
+					);
+					b.extend([data.courier_longitude, data.courier_latitude]);
+					map.fitBounds(b, { padding: 64, maxZoom: 16, duration: 0 });
+					fittedOnce = true;
+				} catch (e) { /* non-fatal: the markers are already placed */ }
+			} else if (!fittedOnce) {
+				var only = hasCourier
+					? [data.courier_longitude, data.courier_latitude]
+					: [data.destination_longitude, data.destination_latitude];
+				map.jumpTo({ center: only, zoom: 14 });
+				fittedOnce = true;
+			}
+		}
+
+		function render(data) {
+			lastPayload = data;
+			clearError();
+
+			var label = lang === "ar" ? data.status_label_ar : data.status_label_en;
+			el("status-label").textContent = label || "";
+			el("status-dot").classList[data.status === "on_the_way" ? "add" : "remove"]("pulse");
+
+			var note = "";
+			if (data.status === "on_the_way") {
+				note = data.courier_latitude != null ? t().liveNote : t().noLive;
+			} else if (!TERMINAL[data.status]) {
+				note = t().waitingForCourier;
+			}
+			el("status-note").textContent = note;
+
+			show(el("row-courier"), !!data.courier_first_name);
+			el("v-courier").textContent = data.courier_first_name || "";
+
+			show(el("row-phone"), !!data.courier_phone);
+			if (data.courier_phone) {
+				el("v-phone").href = "tel:" + data.courier_phone;
+				el("v-phone").textContent = t().call + " " + data.courier_phone;
+			}
+
+			var lines = Number(data.item_count || 0);
+			show(el("row-items"), lines > 0);
+			if (lines > 0) {
+				el("v-items").textContent = t().itemsValue(lines, Number(data.total_qty || 0));
+			}
+
+			show(el("row-total"), Number(data.order_total || 0) > 0);
+			el("v-total").textContent = formatMoney(data.order_total, data.currency);
+
+			updateMap(data);
+		}
+
+		function schedule(ms) {
+			if (pollTimer) { clearTimeout(pollTimer); }
+			pollTimer = setTimeout(poll, ms);
+		}
+
+		function poll() {
+			if (!TOKEN) {
+				showError(t().notFoundBig, t().notFoundSmall);
+				return;
+			}
+			// Guests cannot join Frappe socketio rooms, so polling is the only
+			// transport available here — not a shortcut around websockets.
+			fetch(ENDPOINT + "?token=" + encodeURIComponent(TOKEN), {
+				method: "GET",
+				credentials: "omit",
+				headers: { "Accept": "application/json" },
+				cache: "no-store"
+			})
+				.then(function (res) {
+					if (res.status === 429) { return { message: { success: false, error: "too many requests" } }; }
+					return res.json();
+				})
+				.then(function (body) {
+					var data = (body && body.message) || {};
+					if (data.success) {
+						render(data);
+						if (TERMINAL[data.status]) { return; }   // nothing left to watch
+						schedule((data.poll_interval_sec || 0) * 1000 || DEFAULT_POLL_MS);
+						return;
+					}
+					if (data.error === "too many requests") {
+						showError(t().busyBig, t().busySmall);
+						schedule(DEFAULT_POLL_MS * 4);
+						return;
+					}
+					// Wrong token and expired token are the same answer by design,
+					// so there is exactly one message for both and no retry.
+					showError(t().notFoundBig, t().notFoundSmall);
+				})
+				.catch(function () {
+					if (lastPayload) {
+						el("status-note").textContent = t().offlineSmall;
+					} else {
+						showError(t().notFoundBig, t().offlineSmall);
+					}
+					schedule(DEFAULT_POLL_MS * 2);
+				});
+		}
+
+		// Stop burning a mobile data plan and a server request budget while the
+		// page sits in a background tab.
+		document.addEventListener("visibilitychange", function () {
+			if (document.hidden) {
+				if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+			} else if (!lastPayload || !TERMINAL[lastPayload.status]) {
+				poll();
+			}
+		});
+
+		applyLanguage();
+		initMap();
+		poll();
+	})();
+	</script>
+</body>
+</html>

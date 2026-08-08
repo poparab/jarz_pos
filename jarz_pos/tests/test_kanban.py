@@ -7,6 +7,7 @@ from unittest.mock import patch
 import frappe
 from jarz_pos.api.kanban import (
 	_build_invoice_search_or_filters,
+	_has_narrowing_filters,
 	_get_invoice_latest_notes,
 	_get_invoice_note_counts,
 	_sort_kanban_columns,
@@ -75,6 +76,31 @@ class TestKanbanAPI(unittest.TestCase):
 		self.assertEqual(result["posting_date"][0], ">=", "Should have >= operator")
 		self.assertEqual(result["posting_date"][1], "2025-01-01", "Should have correct date")
 
+	def test_apply_invoice_filters_amount_bounds(self):
+		"""Zero is a real lower bound, and an upper bound alone must still apply."""
+		self.assertEqual(
+			apply_invoice_filters({"amountFrom": 0})["grand_total"], [">=", 0.0]
+		)
+		self.assertEqual(
+			apply_invoice_filters({"amountTo": 500})["grand_total"], ["<=", 500.0]
+		)
+		self.assertEqual(
+			apply_invoice_filters({"amountFrom": 100, "amountTo": 500})["grand_total"],
+			["between", [100.0, 500.0]],
+		)
+
+	def test_apply_invoice_filters_return_status_targets_orders_not_credit_notes(self):
+		"""The board's Returned filter must select orders, never their credit notes."""
+		result = apply_invoice_filters({"status": "Return"})
+
+		self.assertEqual(result["docstatus"], 1)
+		if frappe.get_meta("Sales Invoice").get_field("custom_return_status"):
+			self.assertEqual(
+				result["custom_return_status"],
+				["in", ["Partially Returned", "Fully Returned"]],
+			)
+			self.assertEqual(result["is_return"], 0)
+
 	def test_build_invoice_search_or_filters(self):
 		"""Search helper should cover invoice identifiers and matched customer ids."""
 		result = _build_invoice_search_or_filters("Ali", customer_ids=["CUST-1"])
@@ -83,6 +109,20 @@ class TestKanbanAPI(unittest.TestCase):
 		self.assertIn({"customer_name": ["like", "%Ali%"]}, result)
 		self.assertIn({"customer": ["like", "%Ali%"]}, result)
 		self.assertIn({"customer": ["in", ["CUST-1"]]}, result)
+
+	def test_build_invoice_search_or_filters_escapes_wildcards(self):
+		"""A typed % must match a literal %, not every order on the board."""
+		result = _build_invoice_search_or_filters("50%_off")
+
+		self.assertIn({"name": ["like", "%50\\%\\_off%"]}, result)
+
+	def test_narrowing_filter_detection(self):
+		"""Only a filter that narrows the board relaxes the convenience defaults."""
+		self.assertFalse(_has_narrowing_filters({}))
+		self.assertFalse(_has_narrowing_filters({"searchTerm": "  ", "branches": ["Main"]}))
+		self.assertTrue(_has_narrowing_filters({"searchTerm": "INV-001"}))
+		self.assertTrue(_has_narrowing_filters({"customer": "CUST-1"}))
+		self.assertTrue(_has_narrowing_filters({"amountTo": 500}))
 
 	def test_sort_kanban_columns_orders_received_by_posting_datetime_desc(self):
 		"""Received should use newest posting datetime first, not delivery slot ordering."""

@@ -286,3 +286,42 @@ def stamp_out_for_delivery_flag(doc: Any, method: Optional[str] = None) -> None:
 		if frappe:
 			frappe.log_error(frappe.get_traceback(), "stamp_out_for_delivery_flag failed")
 
+
+def mint_tracking_token_on_ofd(doc: Any, method: Optional[str] = None) -> None:
+	"""Mint the customer tracking token the first time an order goes out.
+
+	Registered on ``on_update_after_submit`` because that is the one point every
+	dispatch path converges on: the Kanban drag saves the submitted invoice, the
+	Delivery Trip bulk send goes through
+	``delivery_handling.update_submitted_sales_invoice_fields`` (which saves), and
+	``mark_courier_outstanding`` does the same. Minting in either API module
+	instead would mean the other path produced orders with no tracking link —
+	the identical trap A6's pin gate has with its two ``_build_ofd_preview_errors``
+	copies.
+
+	Idempotent in the service: an invoice that already has a token keeps it, so a
+	card dragged out, back and out again does not invalidate a link the customer
+	already has.
+
+	Never raises. A tracking link is a courtesy; it must not be able to fail a
+	dispatch, and this hook shares a transaction with the accounting that the
+	dispatch just posted.
+	"""
+	if not frappe or not doc or not getattr(doc, "name", None):
+		return
+	try:
+		current_state = str(
+			getattr(doc, "custom_sales_invoice_state", None)
+			or getattr(doc, "sales_invoice_state", None)
+			or ""
+		).strip()
+		if current_state != "Out for Delivery":
+			return
+
+		from jarz_pos.services import tracking
+
+		tracking.ensure_tracking_token(doc)
+	except Exception:
+		if frappe:
+			frappe.log_error(frappe.get_traceback(), "mint_tracking_token_on_ofd failed")
+

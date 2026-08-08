@@ -37,6 +37,12 @@
   "enable_invoice_returns",
   "courier_section",
   "enable_courier_delivery_actions",
+  "require_delivery_pin_for_ofd",
+  "tracking_section",
+  "enable_customer_tracking",
+  "expose_courier_phone_to_customer",
+  "column_break_tracking",
+  "tracking_link_ttl_hours",
   "production_section",
   "production_max_backdate_days",
   "production_operator_batch_value_limit",
@@ -273,6 +279,44 @@
    "label": "Enable Courier Delivery Actions"
   },
   {
+   "default": "0",
+   "description": "Refuse the Out for Delivery move when the order's delivery address carries no location pin. Off by default so the door-pin database can fill up first — turning it on is what makes staff paste a maps link, and turning it off again is the instant rollback lever (no deploy, no restart). Enforced in jarz_pos.services.ofd_pin_gate, which BOTH the Kanban single-invoice path and the Delivery Trip bulk path call.",
+   "fieldname": "require_delivery_pin_for_ofd",
+   "fieldtype": "Check",
+   "label": "Require Delivery Pin Before Out for Delivery"
+  },
+  {
+   "fieldname": "tracking_section",
+   "fieldtype": "Section Break",
+   "label": "Customer Delivery Tracking"
+  },
+  {
+   "default": "0",
+   "description": "Master switch for the customer-facing /track/TOKEN page and its guest JSON endpoint. Off by default: this is the only guest-callable surface in the app, so it must be switchable off in seconds without a deploy. Read in jarz_pos.services.tracking, not in the API layer, so every entry point hits the same gate.",
+   "fieldname": "enable_customer_tracking",
+   "fieldtype": "Check",
+   "label": "Enable Customer Delivery Tracking"
+  },
+  {
+   "default": "0",
+   "description": "Show the courier's phone number on the customer tracking page. Off by default: a tracking link can be forwarded to anyone, so publishing a staff mobile number is a decision, not a default.",
+   "fieldname": "expose_courier_phone_to_customer",
+   "fieldtype": "Check",
+   "label": "Show Courier Phone To Customer"
+  },
+  {
+   "fieldname": "column_break_tracking",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "24",
+   "description": "How many hours a tracking link keeps working after the order reaches a terminal state (Delivered / Cancelled / Returned). After that the token resolves to the same generic \"not found\" as a wrong token — never a distinguishable \"expired\", which would confirm that the token was once real. 0 means never expire.",
+   "fieldname": "tracking_link_ttl_hours",
+   "fieldtype": "Int",
+   "label": "Tracking Link TTL (hours)",
+   "non_negative": 1
+  },
+  {
    "fieldname": "production_section",
    "fieldtype": "Section Break",
    "label": "Production Floor"
@@ -361,7 +405,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2025-07-10 12:00:00",
+ "modified": "2026-08-08 12:00:00",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Settings",

@@ -8,6 +8,7 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 from jarz_pos.constants import WS_EVENTS
+from jarz_pos.services import ofd_pin_gate
 from jarz_pos.services.delivery_handling import (
     mark_courier_outstanding,
     ensure_delivery_note_for_invoice,
@@ -310,6 +311,14 @@ def _build_ofd_preview_errors(preview: dict) -> list[str]:
                 _format_qty(shortage.get("available_qty")),
             )
         )
+
+    # A6 — the Out-for-Delivery pin gate. THE SAME LINE EXISTS IN
+    # api/kanban.py::_build_ofd_preview_errors and both are required: this
+    # function is duplicated, so a rule added there alone leaves THIS path — the
+    # bulk trip send — dispatching pinless orders. The rule itself lives in
+    # services/ofd_pin_gate so the two call sites cannot drift apart, and it
+    # returns [] unless Jarz POS Settings.require_delivery_pin_for_ofd is on.
+    errors.extend(ofd_pin_gate.build_missing_pin_errors(preview))
 
     return errors
 

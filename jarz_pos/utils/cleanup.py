@@ -369,6 +369,60 @@ def ensure_courier_delivery_fields() -> None:
         _log(f"ensure_courier_delivery_fields error: {e}")
 
 
+def ensure_tracking_fields() -> None:
+    """Ensure the customer-tracking token exists on Sales Invoice.
+
+    A **separate** seeder from :func:`ensure_courier_delivery_fields` on purpose.
+    COURIER_CONTRACTS §2 freezes that block at exactly eight fields and
+    ``tests/test_courier_custom_fields`` asserts the set, so bundling a ninth
+    field of a different feature in there would either break that guard or force
+    it to be loosened — and loosening a frozen-contract test to fit new work is
+    how a contract stops meaning anything.
+
+    Anchored after ``custom_delivery_failure_reason`` so the delivery block stays
+    contiguous and this sits immediately behind it.
+    """
+    try:
+        if not frappe:
+            return
+
+        # Small Text for the SAME reason as custom_delivery_failure_reason, and
+        # equally non-negotiable: `tabSales Invoice` carries 247 columns and is at
+        # MariaDB's 65,535-byte row limit, so no app can add a varchar to this
+        # table. A Data field here is rejected outright with error 1118.
+        #
+        # allow_on_submit: minted at the Out for Delivery transition, i.e. always
+        # on a submitted document. Without it the write is filtered out and
+        # reported as success.
+        #
+        # no_copy: an amended invoice must mint its own token. Copying it would
+        # give two different orders the same public URL and the resolver would
+        # return whichever row it found first — a cross-customer leak created by a
+        # single field flag.
+        #
+        # read_only + print_hide: this is a URL credential, not data. Typing over
+        # it in Desk silently breaks a link the customer already has, and it has
+        # no business on a printed invoice.
+        _ensure_custom_field(
+            dt="Sales Invoice",
+            fieldname="custom_tracking_token",
+            label="Customer Tracking Token",
+            fieldtype="Small Text",
+            insert_after="custom_delivery_failure_reason",
+            description=(
+                "Opaque token addressing this order's public /track page. Minted "
+                "once, at the first Out for Delivery transition, by "
+                "jarz_pos.services.tracking. Never derived from the invoice name."
+            ),
+            allow_on_submit=1,
+            no_copy=1,
+            read_only=1,
+            print_hide=1,
+        )
+    except Exception as e:
+        _log(f"ensure_tracking_fields error: {e}")
+
+
 def ensure_address_geo_fields() -> None:
     """Ensure the Address geo fields exist (COURIER_CONTRACTS §3).
 
