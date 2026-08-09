@@ -174,6 +174,7 @@ def search_items(
     price_map = _get_item_prices_bulk(codes)
     on_hand = _on_hand_bulk(codes)
     last_paid = _last_paid_bulk(codes)
+    tax_map = _item_tax_templates_bulk(codes)
 
     for it in items:
         code = it["item_code"]
@@ -181,6 +182,8 @@ def search_items(
         it["prices"] = price_map.get(code, [])
         it["on_hand_qty"] = on_hand.get(code, 0.0)
         it["last_purchase_rate"] = last_paid.get(code, 0.0)
+        # Pre-fills the line's VAT so the buyer only overrides the exceptions.
+        it["item_tax_template"] = tax_map.get(code)
     return items
 
 
@@ -232,6 +235,33 @@ def _get_item_prices_bulk(item_codes: List[str]) -> Dict[str, List[Dict[str, Any
             "uom": row.get("uom"),
             "rate": float(row.get("price_list_rate") or 0),
         })
+    return out
+
+
+def _item_tax_templates_bulk(item_codes: List[str]) -> Dict[str, Optional[str]]:
+    """The Item Tax Template each item carries on its own ``taxes`` table.
+
+    This is what makes "only some items have VAT" work without the buyer
+    remembering which: the item itself declares its tax treatment, and the cart
+    line just inherits it.
+
+    Only rows with no ``tax_category`` are considered — a categorised row is
+    conditional on the party's tax category, which a POS purchase does not set,
+    so honouring it here would apply a tax that ERPNext itself would not.
+    """
+    if not item_codes:
+        return {}
+    out: Dict[str, Optional[str]] = {}
+    for row in frappe.get_all(
+        "Item Tax",
+        filters={"parent": ["in", item_codes], "parenttype": "Item"},
+        fields=["parent", "item_tax_template", "tax_category"],
+        order_by="parent asc, idx asc",
+        limit_page_length=0,
+    ):
+        if row.get("tax_category"):
+            continue
+        out.setdefault(row["parent"], row.get("item_tax_template"))
     return out
 
 
@@ -314,7 +344,50 @@ def get_item_details(item_code: str) -> Dict[str, Any]:
         "stock_uom": item.stock_uom,
         "uoms": _get_item_uoms(item.name),
         "prices": _get_item_prices(item.name),
+        "item_tax_template": _item_tax_templates_bulk([item.name]).get(item.name),
     }
+
+
+@frappe.whitelist()
+def get_item_tax_templates(company: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Item Tax Templates a purchase line can carry, with their rates.
+
+    ``rate`` is the sum of the template's rows, which is what the buyer thinks
+    of as "the VAT %" — a template is almost always a single rate, and showing a
+    number beats showing an opaque template name in a dropdown.
+    """
+    _ensure_manager_access()
+    filters: Dict[str, Any] = {"disabled": 0}
+    if company:
+        filters["company"] = company
+    templates = frappe.get_all(
+        "Item Tax Template",
+        filters=filters,
+        fields=["name", "title", "company"],
+        order_by="title asc",
+        limit_page_length=0,
+    )
+    if not templates:
+        return []
+
+    rates: Dict[str, List[Dict[str, Any]]] = {}
+    for row in frappe.get_all(
+        "Item Tax Template Detail",
+        filters={"parent": ["in", [t["name"] for t in templates]]},
+        fields=["parent", "tax_type", "tax_rate"],
+        order_by="parent asc, idx asc",
+        limit_page_length=0,
+    ):
+        rates.setdefault(row["parent"], []).append({
+            "account": row.get("tax_type"),
+            "rate": float(row.get("tax_rate") or 0),
+        })
+
+    for t in templates:
+        rows = rates.get(t["name"], [])
+        t["taxes"] = rows
+        t["rate"] = sum(r["rate"] for r in rows)
+    return templates
 
 
 @frappe.whitelist()
@@ -357,9 +430,15 @@ def create_purchase_invoice(
     """Create and submit a Purchase Invoice with ``update_stock=1``.
 
     ``items``: list of ``{item_code, qty, uom, rate?, warehouse?,
-    material_request?, material_request_item?}``.  A missing rate is fetched
-    from Standard Buying; a missing warehouse is resolved by
+    item_tax_template?, material_request?, material_request_item?}``.  A missing
+    rate is fetched from Standard Buying; a missing warehouse is resolved by
     :func:`resolve_purchase_warehouse`.
+
+    ``item_tax_template`` is how a purchase carries VAT on only *some* lines —
+    see :func:`_ensure_item_tax_rows` for why a template alone is not enough.
+    ``taxes_template`` remains the whole-invoice alternative; the two compose,
+    since a template-driven line simply overrides the invoice rate for its own
+    accounts.
 
     When a line carries ``material_request_item`` ERPNext's own status updater
     writes ``received_qty`` back to the Material Request and recomputes
@@ -434,6 +513,17 @@ def create_purchase_invoice(
     if taxes_template:
         pi.taxes_and_charges = taxes_template
 
+    # Resolved once for every row that left the key out, rather than per row.
+    # The app always sends it; this covers other callers of the endpoint.
+    inherited_tax = _item_tax_templates_bulk(
+        [
+            code
+            for row in items
+            if "item_tax_template" not in row
+            and (code := row.get("item_code") or row.get("item"))
+        ]
+    )
+
     for row in items:
         item_code = row.get("item_code") or row.get("item")
         if not item_code:
@@ -470,6 +560,18 @@ def create_purchase_invoice(
             "warehouse": warehouse,
         }
 
+        # Per-line VAT. An explicit key wins — including an explicit empty
+        # string, which is how the buyer says "this one is not taxed" for an
+        # item whose master says otherwise. Only a wholly absent key falls back
+        # to the item's own default.
+        if "item_tax_template" in row:
+            tax_template = (row.get("item_tax_template") or "").strip()
+        else:
+            tax_template = inherited_tax.get(item_code) or ""
+        if tax_template:
+            _validate_item_tax_template(tax_template, resolved_company, item_code)
+            line["item_tax_template"] = tax_template
+
         # Carrying these two makes ERPNext's own status updater write
         # received_qty back onto the Material Request and recompute
         # per_received — that is what closes a team item request.
@@ -481,6 +583,10 @@ def create_purchase_invoice(
             line["material_request_item"] = mr_item
 
         pi.append("items", line)
+
+    # Must run before the shipping row below: VAT is charged On Net Total, so
+    # it is computed from the item lines and not from the freight charge.
+    _ensure_item_tax_rows(pi, resolved_company)
 
     # Shipping as an Actual charge on Freight and Forwarding Charges.
     #
@@ -570,6 +676,74 @@ def create_purchase_invoice(
         "outstanding_amount": pi.outstanding_amount,
         "deduplicated": False,
     }
+
+
+def _validate_item_tax_template(template: str, company: str, item_code: str) -> None:
+    """Reject a tax template that cannot legally apply to this line."""
+    row = frappe.db.get_value(
+        "Item Tax Template", template, ["company", "disabled"], as_dict=True
+    )
+    if not row:
+        frappe.throw(_("Item Tax Template {0} does not exist.").format(template))
+    if int(row.get("disabled") or 0):
+        frappe.throw(_("Item Tax Template {0} is disabled.").format(template))
+    if row.get("company") != company:
+        frappe.throw(
+            _("Item Tax Template {0} belongs to {1}, not {2} (item {3}).").format(
+                template, row.get("company"), company, item_code
+            )
+        )
+
+
+def _ensure_item_tax_rows(pi: Any, company: str) -> None:
+    """Give every account named by a line's Item Tax Template a 0% tax row.
+
+    Without this the whole feature is a silent no-op. ERPNext charges tax by
+    walking ``doc.taxes`` and looking each row's ``account_head`` up in the
+    line's item tax map (``calculate_taxes``) — a template on a line whose
+    account has no row is never consulted, so the invoice submits with the VAT
+    quietly missing.
+
+    Rate 0 plus ``set_by_item_tax_template`` is what keeps this from taxing
+    *everything*: ``get_item_tax_map`` skips flagged rows when building the base
+    rate every line inherits, so an untemplated line stays at 0 while a
+    templated one overrides its own accounts to the real rate. That is exactly
+    "we buy some items with VAT".
+
+    ERPNext has this same routine (``append_taxes_from_item_tax_template``) but
+    it cannot be relied on: it is gated behind an Accounts Settings checkbox,
+    and it bails out entirely once ``taxes`` is non-empty — which the shipping
+    row, or a chosen invoice-level template, can make it.
+    """
+    templates = sorted(
+        {line.get("item_tax_template") for line in pi.items if line.get("item_tax_template")}
+    )
+    if not templates:
+        return
+
+    existing = {row.account_head for row in (pi.get("taxes") or [])}
+    for template in templates:
+        for detail in frappe.get_cached_doc("Item Tax Template", template).taxes:
+            account = detail.tax_type
+            if not account or account in existing:
+                continue
+            # A cross-company account would be rejected by ERPNext's own
+            # validation with a far less obvious message.
+            if frappe.get_cached_value("Account", account, "company") != company:
+                continue
+            pi.append(
+                "taxes",
+                {
+                    "charge_type": "On Net Total",
+                    "account_head": account,
+                    "rate": 0,
+                    "description": account,
+                    "set_by_item_tax_template": 1,
+                    "category": "Total",
+                    "add_deduct_tax": "Add",
+                },
+            )
+            existing.add(account)
 
 
 def _validate_bill_no(supplier: str, bill_no: Optional[str]) -> None:
@@ -667,7 +841,7 @@ def get_purchase_invoices(
             "name", "supplier", "supplier_name", "posting_date",
             "grand_total", "status", "docstatus", "creation",
             "is_paid", "outstanding_amount", "bill_no", "bill_date",
-            "currency",
+            "currency", "net_total", "total_taxes_and_charges",
         ],
         order_by="posting_date desc, creation desc",
         limit_page_length=limit,
@@ -693,14 +867,32 @@ def get_purchase_invoices(
         for row in frappe.get_all(
             "Purchase Invoice Item",
             filters={"parent": ["in", names]},
-            fields=["parent", "item_code", "item_name", "qty", "uom", "rate", "amount", "warehouse"],
+            fields=[
+                "parent", "item_code", "item_name", "qty", "uom", "rate", "amount",
+                "warehouse", "item_tax_template",
+            ],
             order_by="parent asc, idx asc",
             limit_page_length=0,
         ):
             lines_by_parent.setdefault(row["parent"], []).append(row)
 
+    # The tax rows themselves, not just the total. `total_taxes_and_charges`
+    # lumps VAT together with the shipping charge — reporting that figure as
+    # "VAT" would overstate it by the freight on every delivered purchase.
+    taxes_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+    if names:
+        for row in frappe.get_all(
+            "Purchase Taxes and Charges",
+            filters={"parent": ["in", names], "parenttype": "Purchase Invoice"},
+            fields=["parent", "account_head", "description", "rate", "tax_amount", "charge_type"],
+            order_by="parent asc, idx asc",
+            limit_page_length=0,
+        ):
+            taxes_by_parent.setdefault(row["parent"], []).append(row)
+
     for inv in invoices:
         inv["items"] = lines_by_parent.get(inv["name"], [])
+        inv["taxes"] = taxes_by_parent.get(inv["name"], [])
 
     return {"invoices": invoices, "total": total}
 

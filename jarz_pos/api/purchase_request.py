@@ -432,11 +432,17 @@ def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
     item_codes = list(grouped)
     on_hand = _on_hand_by_item(item_codes)
     last_rates = _last_purchase_rate_by_item(item_codes)
+    # So a line bought straight off the requests list carries the same VAT it
+    # would have carried had the buyer searched for the item by hand.
+    from jarz_pos.api.purchase import _item_tax_templates_bulk
+
+    tax_templates = _item_tax_templates_bulk(item_codes)
 
     lines = []
     for item_code, bucket in grouped.items():
         bucket["on_hand_qty"] = on_hand.get(item_code, 0.0)
         bucket["last_purchase_rate"] = last_rates.get(item_code, 0.0)
+        bucket["item_tax_template"] = tax_templates.get(item_code)
         # Sort the per-branch breakdown by urgency so the tap-to-expand view
         # leads with whoever needs it soonest.
         bucket["sources"].sort(key=lambda s: (str(s.get("needed_by") or "9999-12-31"), s.get("pos_profile") or ""))
