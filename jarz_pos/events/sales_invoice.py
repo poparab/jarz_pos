@@ -72,6 +72,41 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 			frappe.log_error(frappe.get_traceback(), "sync_shipping_expense failed")
 
 
+def _check_flag(doc: Any, fieldname: str) -> int:
+    """Read a 0/1 Check field off a Document as an int. Never raises.
+
+    ``getattr(doc, name, 0)`` is NOT safe here and was the bug this replaced.
+    When the instance dict has no entry for the field, attribute lookup falls
+    through to the CLASS, where Frappe's generated property descriptor lives —
+    so ``getattr`` hands back the descriptor OBJECT rather than a value, and
+    ``int()`` on it raises ``TypeError: int() argument must be ... not 'object'``.
+    The caller caught and logged that, which meant the stock suppression this
+    hook exists to enforce was silently skipped on whichever path hit it.
+
+    ``doc.get()`` reads the instance dict and returns None when absent, which is
+    the behaviour the original code assumed ``getattr`` had.
+    """
+    value = None
+    getter = getattr(doc, "get", None)
+    if callable(getter):
+        try:
+            value = getter(fieldname)
+        except Exception:
+            value = None
+    if value is None:
+        # Plain objects (and test doubles) that carry the attribute directly.
+        value = doc.__dict__.get(fieldname) if hasattr(doc, "__dict__") else None
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        # Anything else truthy (a stray object, a "1" that is not numeric) is
+        # treated as set — erring toward RUNNING the suppression, because
+        # skipping it double-books stock while a needless 0 costs nothing.
+        return 1 if value else 0
+
+
 def suppress_pos_invoice_stock_update(doc: Any, method: Optional[str] = None) -> None:
     """Force ``update_stock = 0`` on every POS Sales Invoice.
 
@@ -94,9 +129,9 @@ def suppress_pos_invoice_stock_update(doc: Any, method: Optional[str] = None) ->
     if not doc:
         return
     try:
-        if not int(getattr(doc, "is_pos", 0) or 0):
+        if not _check_flag(doc, "is_pos"):
             return
-        if int(getattr(doc, "update_stock", 0) or 0):
+        if _check_flag(doc, "update_stock"):
             doc.update_stock = 0
             if frappe:
                 frappe.logger().info(
