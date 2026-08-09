@@ -39,6 +39,14 @@ _MIN_AGE_HOURS = 20
 # happened over a weekend. The files are ~52 MB a set against 32 GB free.
 _MIN_BACKUP_LIMIT = 7
 
+# ...and backup_limit is NOT what actually governs the files on disk, which is
+# the trap here. Every new_backup() first calls delete_temp_backups(), which
+# unlinks anything in the backups directory older than `keep_backups_for_hours`
+# — defaulting to 24. So without this, a daily schedule keeps exactly ONE
+# restore point: each run deletes yesterday's before writing today's. Observed
+# doing precisely that on production, taking three Aug-7 sets with it.
+_KEEP_BACKUPS_FOR_HOURS = 7 * 24
+
 
 def _logger():
     # ERROR level so it is actually visible: the default log level off a dev
@@ -54,24 +62,53 @@ def _logger():
 
 
 def ensure_backup_retention():
-    """Raise System Settings.backup_limit to a sane floor. Never lowers it."""
+    """Make retention long enough to be useful. Never shortens it.
+
+    Two separate knobs, and only the second one actually decides what survives:
+
+    * ``System Settings.backup_limit`` bounds the *downloadable* backups the
+      hourly pruner keeps per set name.
+    * ``keep_backups_for_hours`` (site config, default 24) is what
+      ``delete_temp_backups`` enforces on the directory at the START of every
+      new_backup(). This is the one that matters: leave it at 24 and a daily
+      schedule keeps exactly one restore point forever, because each run
+      deletes yesterday's before writing today's.
+
+    Written through ``update_site_config`` rather than by hand on the server so
+    the setting arrives with the code and staging and production cannot drift.
+    """
+    logger = _logger()
     try:
-        current = frappe.db.get_single_value("System Settings", "backup_limit")
-        current = int(current or 0)
+        current = int(
+            frappe.db.get_single_value("System Settings", "backup_limit") or 0
+        )
+        if current < _MIN_BACKUP_LIMIT:
+            frappe.db.set_single_value(
+                "System Settings", "backup_limit", _MIN_BACKUP_LIMIT
+            )
+            frappe.db.commit()
+            logger.info(f"backup_limit raised {current} -> {_MIN_BACKUP_LIMIT}")
     except Exception:
-        return
-    if current >= _MIN_BACKUP_LIMIT:
-        return
+        logger.error("ensure_backup_retention: backup_limit failed", exc_info=True)
+
     try:
-        frappe.db.set_single_value(
-            "System Settings", "backup_limit", _MIN_BACKUP_LIMIT
-        )
-        frappe.db.commit()
-        _logger().info(
-            f"backup_limit raised {current} -> {_MIN_BACKUP_LIMIT}"
-        )
+        from frappe.utils import cint
+
+        current_hours = cint(frappe.conf.get("keep_backups_for_hours"))
+        if current_hours < _KEEP_BACKUPS_FOR_HOURS:
+            from frappe.installer import update_site_config
+
+            update_site_config(
+                "keep_backups_for_hours", _KEEP_BACKUPS_FOR_HOURS
+            )
+            logger.info(
+                f"keep_backups_for_hours raised {current_hours} -> "
+                f"{_KEEP_BACKUPS_FOR_HOURS}"
+            )
     except Exception:
-        _logger().error("ensure_backup_retention failed", exc_info=True)
+        logger.error(
+            "ensure_backup_retention: keep_backups_for_hours failed", exc_info=True
+        )
 
 
 def daily_backup():
