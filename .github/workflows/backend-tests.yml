@@ -156,6 +156,16 @@ jobs:
             test_purchase_warehouse_utils
             test_purchase_setup
             test_purchase_request_links
+            # Per-line purchase VAT. test_purchase_item_vat guards the rate-0
+            # set_by_item_tax_template row without which ERPNext charges nothing
+            # at all; test_purchase_vat_default guards the precedence chain
+            # (explicit empty > item master > site default).
+            test_purchase_item_vat
+            test_purchase_vat_default
+            # The POS stock-update suppression hook. Its field read used to
+            # throw on a class-level descriptor and get swallowed, silently
+            # disabling the guard that stops stock being booked twice.
+            test_suppress_pos_stock_update
             # Courier app (COURIER_CONTRACTS). A module that is not listed here
             # is a module CI never runs — only a fraction of the test files in
             # jarz_pos/tests are in this array, so assume no coverage unless the
