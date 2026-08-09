@@ -433,10 +433,12 @@ def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
     on_hand = _on_hand_by_item(item_codes)
     last_rates = _last_purchase_rate_by_item(item_codes)
     # So a line bought straight off the requests list carries the same VAT it
-    # would have carried had the buyer searched for the item by hand.
+    # would have carried had the buyer searched for the item by hand: the Item
+    # master's own template, else the site default from Jarz POS Settings.
+    # Company-scoped, so a default belonging to another company is not offered.
     from jarz_pos.api.purchase import _item_tax_templates_bulk
 
-    tax_templates = _item_tax_templates_bulk(item_codes)
+    tax_templates = _item_tax_templates_bulk(item_codes, company=resolved_company)
 
     lines = []
     for item_code, bucket in grouped.items():

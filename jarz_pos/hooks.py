@@ -65,6 +65,12 @@ after_migrate = [
     # which is how the purchasing seeder below silently did nothing on
     # production while succeeding on staging.
     "jarz_pos.setup.accounts_setup.ensure_pos_accounts",
+    # Create the default 14% purchase VAT Item Tax Template (create-only, uses
+    # an EXISTING tax account, no-ops if the company has none). Must run BEFORE
+    # settings_defaults: that seeder points the Jarz POS Settings link at this
+    # template, and it will only do so once the template actually exists — a
+    # Link naming a missing record poisons every later full save of the Single.
+    "jarz_pos.setup.purchase_setup.ensure_purchase_vat_template",
     # Fill ONLY the empty fields on Jarz POS Settings. Replaces the Single
     # fixture, which rebuilt the doc every migrate and reverted every feature
     # flag. Must run after ensure_pos_accounts so the account names it seeds
@@ -320,6 +326,12 @@ doc_events = {
 
 scheduler_events = {
     "daily": [
+        # Automated site backup. Frappe ships NO backup-creating job — upstream
+        # relies on a host crontab that a Docker deployment never gets — so
+        # until this landed the only backups this deployment had ever taken
+        # were a side effect of deploying, and passing -SkipBackup silently
+        # reduced backup coverage to zero. See setup/backup_schedule.py.
+        "jarz_pos.setup.backup_schedule.daily_backup",
         "jarz_pos.tasks.run_nightly_rfm_segmentation",
         "jarz_pos.tasks.run_daily_inventory_digest",
         # CRM automation (guarded, never raise)

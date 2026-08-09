@@ -9,6 +9,12 @@ from jarz_pos.utils.warehouse_utils import resolve_purchase_warehouse
 
 STANDARD_BUYING = PRICE_LISTS.STANDARD_BUYING
 
+SETTINGS_DOCTYPE = "Jarz POS Settings"
+
+#: Jarz POS Settings field naming the site-wide default purchase VAT template.
+#: Seeded by ``jarz_pos.setup.purchase_setup``; blank means "no default".
+DEFAULT_ITEM_TAX_TEMPLATE_FIELD = "purchase_default_item_tax_template"
+
 
 def _ensure_manager_access():
     roles = set(frappe.get_roles())
@@ -31,6 +37,56 @@ def _coerce_rows(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         frappe.throw(_("Malformed items payload"))
     return [row for row in value if isinstance(row, dict)]
+
+
+def _has_field(doctype: str, fieldname: str) -> bool:
+    """True when the column actually exists on this site *right now*.
+
+    Code reaches the server before ``bench migrate`` runs, so a query naming a
+    not-yet-migrated field would 500 the endpoint for the whole window between
+    deploy and migrate.
+    """
+    try:
+        return bool(frappe.get_meta(doctype).get_field(fieldname))
+    except Exception:
+        return False
+
+
+def _default_item_tax_template(company: Optional[str] = None) -> Optional[str]:
+    """The site-wide default VAT template configured on Jarz POS Settings.
+
+    Returns ``None`` — i.e. "no default", never a throw — whenever the setting
+    cannot be honoured: the field has not been migrated yet, it is blank, or the
+    template it names has since been deleted, disabled, or belongs to another
+    company. A purchase must never fail because a *default* went stale.
+
+    ``company`` is checked only when supplied; the read-only listing endpoints
+    have no company in hand and are just pre-filling a dropdown, whereas
+    :func:`create_purchase_invoice` knows its company and must not attach a
+    cross-company template that ERPNext would reject.
+    """
+    if not _has_field(SETTINGS_DOCTYPE, DEFAULT_ITEM_TAX_TEMPLATE_FIELD):
+        return None
+    try:
+        configured = frappe.db.get_single_value(
+            SETTINGS_DOCTYPE, DEFAULT_ITEM_TAX_TEMPLATE_FIELD
+        )
+    except Exception:
+        return None
+    configured = (configured or "").strip()
+    if not configured:
+        return None
+    try:
+        row = frappe.db.get_value(
+            "Item Tax Template", configured, ["company", "disabled"], as_dict=True
+        )
+    except Exception:
+        return None
+    if not row or int(row.get("disabled") or 0):
+        return None
+    if company and row.get("company") != company:
+        return None
+    return configured
 
 
 @frappe.whitelist()
@@ -182,7 +238,8 @@ def search_items(
         it["prices"] = price_map.get(code, [])
         it["on_hand_qty"] = on_hand.get(code, 0.0)
         it["last_purchase_rate"] = last_paid.get(code, 0.0)
-        # Pre-fills the line's VAT so the buyer only overrides the exceptions.
+        # Pre-fills the line's VAT so the buyer only overrides the exceptions:
+        # the item's own template, else the configured site default.
         it["item_tax_template"] = tax_map.get(code)
     return items
 
@@ -238,16 +295,31 @@ def _get_item_prices_bulk(item_codes: List[str]) -> Dict[str, List[Dict[str, Any
     return out
 
 
-def _item_tax_templates_bulk(item_codes: List[str]) -> Dict[str, Optional[str]]:
-    """The Item Tax Template each item carries on its own ``taxes`` table.
+def _item_tax_templates_bulk(
+    item_codes: List[str],
+    company: Optional[str] = None,
+    include_default: bool = True,
+) -> Dict[str, Optional[str]]:
+    """The Item Tax Template each item should default to.
 
-    This is what makes "only some items have VAT" work without the buyer
-    remembering which: the item itself declares its tax treatment, and the cart
-    line just inherits it.
+    Two layers, in this order:
 
-    Only rows with no ``tax_category`` are considered — a categorised row is
-    conditional on the party's tax category, which a POS purchase does not set,
-    so honouring it here would apply a tax that ERPNext itself would not.
+    1. the template the item carries on its own ``taxes`` table — this is what
+       makes "only some items have VAT" work without the buyer remembering
+       which: the item itself declares its tax treatment;
+    2. failing that, the site-wide default from Jarz POS Settings — most
+       purchases are taxed at the standard rate, so making every item master
+       spell that out would be busywork with a silent under-charge as the cost
+       of forgetting.
+
+    Only Item Tax rows with no ``tax_category`` are considered — a categorised
+    row is conditional on the party's tax category, which a POS purchase does
+    not set, so honouring it here would apply a tax that ERPNext itself would
+    not.
+
+    The site default is layered in *here* rather than at each call site so that
+    every surface agrees: the item search, the item detail, the requests list
+    and the invoice builder all pre-fill the same template.
     """
     if not item_codes:
         return {}
@@ -262,7 +334,38 @@ def _item_tax_templates_bulk(item_codes: List[str]) -> Dict[str, Optional[str]]:
         if row.get("tax_category"):
             continue
         out.setdefault(row["parent"], row.get("item_tax_template"))
+
+    if include_default:
+        default = _default_item_tax_template(company)
+        if default:
+            for code in item_codes:
+                # A row that exists but names no template is not a decision to
+                # go untaxed — the buyer expresses that per line, by sending an
+                # explicit empty ``item_tax_template``.
+                if not out.get(code):
+                    out[code] = default
     return out
+
+
+def _resolve_line_tax_template(
+    row: Dict[str, Any], inherited: Dict[str, Optional[str]]
+) -> str:
+    """The VAT template a cart line should carry. Strict precedence:
+
+    1. an explicit ``item_tax_template`` key on the line — **including an
+       explicit empty string**, which is how the buyer says "this one is not
+       taxed" for an item whose master (or the site default) says otherwise;
+    2. the Item master's own template;
+    3. the configured site default;
+    4. nothing.
+
+    ``inherited`` is the output of :func:`_item_tax_templates_bulk`, which has
+    already collapsed layers 2 and 3. Only a *wholly absent* key falls back.
+    """
+    if "item_tax_template" in row:
+        return (row.get("item_tax_template") or "").strip()
+    item_code = row.get("item_code") or row.get("item")
+    return (inherited.get(item_code) or "").strip()
 
 
 def _on_hand_bulk(item_codes: List[str]) -> Dict[str, float]:
@@ -355,6 +458,10 @@ def get_item_tax_templates(company: Optional[str] = None) -> List[Dict[str, Any]
     ``rate`` is the sum of the template's rows, which is what the buyer thinks
     of as "the VAT %" — a template is almost always a single rate, and showing a
     number beats showing an opaque template name in a dropdown.
+
+    ``is_default`` marks the one configured on Jarz POS Settings, so the picker
+    can show which rate a line gets when nobody chooses. Additive: the shape of
+    the list is otherwise unchanged.
     """
     _ensure_manager_access()
     filters: Dict[str, Any] = {"disabled": 0}
@@ -383,10 +490,12 @@ def get_item_tax_templates(company: Optional[str] = None) -> List[Dict[str, Any]
             "rate": float(row.get("tax_rate") or 0),
         })
 
+    default = _default_item_tax_template(company)
     for t in templates:
         rows = rates.get(t["name"], [])
         t["taxes"] = rows
         t["rate"] = sum(r["rate"] for r in rows)
+        t["is_default"] = 1 if t["name"] == default else 0
     return templates
 
 
@@ -436,6 +545,9 @@ def create_purchase_invoice(
 
     ``item_tax_template`` is how a purchase carries VAT on only *some* lines —
     see :func:`_ensure_item_tax_rows` for why a template alone is not enough.
+    Omit the key and the line inherits the Item master's template, else the site
+    default on Jarz POS Settings; send it *empty* to keep the line untaxed
+    (:func:`_resolve_line_tax_template`).
     ``taxes_template`` remains the whole-invoice alternative; the two compose,
     since a template-driven line simply overrides the invoice rate for its own
     accounts.
@@ -515,13 +627,17 @@ def create_purchase_invoice(
 
     # Resolved once for every row that left the key out, rather than per row.
     # The app always sends it; this covers other callers of the endpoint.
+    # Carries the item master's template, else the configured site default —
+    # company-checked, so a default belonging to another company is simply not
+    # applied instead of failing the purchase.
     inherited_tax = _item_tax_templates_bulk(
         [
             code
             for row in items
             if "item_tax_template" not in row
             and (code := row.get("item_code") or row.get("item"))
-        ]
+        ],
+        company=resolved_company,
     )
 
     for row in items:
@@ -560,14 +676,9 @@ def create_purchase_invoice(
             "warehouse": warehouse,
         }
 
-        # Per-line VAT. An explicit key wins — including an explicit empty
-        # string, which is how the buyer says "this one is not taxed" for an
-        # item whose master says otherwise. Only a wholly absent key falls back
-        # to the item's own default.
-        if "item_tax_template" in row:
-            tax_template = (row.get("item_tax_template") or "").strip()
-        else:
-            tax_template = inherited_tax.get(item_code) or ""
+        # Per-line VAT: explicit line value (even empty) > item master > site
+        # default > nothing. See _resolve_line_tax_template.
+        tax_template = _resolve_line_tax_template(row, inherited_tax)
         if tax_template:
             _validate_item_tax_template(tax_template, resolved_company, item_code)
             line["item_tax_template"] = tax_template

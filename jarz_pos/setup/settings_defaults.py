@@ -74,6 +74,30 @@ SEED_DEFAULTS: Dict[str, Any] = {
 }
 
 
+def _dynamic_defaults() -> Dict[str, Any]:
+    """Defaults whose value cannot be written down as a constant.
+
+    The default purchase VAT template is named after the company abbreviation
+    ERPNext generates, so it is resolved from the site rather than hardcoded —
+    and only when it actually exists. ``ensure_purchase_vat_template`` runs
+    earlier in ``after_migrate`` and creates it; if it could not (no tax account
+    on the chart, no unambiguous company) this returns nothing and the setting
+    stays blank, which is the safe state.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        from jarz_pos.setup.purchase_setup import default_item_tax_template_name
+
+        template = default_item_tax_template_name()
+        if template:
+            out["purchase_default_item_tax_template"] = template
+    except Exception:
+        # A missing default is harmless; an exception here would take the whole
+        # seeding pass down with it.
+        pass
+    return out
+
+
 def _is_empty(value: Any) -> bool:
     """Empty means None or a blank/whitespace string.
 
@@ -101,7 +125,7 @@ def ensure_settings_defaults() -> None:
         meta = frappe.get_meta(SETTINGS_DOCTYPE)
         filled = []
 
-        for fieldname, default in SEED_DEFAULTS.items():
+        for fieldname, default in {**SEED_DEFAULTS, **_dynamic_defaults()}.items():
             # A field the doctype no longer carries is skipped rather than
             # written blindly, so a removed field cannot break the migrate.
             if not meta.get_field(fieldname):

@@ -54,6 +54,7 @@
   "purchase_warehouse_routes",
   "column_break_purchase",
   "purchase_default_taxes_template",
+  "purchase_default_item_tax_template",
   "purchase_require_bill_no",
   "purchase_request_schedule_days"
  ],
@@ -387,6 +388,13 @@
    "options": "Purchase Taxes and Charges Template"
   },
   {
+   "description": "Item Tax Template a purchase line falls back to when the Item master declares no tax of its own — the site's standard purchase VAT (14%). Precedence per line: the template chosen on the line (choosing none means untaxed) → the Item's own Item Tax row → this default. Leave blank for no default.",
+   "fieldname": "purchase_default_item_tax_template",
+   "fieldtype": "Link",
+   "label": "Default Purchase VAT Template",
+   "options": "Item Tax Template"
+  },
+  {
    "default": "0",
    "description": "Require the supplier's own invoice/bill number on every purchase. ERPNext already rejects a duplicate bill number for the same supplier, so turning this on makes that guard actually bite.",
    "fieldname": "purchase_require_bill_no",
@@ -405,7 +413,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-08 12:00:00",
+ "modified": "2026-08-09 12:00:00",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Settings",
