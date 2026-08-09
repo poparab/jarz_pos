@@ -33,8 +33,15 @@ B2B_STAGES = [
     "Lost/On-hold",
 ]
 
-# Stages a record lives in BEFORE a sample is requested — used to decide which
-# Leads still belong on the board (post-sample work happens on Opportunities).
+# Stages a record lives in BEFORE a sample is requested.
+#
+# This used to gate which Leads reached the board, on the assumption that
+# post-sample work continues on an Opportunity. Nothing in this app ever
+# converts a Lead into an Opportunity, so that assumption was false: advancing
+# a Lead to Sample (or Approved, Trial, Check-up, Active) simply deleted it
+# from the board with nothing taking its place, while the stage editor happily
+# offered all eight stages. Kept only for callers that genuinely mean
+# "pre-sample"; get_b2b_pipeline no longer filters on it.
 _PRE_SAMPLE_STAGES = ("Lead", "Qualify")
 
 _LOST_STAGE = "Lost/On-hold"
@@ -143,7 +150,9 @@ def get_b2b_pipeline():
         for f in ("lead_name", "company_name", "custom_fit_score"):
             if _has_field("Lead", f):
                 lead_fields.append(f)
-        lead_filters = {"custom_b2b_stage": ["in", list(_PRE_SAMPLE_STAGES)]}
+        # Every stage, not just the pre-sample ones: a Lead is only ever a Lead
+        # in this app, so whatever stage a rep sets is where its card belongs.
+        lead_filters = {"custom_b2b_stage": ["is", "set"]}
         # Prospects a rep has manually judged unsuitable never belong on the
         # board. Guarded on the field so a pre-migrate site still returns cards.
         if _has_field("Lead", "custom_not_suitable"):

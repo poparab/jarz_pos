@@ -450,6 +450,39 @@ class TestLeadInPipeline(unittest.TestCase):
         self.assertEqual(card["doctype"], "Lead")
         self.assertEqual(card["stage"], "Lead")
 
+    def test_a_lead_past_qualify_still_appears_on_the_board(self):
+        """Nothing converts a Lead to an Opportunity, so every stage must show.
+
+        The board used to query only ("Lead", "Qualify") on the assumption that
+        post-sample work continued on an Opportunity. It never does — so a rep
+        who moved a lead to Sample watched the card disappear.
+        """
+        name = leads_api.save_lead(
+            {"lead_name": "_TEST Sampled", "category": _COFFEE}
+        )["name"]
+        crm_api.advance_stage("Lead", name, "Sample")
+
+        board = crm_api.get_b2b_pipeline()
+        self.assertIn("Sample", board["columns"])
+        card = next(
+            (c for c in board["columns"]["Sample"] if c["name"] == name), None
+        )
+        self.assertIsNotNone(card, "lead at Sample is missing from the board")
+        self.assertEqual(card["doctype"], "Lead")
+        self.assertEqual(card["stage"], "Sample")
+
+    def test_every_post_sample_stage_is_reachable_on_the_board(self):
+        for stage in ("Approved", "Trial", "Check-up", "Active"):
+            with self.subTest(stage=stage):
+                name = leads_api.save_lead(
+                    {"lead_name": f"_TEST At {stage}", "category": _COFFEE}
+                )["name"]
+                crm_api.advance_stage("Lead", name, stage)
+                board = crm_api.get_b2b_pipeline()
+                self.assertIn(
+                    name, {c["name"] for c in board["columns"].get(stage, [])}
+                )
+
     def test_lead_column_sorted_by_score_desc(self):
         """The Lead column orders higher fit score first (sorts by custom_fit_score).
 
