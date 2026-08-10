@@ -608,6 +608,19 @@ def create_purchase_invoice(
     _validate_bill_no(supplier, bill_no)
 
     pi = frappe.new_doc("Purchase Invoice")
+    # A new doc is NOT born with the doctype's shipped defaults: a Property
+    # Setter on this site overrides `is_paid` to 1 (and `mode_of_payment` to
+    # "cash"), left behind by someone customising the desk form. So an unpaid
+    # purchase arrived at validate() claiming to be paid, with no
+    # cash_bank_account resolved — and ERPNext threw "Payment Entry will not be
+    # created since 'Cash or Bank Account' was not specified", which names
+    # neither the field the caller set nor the customisation that flipped it.
+    # Every payment field is therefore stated outright below, both branches, so
+    # the invoice reflects what the caller asked for and not what a form
+    # customisation happens to default to.
+    pi.is_paid = 0
+    pi.mode_of_payment = None
+    pi.cash_bank_account = None
     pi.company = resolved_company
     pi.supplier = supplier
     if posting_date:

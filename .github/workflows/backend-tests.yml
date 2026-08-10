@@ -162,6 +162,11 @@ jobs:
             # (explicit empty > item master > site default).
             test_purchase_item_vat
             test_purchase_vat_default
+            # A Property Setter on the site defaults Purchase Invoice.is_paid to
+            # 1, so every unpaid purchase died at validate() on a missing cash
+            # account. This pins that the endpoint states the payment fields
+            # outright instead of inheriting a form customisation.
+            test_purchase_payment_defaults
             # The POS stock-update suppression hook. Its field read used to
             # throw on a class-level descriptor and get swallowed, silently
             # disabling the guard that stops stock being booked twice.
