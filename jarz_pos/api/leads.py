@@ -74,6 +74,9 @@ _LEAD_FLAT_FIELDS = [
     "custom_open_status",
     "custom_sahel_branches",
     "custom_is_specialty",
+    "custom_takeout",
+    "custom_dine_in",
+    "custom_serves_dessert",
     "custom_primary_area",
     "custom_regions",
     "custom_governorates",
@@ -119,6 +122,18 @@ _MERGE_FIELDS = (
     "custom_merged_by",
 )
 
+# ...and for the Google service signals (takeaway / dine-in / dessert).
+#
+# IMPORTANT: these are three-state in reality but stored as Check. The Places API
+# only ever reports them when TRUE, so 1 == "Google confirms it" and 0 ==
+# "unknown", NEVER "no". Filter on ``takeout=1`` to find confirmed-takeaway
+# venues; do NOT filter on 0 to mean the venue has no takeaway.
+_TAKEAWAY_FIELDS = (
+    "custom_takeout",
+    "custom_dine_in",
+    "custom_serves_dessert",
+)
+
 
 def _has_verdict_field():
     """Whether the site has migrated the not-suitable fields. Guarded -> False."""
@@ -130,6 +145,11 @@ def _has_merge_field():
     return _has_field("Lead", "custom_merged_into")
 
 
+def _has_takeaway_field():
+    """Whether the site has migrated the service-signal fields. Guarded -> False."""
+    return _has_field("Lead", "custom_takeout")
+
+
 def _lead_query_fields():
     """``_LEAD_FLAT_FIELDS`` minus anything this site has not migrated yet."""
     skip = set()
@@ -137,6 +157,8 @@ def _lead_query_fields():
         skip.update(_VERDICT_FIELDS)
     if not _has_merge_field():
         skip.update(_MERGE_FIELDS)
+    if not _has_takeaway_field():
+        skip.update(_TAKEAWAY_FIELDS)
     if not skip:
         return _LEAD_FLAT_FIELDS
     return [f for f in _LEAD_FLAT_FIELDS if f not in skip]
@@ -224,6 +246,11 @@ def _map_lead_row(row):
         "open_status": row.get("custom_open_status"),
         "sahel_branches": _int(row.get("custom_sahel_branches")),
         "is_specialty": _bool(row.get("custom_is_specialty")),
+        # Google service signals. True == confirmed by Google; False == UNKNOWN,
+        # not "no" (see _TAKEAWAY_FIELDS).
+        "takeout": _bool(row.get("custom_takeout")),
+        "dine_in": _bool(row.get("custom_dine_in")),
+        "serves_dessert": _bool(row.get("custom_serves_dessert")),
         "primary_area": row.get("custom_primary_area"),
         "regions": _json_list(row.get("custom_regions")),
         "governorates": _json_list(row.get("custom_governorates")),
@@ -256,7 +283,8 @@ def _map_lead_row(row):
 # List
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
-def get_leads(category=None, status=None, not_suitable=None, include_merged=0):
+def get_leads(category=None, status=None, not_suitable=None, include_merged=0,
+              takeout=None):
     """Return the whole leads catalog (coarse server-side filtering only).
 
     Optional coarse filters: ``category`` -> custom_lead_category,
@@ -275,6 +303,12 @@ def get_leads(category=None, status=None, not_suitable=None, include_merged=0):
     not-suitable filter — a merged duplicate should never reach the cache at
     all, because showing it would re-offer the very row a rep just eliminated.
 
+    ``takeout`` is an optional coarse filter for the confirmed-takeaway segment
+    (venues Google reports as doing takeaway, i.e. serving drinks in takeaway
+    cups). Only ``takeout=1`` is meaningful: a 0 would mean "unknown", not "no",
+    so passing a falsy value is ignored rather than silently returning a bogus
+    "no takeaway" set. Clients normally filter this one themselves.
+
     Returns: ``{"leads": [<mapped row>, ...], "count": <int>}``.
     """
     _ensure_b2b_access()
@@ -284,6 +318,8 @@ def get_leads(category=None, status=None, not_suitable=None, include_merged=0):
         filters["custom_lead_category"] = category
     if status:
         filters["status"] = status
+    if _bool(takeout) and _has_takeaway_field():
+        filters["custom_takeout"] = 1
     if not_suitable not in (None, "") and _has_verdict_field():
         filters["custom_not_suitable"] = 1 if _bool(not_suitable) else 0
     if not _bool(include_merged) and _has_merge_field():

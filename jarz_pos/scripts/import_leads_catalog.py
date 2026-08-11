@@ -79,7 +79,11 @@ def run(json_path):
         data = json.load(fh)
 
     leads = data.get("leads") or []
+    # Seed every category the export actually uses, not just the default, so a
+    # new segment (e.g. tea/matcha/boba) lands in its own filterable category.
     _ensure_category(DEFAULT_LEAD_CATEGORY)
+    for name in sorted({(l.get("category") or "").strip() for l in leads} - {""}):
+        _ensure_category(name)
 
     created = 0
     updated = 0
@@ -112,6 +116,14 @@ def run(json_path):
         "failed": failed,
         "total": len(leads),
     }
+
+
+def _has_field(doctype, fieldname):
+    """True if the site has this column yet (code ships before bench migrate)."""
+    try:
+        return bool(frappe.db.has_column(doctype, fieldname))
+    except Exception:
+        return False
 
 
 def _ensure_category(name):
@@ -154,6 +166,13 @@ def _upsert_lead(lead):
     doc.custom_regions = json.dumps(_as_list(lead.get("regions")))
     doc.custom_sahel_branches = _int(lead.get("sahelBranches"))
     doc.custom_is_specialty = 1 if lead.get("isSpecialty") else 0
+    # Google service signals. Only ever set to 1 when Google positively confirms
+    # it; a 0 means UNKNOWN, not "no" (the Places API omits these when false).
+    # Guarded so this script still runs on a site that has not migrated yet.
+    if _has_field("Lead", "custom_takeout"):
+        doc.custom_takeout = 1 if lead.get("takeout") else 0
+        doc.custom_dine_in = 1 if lead.get("dineIn") else 0
+        doc.custom_serves_dessert = 1 if lead.get("servesDessert") else 0
     doc.custom_primary_area = lead.get("primaryArea")
     doc.custom_areas = json.dumps(_as_list(lead.get("areas")))
     doc.custom_governorates = json.dumps(_as_list(lead.get("governorates")))
@@ -199,7 +218,7 @@ def _upsert_lead(lead):
         doc.status = "Open"
         doc.custom_b2b_stage = "Lead"
         doc.custom_notes = lead.get("notes") or ""
-        doc.custom_lead_category = DEFAULT_LEAD_CATEGORY
+        doc.custom_lead_category = (lead.get("category") or "").strip() or DEFAULT_LEAD_CATEGORY
         doc.insert(ignore_permissions=True)
         # Primary Address from the primary branch (create-only).
         if primary_branch:
