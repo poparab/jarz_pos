@@ -69,6 +69,26 @@ def _days(offset):
     return add_days(today(), offset)
 
 
+def _journey_todos(reference_name, note_name, fields=None):
+    """Open ToDos that are the reminder for ONE journey note.
+
+    Deliberately filtered by the note's marker rather than counting every open
+    ToDo on the record: staging and production run an Assignment Rule that
+    opens its own ToDo on every Lead, so a bare count asserts on the site's
+    configuration instead of on this feature.
+    """
+    return frappe.get_all(
+        "ToDo",
+        filters={
+            "reference_type": "Lead",
+            "reference_name": reference_name,
+            "status": "Open",
+            "description": ["like", f"%[Journey {note_name}]%"],
+        },
+        fields=fields or ["name", "description", "date"],
+    )
+
+
 class JourneyTestCase(unittest.TestCase):
     """Shared setUp/tearDown: fixtures present, every write rolled back."""
 
@@ -325,7 +345,7 @@ class TestJourneyFollowup(JourneyTestCase):
 
     def test_next_action_opens_a_todo_for_the_reminder_feed(self):
         lead = _make_lead()
-        journey_api.add_journey_note(
+        note = journey_api.add_journey_note(
             reference_doctype="Lead",
             reference_name=lead,
             note="Ask for the owner",
@@ -333,18 +353,119 @@ class TestJourneyFollowup(JourneyTestCase):
             next_action="Ring the owner",
             next_action_date=_days(3),
         )
-        todos = frappe.get_all(
-            "ToDo",
-            filters={
-                "reference_type": "Lead",
-                "reference_name": lead,
-                "status": "Open",
-            },
-            fields=["description", "date"],
-        )
+        todos = _journey_todos(lead, note["name"])
         self.assertEqual(len(todos), 1)
         self.assertEqual(str(todos[0]["date"]), _days(3))
         self.assertIn("Hany", todos[0]["description"])
+        self.assertIn("Ring the owner", todos[0]["description"])
+
+    def test_the_reminder_survives_an_unrelated_open_todo(self):
+        """The regression this site actually hits.
+
+        An Assignment Rule opens a ToDo on every Lead the moment it is created,
+        so the reference ALWAYS already has an open ToDo. The old
+        ``_ensure_todo`` dedup treated that as "a reminder already exists" and
+        skipped the journey one entirely. CI never caught it because a fresh
+        test site has no Assignment Rule -- so this case fakes one.
+        """
+        lead = _make_lead()
+        frappe.get_doc(
+            {
+                "doctype": "ToDo",
+                "description": "Automatic Assignment",
+                "reference_type": "Lead",
+                "reference_name": lead,
+                "status": "Open",
+            }
+        ).insert(ignore_permissions=True)
+
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Owner asked for a call",
+            next_action="Ring the owner",
+            next_action_date=_days(3),
+        )
+
+        todos = _journey_todos(lead, note["name"])
+        self.assertEqual(
+            len(todos),
+            1,
+            "the journey reminder must be created even when the record already "
+            "carries an unrelated open ToDo",
+        )
+        self.assertEqual(str(todos[0]["date"]), _days(3))
+
+    def test_moving_the_date_re_dates_the_reminder_in_place(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="They asked to postpone",
+            next_action="Call back",
+            next_action_date=_days(3),
+        )
+        journey_api.update_journey_note(note["name"], next_action_date=_days(9))
+
+        todos = _journey_todos(lead, note["name"])
+        self.assertEqual(len(todos), 1, "re-dating must not duplicate the ToDo")
+        self.assertEqual(str(todos[0]["date"]), _days(9))
+
+    def test_clearing_the_date_retires_the_reminder(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Never mind, they called us",
+            next_action_date=_days(3),
+        )
+        self.assertEqual(len(_journey_todos(lead, note["name"])), 1)
+
+        journey_api.update_journey_note(note["name"], next_action_date="")
+        self.assertEqual(len(_journey_todos(lead, note["name"])), 0)
+
+    def test_deleting_the_note_retires_the_reminder(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Logged by mistake",
+            next_action_date=_days(3),
+        )
+        self.assertEqual(len(_journey_todos(lead, note["name"])), 1)
+
+        journey_api.delete_journey_note(note["name"])
+        self.assertEqual(len(_journey_todos(lead, note["name"])), 0)
+
+    def test_two_notes_keep_two_separate_reminders(self):
+        lead = _make_lead()
+        first = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Call the barista",
+            next_action_date=_days(2),
+        )
+        second = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Also email the owner",
+            next_action_date=_days(6),
+        )
+        self.assertEqual(len(_journey_todos(lead, first["name"])), 1)
+        self.assertEqual(len(_journey_todos(lead, second["name"])), 1)
+
+    def test_the_reminder_lands_on_the_rep_who_logged_it(self):
+        """Not the record's owner: this catalog was bulk imported, so its owner
+        is Administrator, whose follow-up feed nobody reads."""
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="I will call them",
+            next_action_date=_days(3),
+        )
+        todos = _journey_todos(lead, note["name"], fields=["allocated_to"])
+        self.assertEqual(todos[0]["allocated_to"], frappe.session.user)
 
 
 # ---------------------------------------------------------------------------

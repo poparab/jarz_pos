@@ -92,9 +92,13 @@ class JarzJourneyNote(Document):
 
     def on_update(self):
         # Covers insert too (Frappe runs on_update for the "save" action, which
-        # an insert is), so there is deliberately no after_insert hook here —
+        # an insert is), so there is deliberately no after_insert hook here --
         # having both just ran the same idempotent propagation twice per insert.
         self.sync_followup()
+
+    def on_trash(self):
+        """A deleted note takes its reminder with it."""
+        self._close_reminder_todos()
 
     # ------------------------------------------------------------------
     # Follow-up propagation
@@ -109,6 +113,9 @@ class JarzJourneyNote(Document):
         """
         next_date = getattr(self, "next_action_date", None)
         if not next_date:
+            # The rep cleared the date on an edit: retire the reminder rather
+            # than leaving a ToDo nagging about a promise that no longer exists.
+            self._close_reminder_todos()
             return
         if getattr(self, "reference_doctype", None) not in _FOLLOWUP_DOCTYPES:
             return
@@ -146,32 +153,113 @@ class JarzJourneyNote(Document):
 
         self._ensure_reminder_todo(next_date)
 
-    def _ensure_reminder_todo(self, next_date):
-        """Create an open ToDo for the next action (deduped). Never raises."""
-        try:
-            from jarz_pos.crm.follow_ups import _ensure_todo
+    @property
+    def _todo_marker(self):
+        """The tag that identifies THIS note's reminder among a record's ToDos."""
+        return f"[Journey {self.name}]"
 
-            who = (getattr(self, "contact_person", None) or "").strip()
-            action = (getattr(self, "next_action", None) or "").strip()
-            parts = [f"Follow up on {self.reference_doctype.lower()} {self.reference_name}"]
-            if who:
-                parts.append(f"with {who}")
-            if action:
-                parts.append(f"— {action}")
-            owner = (
-                frappe.db.get_value(
-                    self.reference_doctype, self.reference_name, "owner"
-                )
-                or getattr(self, "logged_by", None)
-                or frappe.session.user
+    def _reminder_description(self):
+        who = (getattr(self, "contact_person", None) or "").strip()
+        action = (getattr(self, "next_action", None) or "").strip()
+        parts = [
+            self._todo_marker,
+            f"Follow up on {self.reference_doctype.lower()} {self.reference_name}",
+        ]
+        if who:
+            parts.append(f"with {who}")
+        if action:
+            parts.append(f"- {action}")
+        return " ".join(parts)
+
+    def _reminder_owner(self):
+        """Who the reminder lands on.
+
+        The rep who WROTE the note, first: they are the one who promised to call
+        back, and the "My follow-ups" feed is keyed on ``allocated_to``. The
+        record's owner is only the fallback -- most of this catalog was bulk
+        imported, so its owner is usually Administrator, whose feed nobody reads.
+        """
+        for candidate in (
+            getattr(self, "logged_by", None),
+            frappe.db.get_value(self.reference_doctype, self.reference_name, "owner"),
+            frappe.session.user,
+        ):
+            if candidate and frappe.db.exists("User", candidate):
+                return candidate
+        return None
+
+    def _open_reminder_todos(self):
+        """Open ToDos that are THIS note's reminder. Guarded -> []."""
+        try:
+            return frappe.get_all(
+                "ToDo",
+                filters={
+                    "reference_type": self.reference_doctype,
+                    "reference_name": self.reference_name,
+                    "status": "Open",
+                    "description": ["like", f"%{self._todo_marker}%"],
+                },
+                pluck="name",
             )
-            _ensure_todo(
-                self.reference_doctype,
-                self.reference_name,
-                owner,
-                " ".join(parts),
-                date=next_date,
+        except Exception:
+            return []
+
+    def _close_reminder_todos(self):
+        """Close this note's reminder ToDos. Never raises."""
+        try:
+            for todo in self._open_reminder_todos():
+                frappe.db.set_value("ToDo", todo, "status", "Closed")
+        except Exception:
+            frappe.log_error(
+                title="Jarz Journey Note: closing reminder ToDo failed",
+                message=frappe.get_traceback(),
             )
+
+    def _ensure_reminder_todo(self, next_date):
+        """Create or re-date THIS note's reminder ToDo. Never raises.
+
+        Deliberately NOT ``jarz_pos.crm.follow_ups._ensure_todo``. That helper
+        dedups against ANY open ToDo on the reference, and this site runs an
+        Assignment Rule that opens one on every Lead the moment it is created --
+        2319 of them on staging. So every journey reminder was silently
+        swallowed by an unrelated "Automatic Assignment" ToDo dated today,
+        leaving the rep's actual promise ("ring the owner Thursday") with no
+        feed entry at all. Found by running the suite against staging; a fresh
+        CI site has no Assignment Rule, so CI could never have caught it.
+
+        Tagging the description with :attr:`_todo_marker` gives each note's
+        reminder its own identity, so it is created once and then RE-DATED in
+        place when the rep moves the date, rather than duplicated or skipped.
+        """
+        try:
+            description = self._reminder_description()
+            existing = self._open_reminder_todos()
+            if existing:
+                for todo in existing:
+                    frappe.db.set_value(
+                        "ToDo",
+                        todo,
+                        {"date": next_date, "description": description},
+                        update_modified=False,
+                    )
+                return
+
+            todo = {
+                "doctype": "ToDo",
+                "description": description,
+                "reference_type": self.reference_doctype,
+                "reference_name": self.reference_name,
+                "status": "Open",
+                "date": next_date,
+            }
+            owner = self._reminder_owner()
+            if owner:
+                todo["allocated_to"] = owner
+                todo["owner"] = owner
+            if _has_field("ToDo", "priority"):
+                todo["priority"] = "Medium"
+
+            frappe.get_doc(todo).insert(ignore_permissions=True)
         except Exception:
             frappe.log_error(
                 title="Jarz Journey Note: reminder ToDo failed",
