@@ -238,7 +238,56 @@ def get_b2b_pipeline():
     for stage_cards in columns.values():
         stage_cards.sort(key=_score_key, reverse=True)
 
+    # Fold in each card's journey diary summary (last touch + next action), so
+    # the board itself shows when a prospect was last visited and what is due.
+    _attach_journey_summaries(columns)
+
     return {"stages": stages, "columns": columns}
+
+
+def _journey_card_defaults():
+    """The journey keys every card carries, whether or not it has notes."""
+    return {
+        "journey_count": 0,
+        "last_journey_date": None,
+        "last_journey_type": None,
+        "last_journey_note": None,
+        "last_journey_contact": None,
+        "next_action_date": None,
+        "next_action": None,
+    }
+
+
+def _attach_journey_summaries(columns):
+    """Merge the journey summary into every card, in ONE query per doctype.
+
+    Best-effort: on a site that has not migrated the Jarz Journey Note DocType
+    yet the cards simply carry the empty defaults. Imported lazily because
+    ``jarz_pos.api.journey`` imports this module's access gate.
+    """
+    by_doctype = {}
+    for stage_cards in columns.values():
+        for card in stage_cards:
+            card.update(_journey_card_defaults())
+            by_doctype.setdefault(card.get("doctype"), []).append(card)
+
+    try:
+        from jarz_pos.api.journey import journey_summaries
+    except Exception:
+        frappe.log_error(
+            title="crm.get_b2b_pipeline: journey import failed",
+            message=frappe.get_traceback(),
+        )
+        return
+
+    for doctype, cards in by_doctype.items():
+        summaries = journey_summaries(doctype, [c.get("name") for c in cards])
+        if not summaries:
+            continue
+        for card in cards:
+            summary = summaries.get(card.get("name"))
+            if summary:
+                card.update(summary)
 
 
 def _resolve_opp_customer(party_name):
@@ -327,7 +376,29 @@ def get_account(doctype, name):
     # Open ToDos referencing this record.
     result["open_todos"] = _open_todos_for(doctype, name)
 
+    # The rep's dated field diary for this account (newest touch first). Empty
+    # on a site that has not migrated the journey DocType yet.
+    result["journey_notes"] = _journey_notes(doctype, name)
+
     return result
+
+
+def _journey_notes(doctype, name, limit=100):
+    """Journey diary entries for a record. Guarded -> [] (never raises).
+
+    Lazily imported: ``jarz_pos.api.journey`` imports this module's access gate,
+    so a module-level import here would be circular.
+    """
+    try:
+        from jarz_pos.api.journey import journey_notes_for
+
+        return journey_notes_for(doctype, name, limit=limit)
+    except Exception:
+        frappe.log_error(
+            title="crm: journey notes lookup failed",
+            message=frappe.get_traceback(),
+        )
+        return []
 
 
 def _str_or_none(value):

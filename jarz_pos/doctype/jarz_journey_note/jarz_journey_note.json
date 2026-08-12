@@ -1,0 +1,196 @@
+{
+ "actions": [],
+ "autoname": "JRN-.YYYY.-.#####",
+ "creation": "2026-08-12 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "reference_doctype",
+  "reference_name",
+  "entry_date",
+  "entry_type",
+  "column_break_meta",
+  "contact_person",
+  "contact_role",
+  "contact_phone",
+  "outcome",
+  "section_break_note",
+  "note",
+  "section_break_next",
+  "next_action_date",
+  "column_break_next",
+  "next_action",
+  "section_break_audit",
+  "logged_by",
+  "column_break_audit",
+  "logged_by_name"
+ ],
+ "fields": [
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Reference Type",
+   "options": "Lead\nOpportunity\nCustomer",
+   "reqd": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Reference",
+   "options": "reference_doctype",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Today",
+   "fieldname": "entry_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Date",
+   "reqd": 1
+  },
+  {
+   "default": "Visit",
+   "fieldname": "entry_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Type",
+   "options": "Visit\nCall\nWhatsApp\nSample Drop\nMeeting\nEmail\nOther"
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "contact_person",
+   "fieldtype": "Data",
+   "label": "Contact Person"
+  },
+  {
+   "fieldname": "contact_role",
+   "fieldtype": "Data",
+   "label": "Contact Role"
+  },
+  {
+   "fieldname": "contact_phone",
+   "fieldtype": "Data",
+   "label": "Contact Phone"
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Outcome",
+   "options": "\nInterested\nNeeds Follow-up\nSample Requested\nOrder Placed\nNot Now\nRejected"
+  },
+  {
+   "fieldname": "section_break_note",
+   "fieldtype": "Section Break",
+   "label": "Note"
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Text",
+   "label": "Note",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_next",
+   "fieldtype": "Section Break",
+   "label": "Next Action"
+  },
+  {
+   "fieldname": "next_action_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Next Action Date"
+  },
+  {
+   "fieldname": "column_break_next",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "next_action",
+   "fieldtype": "Small Text",
+   "label": "Next Action"
+  },
+  {
+   "fieldname": "section_break_audit",
+   "fieldtype": "Section Break",
+   "label": "Logged By"
+  },
+  {
+   "fieldname": "logged_by",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Logged By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_audit",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "logged_by_name",
+   "fieldtype": "Data",
+   "label": "Logged By Name",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Journey Note",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "B2B Sales Rep",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "entry_date",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -334,7 +334,50 @@ def get_leads(category=None, status=None, not_suitable=None, include_merged=0,
     )
 
     leads = [_map_lead_row(row) for row in rows]
+    _attach_journey_summaries(leads)
     return {"leads": leads, "count": len(leads)}
+
+
+def _journey_summary_defaults():
+    """The journey keys every catalog row carries, notes or not."""
+    return {
+        "journey_count": 0,
+        "last_journey_date": None,
+        "last_journey_type": None,
+        "last_journey_note": None,
+        "last_journey_contact": None,
+        "next_action_date": None,
+        "next_action": None,
+    }
+
+
+def _attach_journey_summaries(leads):
+    """Merge each lead's journey summary (last touch + next action) into its row.
+
+    ONE query for the whole catalog, not one per lead: the corpus runs to
+    thousands of rows and the notes table is a fraction of that. Best-effort --
+    a site that has not migrated the journey DocType just gets the defaults.
+    """
+    for lead in leads:
+        lead.update(_journey_summary_defaults())
+    if not leads:
+        return
+    try:
+        from jarz_pos.api.journey import journey_summaries
+
+        summaries = journey_summaries("Lead", [row.get("name") for row in leads])
+    except Exception:
+        frappe.log_error(
+            title="leads: journey summaries failed",
+            message=frappe.get_traceback(),
+        )
+        return
+    if not summaries:
+        return
+    for lead in leads:
+        summary = summaries.get(lead.get("name"))
+        if summary:
+            lead.update(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +437,39 @@ def get_lead(name):
     # Editable rep notes.
     result["notes"] = doc.get("custom_notes") or ""
 
+    # The dated field diary: every visit/call logged against this lead, newest
+    # first, plus the same compact summary the catalog rows carry.
+    result.update(_journey_summary_defaults())
+    result["journey_notes"] = _journey_notes(name)
+    _fold_detail_journey_summary(result)
+
     return result
+
+
+def _journey_notes(name, limit=200):
+    """Journey diary entries for a Lead. Guarded -> [] (never raises)."""
+    try:
+        from jarz_pos.api.journey import journey_notes_for
+
+        return journey_notes_for("Lead", name, limit=limit)
+    except Exception:
+        frappe.log_error(
+            title="leads: journey notes lookup failed",
+            message=frappe.get_traceback(),
+        )
+        return []
+
+
+def _fold_detail_journey_summary(result):
+    """Derive the card summary from the notes already loaded (no second query)."""
+    try:
+        from jarz_pos.api.journey import journey_summary_from_notes
+
+        summary = journey_summary_from_notes(result.get("journey_notes") or [])
+    except Exception:
+        return
+    if summary:
+        result.update(summary)
 
 
 def _linked_lead_address_names(name):
