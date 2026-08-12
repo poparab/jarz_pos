@@ -174,6 +174,7 @@ CONFIDENCE_RANK = {
     "territory_centroid": 10,
     "pos_link":           20,
     "customer_pin":       30,
+    "courier_web":        35,
     "courier_verified":   40,
     "manual_override":    50,
 }
@@ -182,7 +183,7 @@ CONFIDENCE_RANK = {
 `custom_geo_source` Select options (leading blank is intentional — Frappe convention for optional):
 
 ```
-\nterritory_centroid\npos_link\ncustomer_pin\ncourier_verified\nmanual_override
+\nterritory_centroid\npos_link\ncustomer_pin\ncourier_web\ncourier_verified\nmanual_override
 ```
 
 **Ranks, never string comparison.** Alphabetical ordering puts `courier_verified` below
@@ -195,6 +196,22 @@ a routine Woo re-sync must not fail because the address already has a better pin
 
 `manual_override` sits highest deliberately: an authorised human with context must be able to fix a
 bad pin and have it stick against consensus. It requires a manager role and is logged.
+
+
+**Amended 2026-08-12 — `courier_web` (35) added.** The courier app gained a web build so an
+iPhone courier can work without a native iOS app. A capture made through the browser carries no
+mock-GPS evidence — `geolocator_web` exposes no `isMocked`, and iOS has no mock-provider signal
+at any layer — so it is unverifiable by construction. It still outranks `customer_pin`, because
+the courier is physically at the door and the customer was not, but a real Android capture must
+always be able to overwrite it. Hence 35, between the two.
+
+Adding a rank is the reason these are **integers with gaps** rather than an ordered list: no
+existing rank was renumbered, so no stored value changed meaning.
+
+`custom_geo_source` is a Select, so the option must exist in the database **before** anything
+writes it — schema and migrate ship first, alone. Note also that a fixture whose `modified`
+timestamp is unchanged is skipped on import, so an options-only edit must bump it.
+
 
 ---
 

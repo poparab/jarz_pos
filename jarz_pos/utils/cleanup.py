@@ -483,7 +483,7 @@ def ensure_address_geo_fields() -> None:
             # Leading blank is intentional: Frappe's convention for an optional
             # Select. Order matches CONFIDENCE_RANK but is NOT what enforces the
             # ladder — jarz_pos.utils.geo.CONFIDENCE_RANK is.
-            options="\nterritory_centroid\npos_link\ncustomer_pin\ncourier_verified\nmanual_override",
+            options="\nterritory_centroid\npos_link\ncustomer_pin\ncourier_web\ncourier_verified\nmanual_override",
             description="Where the pin came from; the label half of the confidence ladder.",
             in_standard_filter=1,
         )

@@ -33,6 +33,7 @@ ALL_SOURCES = [
     "territory_centroid",
     "pos_link",
     "customer_pin",
+    "courier_web",
     "courier_verified",
     "manual_override",
 ]
@@ -46,6 +47,7 @@ class TestRanksAreTheContractedValues(unittest.TestCase):
                 "territory_centroid": 10,
                 "pos_link": 20,
                 "customer_pin": 30,
+                "courier_web": 35,
                 "courier_verified": 40,
                 "manual_override": 50,
             },
@@ -98,6 +100,33 @@ class TestStringComparisonWouldInvert(unittest.TestCase):
         by_rank = sorted(ALL_SOURCES, key=geo.CONFIDENCE_RANK.get)
         self.assertNotEqual(by_rank, sorted(ALL_SOURCES))
 
+
+
+class TestCourierWebSitsBetween(unittest.TestCase):
+    """Rank 35 is the containment for a capture with no mock-GPS evidence.
+
+    `geolocator_web` exposes no `isMocked` and iOS has no mock-provider signal at
+    all, so a web capture is unverifiable by construction. It still beats a
+    customer's remote pin — the courier is physically at the door — but a real
+    Android capture must always be able to overwrite it.
+    """
+
+    def test_web_beats_customer_pin(self):
+        self.assertTrue(geo.accepts_write("customer_pin", "courier_web"))
+
+    def test_verified_android_overwrites_web(self):
+        self.assertTrue(geo.accepts_write("courier_web", "courier_verified"))
+
+    def test_web_cannot_overwrite_verified_android(self):
+        self.assertFalse(geo.accepts_write("courier_verified", "courier_web"))
+
+    def test_web_beats_a_pos_link_and_an_empty_address(self):
+        self.assertTrue(geo.accepts_write("pos_link", "courier_web"))
+        self.assertTrue(geo.accepts_write("", "courier_web"))
+
+    def test_manual_override_still_wins(self):
+        self.assertTrue(geo.accepts_write("courier_web", "manual_override"))
+        self.assertFalse(geo.accepts_write("manual_override", "courier_web"))
 
 class TestNeverDowngradeMatrix(unittest.TestCase):
     """Every (current, incoming) pair, including the empty state."""

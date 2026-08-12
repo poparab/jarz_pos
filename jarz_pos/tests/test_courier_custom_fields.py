@@ -64,7 +64,8 @@ ADDRESS_FIELDS = {
 #: Frozen verbatim. Leading blank is Frappe's convention for an optional Select;
 #: the order matches the confidence ladder but is NOT what enforces it.
 GEO_SOURCE_OPTIONS = (
-    "\nterritory_centroid\npos_link\ncustomer_pin\ncourier_verified\nmanual_override"
+    "\nterritory_centroid\npos_link\ncustomer_pin"
+    "\ncourier_web\ncourier_verified\nmanual_override"
 )
 
 

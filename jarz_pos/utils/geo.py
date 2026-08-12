@@ -59,6 +59,11 @@ CONFIDENCE_RANK: Dict[str, int] = {
     "territory_centroid": 10,
     "pos_link": 20,
     "customer_pin": 30,
+    # A courier standing at the door beats a customer's remote pin, but a web
+    # capture carries no mock-GPS evidence (geolocator_web has no isMocked, and
+    # iOS exposes no mock-provider signal at all), so it must never outrank a
+    # verified Android capture. Deliberately between the two.
+    "courier_web": 35,
     "courier_verified": 40,
     "manual_override": 50,
 }
@@ -67,6 +72,7 @@ CONFIDENCE_RANK: Dict[str, int] = {
 SOURCE_TERRITORY_CENTROID = "territory_centroid"
 SOURCE_POS_LINK = "pos_link"
 SOURCE_CUSTOMER_PIN = "customer_pin"
+SOURCE_COURIER_WEB = "courier_web"
 SOURCE_COURIER_VERIFIED = "courier_verified"
 SOURCE_MANUAL_OVERRIDE = "manual_override"
 
