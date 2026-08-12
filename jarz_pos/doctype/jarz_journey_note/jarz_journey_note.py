@@ -155,8 +155,17 @@ class JarzJourneyNote(Document):
 
     @property
     def _todo_marker(self):
-        """The tag that identifies THIS note's reminder among a record's ToDos."""
-        return f"[Journey {self.name}]"
+        """The tag that identifies THIS note's reminder among a record's ToDos.
+
+        Uses the app-wide ``[jarz:<kind>]`` scheme from ``crm.follow_ups`` with a
+        per-note kind, so one convention covers every reminder this app opens:
+        the note finds its own by the full tag, while ``close_all_jarz_todos``
+        can still sweep them by the shared ``[jarz:`` prefix without touching an
+        Assignment Rule's ToDo.
+        """
+        from jarz_pos.crm.follow_ups import todo_marker
+
+        return todo_marker(f"journey:{self.name}")
 
     def _reminder_description(self):
         who = (getattr(self, "contact_person", None) or "").strip()

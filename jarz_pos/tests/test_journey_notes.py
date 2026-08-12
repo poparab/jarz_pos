@@ -29,6 +29,12 @@ import frappe
 from jarz_pos.api import crm as crm_api
 from jarz_pos.api import journey as journey_api
 from jarz_pos.api import leads as leads_api
+from jarz_pos.crm.follow_ups import todo_marker
+
+
+def journey_marker(note_name):
+    """The ToDo tag one journey note's reminder carries."""
+    return todo_marker(f"journey:{note_name}")
 
 _B2B_ROLE = "B2B Sales Rep"
 _COFFEE = "Coffee"
@@ -83,7 +89,7 @@ def _journey_todos(reference_name, note_name, fields=None):
             "reference_type": "Lead",
             "reference_name": reference_name,
             "status": "Open",
-            "description": ["like", f"%[Journey {note_name}]%"],
+            "description": ["like", f"%{journey_marker(note_name)}%"],
         },
         fields=fields or ["name", "description", "date"],
     )

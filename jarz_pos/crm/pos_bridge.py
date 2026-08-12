@@ -155,7 +155,7 @@ def link_b2b_sale_to_opportunity(doc, method=None):
 
         # --- Post-sale follow-up ToDo (deduped) -------------------------
         try:
-            from jarz_pos.crm.follow_ups import _ensure_todo
+            from jarz_pos.crm.follow_ups import KIND_POST_SALE, _ensure_todo
 
             from frappe.utils import add_days, today
 
@@ -177,6 +177,7 @@ def link_b2b_sale_to_opportunity(doc, method=None):
                 owner,
                 f"Post-sale follow-up for {customer}",
                 date=followup_date,
+                kind=KIND_POST_SALE,
             )
         except Exception:
             _logger().error(
@@ -248,11 +249,17 @@ def create_delivery_followup_on_state(doc, method=None):
         if not customer:
             return
 
-        # _ensure_todo dedups on an OPEN ToDo for the same (reference_type,
-        # reference_name), so re-firing on_update_after_submit will not create
-        # duplicate reminders while a prior follow-up is still open.
+        # _ensure_todo dedups per reminder KIND, so re-firing
+        # on_update_after_submit re-dates the existing reminder instead of
+        # opening a second one -- and, unlike the old any-open-ToDo dedup, an
+        # unrelated ToDo on the same record (an assignment, say) no longer
+        # suppresses this reminder entirely.
         try:
-            from jarz_pos.crm.follow_ups import _ensure_todo
+            from jarz_pos.crm.follow_ups import (
+                KIND_CHECK_UP,
+                KIND_SAMPLE_FEEDBACK,
+                _ensure_todo,
+            )
             from frappe.utils import add_days, today
         except Exception:
             return
@@ -260,9 +267,11 @@ def create_delivery_followup_on_state(doc, method=None):
         if kind == "sample":
             description = f"Collect sample feedback for {customer}"
             followup_date = add_days(today(), _SAMPLE_FOLLOWUP_DAYS)
+            todo_kind = KIND_SAMPLE_FEEDBACK
         else:  # trial
             description = f"Do check-up call for {customer}"
             followup_date = add_days(today(), _TRIAL_FOLLOWUP_DAYS)
+            todo_kind = KIND_CHECK_UP
 
         owner = getattr(doc, "owner", None) or frappe.session.user
 
@@ -285,7 +294,10 @@ def create_delivery_followup_on_state(doc, method=None):
         except Exception:
             pass
 
-        _ensure_todo(ref_type, ref_name, owner, description, date=followup_date)
+        _ensure_todo(
+            ref_type, ref_name, owner, description, date=followup_date,
+            kind=todo_kind,
+        )
     except Exception:
         try:
             _logger().error(

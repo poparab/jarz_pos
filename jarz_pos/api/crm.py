@@ -573,7 +573,7 @@ def _stamp_followup_date(doctype, name, follow_up_date):
 def _schedule_reengage(doctype, name, reason):
     """On Lost/On-hold: set re-engage ToDo + custom_next_followup_date. Guarded."""
     try:
-        from jarz_pos.crm.follow_ups import _ensure_todo
+        from jarz_pos.crm.follow_ups import KIND_REENGAGE, _ensure_todo
 
         followup_date = None
         try:
@@ -587,7 +587,9 @@ def _schedule_reengage(doctype, name, reason):
         desc = f"Re-engage {doctype.lower()} {name}"
         if reason:
             desc += f" (reason: {reason})"
-        _ensure_todo(doctype, name, owner, desc, date=followup_date)
+        _ensure_todo(
+            doctype, name, owner, desc, date=followup_date, kind=KIND_REENGAGE
+        )
 
         if followup_date and _has_field(doctype, "custom_next_followup_date"):
             frappe.db.set_value(
@@ -669,26 +671,22 @@ def _can_complete_followup(doctype, name):
 
 
 def _close_open_todos(reference_type, reference_name):
-    """Close (status='Closed') every open ToDo referencing the record. Never raises."""
+    """Close the reminders THIS APP opened on the record. Never raises.
+
+    Deliberately NOT every open ToDo. On a Lead the Assignment Rule keeps its
+    own open ToDo, and closing that as a side effect of "I've done this
+    follow-up" quietly un-assigned the rep from their own lead. The helper
+    matches only our ``[jarz:`` reminders.
+    """
     try:
-        if not _doctype_exists("ToDo"):
-            return
-        names = frappe.get_all(
-            "ToDo",
-            filters={
-                "reference_type": reference_type,
-                "reference_name": reference_name,
-                "status": "Open",
-            },
-            pluck="name",
-        )
-        for todo in names:
-            try:
-                frappe.db.set_value("ToDo", todo, "status", "Closed")
-            except Exception:
-                pass
+        from jarz_pos.crm.follow_ups import close_all_jarz_todos
+
+        close_all_jarz_todos(reference_type, reference_name)
     except Exception:
-        pass
+        frappe.log_error(
+            title="crm: closing follow-up ToDos failed",
+            message=frappe.get_traceback(),
+        )
 
 
 # ---------------------------------------------------------------------------

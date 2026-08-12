@@ -139,6 +139,13 @@ jobs:
             # job never migrates — so the first run after it lands is vacuous
             # and only post-deploy runs actually assert anything.
             test_journey_notes
+            # The reminder-ToDo identity fix. Plants its OWN unrelated open
+            # ToDo rather than relying on the site's Assignment Rule, so it is
+            # meaningful on a fresh CI site too -- which is exactly where the
+            # original any-open-ToDo dedup looked correct.
+            test_followup_todo_kinds
+            # Mock-level cover for the four scheduled passes that call it.
+            test_followup_reminders
             test_access_control
             test_realtime_scoping
             test_cancellation_guards

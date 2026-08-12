@@ -37,7 +37,11 @@ class _Capture:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, reference_type, reference_name, owner, description, date=None):
+    def __call__(
+        self, reference_type, reference_name, owner, description, date=None, *, kind
+    ):
+        # ``kind`` is keyword-only and REQUIRED on the real helper, so mirroring
+        # that here is what makes this fake catch a caller that forgets it.
         self.calls.append(
             {
                 "reference_type": reference_type,
@@ -45,6 +49,7 @@ class _Capture:
                 "owner": owner,
                 "description": description,
                 "date": date,
+                "kind": kind,
             }
         )
         return "TODO-1"

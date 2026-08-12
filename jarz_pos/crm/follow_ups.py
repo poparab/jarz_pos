@@ -18,6 +18,20 @@ LOGGER_NAME = "crm_follow_ups"
 
 _STALLED_OPP_DAYS = 7
 
+# Every reminder this app opens is tagged ``[jarz:<kind>]`` in its ToDo
+# description, so it can be found again without colliding with ToDos other
+# things (notably Assignment Rules) open on the same record. See _ensure_todo.
+_MARKER_PREFIX = "jarz:"
+
+# The reminder kinds. One per distinct promise, because dedup and re-dating are
+# per kind: a lead can legitimately owe both a follow-up and a re-engage.
+KIND_LEAD_FOLLOWUP = "lead-followup"
+KIND_STALLED_OPP = "stalled-opp"
+KIND_REENGAGE = "reengage"
+KIND_POST_SALE = "post-sale"
+KIND_SAMPLE_FEEDBACK = "sample-feedback"
+KIND_CHECK_UP = "check-up"
+
 
 def _logger():
     return frappe.logger(LOGGER_NAME, allow_site=True)
@@ -55,11 +69,32 @@ def _add_days(date, days):
         return None
 
 
-def _ensure_todo(reference_type, reference_name, owner, description, date=None):
-    """Create a ToDo for the reference if no OPEN ToDo already references it.
+def todo_marker(kind):
+    """The tag that identifies a reminder KIND inside a ToDo description."""
+    return f"[{_MARKER_PREFIX}{kind}]"
 
-    Dedups against existing open ToDos on (reference_type, reference_name).
-    Returns the ToDo name if created, else None. Never raises.
+
+def _ensure_todo(reference_type, reference_name, owner, description, date=None, *, kind):
+    """Create — or re-date — THIS KIND of reminder on a record.
+
+    ``kind`` is keyword-only and required on purpose. The dedup used to match
+    ANY open ToDo on (reference_type, reference_name), which sounds right until
+    you notice that something else opens ToDos on these records too: this site
+    runs an Assignment Rule that opens one on every Lead the instant it is
+    created — 2319 of them on staging. Every CRM reminder therefore found an
+    "existing" ToDo and silently created nothing, for years, on every lead the
+    rule had touched. Reps saw the assignment row (dated the day the lead was
+    imported, saying nothing about a follow-up) and no reminder at all.
+
+    So a reminder now declares what it IS. Its description is tagged
+    ``[jarz:<kind>]``, dedup matches only that tag, and an existing open one is
+    RE-DATED in place rather than skipped — which also fixes the quieter half of
+    the bug, where a follow-up date moved but its reminder kept the old date.
+
+    Making ``kind`` required is the actual guard: a future caller cannot
+    reintroduce the bug by forgetting it, because the call will not run.
+
+    Returns the ToDo name (created OR re-dated), else None. Never raises.
     """
     try:
         if not _doctype_exists("ToDo"):
@@ -67,23 +102,19 @@ def _ensure_todo(reference_type, reference_name, owner, description, date=None):
         if not reference_name:
             return None
 
-        # Dedup: any open ToDo already pointing at this reference?
-        existing_filters = {
-            "reference_type": reference_type,
-            "reference_name": reference_name,
-            "status": "Open",
-        }
-        try:
-            if frappe.db.exists("ToDo", existing_filters):
-                return None
-        except Exception:
-            # If the dedup query fails, fall through and try to create — a
-            # duplicate ToDo is preferable to a silent miss, but guard the create.
-            pass
+        marker = todo_marker(kind)
+        # Tag the description so this reminder is findable later. Callers pass
+        # human text; the marker is ours and goes first.
+        tagged = f"{marker} {description}".strip()
+
+        existing = _open_todos_of_kind(reference_type, reference_name, marker)
+        if existing:
+            _redate_todos(existing, tagged, date)
+            return existing[0]
 
         todo_data = {
             "doctype": "ToDo",
-            "description": description,
+            "description": tagged,
             "reference_type": reference_type,
             "reference_name": reference_name,
             "status": "Open",
@@ -109,6 +140,106 @@ def _ensure_todo(reference_type, reference_name, owner, description, date=None):
             exc_info=True,
         )
         return None
+
+
+def _open_todos_of_kind(reference_type, reference_name, marker):
+    """Open ToDos on a record carrying ``marker``. Guarded -> []."""
+    try:
+        return frappe.get_all(
+            "ToDo",
+            filters={
+                "reference_type": reference_type,
+                "reference_name": reference_name,
+                "status": "Open",
+                "description": ["like", f"%{marker}%"],
+            },
+            pluck="name",
+            order_by="creation asc",
+        )
+    except Exception:
+        # A failed lookup must not silently suppress the reminder, but it must
+        # not duplicate one either. Treat it as "cannot tell" and skip — the
+        # next scheduled pass retries.
+        _logger().error(
+            f"_open_todos_of_kind failed for {reference_type}:{reference_name}",
+            exc_info=True,
+        )
+        return []
+
+
+def _redate_todos(names, description, date):
+    """Move an existing reminder to its current date/text. Never raises."""
+    if not date or not _has_field("ToDo", "date"):
+        return
+    for name in names:
+        try:
+            frappe.db.set_value(
+                "ToDo",
+                name,
+                {"date": date, "description": description},
+                update_modified=False,
+            )
+        except Exception:
+            _logger().error(f"_redate_todos failed for {name}", exc_info=True)
+
+
+def close_all_jarz_todos(reference_type, reference_name):
+    """Close every reminder THIS APP opened on a record -- and nothing else.
+
+    The counterpart to the dedup fix. ``complete_followup`` used to close EVERY
+    open ToDo on the record, which on a Lead meant a rep marking a follow-up
+    done also closed the Assignment Rule's ToDo and quietly un-assigned
+    themselves from the lead. Matching the ``[jarz:`` prefix keeps the blast
+    radius to reminders this app is responsible for.
+
+    Returns the number closed. Never raises.
+    """
+    try:
+        if not _doctype_exists("ToDo"):
+            return 0
+        names = frappe.get_all(
+            "ToDo",
+            filters={
+                "reference_type": reference_type,
+                "reference_name": reference_name,
+                "status": "Open",
+                "description": ["like", f"%[{_MARKER_PREFIX}%"],
+            },
+            pluck="name",
+        )
+        for name in names:
+            try:
+                frappe.db.set_value("ToDo", name, "status", "Closed")
+            except Exception:
+                pass
+        return len(names)
+    except Exception:
+        _logger().error(
+            f"close_all_jarz_todos failed for {reference_type}:{reference_name}",
+            exc_info=True,
+        )
+        return 0
+
+
+def close_todos_of_kind(reference_type, reference_name, kind):
+    """Close a record's open reminders of one kind. Never raises.
+
+    Used when the thing the reminder was about has been settled, so a stale
+    reminder stops nagging.
+    """
+    try:
+        names = _open_todos_of_kind(
+            reference_type, reference_name, todo_marker(kind)
+        )
+        for name in names:
+            frappe.db.set_value("ToDo", name, "status", "Closed")
+        return len(names)
+    except Exception:
+        _logger().error(
+            f"close_todos_of_kind failed for {reference_type}:{reference_name}",
+            exc_info=True,
+        )
+        return 0
 
 
 def _notify(owner, subject, document_type=None, document_name=None):
@@ -173,6 +304,7 @@ def _pass_lead_followups(summary):
                     lead.get("owner"),
                     f"Follow up with lead {label}",
                     date=today,
+                    kind=KIND_LEAD_FOLLOWUP,
                 )
                 if todo:
                     summary["lead_followups"] += 1
@@ -222,6 +354,7 @@ def _pass_stalled_opportunities(summary):
                     opp.get("owner"),
                     f"Stalled opportunity {label} - follow up",
                     date=_today(),
+                    kind=KIND_STALLED_OPP,
                 )
                 if todo:
                     summary["stalled_opps"] += 1
@@ -276,6 +409,7 @@ def _pass_reengagement(summary):
                         lead.get("owner"),
                         f"Re-engage lost lead {lead.get('name')}",
                         date=today,
+                        kind=KIND_REENGAGE,
                     )
                     if todo:
                         summary["reengagement"] += 1
@@ -310,6 +444,7 @@ def _pass_reengagement(summary):
                         opp.get("owner"),
                         f"Re-engage lost opportunity {opp.get('name')}",
                         date=today,
+                        kind=KIND_REENGAGE,
                     )
                     if todo:
                         summary["reengagement"] += 1
