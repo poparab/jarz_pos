@@ -94,7 +94,18 @@ def _ensure_todo(reference_type, reference_name, owner, description, date=None, 
     Making ``kind`` required is the actual guard: a future caller cannot
     reintroduce the bug by forgetting it, because the call will not run.
 
-    Returns the ToDo name (created OR re-dated), else None. Never raises.
+    RETURN CONTRACT -- the ToDo name only when one was CREATED, None when an
+    existing reminder was merely re-dated. Callers read this as "did something
+    newsworthy happen", and the scheduled passes turn a truthy answer into a
+    Notification Log entry:
+
+        if todo:
+            summary[...] += 1
+            _notify(owner, ...)
+
+    Returning the name on a re-date would therefore notify every rep about every
+    open reminder every single day the pass runs. The reminder is still ensured
+    and still current; it is just not news. Never raises.
     """
     try:
         if not _doctype_exists("ToDo"):
@@ -110,7 +121,8 @@ def _ensure_todo(reference_type, reference_name, owner, description, date=None, 
         existing = _open_todos_of_kind(reference_type, reference_name, marker)
         if existing:
             _redate_todos(existing, tagged, date)
-            return existing[0]
+            # Deliberately None, not existing[0] -- see RETURN CONTRACT above.
+            return None
 
         todo_data = {
             "doctype": "ToDo",

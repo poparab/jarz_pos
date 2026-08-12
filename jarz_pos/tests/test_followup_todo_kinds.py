@@ -157,13 +157,38 @@ class TestReminderIdentity(ReminderTestCase):
             date=_days(5), kind=fu.KIND_LEAD_FOLLOWUP,
         )
 
-        self.assertEqual(first, second, "the same reminder should be reused")
+        self.assertIsNotNone(first, "the first call creates the reminder")
+        # The scheduled passes turn a truthy return into a Notification Log
+        # entry, so a re-date MUST report None -- otherwise the daily pass
+        # notifies every rep about every open reminder every single day.
+        self.assertIsNone(second, "a re-date is not news")
+
         mine = _todos_of_kind(lead, fu.KIND_LEAD_FOLLOWUP)
-        self.assertEqual(len(mine), 1)
+        self.assertEqual(len(mine), 1, "re-dating must not duplicate")
+        self.assertEqual(mine[0]["name"], first)
         # The quieter half of the old bug: a moved follow-up date used to leave
         # the reminder sitting on its original date forever.
         self.assertEqual(str(mine[0]["date"]), _days(5))
         self.assertIn("Follow up again", mine[0]["description"])
+
+    def test_a_repeat_pass_does_not_re_notify(self):
+        """The daily pass must announce a reminder once, not once per day."""
+        lead = _make_lead()
+        summary = {"lead_followups": 0, "stalled_opps": 0, "reengagement": 0}
+
+        for _ in range(3):
+            todo = fu._ensure_todo(
+                "Lead", lead, frappe.session.user, "Follow up",
+                date=_days(0), kind=fu.KIND_LEAD_FOLLOWUP,
+            )
+            if todo:
+                summary["lead_followups"] += 1
+
+        self.assertEqual(
+            summary["lead_followups"],
+            1,
+            "three passes over one due lead must count (and notify) exactly once",
+        )
 
     def test_different_kinds_coexist_on_one_record(self):
         lead = _make_lead()
