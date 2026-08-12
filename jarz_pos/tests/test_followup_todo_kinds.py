@@ -61,13 +61,28 @@ def _todos(lead, status="Open", fields=None):
             "reference_name": lead,
             "status": status,
         },
-        fields=fields or ["name", "description", "date"],
+        fields=fields or ["name", "description", "date", "status"],
     )
 
 
 def _todos_of_kind(lead, kind, status="Open"):
     marker = fu.todo_marker(kind)
     return [t for t in _todos(lead, status=status) if marker in (t["description"] or "")]
+
+
+def _open_jarz(lead):
+    """Open ToDos this app owns (tagged ``[jarz:``)."""
+    return [t for t in _todos(lead) if "[jarz:" in (t["description"] or "")]
+
+
+def _open_non_jarz(lead):
+    """Open ToDos this app does NOT own -- ours to leave strictly alone.
+
+    On a site with the Assignment Rule enabled this holds the rule's own ToDo
+    as well as anything a test planted, which is exactly why no assertion here
+    may use a raw count of the record's ToDos.
+    """
+    return [t for t in _todos(lead) if "[jarz:" not in (t["description"] or "")]
 
 
 def _days(offset):
@@ -170,7 +185,11 @@ class TestReminderIdentity(ReminderTestCase):
             "Lead", lead, frappe.session.user, "Follow up",
             date=_days(0), kind=fu.KIND_LEAD_FOLLOWUP,
         )
-        description = _todos(lead)[0]["description"]
+        # _open_jarz, not _todos[0]: on a site with the Assignment Rule the
+        # record's first ToDo may well be the rule's, not ours.
+        ours = _open_jarz(lead)
+        self.assertEqual(len(ours), 1)
+        description = ours[0]["description"]
         self.assertIn(fu.todo_marker(fu.KIND_LEAD_FOLLOWUP), description)
         self.assertTrue(description.startswith("[jarz:"))
 
@@ -204,13 +223,18 @@ class TestReminderClosing(ReminderTestCase):
             "Lead", lead, frappe.session.user, "Re-engage",
             date=_days(14), kind=fu.KIND_REENGAGE,
         )
+        # Never assert on a RAW count of the record's ToDos: on a site with the
+        # Assignment Rule enabled the Lead insert opens one of its own, so a
+        # total asserts on site configuration rather than on this code. Snapshot
+        # what we do not own and require it to be untouched.
+        untouched = sorted(t["name"] for t in _open_non_jarz(lead))
 
         closed = fu.close_todos_of_kind("Lead", lead, fu.KIND_LEAD_FOLLOWUP)
 
         self.assertEqual(closed, 1)
         self.assertEqual(len(_todos_of_kind(lead, fu.KIND_LEAD_FOLLOWUP)), 0)
         self.assertEqual(len(_todos_of_kind(lead, fu.KIND_REENGAGE)), 1)
-        self.assertEqual(len(_todos(lead)), 2)  # assignment + reengage still open
+        self.assertEqual(sorted(t["name"] for t in _open_non_jarz(lead)), untouched)
 
     def test_close_all_jarz_todos_spares_the_assignment(self):
         lead = _make_lead()
@@ -224,13 +248,21 @@ class TestReminderClosing(ReminderTestCase):
             date=_days(14), kind=fu.KIND_REENGAGE,
         )
 
+        untouched = sorted(t["name"] for t in _open_non_jarz(lead))
+
         closed = fu.close_all_jarz_todos("Lead", lead)
 
         self.assertEqual(closed, 2)
         self.assertEqual(frappe.db.get_value("ToDo", assignment, "status"), "Open")
-        remaining = _todos(lead)
-        self.assertEqual(len(remaining), 1)
-        self.assertEqual(remaining[0]["description"], _ASSIGNMENT_DESCRIPTION)
+        # Every jarz reminder gone...
+        self.assertEqual(len(_open_jarz(lead)), 0)
+        # ...and every ToDo this app does not own still open, whether that is
+        # just our planted one or also the Assignment Rule's.
+        self.assertEqual(sorted(t["name"] for t in _open_non_jarz(lead)), untouched)
+        self.assertIn(
+            _ASSIGNMENT_DESCRIPTION,
+            [t["description"] for t in _open_non_jarz(lead)],
+        )
 
 
 class TestCompleteFollowupScope(ReminderTestCase):

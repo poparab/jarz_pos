@@ -24,6 +24,26 @@ from jarz_pos.api import crm
 _TODAY = "2026-07-11"
 
 
+@contextmanager
+def _as_user(email):
+    """Run the block as ``email``, restoring the previous session user after.
+
+    Deliberately NOT ``patch.object(frappe.session, "user", ...)``. ``frappe.session``
+    is a ``frappe._dict``, whose ``__getattr__`` is ``dict.get`` -- so ``session.__dict__``
+    returns None rather than a mapping, and mock's ``get_original`` dies on
+    ``TypeError: 'NoneType' object is not subscriptable``. Plain assignment works
+    because ``_dict.__setattr__`` is ``dict.__setitem__``.
+    """
+    import frappe
+
+    previous = frappe.session.user
+    frappe.session.user = email
+    try:
+        yield
+    finally:
+        frappe.session.user = previous
+
+
 # ---------------------------------------------------------------------------
 # follow_ups.py — scheduled passes
 # ---------------------------------------------------------------------------
@@ -204,17 +224,17 @@ class TestCompleteFollowup(unittest.TestCase):
         self.assertEqual(out, {"ok": True})
 
     def test_owner_rep_can_complete(self):
-        with patch.object(crm.frappe, "get_roles", return_value=["B2B Sales Rep"]), patch.object(
-            crm.frappe.session, "user", "rep@x.com", create=True
+        with _as_user("rep@x.com"), patch.object(
+            crm.frappe, "get_roles", return_value=["B2B Sales Rep"]
         ), patch.object(crm.frappe.db, "get_value", return_value="rep@x.com"):
             self.assertTrue(crm._can_complete_followup("Lead", "L-1"))
 
     def test_non_owner_rep_denied(self):
-        with patch.object(crm.frappe, "get_roles", return_value=["B2B Sales Rep"]), patch.object(
-            crm.frappe.session, "user", "other@x.com", create=True
-        ), patch.object(crm.frappe.db, "get_value", return_value="rep@x.com"), patch.object(
-            crm.frappe.db, "exists", return_value=False
-        ):
+        with _as_user("other@x.com"), patch.object(
+            crm.frappe, "get_roles", return_value=["B2B Sales Rep"]
+        ), patch.object(
+            crm.frappe.db, "get_value", return_value="rep@x.com"
+        ), patch.object(crm.frappe.db, "exists", return_value=False):
             self.assertFalse(crm._can_complete_followup("Lead", "L-1"))
 
     def test_plain_user_rejected_by_gate(self):
