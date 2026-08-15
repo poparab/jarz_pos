@@ -424,30 +424,25 @@ def _already_paid_by_migration(invoice: str) -> bool:
 
 
 def _build_payment_entry(invoice: Any, account: str) -> Any:
-    payment = frappe.new_doc("Payment Entry")
-    payment.payment_type = "Receive"
-    payment.company = invoice.company
-    payment.posting_date = frappe.utils.today()
-    payment.party_type = "Customer"
-    payment.party = invoice.customer
-    payment.paid_from = invoice.debit_to  # the receivable this clears
-    payment.paid_to = account
-    payment.paid_amount = invoice.outstanding_amount
-    payment.received_amount = invoice.outstanding_amount
-    payment.source_exchange_rate = 1
-    payment.target_exchange_rate = 1
+    """Build the Payment Entry the way the Desk's "Create > Payment" button does.
+
+    Hand-constructing this document is a trap: HRMS replaces the Payment Entry
+    class with its own ``EmployeePaymentEntry`` subclass, and a doc built field
+    by field never gets ``party_account`` populated, so ``set_missing_values``
+    dies on an AttributeError before any validation runs. ``get_payment_entry``
+    is ERPNext's own builder -- it resolves the party account, the account
+    currencies, the cost center, the exchange rate and the reference allocation
+    from the invoice itself, and it already dates the entry ``nowdate()``, which
+    is the posting date this migration wants.
+    """
+    from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+    payment = get_payment_entry("Sales Invoice", invoice.name, bank_account=account)
     payment.reference_no = MARKER
     payment.reference_date = frappe.utils.today()
     payment.remarks = "{0} | woo_order_id={1} | invoice={2}".format(
         MARKER, invoice.woo_order_id, invoice.name
     )
-    payment.append("references", {
-        "reference_doctype": "Sales Invoice",
-        "reference_name": invoice.name,
-        "total_amount": invoice.grand_total,
-        "outstanding_amount": invoice.outstanding_amount,
-        "allocated_amount": invoice.outstanding_amount,
-    })
     payment.flags.ignore_woo_outbound = True
     return payment
 
@@ -467,10 +462,13 @@ def _receive_payment(invoice: Any, woo_payment_method: str, dry_run: bool):
     if dry_run:
         # Build and validate for real, but never insert. This catches a missing
         # account, a party mismatch or a bad allocation without writing a row
-        # and without firing a single hook.
-        payment.set_missing_values()
+        # and without firing a single hook. `validate` runs the whole chain --
+        # setup_party_account_field, set_missing_values, set_missing_ref_details
+        # and the allocation checks.
         payment.validate()
-        return None, "DRY", "WOULD receive {0:,.2f} -> {1}".format(amount, account)
+        return None, "DRY", "WOULD receive {0:,.2f} -> {1} ({2})".format(
+            amount, account, payment.paid_from
+        )
 
     payment.insert(ignore_permissions=True)
     payment.submit()
