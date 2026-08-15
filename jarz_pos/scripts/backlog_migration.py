@@ -696,14 +696,25 @@ def run_cancel(dry_run: bool = True, limit: Optional[int] = None,
             record["note"] = "cancelled"
             frappe.db.commit()
 
+        except frappe.ValidationError as exc:
+            # A ValidationError here is a guard doing its job, not a defect:
+            # `block_cancel_if_dispatched` refuses an invoice already Out for
+            # Delivery, and ERPNext itself refuses one with a submitted Delivery
+            # Note. Both mean goods physically moved, which is a business
+            # decision and not a clerical error -- so it goes to a human with
+            # the reason attached, rather than halting the whole run.
+            #
+            # Matching on the exception type rather than on words in the message
+            # is deliberate: the first version of this looked for "dispatch",
+            # which silently let the Delivery Note refusal count as a hard
+            # failure and would have halted production after three of them.
+            record["outcome"] = "SKIP"
+            record["note"] = "blocked -- manual review: {0}".format(exc)
+            frappe.db.rollback()
+            audit.append(record)
+            continue
+
         except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            if "dispatch" in message.lower():
-                record["outcome"] = "SKIP"
-                record["note"] = "blocked (dispatched) -- manual review: {0}".format(message)
-                frappe.db.rollback()
-                audit.append(record)
-                continue
             failures += 1
             record["outcome"] = "FAIL"
             record["note"] = "{0}: {1}".format(type(exc).__name__, exc)
