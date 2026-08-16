@@ -48,10 +48,11 @@
  "fields": [
   {
    "fieldname": "naming_series",
-   "fieldtype": "Data",
+   "fieldtype": "Select",
    "label": "Series",
+   "options": "JREXP-.#####",
    "default": "JREXP-.#####",
-   "read_only": 1
+   "set_only_once": 1
   },
   {
    "fieldname": "expense_name",

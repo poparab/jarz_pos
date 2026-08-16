@@ -5,6 +5,7 @@ and GL reconciliation classification — so they run without a site or database.
 """
 
 from datetime import date
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -172,6 +173,51 @@ class TestMonthlyEquivalent(unittest.TestCase):
 		)
 
 		self.assertEqual(api_map, doctype_map)
+
+
+class TestNamingSeriesFallback(unittest.TestCase):
+	"""API and Data Import inserts never get the form's client-side default."""
+
+	def _before_insert(self, naming_series):
+		from jarz_pos.doctype.jarz_recurring_expense.jarz_recurring_expense import (
+			JarzRecurringExpense,
+		)
+
+		doc = MagicMock()
+		doc.naming_series = naming_series
+		JarzRecurringExpense.before_insert(doc)
+		return doc.naming_series
+
+	def test_missing_series_is_filled_in(self):
+		from jarz_pos.doctype.jarz_recurring_expense.jarz_recurring_expense import (
+			DEFAULT_NAMING_SERIES,
+		)
+
+		self.assertEqual(self._before_insert(None), DEFAULT_NAMING_SERIES)
+		self.assertEqual(self._before_insert(""), DEFAULT_NAMING_SERIES)
+
+	def test_explicit_series_is_left_alone(self):
+		self.assertEqual(self._before_insert("CUSTOM-.#####"), "CUSTOM-.#####")
+
+	def test_default_matches_the_doctype_field_options(self):
+		import json
+		import os
+
+		from jarz_pos.doctype.jarz_recurring_expense import jarz_recurring_expense as mod
+
+		path = os.path.join(
+			os.path.dirname(mod.__file__), "jarz_recurring_expense.json"
+		)
+		with io.open(path, encoding="utf-8") as handle:
+			schema = json.load(handle)
+
+		field = next(
+			f for f in schema["fields"] if f["fieldname"] == "naming_series"
+		)
+		# A read-only Data field silently drops its default on non-form inserts.
+		self.assertEqual(field["fieldtype"], "Select")
+		self.assertFalse(field.get("read_only"))
+		self.assertEqual(field["options"], mod.DEFAULT_NAMING_SERIES)
 
 
 if __name__ == "__main__":

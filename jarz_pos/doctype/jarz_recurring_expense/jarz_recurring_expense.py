@@ -24,8 +24,18 @@ FREQUENCY_MONTHS = {
     "Annual": 12,
 }
 
+# Kept in step with the `naming_series` field's options in the DocType JSON.
+DEFAULT_NAMING_SERIES = "JREXP-.#####"
+
 
 class JarzRecurringExpense(Document):
+    def before_insert(self):
+        # The form fills `naming_series` from its default client-side, but API
+        # inserts and Data Import do not — leaving those paths to fail autoname
+        # with "Naming Series mandatory". Fill it here so every path names alike.
+        if not self.naming_series:
+            self.naming_series = DEFAULT_NAMING_SERIES
+
     def validate(self):
         self._validate_amount()
         self._validate_period()
