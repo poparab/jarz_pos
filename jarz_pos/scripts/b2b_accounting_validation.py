@@ -470,8 +470,11 @@ def _pick_courier_party(pos_profile: str | None = None) -> tuple[str, str] | tup
             branch = resolve_courier_branch(pt, p)
         except Exception:
             return True
-        # Empty branch = unrestricted courier; otherwise must equal the profile.
-        return branch in ("", pos_profile)
+        # An empty branch is NOT "unrestricted" — ``ensure_courier_in_branch``
+        # throws "Courier {0} has no branch and cannot be assigned." on exactly
+        # that case, so a branchless party picked here fails at dispatch instead
+        # of skipping. Mirror the server rule: the branch must be set AND equal.
+        return bool(branch) and branch == pos_profile
 
     for pt, doctype, flt in (
         ("Employee", "Employee", {"status": "Active"}),
