@@ -1,0 +1,257 @@
+{
+ "actions": [],
+ "allow_copy": 1,
+ "allow_import": 1,
+ "allow_rename": 1,
+ "autoname": "naming_series:",
+ "creation": "2026-08-17 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "customer",
+  "customer_name",
+  "label_title",
+  "column_break_identity",
+  "enabled",
+  "we_print",
+  "applies_to_item_group",
+  "labels_per_unit",
+  "stock_section",
+  "on_hand_qty",
+  "min_stock_qty",
+  "reorder_qty",
+  "column_break_stock",
+  "avg_daily_usage",
+  "days_of_cover",
+  "status",
+  "tracking_section",
+  "last_movement_on",
+  "last_counted_on",
+  "column_break_tracking",
+  "last_alert_on",
+  "notes"
+ ],
+ "fields": [
+  {
+   "default": "JLBL-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Naming Series",
+   "no_copy": 1,
+   "options": "JLBL-.#####",
+   "print_hide": 1,
+   "set_only_once": 1
+  },
+  {
+   "description": "The B2B customer this label design belongs to.",
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fetch_from": "customer.customer_name",
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Customer Name",
+   "read_only": 1
+  },
+  {
+   "default": "Default",
+   "description": "Name of this label design, e.g. \"250g Jar\" or \"Large\". One customer may have several.",
+   "fieldname": "label_title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "description": "Untick to retire a label design without deleting its history.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Tick when JARZ prints this label. Untick for customers who supply their own labels — those are never counted and never alerted on.",
+   "fieldname": "we_print",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "We Print This Label"
+  },
+  {
+   "description": "Optional. When set, only invoice lines in this Item Group consume this label. Leave blank when the customer has a single label for everything.",
+   "fieldname": "applies_to_item_group",
+   "fieldtype": "Link",
+   "label": "Applies To Item Group",
+   "options": "Item Group"
+  },
+  {
+   "default": "1",
+   "description": "Labels used per unit sold. Normally 1 label per jar.",
+   "fieldname": "labels_per_unit",
+   "fieldtype": "Float",
+   "label": "Labels Per Unit",
+   "precision": "2"
+  },
+  {
+   "fieldname": "stock_section",
+   "fieldtype": "Section Break",
+   "label": "Stock & Reorder"
+  },
+  {
+   "description": "Derived from the label movement ledger. Never edit directly — post an Adjustment movement instead.",
+   "fieldname": "on_hand_qty",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "On Hand",
+   "read_only": 1
+  },
+  {
+   "description": "Never let stock fall below this. Reaching it forces a Reorder Now regardless of usage rate.",
+   "fieldname": "min_stock_qty",
+   "fieldtype": "Int",
+   "label": "Minimum Stock"
+  },
+  {
+   "description": "How many labels a normal print batch produces. Pre-fills the print order.",
+   "fieldname": "reorder_qty",
+   "fieldtype": "Int",
+   "label": "Print Batch Qty"
+  },
+  {
+   "fieldname": "column_break_stock",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "avg_daily_usage",
+   "fieldtype": "Float",
+   "label": "Avg Daily Usage",
+   "precision": "2",
+   "read_only": 1
+  },
+  {
+   "description": "On hand ÷ average daily usage.",
+   "fieldname": "days_of_cover",
+   "fieldtype": "Float",
+   "label": "Days Of Cover",
+   "precision": "1",
+   "read_only": 1
+  },
+  {
+   "default": "OK",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "OK\nReorder Soon\nReorder Now\nOut of Stock\nOn Order\nNot Tracked",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tracking_section",
+   "fieldtype": "Section Break",
+   "label": "Tracking"
+  },
+  {
+   "fieldname": "last_movement_on",
+   "fieldtype": "Date",
+   "label": "Last Movement On",
+   "read_only": 1
+  },
+  {
+   "description": "Last time somebody physically counted this label stock.",
+   "fieldname": "last_counted_on",
+   "fieldtype": "Date",
+   "label": "Last Counted On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_tracking",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Set by the daily alert so the same reorder is not announced twice in one day.",
+   "fieldname": "last_alert_on",
+   "fieldtype": "Date",
+   "label": "Last Alert On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "is_submittable": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-08-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Customer Label",
+ "naming_rule": "Naming Series",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "B2B Sales Rep",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Stock Manager"
+  }
+ ],
+ "show_name_in_global_search": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "customer_name",
+ "track_changes": 1
+}

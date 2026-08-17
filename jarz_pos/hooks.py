@@ -292,6 +292,11 @@ doc_events = {
         "jarz_pos.crm.pos_bridge.link_b2b_sale_to_opportunity",
         # Promo-code engine: record redemptions (concurrency-safe, may abort submit)
         "jarz_pos.services.promo_codes.record_redemptions_on_submit",
+        # B2B printed labels: draw down the customer's label stock. Deliberately
+        # on submit rather than on the OFD transition where consumable_deduction
+        # sits — a B2B supply order does not have to travel the dispatch kanban,
+        # and one that never reached OFD would silently never consume a label.
+        "jarz_pos.services.label_stock.consume_labels_on_invoice_submit",
     ],
     # Emit state-change events for already-submitted invoices edited elsewhere
     "on_update_after_submit": [
@@ -315,6 +320,8 @@ doc_events = {
             "jarz_pos.services.consumable_deduction.reverse_consumable_deduction_on_cancel",
             # Promo-code engine: reverse redemptions, recompute times_used
             "jarz_pos.services.promo_codes.reverse_redemptions_on_cancel",
+            # B2B printed labels: hand back whatever this invoice consumed.
+            "jarz_pos.services.label_stock.reverse_labels_on_invoice_cancel",
         ],
         # Validate bundle items before submission
         "before_submit": "jarz_pos.events.sales_invoice.validate_invoice_before_submit"
@@ -342,6 +349,9 @@ scheduler_events = {
         # "jarz_pos.crm.lead_scoring.compute_lead_scores",
         "jarz_pos.crm.follow_ups.run_followup_reminders",
         "jarz_pos.crm.reorder_forecast.compute_reorder_forecast",
+        # B2B printed labels: refresh every label's cover and alert on the ones
+        # that must go to the print house now to land before they run out.
+        "jarz_pos.services.label_stock.run_label_stock_alerts",
     ],
     "weekly": [
         "jarz_pos.tasks.run_weekly_velocity_update",

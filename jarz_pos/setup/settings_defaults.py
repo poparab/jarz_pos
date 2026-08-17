@@ -71,6 +71,20 @@ SEED_DEFAULTS: Dict[str, Any] = {
     "receipt_footer_text": "Thank you for Your Order",
     "receipt_phone": "01061332266",
     "receipt_website": "https://www.orderjarz.com",
+    # B2B customer labels. These ARE seeded, unlike the other feature flags,
+    # because `services.label_stock` falls back to exactly these values when the
+    # field has never been written — and an unwritten Check renders unticked in
+    # Desk, so an operator would otherwise be shown "off" for something that is
+    # on. Seeding makes the form agree with the behaviour. `_is_empty` treats a
+    # stored 0 as a decision, so switching either flag off still survives a
+    # migrate. The pair is safe to default on because the whole feature is inert
+    # until somebody creates a Jarz Customer Label.
+    "label_print_lead_days_min": 2,
+    "label_print_lead_days_max": 3,
+    "label_print_rest_day": "Friday",
+    "label_reorder_buffer_days": 3,
+    "label_auto_consume_on_invoice": 1,
+    "label_alerts_enabled": 1,
 }
 
 

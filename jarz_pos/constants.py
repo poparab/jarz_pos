@@ -129,6 +129,8 @@ class WS_EVENTS:
     COURIER_DUTY_CHANGED = "jarz_pos_courier_duty_changed"
     COURIER_DEPOSIT_DECLARED = "jarz_pos_courier_deposit_declared"
     ADDRESS_PIN_UPDATED = "jarz_pos_address_pin_updated"
+    # B2B printed-label stock running low (see services/label_stock.py).
+    LABEL_STOCK_ALERT = "jarz_pos_label_stock_alert"
     TEST_EVENT = "test_event"
 
 

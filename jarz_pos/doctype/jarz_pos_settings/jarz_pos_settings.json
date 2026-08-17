@@ -56,7 +56,15 @@
   "purchase_default_taxes_template",
   "purchase_default_item_tax_template",
   "purchase_require_bill_no",
-  "purchase_request_schedule_days"
+  "purchase_request_schedule_days",
+  "label_section",
+  "label_print_lead_days_min",
+  "label_print_lead_days_max",
+  "label_print_rest_day",
+  "column_break_label",
+  "label_reorder_buffer_days",
+  "label_auto_consume_on_invoice",
+  "label_alerts_enabled"
  ],
  "fields": [
   {
@@ -408,6 +416,61 @@
    "fieldtype": "Int",
    "label": "Request Default Lead Days",
    "non_negative": 1
+  },
+  {
+   "fieldname": "label_section",
+   "fieldtype": "Section Break",
+   "label": "B2B Customer Labels"
+  },
+  {
+   "default": "2",
+   "description": "Fastest the print house turns a label batch around, in working days.",
+   "fieldname": "label_print_lead_days_min",
+   "fieldtype": "Int",
+   "label": "Print Lead Days (Min)",
+   "non_negative": 1
+  },
+  {
+   "default": "3",
+   "description": "Slowest the print house turns a label batch around, in working days. Reorder alerts are timed against this one.",
+   "fieldname": "label_print_lead_days_max",
+   "fieldtype": "Int",
+   "label": "Print Lead Days (Max)",
+   "non_negative": 1
+  },
+  {
+   "default": "Friday",
+   "description": "Weekly day the print house is closed. It is skipped when counting printing days, so a 3-day batch ordered Wednesday is ready Sunday, not Saturday.",
+   "fieldname": "label_print_rest_day",
+   "fieldtype": "Select",
+   "label": "Printing Rest Day",
+   "options": "None\nFriday\nSaturday\nSunday\nFriday & Saturday"
+  },
+  {
+   "fieldname": "column_break_label",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "3",
+   "description": "Extra days of cover on top of the print lead time before a label is flagged Reorder Soon.",
+   "fieldname": "label_reorder_buffer_days",
+   "fieldtype": "Int",
+   "label": "Reorder Buffer Days",
+   "non_negative": 1
+  },
+  {
+   "default": "1",
+   "description": "Draw labels down automatically when a Sales Invoice is submitted for a customer that has a tracked label. Leave on: with it off the ledger only moves when somebody records a count by hand.",
+   "fieldname": "label_auto_consume_on_invoice",
+   "fieldtype": "Check",
+   "label": "Auto-Consume Labels On Invoice"
+  },
+  {
+   "default": "1",
+   "description": "Send the daily 'labels running low' alert to managers and B2B reps.",
+   "fieldname": "label_alerts_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Label Reorder Alerts"
   }
  ],
  "index_web_pages_for_search": 0,

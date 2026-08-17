@@ -149,6 +149,9 @@ CARDS = [
             {"label": "Jarz Price List Category Rate", "link_type": "DocType", "link_to": "Jarz Price List Category Rate"},
             {"label": "Price List", "link_type": "DocType", "link_to": "Price List"},
             {"label": "Customer", "link_type": "DocType", "link_to": "Customer"},
+            {"label": "Customer Label", "link_type": "DocType", "link_to": "Jarz Customer Label"},
+            {"label": "Label Print Order", "link_type": "DocType", "link_to": "Jarz Label Print Order"},
+            {"label": "Label Movement", "link_type": "DocType", "link_to": "Jarz Label Movement"},
         ],
     },
     {
