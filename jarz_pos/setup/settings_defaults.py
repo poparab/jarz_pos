@@ -126,6 +126,42 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
+def _stored_value(fieldname: str) -> Any:
+    """The raw ``tabSingles`` value for *fieldname*, or None if there is no row.
+
+    ``frappe.db.get_single_value`` cannot be used to decide whether a field has
+    ever been written. It ends with ``cast_fieldtype``, which turns ``Int`` and
+    ``Check`` into ``cint(value)`` — so a field with no row at all reads back as
+    ``0``, which ``_is_empty`` then (correctly, by its own rule) reports as "not
+    empty". The two rules combined meant **an Int or Check field could never be
+    seeded on a real site**, silently, forever.
+
+    That was observed, not theorised: the label-printing settings were added to
+    SEED_DEFAULTS with a comment promising they would be seeded, the migrate ran
+    green, and staging came up with every one of the five Int/Check fields
+    unwritten while the lone Select field seeded fine.
+
+    Reading the row directly keeps the "0 is a decision" doctrine intact — a
+    stored ``"0"`` is still not empty — while letting a genuinely absent field
+    be filled.
+    """
+    try:
+        rows = frappe.db.sql(
+            "select `value` from `tabSingles` where `doctype`=%s and `field`=%s limit 1",
+            (SETTINGS_DOCTYPE, fieldname),
+        )
+    except Exception:
+        # Fall back to the casting reader rather than seeding blindly: writing
+        # over an operator's choice is worse than skipping a field.
+        try:
+            return frappe.db.get_single_value(SETTINGS_DOCTYPE, fieldname)
+        except Exception:
+            return 0  # not empty -> skip
+    if not rows:
+        return None
+    return rows[0][0]
+
+
 def ensure_settings_defaults() -> None:
     """Fill only the empty fields on the settings Single. Never raises.
 
@@ -144,10 +180,9 @@ def ensure_settings_defaults() -> None:
             # written blindly, so a removed field cannot break the migrate.
             if not meta.get_field(fieldname):
                 continue
-            try:
-                current = frappe.db.get_single_value(SETTINGS_DOCTYPE, fieldname)
-            except Exception:
-                continue
+            # Row-level read, NOT get_single_value: see _stored_value for why an
+            # Int/Check field could otherwise never be seeded.
+            current = _stored_value(fieldname)
             if not _is_empty(current):
                 continue
 

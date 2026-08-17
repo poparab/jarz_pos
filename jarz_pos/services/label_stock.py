@@ -116,10 +116,36 @@ def _float(value: Any, default: float = 0.0) -> float:
 
 
 def _single_value(fieldname: str) -> Any:
+    """Raw stored value for a settings field, or None when it was never written.
+
+    Deliberately NOT ``frappe.db.get_single_value``. That helper ends with
+    ``cast_fieldtype(df.fieldtype, val)``, which for ``Int`` and ``Check`` is
+    ``cint(value)`` — so a field with **no row at all** in ``tabSingles`` comes
+    back as ``0``, indistinguishable from an operator who deliberately set 0.
+
+    That is not hypothetical. This module shipped reading through
+    ``get_single_value``, and the first staging deploy came up with
+    ``auto_consume=False``, ``alerts_enabled=False`` and ``buffer_days=0`` on a
+    site where nobody had touched a thing: the whole feature was dark, quietly,
+    while every endpoint answered 200. Only ``label_print_rest_day`` survived,
+    because ``Select`` casts through ``cstr(None)`` to ``""`` — which the
+    fallbacks below do treat as unset.
+
+    Reading ``tabSingles`` directly is the only way to tell "never configured"
+    from "configured to zero", and every default in ``get_label_settings``
+    depends on that distinction.
+    """
     try:
-        return frappe.db.get_single_value(SETTINGS_DOCTYPE, fieldname)
+        rows = frappe.db.sql(
+            "select `value` from `tabSingles` where `doctype`=%s and `field`=%s limit 1",
+            (SETTINGS_DOCTYPE, fieldname),
+        )
     except Exception:
         return None
+    if not rows:
+        return None
+    value = rows[0][0]
+    return None if value is None else value
 
 
 def _today():

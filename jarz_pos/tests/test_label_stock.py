@@ -511,5 +511,74 @@ class TestWriteSnapshot(unittest.TestCase):
         write.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Settings reader (regression: the feature shipped dark once)
+# ---------------------------------------------------------------------------
+class TestSingleValueReader(unittest.TestCase):
+    """The unset-vs-zero distinction every default in this module rests on.
+
+    ``frappe.db.get_single_value`` casts Int/Check through ``cint()``, so a field
+    with no row in ``tabSingles`` reads back as ``0`` — identical to an operator
+    who deliberately set 0. Reading through it made ``auto_consume`` and
+    ``alerts_enabled`` evaluate False on a site nobody had configured, and the
+    whole feature went live dark while every endpoint answered 200.
+
+    These tests exercise the REAL reader against a mocked DB rather than
+    patching ``_single_value`` out, which is exactly how the original suite
+    missed this.
+    """
+
+    def test_no_row_means_never_written(self):
+        with patch.object(ls.frappe.db, "sql", return_value=[]):
+            self.assertIsNone(ls._single_value("label_alerts_enabled"))
+
+    def test_a_stored_zero_is_returned_not_swallowed(self):
+        with patch.object(ls.frappe.db, "sql", return_value=[("0",)]):
+            self.assertEqual(ls._single_value("label_alerts_enabled"), "0")
+
+    def test_a_stored_value_is_returned_verbatim(self):
+        with patch.object(ls.frappe.db, "sql", return_value=[("7",)]):
+            self.assertEqual(ls._single_value("label_reorder_buffer_days"), "7")
+
+    def test_a_null_column_reads_as_never_written(self):
+        with patch.object(ls.frappe.db, "sql", return_value=[(None,)]):
+            self.assertIsNone(ls._single_value("label_print_rest_day"))
+
+    def test_a_db_failure_degrades_to_the_defaults(self):
+        with patch.object(ls.frappe.db, "sql", side_effect=RuntimeError("no table")):
+            self.assertIsNone(ls._single_value("label_alerts_enabled"))
+
+    def test_an_unconfigured_site_gets_the_feature_switched_ON(self):
+        # The exact regression: empty tabSingles must not read as "all zeroes".
+        with patch.object(ls.frappe.db, "sql", return_value=[]):
+            settings = ls.get_label_settings()
+        self.assertTrue(settings["auto_consume"])
+        self.assertTrue(settings["alerts_enabled"])
+        self.assertEqual(settings["buffer_days"], 3)
+        self.assertEqual(settings["lead_days_min"], 2)
+        self.assertEqual(settings["lead_days_max"], 3)
+        self.assertEqual(settings["rest_day"], "Friday")
+
+    def test_an_operator_zero_still_switches_it_off(self):
+        # The other half: a real stored 0 must survive, or the "0 is a decision"
+        # doctrine is broken in the opposite direction.
+        def stored(query, params):
+            return [("0",)] if params[1] == "label_alerts_enabled" else []
+
+        with patch.object(ls.frappe.db, "sql", side_effect=stored):
+            settings = ls.get_label_settings()
+        self.assertFalse(settings["alerts_enabled"])
+        self.assertTrue(settings["auto_consume"])  # untouched, still defaults on
+
+    def test_the_casting_reader_is_never_used(self):
+        # Guards against a future "simplification" back to get_single_value,
+        # which would silently reintroduce the dark-launch bug.
+        with patch.object(ls.frappe.db, "sql", return_value=[]), patch.object(
+            ls.frappe.db, "get_single_value"
+        ) as casting_reader:
+            ls.get_label_settings()
+        casting_reader.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
