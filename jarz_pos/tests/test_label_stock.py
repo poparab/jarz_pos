@@ -471,5 +471,45 @@ class TestAlertMessage(unittest.TestCase):
         self.assertIn("500", message)
 
 
+# ---------------------------------------------------------------------------
+# Snapshot write-back
+# ---------------------------------------------------------------------------
+class TestWriteSnapshot(unittest.TestCase):
+    def _snapshot(self, **overrides):
+        snap = {
+            "name": "JLBL-00001",
+            "on_hand_qty": 40,
+            "avg_daily_usage": 10.0,
+            "days_of_cover": 4.0,
+            "status": ls.STATUS_REORDER_NOW,
+            "last_movement_on": "2026-08-16",
+        }
+        snap.update(overrides)
+        return snap
+
+    def test_writes_the_status_it_was_handed(self):
+        # The daily pass alerts on one snapshot and writes the same one, so the
+        # row can never end up recording a status different from the one that
+        # was announced.
+        with patch.object(ls.frappe.db, "set_value") as write:
+            ls.write_snapshot(self._snapshot())
+        written = {call.args[2]: call.args[3] for call in write.call_args_list}
+        self.assertEqual(written["status"], ls.STATUS_REORDER_NOW)
+        self.assertEqual(written["on_hand_qty"], 40)
+        self.assertEqual(written["days_of_cover"], 4.0)
+
+    def test_unknown_cover_is_stored_as_zero_not_null(self):
+        # The column is a Float; None would fail the write on some backends.
+        with patch.object(ls.frappe.db, "set_value") as write:
+            ls.write_snapshot(self._snapshot(days_of_cover=None))
+        written = {call.args[2]: call.args[3] for call in write.call_args_list}
+        self.assertEqual(written["days_of_cover"], 0)
+
+    def test_a_snapshot_with_no_name_writes_nothing(self):
+        with patch.object(ls.frappe.db, "set_value") as write:
+            ls.write_snapshot({"name": None})
+        write.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

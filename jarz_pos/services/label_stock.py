@@ -481,13 +481,37 @@ def _runs_out_on(on_hand: int, avg_daily_usage: float) -> Optional[str]:
         return None
 
 
+def write_snapshot(snapshot: Dict[str, Any]) -> None:
+    """Persist an already-computed snapshot onto its label's cached columns.
+
+    Split out from ``refresh_label`` so a caller that has just built a snapshot
+    can write *that* one rather than compute a second. It is not only cheaper:
+    recomputing would leave the status written to the row free to disagree with
+    the status the caller acted on, which for the daily alert means announcing
+    one thing and recording another.
+
+    Writes are per-field with ``update_modified=False`` so a refresh never shows
+    up as an edit in the version history.
+    """
+    name = snapshot.get("name")
+    if not name:
+        return
+    updates = {
+        "on_hand_qty": snapshot["on_hand_qty"],
+        "avg_daily_usage": snapshot["avg_daily_usage"],
+        "days_of_cover": snapshot["days_of_cover"] or 0,
+        "status": snapshot["status"],
+        "last_movement_on": snapshot["last_movement_on"],
+    }
+    for field, value in updates.items():
+        frappe.db.set_value(LABEL_DOCTYPE, name, field, value, update_modified=False)
+
+
 def refresh_label(label_name: str) -> Optional[Dict[str, Any]]:
     """Recompute the cached columns on one label and write them back.
 
     The cached values exist only so Desk list views and reports can sort and
-    filter; every read path recomputes from the ledger anyway. Writes are
-    per-field with ``update_modified=False`` so a refresh never shows up as an
-    edit in the version history.
+    filter; every read path recomputes from the ledger anyway.
     """
     if not frappe or not label_name or not _doctype_exists(LABEL_DOCTYPE):
         return None
@@ -506,15 +530,7 @@ def refresh_label(label_name: str) -> Optional[Dict[str, Any]]:
             return None
 
         snapshot = build_snapshot(row)
-        updates = {
-            "on_hand_qty": snapshot["on_hand_qty"],
-            "avg_daily_usage": snapshot["avg_daily_usage"],
-            "days_of_cover": snapshot["days_of_cover"] or 0,
-            "status": snapshot["status"],
-            "last_movement_on": snapshot["last_movement_on"],
-        }
-        for field, value in updates.items():
-            frappe.db.set_value(LABEL_DOCTYPE, label_name, field, value, update_modified=False)
+        write_snapshot(snapshot)
         return snapshot
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"label_stock: refresh failed for {label_name}")
@@ -914,9 +930,11 @@ def run_label_stock_alerts() -> Dict[str, Any]:
         result["checked"] = len(snapshots)
 
         # Keep the cached Desk columns honest even for labels that are fine.
+        # Writing the snapshot already in hand, rather than recomputing, is what
+        # guarantees the row ends up carrying the same status this pass alerts on.
         for snap in snapshots:
             try:
-                refresh_label(snap["name"])
+                write_snapshot(snap)
             except Exception:
                 continue
 
