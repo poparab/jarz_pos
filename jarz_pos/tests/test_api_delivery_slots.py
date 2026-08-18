@@ -154,3 +154,179 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			start = datetime.datetime.fromisoformat(slot["datetime"])
 			end = datetime.datetime.fromisoformat(slot["end_datetime"])
 			self.assertEqual((end - start).total_seconds(), 3600)
+
+	# ------------------------------------------------------------------
+	# Anchored last slot — mirrors the production WooCommerce (ORDDD) grid
+	# ------------------------------------------------------------------
+
+	# Taken from 699 sampled production Woo orders on 2026-08-18. These are the
+	# slots customers can actually book on orderjarz.com; ERPNext must match.
+	WOO_GRID_A = [
+		"13:00-14:30", "14:30-16:00", "16:00-17:30", "17:30-19:00",
+		"19:00-20:30", "20:30-22:00", "22:00-23:30", "00:00-01:00",
+	]
+	WOO_FRIDAY = [
+		"14:00-15:30", "15:30-17:00", "17:00-18:30", "18:30-20:00",
+		"20:00-21:30", "21:30-23:00", "23:00-00:30", "00:30-01:30",
+	]
+
+	def _hhmm(self, slots):
+		"""Render slots as HH:MM-HH:MM pairs for readable comparisons."""
+		return [f'{s["datetime"][11:16]}-{s["end_datetime"][11:16]}' for s in slots]
+
+	def test_anchored_last_slot_matches_woo_grid(self):
+		"""13:00-01:00 with a 60-min anchored last slot reproduces the Woo grid.
+
+		The regular 90-minute cadence stops at 23:30 and the final slot is
+		00:00-01:00, deliberately leaving 23:30-00:00 unbookable — which is
+		exactly what the WooCommerce store offers.
+		"""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		slots = _generate_day_slots(
+			target_date=self._make_date(),
+			opening_time=datetime.time(13, 0),
+			closing_time=datetime.time(1, 0),
+			same_day="Next Day",
+			slot_duration_minutes=90,
+			last_slot_duration_minutes=60,
+			anchor_last_slot_to_closing=True,
+		)
+
+		self.assertEqual(self._hhmm(slots), self.WOO_GRID_A)
+
+	def test_anchored_last_slot_matches_woo_friday(self):
+		"""Friday opens an hour later and closes 01:30 — no gap, 8 slots."""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		slots = _generate_day_slots(
+			target_date=datetime.date(2030, 1, 4),  # A Friday
+			opening_time=datetime.time(14, 0),
+			closing_time=datetime.time(1, 30),
+			same_day="Next Day",
+			slot_duration_minutes=90,
+			last_slot_duration_minutes=60,
+			anchor_last_slot_to_closing=True,
+		)
+
+		self.assertEqual(self._hhmm(slots), self.WOO_FRIDAY)
+
+	def test_anchor_off_preserves_previous_behaviour(self):
+		"""Without the anchor the cadence runs contiguously to closing, as before."""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		slots = _generate_day_slots(
+			target_date=self._make_date(),
+			opening_time=datetime.time(13, 0),
+			closing_time=datetime.time(1, 0),
+			same_day="Next Day",
+			slot_duration_minutes=90,
+		)
+
+		self.assertEqual(self._hhmm(slots)[-1], "23:30-01:00")
+		self.assertEqual(len(slots), 8)
+
+	def test_anchor_ignored_without_custom_duration(self):
+		"""The anchor needs a last-slot duration; alone it must change nothing."""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		kwargs = dict(
+			target_date=self._make_date(),
+			opening_time=datetime.time(13, 0),
+			closing_time=datetime.time(1, 0),
+			same_day="Next Day",
+			slot_duration_minutes=90,
+		)
+		plain = _generate_day_slots(**kwargs)
+		anchored = _generate_day_slots(anchor_last_slot_to_closing=True, **kwargs)
+
+		self.assertEqual(self._hhmm(plain), self._hhmm(anchored))
+
+	def test_anchor_ignored_when_it_cannot_fit(self):
+		"""An anchored slot wider than the whole window must not produce a slot."""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		slots = _generate_day_slots(
+			target_date=self._make_date(),
+			opening_time=datetime.time(23, 0),
+			closing_time=datetime.time(23, 30),
+			same_day="Same Day",
+			slot_duration_minutes=90,
+			last_slot_duration_minutes=60,
+			anchor_last_slot_to_closing=True,
+		)
+
+		self.assertEqual(slots, [])
+
+	def test_anchored_slot_survives_today_filtering(self):
+		"""Late in the day the anchored tail is still offered on its own."""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		target = self._make_date()
+		slots = _generate_day_slots(
+			target_date=target,
+			opening_time=datetime.time(13, 0),
+			closing_time=datetime.time(1, 0),
+			same_day="Next Day",
+			slot_duration_minutes=90,
+			current_datetime=datetime.datetime.combine(target, datetime.time(23, 0)),
+			last_slot_duration_minutes=60,
+			anchor_last_slot_to_closing=True,
+		)
+
+		self.assertEqual(self._hhmm(slots), ["00:00-01:00"])
+
+	def test_anchored_slot_respects_preparation_buffer(self):
+		"""The anchored slot obeys the same 30-minute buffer as every other slot."""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		target = self._make_date()
+		slots = _generate_day_slots(
+			target_date=target,
+			opening_time=datetime.time(13, 0),
+			closing_time=datetime.time(1, 0),
+			same_day="Next Day",
+			slot_duration_minutes=90,
+			# 23:45 leaves only 15 minutes before a 00:00 start.
+			current_datetime=datetime.datetime.combine(target, datetime.time(23, 45)),
+			last_slot_duration_minutes=60,
+			anchor_last_slot_to_closing=True,
+		)
+
+		self.assertEqual(slots, [])
+
+	def test_preview_endpoint_reproduces_the_woo_week(self):
+		"""The Desk preview must render the same aligned week the POS serves."""
+		import json as _json
+		from jarz_pos.api.delivery_slots import preview_timetable_slots
+
+		timetable = [
+			{"day": day, "opening_time": "13:00:00", "closing_time": "01:00:00",
+			 "same_day": "Next Day"}
+			for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Saturday", "Sunday")
+		]
+		timetable.append({
+			"day": "Friday", "opening_time": "14:00:00",
+			"closing_time": "01:30:00", "same_day": "Next Day",
+		})
+
+		result = preview_timetable_slots(_json.dumps({
+			"slot_hours": 1, "slot_minutes": 30,
+			"has_custom_last_slot": 1, "last_slot_hours": 1, "last_slot_minutes": 0,
+			"anchor_last_slot_to_closing": 1,
+			"timetable": timetable,
+		}))
+
+		self.assertEqual(result["total_slots"], 56)
+		by_day = {d["day"]: d for d in result["days"]}
+		self.assertEqual(
+			[f'{s["start"]}-{s["end"]}' for s in by_day["Monday"]["slots"]],
+			self.WOO_GRID_A,
+		)
+		self.assertEqual(
+			[f'{s["start"]}-{s["end"]}' for s in by_day["Friday"]["slots"]],
+			self.WOO_FRIDAY,
+		)
+		# The 23:30-00:00 gap is interior, not a tail - it must still be reported.
+		self.assertEqual(by_day["Monday"]["uncovered_minutes"], 30)
+		self.assertEqual(by_day["Friday"]["uncovered_minutes"], 0)

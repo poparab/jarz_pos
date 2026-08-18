@@ -27,6 +27,7 @@ function render_slot_preview(frm) {
 		has_custom_last_slot: cint(frm.doc.has_custom_last_slot),
 		last_slot_hours: cint(frm.doc.last_slot_hours),
 		last_slot_minutes: cint(frm.doc.last_slot_minutes),
+		anchor_last_slot_to_closing: cint(frm.doc.anchor_last_slot_to_closing),
 		timetable: (frm.doc.timetable || []).map((row) => ({
 			day: row.day,
 			opening_time: row.opening_time,
@@ -132,6 +133,7 @@ frappe.ui.form.on("POS Profile Timetable", {
 	has_custom_last_slot: refresh_preview,
 	last_slot_hours: refresh_preview,
 	last_slot_minutes: refresh_preview,
+	anchor_last_slot_to_closing: refresh_preview,
 });
 
 frappe.ui.form.on("POS Profile Day Timing", {

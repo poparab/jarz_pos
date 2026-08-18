@@ -104,7 +104,8 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
         timetable_config = frappe.get_value(
             "POS Profile Timetable",
             {"pos_profile": pos_profile_name},
-            ["name", "slot_hours", "slot_minutes", "has_custom_last_slot", "last_slot_hours", "last_slot_minutes"],
+            ["name", "slot_hours", "slot_minutes", "has_custom_last_slot", "last_slot_hours",
+             "last_slot_minutes", "anchor_last_slot_to_closing"],
             as_dict=True
         )
 
@@ -131,13 +132,15 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
                 int(timetable_config.last_slot_hours or 1) * 60
                 + int(timetable_config.last_slot_minutes or 0)
             )
+        anchor_last_slot_to_closing = bool(timetable_config.anchor_last_slot_to_closing)
         timetable_name = timetable_config.name
 
         logger.debug(
-            "Timetable %s | slot duration %s min | custom last slot %s min",
+            "Timetable %s | slot duration %s min | custom last slot %s min | anchored %s",
             timetable_name,
             slot_duration_minutes,
             last_slot_duration_minutes,
+            anchor_last_slot_to_closing,
         )
 
         # Get day timings from the child table
@@ -282,7 +285,8 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
                 same_day,
                 slot_duration_minutes,
                 current_datetime if day_offset == 0 else None,  # Only check current time for today
-                last_slot_duration_minutes
+                last_slot_duration_minutes,
+                anchor_last_slot_to_closing,
             )
 
             logger.debug("Generated %s slot(s) for %s", len(day_slots), day_name)
@@ -317,7 +321,8 @@ def _generate_day_slots(
     same_day: str,
     slot_duration_minutes: int,
     current_datetime: datetime = None,
-    last_slot_duration_minutes: int = None
+    last_slot_duration_minutes: int = None,
+    anchor_last_slot_to_closing: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Generate time slots for a specific day.
@@ -331,6 +336,13 @@ def _generate_day_slots(
         current_datetime: Current datetime (only provided for today)
         last_slot_duration_minutes: If set, the final slot of the day uses this shorter duration
             instead of the regular one, allowing an extra slot to fill remaining time before closing.
+        anchor_last_slot_to_closing: Pin the final slot to *end* exactly at closing time
+            rather than letting it follow on from the regular cadence. Regular slots then
+            stop before it, which can leave a deliberate gap between the last regular slot
+            and the final one. This mirrors the WooCommerce (ORDDD) grid, where a
+            13:00-01:00 day runs 90-minute slots to 23:30 and then offers only
+            00:00-01:00, leaving 23:30-00:00 unbookable. Requires
+            ``last_slot_duration_minutes``; ignored without it.
 
     Returns:
         List of time slots for the day
@@ -345,17 +357,17 @@ def _generate_day_slots(
         closing_time = (datetime.min + closing_time).time()
 
     logger.debug(
-        "Slot inputs for %s | opening=%s (%s) closing=%s (%s) same_day=%s",
-        target_date,
+        "Converting times - opening: %s (%s), closing: %s (%s); same_day=%s",
         opening_time,
-        type(opening_time).__name__,
+        type(opening_time),
         closing_time,
-        type(closing_time).__name__,
+        type(closing_time),
         same_day,
     )
 
     # Convert times to datetime objects for easier calculation
-    current_slot_time = datetime.combine(target_date, opening_time)
+    window_start = datetime.combine(target_date, opening_time)
+    current_slot_time = window_start
 
     # Handle same_day vs next_day closing times
     if same_day == TIMING_MODES.NEXT_DAY:
@@ -375,7 +387,28 @@ def _generate_day_slots(
         )
         return slots
 
+    # An anchored last slot ends exactly at closing time. Regular slots must stop
+    # at its start, so compute it up-front and treat it as the cadence ceiling.
+    # Falls back to the unanchored behaviour if it would not fit the window.
+    anchored_start = None
+    if anchor_last_slot_to_closing and last_slot_duration_minutes:
+        candidate = end_time - timedelta(minutes=last_slot_duration_minutes)
+        if candidate >= window_start:
+            anchored_start = candidate
+            logger.debug("Last slot anchored to closing: %s - %s", anchored_start, end_time)
+        else:
+            logger.debug(
+                "Anchored last slot does not fit the window for %s (%s < %s); ignoring anchor",
+                target_date,
+                candidate,
+                window_start,
+            )
+
+    regular_limit = anchored_start or end_time
+
     # If this is today, ensure we only show future slots
+    min_slot_time = None
+    skip_regular_slots = False
     if current_datetime:
         # Add buffer of 30 minutes for preparation
         min_slot_time = current_datetime + timedelta(minutes=30)
@@ -392,16 +425,21 @@ def _generate_day_slots(
                 slots_to_skip,
             )
 
-            # Check if adjusted time is still valid
-            if current_slot_time >= end_time:
-                logger.debug("No valid slots left today after time adjustment")
-                return slots
+            # No regular slots left today. An anchored last slot may still be
+            # valid, so fall through to it instead of returning early.
+            if current_slot_time >= regular_limit:
+                logger.debug("No regular slots left today after time adjustment")
+                skip_regular_slots = True
 
     slot_count = 0
     max_iterations = 50  # Safety limit to prevent infinite loops
     iteration_count = 0
 
-    while current_slot_time < end_time and iteration_count < max_iterations:
+    while (
+        not skip_regular_slots
+        and current_slot_time < regular_limit
+        and iteration_count < max_iterations
+    ):
         iteration_count += 1
         slot_end_time = current_slot_time + timedelta(minutes=slot_duration_minutes)
 
@@ -409,14 +447,20 @@ def _generate_day_slots(
             "Iteration %s: checking slot %s - %s", iteration_count, current_slot_time, slot_end_time
         )
 
-        # Regular slot overflows closing time — try custom last slot before stopping
-        if slot_end_time > end_time:
+        # Regular slot overflows the cadence ceiling. With an anchored last slot
+        # the tail is handled below, so just stop; otherwise try the shorter
+        # custom last slot before giving up.
+        if slot_end_time > regular_limit:
             logger.debug(
-                "Regular slot would extend beyond closing time: %s > %s", slot_end_time, end_time
+                "Regular slot would extend beyond the cadence limit: %s > %s",
+                slot_end_time,
+                regular_limit,
             )
+            if anchored_start:
+                break
             if last_slot_duration_minutes:
                 last_slot_end = current_slot_time + timedelta(minutes=last_slot_duration_minutes)
-                if last_slot_end <= end_time:
+                if last_slot_end <= regular_limit:
                     logger.debug(
                         "Adding custom last slot: %s - %s", current_slot_time, last_slot_end
                     )
@@ -424,30 +468,15 @@ def _generate_day_slots(
                     # Fall through to append, then exit loop
                 else:
                     logger.debug(
-                        "Custom last slot also overflows: %s > %s", last_slot_end, end_time
+                        "Custom last slot also overflows: %s > %s", last_slot_end, regular_limit
                     )
                     break
             else:
                 break
 
-        # Format slot label
-        day_label = _get_day_label(target_date)
-        time_label = f"{current_slot_time.strftime('%I:%M %p')} - {slot_end_time.strftime('%I:%M %p')}"
-
-        slot_data = {
-            'date': target_date.isoformat(),
-            'time': current_slot_time.time().isoformat(),
-            'datetime': current_slot_time.isoformat(),
-            'end_datetime': slot_end_time.isoformat(),
-            'label': f"{day_label}, {time_label}",
-            'day_label': day_label,
-            'time_label': time_label,
-            'is_default': False
-        }
-
-        slots.append(slot_data)
+        slots.append(_build_slot(target_date, current_slot_time, slot_end_time))
         slot_count += 1
-        logger.debug("Generated slot %s: %s", slot_count, time_label)
+        logger.debug("Generated slot %s: %s", slot_count, slots[-1]["time_label"])
 
         # If we appended a custom last slot, the loop must end now
         if slot_end_time != current_slot_time + timedelta(minutes=slot_duration_minutes):
@@ -467,8 +496,37 @@ def _generate_day_slots(
             slot_duration_minutes,
         )
 
+    # Append the anchored last slot, unless today's buffer already ruled it out.
+    if anchored_start:
+        if min_slot_time and anchored_start < min_slot_time:
+            logger.debug(
+                "Anchored last slot %s is inside today's preparation buffer; skipping",
+                anchored_start,
+            )
+        else:
+            slots.append(_build_slot(target_date, anchored_start, end_time))
+            logger.debug("Generated anchored last slot: %s", slots[-1]["time_label"])
+
     logger.debug("Total slots generated for %s: %s", target_date, len(slots))
     return slots
+
+
+def _build_slot(
+    target_date: datetime.date, start: datetime, end: datetime
+) -> Dict[str, Any]:
+    """Shape one slot the way the POS and the preview both expect."""
+    day_label = _get_day_label(target_date)
+    time_label = f"{start.strftime('%I:%M %p')} - {end.strftime('%I:%M %p')}"
+    return {
+        "date": target_date.isoformat(),
+        "time": start.time().isoformat(),
+        "datetime": start.isoformat(),
+        "end_datetime": end.isoformat(),
+        "label": f"{day_label}, {time_label}",
+        "day_label": day_label,
+        "time_label": time_label,
+        "is_default": False,
+    }
 
 
 def _get_day_label(target_date: datetime.date) -> str:
@@ -578,6 +636,8 @@ def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any
         if last_slot_duration_minutes <= 0:
             last_slot_duration_minutes = None
 
+    anchor_last_slot_to_closing = bool(int(config.get("anchor_last_slot_to_closing") or 0))
+
     rows_by_day: Dict[str, Dict[str, Any]] = {}
     for row in config.get("timetable") or []:
         day = (row or {}).get("day")
@@ -643,6 +703,7 @@ def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any
             slot_duration_minutes,
             None,
             last_slot_duration_minutes,
+            anchor_last_slot_to_closing,
         )
 
         entry["slots"] = [
@@ -657,16 +718,26 @@ def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any
         entry["open_minutes"] = int((end_dt - start_dt).total_seconds() // 60)
 
         if generated:
-            last_end = datetime.fromisoformat(generated[-1]["end_datetime"])
-            entry["uncovered_minutes"] = int((end_dt - last_end).total_seconds() // 60)
+            # Count every open minute no slot covers, not just the tail - an
+            # anchored last slot leaves the gap in the middle of the day.
+            covered = 0
+            for slot in generated:
+                covered += int(
+                    (
+                        datetime.fromisoformat(slot["end_datetime"])
+                        - datetime.fromisoformat(slot["datetime"])
+                    ).total_seconds()
+                    // 60
+                )
+            entry["uncovered_minutes"] = max(0, entry["open_minutes"] - covered)
         else:
             entry["uncovered_minutes"] = entry["open_minutes"]
             entry["note"] = "Open window is shorter than one slot - no slots."
 
         if entry["uncovered_minutes"] > 0 and entry["slot_count"]:
             entry["note"] = (
-                f"{entry['uncovered_minutes']} min before closing is not covered "
-                "by any slot."
+                f"{entry['uncovered_minutes']} min of the open window is not "
+                "covered by any slot."
             )
 
         total_slots += entry["slot_count"]
