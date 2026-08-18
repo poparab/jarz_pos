@@ -371,11 +371,16 @@ class TestSettingsSeedNeverPointsAtAMissingRecord(unittest.TestCase):
         self.sd = settings_defaults
 
     def test_missing_template_seeds_nothing(self):
+        # Key-scoped, same as test_a_failing_lookup_seeds_nothing below: the
+        # dict also carries the label accounting names on a site with a
+        # company, and those are not this test's business.
         with patch(
             "jarz_pos.setup.purchase_setup.default_item_tax_template_name",
             return_value=None,
         ):
-            self.assertEqual(self.sd._dynamic_defaults(), {})
+            self.assertNotIn(
+                "purchase_default_item_tax_template", self.sd._dynamic_defaults()
+            )
 
     def test_existing_template_is_seeded(self):
         with patch(
