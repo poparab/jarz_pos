@@ -4,7 +4,9 @@ Provides delivery time slot management based on POS Profile Timetable configurat
 """
 
 from __future__ import annotations
+import contextlib
 import frappe
+import io
 import json
 from datetime import datetime, timedelta, time
 from typing import List, Dict, Any, Union
@@ -547,15 +549,19 @@ def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any
             continue
 
         # current_datetime=None → full day, not filtered against "now".
-        generated = _generate_day_slots(
-            target_date,
-            opening_time,
-            closing_time,
-            same_day,
-            slot_duration_minutes,
-            None,
-            last_slot_duration_minutes,
-        )
+        # The generator prints ~50 debug lines per day. The Desk form calls this
+        # on every edit, so swallow that here rather than flooding the backend
+        # container's stdout with a form preview.
+        with contextlib.redirect_stdout(io.StringIO()):
+            generated = _generate_day_slots(
+                target_date,
+                opening_time,
+                closing_time,
+                same_day,
+                slot_duration_minutes,
+                None,
+                last_slot_duration_minutes,
+            )
 
         entry["slots"] = [
             {
