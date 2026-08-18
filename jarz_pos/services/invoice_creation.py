@@ -24,6 +24,10 @@ from jarz_pos.utils.invoice_utils import (
     add_items_to_invoice,
     verify_invoice_totals,
     resolve_order_territory,
+    append_pos_audit_marker,
+    stamp_order_channel,
+    is_unresolved_territory,
+    _log_loud,
 )
 from jarz_pos.utils.customer_address_utils import (
     ensure_shipping_address,
@@ -37,6 +41,22 @@ from jarz_pos.utils.account_utils import (
     ensure_partner_receivable_subaccount,
     resolve_online_partner_paid_to,
 )
+
+# Territory / branch exception logging lives in its own service so a logging
+# failure can never reach invoice creation.  Imported defensively (same pattern as
+# jarz_pos.api.kanban's optional imports) because a site that has not migrated the
+# `Jarz Territory Exception` DocType yet must still be able to take an order.
+try:
+    from jarz_pos.services.territory_exceptions import (  # type: ignore
+        record_invoice_territory_exception,
+    )
+
+    _TERRITORY_EXCEPTIONS_AVAILABLE = True
+except Exception:  # pragma: no cover - exercised only on a not-yet-migrated site
+    _TERRITORY_EXCEPTIONS_AVAILABLE = False
+
+    def record_invoice_territory_exception(invoice_doc):  # type: ignore
+        return None
 
 
 _MANAGER_PRICING_ROLES = ROLES.LINE_MANAGER_TIER
@@ -85,16 +105,110 @@ def _normalize_price_list_name(value) -> str | None:
     return cleaned or None
 
 
-def _append_unique_remark(invoice_doc, marker: str) -> None:
-    marker = (marker or "").strip()
-    if not marker:
+# F-13: `remarks` must mean "the customer's note" on BOTH lanes, so the POS lane's
+# internal audit markers now live in `custom_pos_audit_markers`.
+#
+# A marker is ALSO mirrored into `remarks` only while a consumer this package does
+# not own still reads it there.  Every entry below names that consumer and dies
+# with it — dropping a tag from this set is the one-line switch that finishes the
+# migration for that marker.
+#
+#   [PICKUP]              jarz_pos/api/kanban.py::_is_pickup_invoice (legacy fallback)
+#                         jarz_pos/services/delivery_handling.py (courier-expense
+#                           short-circuit, ~line 3585)
+#                         jarz_pos_mobile .../kanban/models/kanban_models.dart
+#                           (`isPickup` falls back to remarks.contains('[pickup]'))
+#                         jarz_pos/tests/test_invoice_creation_accounting.py
+#   [ORDER PURPOSE]       jarz_pos/scripts/b2b_accounting_validation.py (~line 845)
+#   [PRICE LIST OVERRIDE] jarz_pos/tests/test_invoice_creation_accounting.py
+#   [ZERO SHIPPING OVERRIDE]  same test module
+#   [CUSTOM LINE PRICING]     same test module
+#   [LINE DISCOUNTS]          same test module
+#   [UNRESOLVED TERRITORY]    same test module
+#
+# `[POLICY PRICE LIST]` has NO reader anywhere in the workspace (both Python apps
+# and the Flutter client were grepped), so it moves out of `remarks` outright.
+_REMARKS_MIRRORED_TAGS = frozenset(
+    {
+        "[PICKUP]",
+        "[ORDER PURPOSE]",
+        "[PRICE LIST OVERRIDE]",
+        "[ZERO SHIPPING OVERRIDE]",
+        "[CUSTOM LINE PRICING]",
+        "[LINE DISCOUNTS]",
+        "[UNRESOLVED TERRITORY]",
+    }
+)
+
+
+def _marker_tag(marker: str) -> str:
+    """Return the leading ``[TAG]`` of a marker, ignoring any trailing detail.
+
+    Markers come in two shapes — bare (``[PICKUP]``) and parameterised
+    (``[ORDER PURPOSE] Employee``) — and the mirror decision is per tag, not per
+    rendered string.
+    """
+    text = str(marker or "").strip()
+    if text.startswith("["):
+        closing = text.find("]")
+        if closing != -1:
+            return text[: closing + 1]
+    return text
+
+
+def _append_audit_marker(invoice_doc, marker: str) -> None:
+    """Record a POS audit marker, mirroring to `remarks` only where still required."""
+    append_pos_audit_marker(
+        invoice_doc,
+        marker,
+        mirror_to_remarks=_marker_tag(marker) in _REMARKS_MIRRORED_TAGS,
+    )
+
+
+#: Deprecated alias kept so any external caller of the old private name keeps
+#: working; it now routes through the audit-marker field like everything else.
+_append_unique_remark = _append_audit_marker
+
+
+def _record_territory_exception(invoice_doc, logger) -> None:
+    """Log a submitted invoice into the territory/branch review queue (F-08, F-09).
+
+    Two conditions land here, and neither one blocks or corrects anything:
+
+      * the invoice's ``pos_profile`` differs from the profile its ``territory``
+        points at (1,285 submitted invoices, ~EGP 520k, on staging) — the branch
+        that shipped is the fact, so the territory is what may need fixing;
+      * the territory could not be resolved at all, which used to mean a silent
+        free delivery.
+
+    Fully defensive. ``record_invoice_territory_exception`` is contractually
+    non-raising, but invoice creation must survive even a broken implementation of
+    it, a missing DocType, or a site that has not migrated yet.
+    """
+    if not _TERRITORY_EXCEPTIONS_AVAILABLE:
+        print("   ℹ️ Territory exception service unavailable – review queue skipped")
         return
 
-    existing = (getattr(invoice_doc, "remarks", "") or "").strip()
-    if marker in existing:
+    try:
+        exception_name = record_invoice_territory_exception(invoice_doc)
+    except Exception as exc:  # pragma: no cover - contract says this cannot happen
+        print(f"   ⚠️ Territory exception logging failed: {exc}")
+        try:
+            frappe.log_error(
+                f"record_invoice_territory_exception failed for "
+                f"{getattr(invoice_doc, 'name', '?')}: {exc}",
+                "Jarz POS Territory Exception Logging",
+            )
+        except Exception:
+            pass
         return
 
-    invoice_doc.remarks = (existing + "\n" if existing else "") + marker
+    if exception_name:
+        print(f"   🧭 Territory exception recorded for review: {exception_name}")
+        try:
+            logger.info(f"Territory exception recorded: {exception_name}")
+        except Exception:
+            pass
 
 
 def _describe_unresolved_territory_source(
@@ -747,15 +861,24 @@ def create_pos_invoice(
         # STEP 6: Set Document Fields
         print("\n6️⃣ SETTING DOCUMENT FIELDS:")
         set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
+
+        # STEP 6.0a: Persist the ordering channel (F-14). It used to be accepted and
+        # then discarded after promo evaluation, which left every POS order with all
+        # 14 `woo_*` attribution columns NULL — reading as "unknown source" in channel
+        # analytics rather than as "placed in the POS".
+        stamped_channel = stamp_order_channel(invoice_doc, channel or "flutter")
+        if stamped_channel:
+            print(f"   📡 Order channel stamped: {stamped_channel}")
+
         if effective_price_list:
             invoice_doc.selling_price_list = effective_price_list
             print(f"   🏷️ Selling Price List set: {effective_price_list}")
             if effective_price_list != getattr(pos_profile, "selling_price_list", None):
-                _append_unique_remark(invoice_doc, f"[PRICE LIST OVERRIDE] {effective_price_list}")
+                _append_audit_marker(invoice_doc, f"[PRICE LIST OVERRIDE] {effective_price_list}")
         if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
-            _append_unique_remark(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
+            _append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
         if any(item.get("custom_rate_override") not in (None, "", 0, 0.0) for item in processed_items):
-            _append_unique_remark(invoice_doc, "[CUSTOM LINE PRICING]")
+            _append_audit_marker(invoice_doc, "[CUSTOM LINE PRICING]")
         if any(
             (
                 item.get("discount_amount") not in (None, "", 0, 0.0)
@@ -765,7 +888,7 @@ def create_pos_invoice(
             and not item.get("is_bundle_child")
             for item in processed_items
         ):
-            _append_unique_remark(invoice_doc, "[LINE DISCOUNTS]")
+            _append_audit_marker(invoice_doc, "[LINE DISCOUNTS]")
 
         # STEP 6.A: Resolve and stamp the shipping address explicitly.
         resolved_shipping_address = resolve_customer_shipping_address(
@@ -794,20 +917,44 @@ def create_pos_invoice(
             invoice_doc.territory = effective_order_territory
             print(f"   🧭 Order territory set: {effective_order_territory}")
 
+        # F-09: a territory that tells us nothing must not pass for an answer. Both a
+        # missing territory AND "All Territories" (tree root: delivery_income 0, no
+        # pos_profile) bill no shipping and name no branch, so both are caught — which
+        # of the two a code path happens to produce is an implementation detail. The
+        # resolved value itself is left exactly as-is; this only shouts and, at STEP
+        # 10.5, files a review row. A catch, not a gate: order taking never stops.
+        stamped_territory = effective_order_territory or getattr(invoice_doc, "territory", None)
+        if is_unresolved_territory(stamped_territory):
+            _unresolved_source = _describe_unresolved_territory_source(
+                resolved_shipping_address=resolved_shipping_address,
+                shipping_address_name=resolved_shipping_address_name or shipping_address_name,
+                customer_doc=customer_doc,
+            )
+            _append_audit_marker(invoice_doc, f"[UNRESOLVED TERRITORY] {_unresolved_source}")
+            _log_loud(
+                logger,
+                f"Order territory unresolved for customer {customer_doc.name} "
+                f"(territory={stamped_territory or '<blank>'}, {_unresolved_source}); "
+                "invoice will carry no shipping income row.",
+                "Jarz POS Territory Unresolved",
+            )
+            # Hint for the exception recorder, which sees this same in-memory doc.
+            try:
+                invoice_doc.flags.jarz_territory_unresolved = True
+            except Exception:
+                pass
+
         # STEP 6.0: Mark pickup flag if provided
         is_pickup = bool(pickup)
         if is_pickup:
             try:
                 # Set the standardized custom_is_pickup field
                 invoice_doc.custom_is_pickup = 1
-                # Add a remark marker for backward compatibility and visibility
-                try:
-                    existing = (getattr(invoice_doc, "remarks", "") or "").strip()
-                    marker = "[PICKUP]"
-                    if marker not in existing:
-                        invoice_doc.remarks = (existing + "\n" if existing else "") + marker
-                except Exception:
-                    pass
+                # Audit marker: `custom_is_pickup` above is the source of truth, but
+                # three consumers outside this package still fall back to reading
+                # "[PICKUP]" out of `remarks`, so the marker keeps being mirrored
+                # there (see _REMARKS_MIRRORED_TAGS).
+                _append_audit_marker(invoice_doc, "[PICKUP]")
                 print("   🚏 Pickup mode enabled – shipping suppressed")
             except Exception as _mkpu_err:
                 print(f"   ⚠️ Could not mark pickup flag: {_mkpu_err}")
@@ -824,11 +971,11 @@ def create_pos_invoice(
             if policy_decision.reason:
                 invoice_doc.custom_policy_reason = policy_decision.reason
             invoice_doc.custom_no_courier = 1 if policy_decision.no_courier else 0
-            _append_unique_remark(
+            _append_audit_marker(
                 invoice_doc, f"[ORDER PURPOSE] {policy_decision.order_purpose}"
             )
             if policy_decision.price_list:
-                _append_unique_remark(
+                _append_audit_marker(
                     invoice_doc, f"[POLICY PRICE LIST] {policy_decision.price_list}"
                 )
             print(
@@ -1058,7 +1205,7 @@ def create_pos_invoice(
                             shipping_address_name=resolved_shipping_address_name or shipping_address_name,
                             customer_doc=customer_doc,
                         )
-                        _append_unique_remark(invoice_doc, f"[UNRESOLVED TERRITORY] {unresolved_source}")
+                        _append_audit_marker(invoice_doc, f"[UNRESOLVED TERRITORY] {unresolved_source}")
                         logger.warning(
                             "Order territory unresolved; shipping income skipped "
                             f"(customer={customer_doc.name}, source={unresolved_source})"
@@ -1135,6 +1282,21 @@ def create_pos_invoice(
         # STEP 10: Submit Document
         print("\n🔟 SUBMITTING DOCUMENT:")
         _submit_document(invoice_doc, logger)
+
+        # STEP 10.5: File a territory / branch exception for review (F-08, F-09).
+        #
+        # Runs here and not earlier because `Jarz Territory Exception.sales_invoice`
+        # is a required Link — the invoice must exist — and because both inputs it
+        # judges are only final now: `territory` (STEP 6.A, possibly re-filled by
+        # set_missing_values in STEP 8) and `pos_profile` (STEP 6).
+        #
+        # This records; it never corrects and never blocks. The owner's ruling on the
+        # 1,285 branch<>territory invoices is that the branch that shipped IS the
+        # fact, so the POS Profile is left exactly as chosen and only the territory is
+        # flagged as possibly needing correction. `record_invoice_territory_exception`
+        # is documented never to raise, but it is still wrapped and still placed off
+        # the critical path: a submitted invoice must never be undone by a log write.
+        _record_territory_exception(invoice_doc, logger)
 
         # STEP 11: If payment_type == 'online' and invoice has a sales partner, create a Payment Entry
         try:

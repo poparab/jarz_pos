@@ -303,6 +303,13 @@ doc_events = {
         # sits — a B2B supply order does not have to travel the dispatch kanban,
         # and one that never reached OFD would silently never consume a label.
         "jarz_pos.services.label_stock.consume_labels_on_invoice_submit",
+        # Branch/territory parity catch. Files a "Jarz Territory Exception" when
+        # the branch that shipped is not the branch the delivery territory points
+        # at, or when the order has no territory at all. Deliberately a doc event
+        # rather than a call inside services/invoice_creation: this way it covers
+        # the WooCommerce inbound lane too, which never goes through that module.
+        # Never raises, never touches the invoice, idempotent per (invoice, type).
+        "jarz_pos.services.territory_exceptions.record_territory_exception_on_submit",
     ],
     # Emit state-change events for already-submitted invoices edited elsewhere
     "on_update_after_submit": [
@@ -358,6 +365,13 @@ scheduler_events = {
         # B2B printed labels: refresh every label's cover and alert on the ones
         # that must go to the print house now to land before they run out.
         "jarz_pos.services.label_stock.run_label_stock_alerts",
+        # Branch/territory parity: pick up anything the on_submit hook missed in
+        # the last few days, then auto-close the exceptions whose territory has
+        # since been corrected. Bounded window and a hard row cap, so this can
+        # never run long enough to crowd the rest of the daily slot. The
+        # HISTORICAL backfill is deliberately NOT here — it is a one-off run by
+        # hand via territory_exceptions.backfill_territory_exceptions.
+        "jarz_pos.services.territory_exceptions.run_territory_exception_sweep",
     ],
     "weekly": [
         "jarz_pos.tasks.run_weekly_velocity_update",
