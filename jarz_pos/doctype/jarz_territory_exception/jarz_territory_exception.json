@@ -1,0 +1,270 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-08-19 00:00:00.000000",
+ "description": "One order whose delivery territory disagrees with the branch that actually shipped it, or whose territory was never resolved. The branch is the fact; the territory is what needs correcting.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sales_invoice",
+  "exception_type",
+  "posting_date",
+  "column_break_head",
+  "status",
+  "order_lane",
+  "historical_repointing",
+  "grand_total",
+  "section_break_branch",
+  "pos_profile_used",
+  "column_break_branch",
+  "territory_pos_profile",
+  "section_break_territory",
+  "invoice_territory",
+  "expected_territory",
+  "column_break_territory",
+  "customer",
+  "shipping_address",
+  "address_city",
+  "address_state",
+  "section_break_detail",
+  "detail",
+  "section_break_resolution",
+  "resolved_on",
+  "column_break_resolution",
+  "resolved_by"
+ ],
+ "fields": [
+  {
+   "description": "The order this exception was raised against.",
+   "fieldname": "sales_invoice",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Branch Territory Mismatch: the POS Profile that shipped is not the POS Profile the invoice's Territory points at. Territory Unresolved: the invoice carries no usable Territory at all.",
+   "fieldname": "exception_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Exception Type",
+   "options": "Branch Territory Mismatch\nTerritory Unresolved",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Posting Date"
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Open",
+   "description": "Territory Corrected = the Territory (or the Territory's POS Profile) was fixed. Accepted = the crossing was deliberate. Ignored = not worth acting on.",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Open\nTerritory Corrected\nAccepted\nIgnored",
+   "search_index": 1
+  },
+  {
+   "description": "Which lane created the order. Woo when the invoice carries a WooCommerce source type or transaction id, otherwise POS.",
+   "fieldname": "order_lane",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Order Lane",
+   "options": "\nPOS\nWoo",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "Set on Woo-lane branch mismatches. A Woo order derives its POS Profile FROM Territory.pos_profile at creation, so a later disagreement means the Territory was re-pointed AFTER the order shipped -- a historical fact, not a defect. Filter these OUT to see the live queue. On production 1,260 of the 1,285 known mismatches are this.",
+   "fieldname": "historical_repointing",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Historical Re-pointing",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "grand_total",
+   "fieldtype": "Currency",
+   "label": "Grand Total",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_branch",
+   "fieldtype": "Section Break",
+   "label": "Branch"
+  },
+  {
+   "description": "The branch that actually shipped the order. This is the fact — do not \"fix\" the invoice to match the territory.",
+   "fieldname": "pos_profile_used",
+   "fieldtype": "Link",
+   "label": "POS Profile Used (shipped)",
+   "options": "POS Profile",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_branch",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The branch the invoice's Territory points at. When this disagrees with the branch that shipped, this is usually what needs correcting.",
+   "fieldname": "territory_pos_profile",
+   "fieldtype": "Link",
+   "label": "Territory POS Profile (expected)",
+   "options": "POS Profile",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_territory",
+   "fieldtype": "Section Break",
+   "label": "Territory & Address"
+  },
+  {
+   "description": "The Territory the invoice actually carried. Blank for a Territory Unresolved exception.",
+   "fieldname": "invoice_territory",
+   "fieldtype": "Link",
+   "label": "Invoice Territory",
+   "options": "Territory",
+   "read_only": 1
+  },
+  {
+   "description": "Best guess at the Territory this order should have carried, from the shipping address, or from the only Territory pointing at the shipping branch. May be blank when nothing unambiguous could be derived.",
+   "fieldname": "expected_territory",
+   "fieldtype": "Link",
+   "label": "Expected Territory",
+   "options": "Territory",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_territory",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shipping_address",
+   "fieldtype": "Link",
+   "label": "Shipping Address",
+   "options": "Address",
+   "read_only": 1
+  },
+  {
+   "description": "Snapshot of Address.city as it read when the exception was raised. Free text on this site, not a Territory name.",
+   "fieldname": "address_city",
+   "fieldtype": "Data",
+   "label": "Address City",
+   "read_only": 1
+  },
+  {
+   "fieldname": "address_state",
+   "fieldtype": "Data",
+   "label": "Address State",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_detail",
+   "fieldtype": "Section Break",
+   "label": "Detail"
+  },
+  {
+   "description": "Everything a reviewer needs to act without opening the invoice.",
+   "fieldname": "detail",
+   "fieldtype": "Small Text",
+   "label": "Detail",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_break_resolution",
+   "fieldtype": "Section Break",
+   "label": "Resolution"
+  },
+  {
+   "fieldname": "resolved_on",
+   "fieldtype": "Datetime",
+   "label": "Resolved On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_resolution",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "resolved_by",
+   "fieldtype": "Link",
+   "label": "Resolved By",
+   "options": "User",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-08-19 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Territory Exception",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Line Manager"
+  }
+ ],
+ "show_title_field_in_link": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "sales_invoice",
+ "track_changes": 1
+}

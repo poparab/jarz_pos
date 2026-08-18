@@ -43,6 +43,157 @@ def sanitize_printable_text(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# ---------------------------------------------------------------------------
+# POS audit markers / order channel  (F-13, F-14)
+# ---------------------------------------------------------------------------
+
+#: Small Text field on Sales Invoice that holds the POS lane's internal audit
+#: markers.  Owned by the DocType/custom-field package; written here.
+POS_AUDIT_MARKERS_FIELD = "custom_pos_audit_markers"
+
+#: Small Text field on Sales Invoice that records which client placed the order.
+ORDER_CHANNEL_FIELD = "custom_order_channel"
+
+#: Value written to ``woo_source_type`` for an order that originated in the POS.
+#: All 14 ``woo_*`` attribution columns are structurally NULL on a POS order, so
+#: channel analytics could not tell "placed in the POS" from "unknown source".
+POS_SOURCE_TYPE = "pos"
+
+
+def _append_unique_line(existing: Any, marker: str) -> Optional[str]:
+    """Return ``existing`` with ``marker`` appended on its own line.
+
+    Returns ``None`` when there is nothing to do (blank marker, or the marker is
+    already present), so callers can skip the write entirely.  Pure string work —
+    deliberately no ``frappe`` calls, so this stays testable and cannot fail.
+    """
+    marker = str(marker or "").strip()
+    if not marker:
+        return None
+
+    current = str(existing or "").strip()
+    if marker in current:
+        return None
+
+    return (current + "\n" if current else "") + marker
+
+
+def append_pos_audit_marker(invoice_doc, marker: str, *, mirror_to_remarks: bool = False) -> None:
+    """Record an internal POS audit marker on the invoice (F-13).
+
+    Markers such as ``[PICKUP]`` or ``[LINE DISCOUNTS]`` used to be stacked into
+    ``remarks``, which on the WooCommerce lane carries the *customer's note*.  One
+    field therefore meant two different things depending on which lane wrote the
+    order.  Markers now live in :data:`POS_AUDIT_MARKERS_FIELD` so ``remarks``
+    means "the customer's note" on both lanes.
+
+    ``mirror_to_remarks`` keeps the legacy copy in ``remarks`` for the markers a
+    consumer outside this package still reads there (see
+    ``invoice_creation._REMARKS_MIRRORED_TAGS``); it exists to be switched off per
+    marker as those readers migrate, not as a permanent second home.
+
+    Never raises: an audit marker must not be able to fail invoice creation.
+    """
+    try:
+        updated = _append_unique_line(getattr(invoice_doc, POS_AUDIT_MARKERS_FIELD, None), marker)
+        if updated is not None:
+            setattr(invoice_doc, POS_AUDIT_MARKERS_FIELD, updated)
+    except Exception:
+        pass
+
+    if not mirror_to_remarks:
+        return
+
+    try:
+        mirrored = _append_unique_line(getattr(invoice_doc, "remarks", None), marker)
+        if mirrored is not None:
+            invoice_doc.remarks = mirrored
+    except Exception:
+        pass
+
+
+def stamp_order_channel(invoice_doc, channel: Any, *, source_type: str = POS_SOURCE_TYPE) -> str:
+    """Persist the ordering channel on the invoice and return what was stamped (F-14).
+
+    ``create_pos_invoice`` has always accepted a ``channel`` argument and thrown
+    it away after promo evaluation, so a POS order reached channel analytics with
+    every ``woo_*`` attribution column NULL — indistinguishable from an order of
+    unknown provenance.
+
+    ``woo_source_type`` is filled ONLY when it is otherwise empty: an order pushed
+    POS → Woo and pulled back may legitimately carry real Woo attribution, and
+    that must win over this default.  Never raises.
+    """
+    normalized = str(channel or "").strip()
+    if not normalized:
+        return ""
+
+    try:
+        setattr(invoice_doc, ORDER_CHANNEL_FIELD, normalized)
+    except Exception:
+        return ""
+
+    try:
+        existing_source = str(getattr(invoice_doc, "woo_source_type", "") or "").strip()
+        if not existing_source and source_type:
+            invoice_doc.woo_source_type = source_type
+    except Exception:
+        pass
+
+    return normalized
+
+
+#: Territory values that carry no delivery information and therefore mean
+#: "we do not actually know where this order is going".
+#:
+#: ``All Territories`` is the root of the Territory tree and ERPNext's default for
+#: a newly created Customer.  Its ``delivery_income`` is 0 and it has no
+#: ``pos_profile``, so an invoice carrying it bills no shipping and names no
+#: branch — operationally identical to a NULL territory, and it must be caught the
+#: same way.  Production currently shows 262 NULL-territory invoices and zero
+#: ``All Territories`` ones, but which of the two a code path produces is an
+#: implementation detail; the catch must not depend on it.
+UNRESOLVED_TERRITORY_VALUES = frozenset({"", "all territories"})
+
+
+def is_unresolved_territory(territory_value: Any) -> bool:
+    """Whether a territory value tells us nothing about where the order goes.
+
+    True for ``None``, blank, and ``All Territories`` (case/whitespace
+    insensitive).  Used to decide whether to shout and file a review-queue
+    exception — never to rewrite the value, which stays exactly as resolved.
+    """
+    return str(territory_value or "").strip().lower() in UNRESOLVED_TERRITORY_VALUES
+
+
+def _log_loud(logger, message: str, title: str) -> None:
+    """Emit a diagnostic that is actually visible on staging and production.
+
+    ``frappe.logger()`` runs at level ERROR off a dev server, so ``.info()`` and
+    ``.warning()`` vanish there — anything that must be seen also goes to the
+    Error Log.  Tries ``logger.warning`` then ``logger.error`` because the loggers
+    passed around this module are sometimes minimal stubs.  Never raises.
+    """
+    try:
+        print(f"   ⚠️ {message}")
+    except Exception:
+        pass
+
+    for level in ("warning", "error", "info"):
+        candidate = getattr(logger, level, None)
+        if callable(candidate):
+            try:
+                candidate(message)
+                break
+            except Exception:
+                continue
+
+    try:
+        frappe.log_error(message, title)
+    except Exception:
+        pass
+
+
 def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
     """Set basic fields on the Sales Invoice document."""
     logger.debug("Setting invoice fields...")
@@ -53,11 +204,44 @@ def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime
     invoice_doc.customer_name = customer_doc.customer_name
     invoice_doc.company = pos_profile.company
     invoice_doc.pos_profile = pos_profile.name
+    # Every POS invoice is a POS invoice (F-17). `pos_profile` is set on the line
+    # above, so ERPNext's stricter POS validation always has what it needs.
     invoice_doc.is_pos = 1
     invoice_doc.selling_price_list = pos_profile.selling_price_list
     invoice_doc.currency = pos_profile.currency
-    invoice_doc.territory = customer_doc.territory or "All Territories"
-    
+
+    # F-09: seed the customer's own territory, and do NOT invent "All Territories"
+    # when there isn't one.  That value is the root of the tree: delivery_income 0
+    # and no pos_profile, so it bills no shipping and names no branch — the same
+    # outcome as NULL, but disguised as a real answer.  Production carries 262
+    # NULL-territory invoices and zero "All Territories" ones, so leaving it blank
+    # is also what the data already does.
+    #
+    # A blank territory is safe here:
+    #   * Sales Invoice.territory is not mandatory in ERPNext;
+    #   * create_pos_invoice STEP 6.A overwrites it with the address-resolved
+    #     territory, and `update_if_missing` inside set_missing_values() only fills
+    #     a territory that is still blank, so a resolved value always survives;
+    #   * the shipping-income block already treats "no territory" as "add no row" —
+    #     it now says so out loud and files a review-queue exception as well.
+    #
+    # Deliberately quiet: STEP 6.A re-checks the SAME condition with the shipping
+    # address in hand and owns the Error Log entry. Shouting twice per order would
+    # just make the review queue's signal harder to find.
+    customer_territory = str(getattr(customer_doc, "territory", "") or "").strip()
+    invoice_doc.territory = customer_territory or None
+    if is_unresolved_territory(customer_territory):
+        message = (
+            f"Customer {getattr(customer_doc, 'name', '?')} seeds an unresolved "
+            f"territory ({customer_territory or '<blank>'}); not substituting "
+            "'All Territories'. Caller must re-check after address resolution."
+        )
+        print(f"   ⚠️ {message}")
+        try:
+            logger.debug(message)
+        except Exception:
+            pass
+
     # Set delivery slot fields when delivery_datetime provided (new model)
     # Note: duration is calculated properly in _apply_delivery_slot_fields from
     # end_datetime or timetable slot_hours; do NOT set a default here.
@@ -794,15 +978,85 @@ def resolve_territory_name(territory_value: Any) -> Optional[str]:
     return None
 
 
+#: Address fields consulted, in order, when resolving an Address to a Territory.
+#:
+#: **city wins, deliberately (F-07).**  On this site ``Address.city`` is the
+#: delivery area and ``Address.state`` is the governorate:
+#:
+#:   * The POS lane WRITES the Territory itself into ``city`` — see
+#:     ``jarz_pos.api.customer`` ("city": normalized_territory / territory_name).
+#:     It never writes ``state`` at all, so on a POS-created address ``state`` is
+#:     blank and this precedence is a no-op there.
+#:   * The WooCommerce lane leaves a free-text label in ``city``
+#:     ("Nasr City - مدينه نصر"), which ``resolve_territory_name`` matches through
+#:     ``custom_woo_code`` / ``custom_territory_name_ar`` / the folded index, and a
+#:     governorate ("Cairo") in ``state``.
+#:
+#: A governorate is at best a GROUP Territory: it carries no ``delivery_income``
+#: and no ``pos_profile``.  Preferring ``state`` would therefore trade a leaf
+#: territory that prices the delivery and names the branch for a parent node that
+#: does neither — i.e. it would silently produce free shipping and an unresolvable
+#: branch.  The raw "2,842 addresses have city <> state" count is NOT evidence of a
+#: bug: city and state are supposed to differ, they describe different levels.
+#:
+#: Use :func:`describe_address_territory_resolution` to measure the only figure
+#: that would matter — addresses where city and state each resolve to a DIFFERENT
+#: non-null Territory.
+ADDRESS_TERRITORY_FIELD_PRECEDENCE = ("city", "state")
+
+
 def _territory_from_address_row(address_row: Optional[Dict[str, Any]]) -> Optional[str]:
+    """First field in :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE` that resolves."""
     if not address_row:
         return None
 
-    for fieldname in ("city", "state"):
+    for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE:
         territory_name = resolve_territory_name(address_row.get(fieldname))
         if territory_name:
             return territory_name
     return None
+
+
+def describe_address_territory_resolution(
+    address_row: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Explain how an Address row resolves to a Territory, field by field.
+
+    Diagnostic only — it changes nothing.  It exists so the city-vs-state question
+    can be *measured* rather than argued: ``fields_disagree`` is True only when
+    both fields resolve and resolve to DIFFERENT Territories, which is the single
+    population where the precedence in
+    :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE` can change an outcome.
+
+    Returns a dict with the raw values, the per-field resolutions, the winner and
+    which field won.  Never raises.
+    """
+    result: Dict[str, Any] = {
+        "resolved_territory": None,
+        "resolved_from": None,
+        "fields_disagree": False,
+    }
+
+    row = address_row if isinstance(address_row, dict) else {}
+    for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE:
+        raw = str(row.get(fieldname) or "").strip()
+        result[fieldname] = raw
+        try:
+            resolved = resolve_territory_name(raw) if raw else None
+        except Exception:
+            resolved = None
+        result[f"{fieldname}_territory"] = resolved
+        if resolved and result["resolved_territory"] is None:
+            result["resolved_territory"] = resolved
+            result["resolved_from"] = fieldname
+
+    resolutions = [
+        result.get(f"{fieldname}_territory")
+        for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE
+    ]
+    non_null = [value for value in resolutions if value]
+    result["fields_disagree"] = len(non_null) > 1 and len(set(non_null)) > 1
+    return result
 
 
 def resolve_address_territory(address_name: str | None) -> Optional[str]:
@@ -812,7 +1066,12 @@ def resolve_address_territory(address_name: str | None) -> Optional[str]:
         return None
 
     try:
-        address_row = frappe.db.get_value("Address", address_name, ["city", "state"], as_dict=True)
+        address_row = frappe.db.get_value(
+            "Address",
+            address_name,
+            list(ADDRESS_TERRITORY_FIELD_PRECEDENCE),
+            as_dict=True,
+        )
     except Exception:
         address_row = None
     return _territory_from_address_row(address_row)
@@ -826,8 +1085,20 @@ def resolve_order_territory(
 ) -> Optional[str]:
     """Resolve the territory that should control a POS order.
 
-    A selected shipping address wins over the customer's stored territory so
-    older/default customer state cannot contaminate invoice totals.
+    Precedence, highest first (F-07 — explicit on purpose, do not reorder without
+    reading the note on :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE`):
+
+      1. the shipping address row already resolved by the caller — ``city``, then
+         ``state``;
+      2. the same lookup against ``shipping_address_name``;
+      3. ``Customer.territory``.
+
+    The selected shipping address wins over the customer's stored territory
+    because the POS operator picks that address for THIS order, so older/default
+    customer state cannot contaminate invoice totals.  ``Customer.territory`` is a
+    Link, so step 3 resolves whenever it is set at all — which means a ``None``
+    return here proves the customer carries no territory either, and the caller
+    must treat that as an exception rather than as free shipping.
     """
     territory_name = _territory_from_address_row(resolved_shipping_address)
     if territory_name:
