@@ -383,16 +383,22 @@ class TestSettingsSeedNeverPointsAtAMissingRecord(unittest.TestCase):
             return_value=SITE_DEFAULT,
         ):
             self.assertEqual(
-                self.sd._dynamic_defaults(),
-                {"purchase_default_item_tax_template": SITE_DEFAULT},
+                self.sd._dynamic_defaults().get("purchase_default_item_tax_template"),
+                SITE_DEFAULT,
             )
 
     def test_a_failing_lookup_seeds_nothing(self):
+        # "Nothing" means nothing FOR THIS KEY. _dynamic_defaults also resolves
+        # the label accounting names (a separate, independently-guarded lookup),
+        # so asserting the whole dict empty would couple this test to every
+        # future dynamic default and break on each one added.
         with patch(
             "jarz_pos.setup.purchase_setup.default_item_tax_template_name",
             side_effect=RuntimeError("boom"),
         ):
-            self.assertEqual(self.sd._dynamic_defaults(), {})
+            self.assertNotIn(
+                "purchase_default_item_tax_template", self.sd._dynamic_defaults()
+            )
 
 
 if __name__ == "__main__":
