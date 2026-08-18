@@ -31,7 +31,7 @@ Guarantees mirrored from ``services/consumable_deduction`` and ``crm/*``:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:
     import frappe
@@ -82,6 +82,13 @@ DEFAULT_LEAD_DAYS_MAX = 3
 DEFAULT_REST_DAY = "Friday"
 DEFAULT_BUFFER_DAYS = 3
 DEFAULT_USAGE_WINDOW_DAYS = 60
+#: Sheet geometry: what the print house fits on one sheet, by jar size.
+DEFAULT_SHEET_MEDIUM = 21
+DEFAULT_SHEET_LARGE = 18
+DEFAULT_PRINT_SHEETS = 2
+#: Item groups that read as "Large" for sheet-size purposes; everything else
+#: (including the known "Meduim" typo group) uses the Medium sheet.
+_LARGE_GROUPS = {"Large"}
 #: Never divide the usage window by fewer days than this -- a label created
 #: yesterday that shipped 400 units would otherwise forecast 400/day.
 _MIN_USAGE_DIVISOR_DAYS = 7
@@ -200,7 +207,41 @@ def get_label_settings() -> Dict[str, Any]:
         "auto_consume": True if auto_raw in (None, "") else bool(_int(auto_raw, 1)),
         "alerts_enabled": True if alerts_raw in (None, "") else bool(_int(alerts_raw, 1)),
         "usage_window_days": DEFAULT_USAGE_WINDOW_DAYS,
+        "sheet_medium": _int(_single_value("labels_per_sheet_medium"), DEFAULT_SHEET_MEDIUM)
+        or DEFAULT_SHEET_MEDIUM,
+        "sheet_large": _int(_single_value("labels_per_sheet_large"), DEFAULT_SHEET_LARGE)
+        or DEFAULT_SHEET_LARGE,
+        "default_print_sheets": _int(
+            _single_value("label_default_print_sheets"), DEFAULT_PRINT_SHEETS
+        )
+        or DEFAULT_PRINT_SHEETS,
+        # COGS journal posting defaults ON, same never-written logic as the
+        # other two flags (safe: no GL is touched until a movement has value).
+        "post_cogs": True
+        if (cogs_raw := _single_value("label_post_cogs_journal")) in (None, "")
+        else bool(_int(cogs_raw, 1)),
+        "inventory_account": str(_single_value("label_inventory_account") or "").strip(),
+        "cogs_account": str(_single_value("label_cogs_account") or "").strip(),
+        "printing_item": str(_single_value("label_printing_item") or "").strip(),
     }
+
+
+def labels_per_sheet_for(label_row: Dict[str, Any], *, settings: Optional[Dict[str, Any]] = None) -> int:
+    """Labels on one printed sheet for this design.
+
+    The per-label override wins; otherwise the size decides — the print house
+    fits 21 Medium labels or 18 Large ones on a sheet. Size comes from the
+    flavour item's group, with anything that is not explicitly Large treated as
+    Medium (which also covers the known "Meduim" typo group).
+    """
+    settings = settings or get_label_settings()
+    override = _int(label_row.get("labels_per_sheet"))
+    if override > 0:
+        return override
+    size = str(label_row.get("size") or "").strip()
+    if size in _LARGE_GROUPS:
+        return _int(settings.get("sheet_large"), DEFAULT_SHEET_LARGE) or DEFAULT_SHEET_LARGE
+    return _int(settings.get("sheet_medium"), DEFAULT_SHEET_MEDIUM) or DEFAULT_SHEET_MEDIUM
 
 
 # ---------------------------------------------------------------------------
@@ -270,21 +311,36 @@ def lead_time_calendar_days(from_date: Any = None, *, settings: Optional[Dict[st
 # ---------------------------------------------------------------------------
 # Ledger reads
 # ---------------------------------------------------------------------------
-def get_on_hand(label_name: str) -> int:
-    """Current on-hand count for one label: ``SUM(qty)`` over its movements."""
+def get_position(label_name: str) -> Dict[str, Any]:
+    """On-hand count AND value for one label, both summed over the ledger.
+
+    ``avg_cost`` is the weighted average of what is left: total value over total
+    quantity. It is what a consumption movement prices at, so the Labels
+    Inventory account drains at exactly the rate stock was booked in at, and a
+    fully-consumed label leaves the account at zero rather than a residue.
+    """
+    empty = {"on_hand": 0, "value": 0.0, "avg_cost": 0.0}
     if not label_name or not _doctype_exists(MOVEMENT_DOCTYPE):
-        return 0
+        return empty
     try:
         rows = frappe.get_all(
             MOVEMENT_DOCTYPE,
             filters={"label": label_name},
-            fields=["qty"],
+            fields=["qty", "value"],
             limit_page_length=0,
         )
     except Exception:
-        frappe.log_error(frappe.get_traceback(), f"label_stock: on-hand read failed for {label_name}")
-        return 0
-    return sum(_int(r.get("qty")) for r in rows or [])
+        frappe.log_error(frappe.get_traceback(), f"label_stock: position read failed for {label_name}")
+        return empty
+    on_hand = sum(_int(r.get("qty")) for r in rows or [])
+    value = round(sum(_float(r.get("value")) for r in rows or []), 2)
+    avg = round(value / on_hand, 4) if on_hand > 0 and value > 0 else 0.0
+    return {"on_hand": on_hand, "value": value, "avg_cost": avg}
+
+
+def get_on_hand(label_name: str) -> int:
+    """Current on-hand count for one label: ``SUM(qty)`` over its movements."""
+    return get_position(label_name)["on_hand"]
 
 
 def get_usage_stats(label_name: str, *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -365,7 +421,7 @@ def get_open_print_orders(label_name: str) -> List[Dict[str, Any]]:
         return frappe.get_all(
             PRINT_ORDER_DOCTYPE,
             filters={"label": label_name, "status": ["in", list(OPEN_PRINT_STATUSES)]},
-            fields=["name", "qty", "status", "requested_on", "expected_ready_date", "printer_name"],
+            fields=["name", "qty", "qty_sheets", "status", "requested_on", "expected_ready_date", "printer_name"],
             order_by="expected_ready_date asc",
             limit_page_length=0,
         )
@@ -426,7 +482,8 @@ def build_snapshot(label_row: Dict[str, Any], *, settings: Optional[Dict[str, An
     name = label_row.get("name")
 
     tracked = bool(_int(label_row.get("enabled"), 1)) and bool(_int(label_row.get("we_print"), 1))
-    on_hand = get_on_hand(name)
+    position = get_position(name)
+    on_hand = position["on_hand"]
     usage = get_usage_stats(name, settings=settings)
     open_orders = get_open_print_orders(name)
     lead_days = lead_time_calendar_days(settings=settings)
@@ -445,27 +502,39 @@ def build_snapshot(label_row: Dict[str, Any], *, settings: Optional[Dict[str, An
     )
 
     days_of_cover = round(on_hand / avg, 1) if avg > 0 else None
-    # How many to print: the standard batch, or enough to cover twice the
-    # lead-time-plus-buffer horizon, or at least back up to the safety floor --
-    # whichever is largest. Never suggests less than what is missing.
-    reorder_qty = _int(label_row.get("reorder_qty"))
+    per_sheet = labels_per_sheet_for(label_row, settings=settings)
+    default_sheets = _int(label_row.get("default_print_sheets")) or _int(
+        settings.get("default_print_sheets"), DEFAULT_PRINT_SHEETS
+    )
+    # How many labels are needed: enough to cover twice the lead-time-plus-
+    # buffer horizon, or at least back up to the safety floor -- then expressed
+    # in whole sheets, floored at the design's usual batch. The printer sells
+    # sheets, so the suggestion must be something you can actually order.
     target_cover = avg * (lead_days + buffer_days) * 2
-    suggested = int(max(reorder_qty, round(target_cover) - on_hand, min_stock - on_hand, 0))
+    needed_labels = int(max(round(target_cover) - on_hand, min_stock - on_hand, 0))
+    needed_sheets = -(-needed_labels // per_sheet) if needed_labels > 0 else 0  # ceil
+    suggested_sheets = max(needed_sheets, default_sheets if status in ALERT_STATUSES else needed_sheets)
 
     return {
         "name": name,
         "customer": label_row.get("customer"),
         "customer_name": label_row.get("customer_name") or label_row.get("customer"),
-        "label_title": label_row.get("label_title") or "Default",
+        "label_title": label_row.get("label_title") or label_row.get("item") or "Default",
+        "item": label_row.get("item"),
+        "size": label_row.get("size"),
+        "storage_location": label_row.get("storage_location"),
         "enabled": bool(_int(label_row.get("enabled"), 1)),
         "we_print": bool(_int(label_row.get("we_print"), 1)),
         "tracked": tracked,
-        "applies_to_item_group": label_row.get("applies_to_item_group"),
         "labels_per_unit": _float(label_row.get("labels_per_unit"), 1.0) or 1.0,
+        "labels_per_sheet": per_sheet,
+        "default_print_sheets": default_sheets,
         "on_hand_qty": on_hand,
         "min_stock_qty": min_stock,
-        "reorder_qty": reorder_qty,
-        "suggested_print_qty": suggested,
+        "stock_value": position["value"],
+        "avg_cost_per_label": position["avg_cost"],
+        "suggested_print_sheets": suggested_sheets,
+        "suggested_print_qty": suggested_sheets * per_sheet,
         "avg_daily_usage": avg,
         "days_of_cover": days_of_cover,
         "consumed_in_window": _int(usage.get("consumed")),
@@ -482,6 +551,7 @@ def build_snapshot(label_row: Dict[str, Any], *, settings: Optional[Dict[str, An
             {
                 "name": o.get("name"),
                 "qty": _int(o.get("qty")),
+                "qty_sheets": _int(o.get("qty_sheets")),
                 "status": o.get("status"),
                 "requested_on": str(o.get("requested_on") or "") or None,
                 "expected_ready_date": str(o.get("expected_ready_date") or "") or None,
@@ -528,6 +598,8 @@ def write_snapshot(snapshot: Dict[str, Any]) -> None:
         "days_of_cover": snapshot["days_of_cover"] or 0,
         "status": snapshot["status"],
         "last_movement_on": snapshot["last_movement_on"],
+        "avg_cost_per_label": snapshot.get("avg_cost_per_label") or 0,
+        "stock_value": snapshot.get("stock_value") or 0,
     }
     for field, value in updates.items():
         frappe.db.set_value(LABEL_DOCTYPE, name, field, value, update_modified=False)
@@ -546,8 +618,9 @@ def refresh_label(label_name: str) -> Optional[Dict[str, Any]]:
             LABEL_DOCTYPE,
             label_name,
             [
-                "name", "customer", "customer_name", "label_title", "enabled", "we_print",
-                "applies_to_item_group", "labels_per_unit", "min_stock_qty", "reorder_qty",
+                "name", "customer", "customer_name", "label_title", "item", "size",
+                "storage_location", "enabled", "we_print", "labels_per_unit",
+                "labels_per_sheet", "default_print_sheets", "min_stock_qty",
                 "last_counted_on", "notes",
             ],
             as_dict=True,
@@ -576,13 +649,27 @@ def post_movement(
     reference_name: Optional[str] = None,
     print_order: Optional[str] = None,
     remarks: Optional[str] = None,
+    unit_cost: Optional[float] = None,
+    post_gl: bool = True,
     refresh: bool = True,
 ) -> Optional[str]:
-    """Insert one ledger row and refresh the label. Returns the movement name.
+    """Insert one ledger row, mirror its value into the GL, refresh the label.
 
     *qty* is signed by the caller for ``Adjustment`` and ``Opening``; for the
     fixed-sign types the sign is forced here, so a caller cannot post a positive
     ``Consumed``.
+
+    Valuation: a receipt (``Print Received``) prices at the *unit_cost* the
+    caller passes (the batch's actual printed cost — 0 when the batch was
+    received unbilled). Every other movement prices at the label's current
+    weighted-average cost, so consumption, scrap and count corrections drain
+    the inventory value at the rate it was booked in.
+
+    GL: any movement whose value is non-zero and that is NOT funded by a
+    Purchase Invoice is mirrored into a Journal Entry between the Labels
+    Inventory and Label Cost accounts (see ``_post_value_journal``). Receipts
+    ARE PI-funded — the supplier invoice already debited the inventory account —
+    so ``post_gl=False`` on those, or double-counting would follow.
     """
     if not frappe or not label:
         return None
@@ -595,10 +682,17 @@ def post_movement(
     elif movement_type in _NEGATIVE_TYPES:
         qty = -abs(qty)
 
+    if unit_cost is None:
+        unit_cost = get_position(label)["avg_cost"]
+    unit_cost = round(max(_float(unit_cost), 0.0), 4)
+    value = round(qty * unit_cost, 2)
+
     doc = frappe.new_doc(MOVEMENT_DOCTYPE)
     doc.label = label
     doc.movement_type = movement_type
     doc.qty = qty
+    doc.unit_cost = unit_cost
+    doc.value = value
     doc.posting_date = posting_date or _today()
     if reference_doctype:
         doc.reference_doctype = reference_doctype
@@ -611,73 +705,201 @@ def post_movement(
     doc.flags.ignore_permissions = True
     doc.insert(ignore_permissions=True)
 
+    if post_gl and value:
+        _post_value_journal(doc)
+
     if refresh:
         refresh_label(label)
     return doc.name
+
+
+def _post_value_journal(movement: Any) -> None:
+    """Mirror one movement's value into the GL: inventory <-> label COGS.
+
+    Negative value (labels leaving the shelf) debits Label Cost and credits
+    Labels Inventory; positive non-PI value (a return, an upward count
+    correction) reverses that. The invariant this maintains: the Labels
+    Inventory account balance equals ``SUM(value)`` over the movement ledger.
+
+    Never raises — a GL hiccup must not block the sale or the count that
+    produced the movement. A movement whose JE failed simply has no
+    ``journal_entry`` set, which is the queryable signature of the gap.
+    """
+    try:
+        settings = get_label_settings()
+        if not settings["post_cogs"]:
+            return
+        inventory = settings["inventory_account"]
+        cogs = settings["cogs_account"]
+        if not inventory or not cogs:
+            return  # accounts not configured yet: count-only mode
+        if not frappe.db.exists("Account", inventory) or not frappe.db.exists("Account", cogs):
+            frappe.log_error(
+                f"label_stock: GL accounts missing ({inventory} / {cogs}); JE skipped "
+                f"for {movement.name}",
+                "label_stock: JE accounts missing",
+            )
+            return
+
+        amount = abs(_float(movement.value))
+        if not amount:
+            return
+        outgoing = _float(movement.value) < 0
+
+        company = frappe.db.get_value("Account", inventory, "company")
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.company = company
+        je.posting_date = movement.posting_date or _today()
+        je.user_remark = (
+            f"Label {'consumption' if outgoing else 'return'}: {movement.qty} "
+            f"label(s) on {movement.label}"
+            + (f" ({movement.reference_name})" if movement.get("reference_name") else "")
+        )
+        je.append("accounts", {
+            "account": cogs if outgoing else inventory,
+            "debit_in_account_currency": amount,
+        })
+        je.append("accounts", {
+            "account": inventory if outgoing else cogs,
+            "credit_in_account_currency": amount,
+        })
+        je.flags.ignore_permissions = True
+        je.insert(ignore_permissions=True)
+        je.submit()
+
+        frappe.db.set_value(
+            MOVEMENT_DOCTYPE, movement.name, "journal_entry", je.name, update_modified=False
+        )
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"label_stock: COGS journal failed for movement {getattr(movement, 'name', '?')}",
+        )
 
 
 # ---------------------------------------------------------------------------
 # Sales Invoice consumption
 # ---------------------------------------------------------------------------
 def labels_for_customer(customer: str) -> List[Dict[str, Any]]:
-    """Enabled, we-print labels for *customer*, catch-all (no item group) last."""
+    """Enabled, we-print labels for *customer*, keyed for per-flavour matching."""
     if not customer or not _doctype_exists(LABEL_DOCTYPE):
         return []
     try:
-        rows = frappe.get_all(
+        return frappe.get_all(
             LABEL_DOCTYPE,
             filters={"customer": customer, "enabled": 1, "we_print": 1},
-            fields=["name", "label_title", "applies_to_item_group", "labels_per_unit"],
+            fields=["name", "label_title", "item", "size", "labels_per_unit", "storage_location"],
             order_by="creation asc",
             limit_page_length=0,
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"label_stock: label lookup failed for {customer}")
         return []
-    grouped = [r for r in rows if (r.get("applies_to_item_group") or "").strip()]
-    catch_all = [r for r in rows if not (r.get("applies_to_item_group") or "").strip()]
-    return grouped + catch_all
 
 
-def invoice_label_usage(doc: Any, labels: Sequence[Dict[str, Any]]) -> Dict[str, int]:
-    """Labels consumed per label name for one invoice.
+#: Item groups whose lines are physical jars that carry a customer label.
+#: Mirrors api/daily_plan.FINISHED_GOODS_GROUPS plus the known data typo.
+LABEL_BEARING_GROUPS = {"Medium", "Meduim", "Large"}
+
+
+def invoice_label_usage(
+    doc: Any, labels: Sequence[Dict[str, Any]]
+) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
+    """Per-flavour label usage for one invoice.
+
+    Returns ``(usage, unmatched)`` where *usage* maps label name -> signed label
+    qty, and *unmatched* lists jar lines the customer has NO label for yet:
+    ``[{"item_code", "item_name", "item_group", "labels"}]``. Every flavour has
+    its own label, so matching is by exact ``item_code`` — the Item already
+    encodes both the flavour and the size (Item Group = Medium/Large).
 
     Bundle *parent* rows are skipped: they carry the bundle SKU at a 100%
     discount while the physical jars are the child rows underneath, so counting
-    both would double every bundled order. That is the same rule
-    ``services/consumable_deduction`` gets for free by only counting real jar
-    groups.
-
-    Rows are claimed by the label whose ``applies_to_item_group`` matches; a
-    single label with no item group is the catch-all for everything left over.
-    ``JarzCustomerLabel.validate`` guarantees at most one catch-all per customer,
-    so a row can never be billed to two labels.
+    both would double every bundled order. Lines outside the jar groups (merch,
+    services) carry no label and are ignored rather than reported unmatched.
     """
-    by_group: Dict[str, Dict[str, Any]] = {}
-    catch_all: Optional[Dict[str, Any]] = None
+    by_item: Dict[str, Dict[str, Any]] = {}
     for label in labels:
-        group = (label.get("applies_to_item_group") or "").strip()
-        if group:
-            by_group.setdefault(group, label)
-        elif catch_all is None:
-            catch_all = label
+        item_code = str(label.get("item") or "").strip()
+        if item_code:
+            by_item.setdefault(item_code, label)
 
     usage: Dict[str, int] = {}
-    for item in getattr(doc, "items", None) or []:
-        if _int(getattr(item, "is_bundle_parent", 0)):
+    unmatched: Dict[str, Dict[str, Any]] = {}
+    for row in getattr(doc, "items", None) or []:
+        if _int(getattr(row, "is_bundle_parent", 0)):
             continue
-        qty = _float(getattr(item, "qty", 0))
+        qty = _float(getattr(row, "qty", 0))
         if not qty:
             continue
-        group = str(getattr(item, "item_group", "") or "").strip()
-        label = by_group.get(group) or catch_all
-        if not label:
+        group = str(getattr(row, "item_group", "") or "").strip()
+        if group not in LABEL_BEARING_GROUPS:
             continue
-        per_unit = _float(label.get("labels_per_unit"), 1.0) or 1.0
-        # Return invoices carry negative qty, which flows straight through as a
-        # positive movement -- the labels come back on the jars that came back.
-        usage[label["name"]] = usage.get(label["name"], 0) + int(round(qty * per_unit))
-    return {name: qty for name, qty in usage.items() if qty}
+        item_code = str(getattr(row, "item_code", "") or "").strip()
+        label = by_item.get(item_code)
+        if label:
+            per_unit = _float(label.get("labels_per_unit"), 1.0) or 1.0
+            # Return invoices carry negative qty, which flows straight through
+            # as a positive movement -- labels come back on the jars that came back.
+            usage[label["name"]] = usage.get(label["name"], 0) + int(round(qty * per_unit))
+        else:
+            entry = unmatched.setdefault(
+                item_code,
+                {
+                    "item_code": item_code,
+                    "item_name": str(getattr(row, "item_name", "") or item_code),
+                    "item_group": group,
+                    "labels": 0,
+                },
+            )
+            entry["labels"] += int(round(qty))
+
+    return (
+        {name: qty for name, qty in usage.items() if qty},
+        [u for u in unmatched.values() if u["labels"]],
+    )
+
+
+def _auto_create_label(customer: str, unmatched_line: Dict[str, Any], peers: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Start tracking a flavour the customer ordered but has no label for.
+
+    Customers add and remove flavours at will, and an untracked flavour is a
+    silent hole in the count — the exact failure this feature exists to close.
+    So the first invoice carrying a new flavour creates its label at zero stock:
+    it lands on the board as Out of Stock immediately, which is the truthful
+    state (nothing was ever printed into the ledger), and the alert makes a
+    human decide whether to print or to correct the setup.
+
+    The home location is inherited from the customer's existing labels (they
+    all live in the same place), and the sheet/batch defaults resolve from the
+    size, so the record is complete without a human filling a form mid-dispatch.
+    """
+    try:
+        location = next(
+            (str(p.get("storage_location") or "").strip() for p in peers
+             if str(p.get("storage_location") or "").strip()),
+            None,
+        )
+        doc = frappe.new_doc(LABEL_DOCTYPE)
+        doc.customer = customer
+        doc.item = unmatched_line["item_code"]
+        doc.label_title = unmatched_line.get("item_name") or unmatched_line["item_code"]
+        doc.enabled = 1
+        doc.we_print = 1
+        doc.labels_per_unit = 1
+        if location:
+            doc.storage_location = location
+        doc.notes = "Auto-created: flavour appeared on an invoice with no label tracked."
+        doc.flags.ignore_permissions = True
+        doc.insert(ignore_permissions=True)
+        return doc.name
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"label_stock: auto-create failed for {customer} / {unmatched_line.get('item_code')}",
+        )
+        return None
 
 
 def _movements_for_invoice(invoice_name: str) -> List[Dict[str, Any]]:
@@ -685,7 +907,7 @@ def _movements_for_invoice(invoice_name: str) -> List[Dict[str, Any]]:
         return frappe.get_all(
             MOVEMENT_DOCTYPE,
             filters={"reference_doctype": "Sales Invoice", "reference_name": invoice_name},
-            fields=["name", "label", "qty", "movement_type"],
+            fields=["name", "label", "qty", "value", "movement_type"],
             limit_page_length=0,
         )
     except Exception:
@@ -718,7 +940,16 @@ def consume_labels_on_invoice_submit(doc: Any, method: Optional[str] = None) -> 
         if _movements_for_invoice(doc.name):
             return  # already consumed on an earlier fire
 
-        usage = invoice_label_usage(doc, labels)
+        usage, unmatched = invoice_label_usage(doc, labels)
+
+        # A flavour with no label yet is a hole in the count. Create it dark
+        # (zero stock) and consume from it, so it surfaces as Out of Stock on
+        # the board instead of silently not existing.
+        for line in unmatched:
+            created = _auto_create_label(customer, line, labels)
+            if created:
+                usage[created] = usage.get(created, 0) - abs(_int(line["labels"]))
+
         if not usage:
             return
 
@@ -758,23 +989,32 @@ def reverse_labels_on_invoice_cancel(doc: Any, method: Optional[str] = None) -> 
         if not rows:
             return
 
-        net_by_label: Dict[str, int] = {}
+        net_by_label: Dict[str, Dict[str, float]] = {}
         for row in rows:
             label_name = row.get("label")
             if not label_name:
                 continue
-            net_by_label[label_name] = net_by_label.get(label_name, 0) + _int(row.get("qty"))
+            entry = net_by_label.setdefault(label_name, {"qty": 0, "value": 0.0})
+            entry["qty"] += _int(row.get("qty"))
+            entry["value"] += _float(row.get("value"))
 
         for label_name, net in net_by_label.items():
-            if net == 0:
+            qty = _int(net["qty"])
+            if qty == 0:
                 continue  # already compensated
+            # Reverse at the ORIGINAL movements' cost, not today's average: the
+            # compensating value must exactly negate what the consumption took
+            # out of the inventory account, or a cancel that follows a price
+            # change strands a residue in the GL forever.
+            original_cost = abs(net["value"] / qty) if net["value"] else 0.0
             post_movement(
                 label=label_name,
                 movement_type="Adjustment",
-                qty=-net,
+                qty=-qty,
+                unit_cost=round(original_cost, 4),
                 reference_doctype="Sales Invoice",
                 reference_name=doc.name,
-                remarks=f"Auto: reversed {abs(net)} label(s) -- {doc.name} cancelled",
+                remarks=f"Auto: reversed {abs(qty)} label(s) -- {doc.name} cancelled",
             )
     except Exception:
         frappe.log_error(
@@ -789,6 +1029,7 @@ def reverse_labels_on_invoice_cancel(doc: Any, method: Optional[str] = None) -> 
 def list_label_snapshots(
     *,
     customer: Optional[str] = None,
+    storage_location: Optional[str] = None,
     include_untracked: bool = True,
     only_attention: bool = False,
 ) -> List[Dict[str, Any]]:
@@ -804,6 +1045,8 @@ def list_label_snapshots(
     filters: Dict[str, Any] = {}
     if customer:
         filters["customer"] = customer
+    if storage_location:
+        filters["storage_location"] = storage_location
     if not include_untracked:
         filters["enabled"] = 1
         filters["we_print"] = 1
@@ -813,8 +1056,9 @@ def list_label_snapshots(
             LABEL_DOCTYPE,
             filters=filters,
             fields=[
-                "name", "customer", "customer_name", "label_title", "enabled", "we_print",
-                "applies_to_item_group", "labels_per_unit", "min_stock_qty", "reorder_qty",
+                "name", "customer", "customer_name", "label_title", "item", "size",
+                "storage_location", "enabled", "we_print", "labels_per_unit",
+                "labels_per_sheet", "default_print_sheets", "min_stock_qty",
                 "last_counted_on", "notes",
             ],
             order_by="customer_name asc, label_title asc",
@@ -917,8 +1161,9 @@ def _alert_recipients() -> List[str]:
 
 
 def _alert_message(snap: Dict[str, Any]) -> str:
+    size = f" ({snap['size']})" if snap.get("size") else ""
     bits = [
-        f"{snap['customer_name']} - {snap['label_title']}: {snap['on_hand_qty']} label(s) left.",
+        f"{snap['customer_name']} - {snap['label_title']}{size}: {snap['on_hand_qty']} label(s) left.",
     ]
     if snap.get("days_of_cover") is not None:
         bits.append(f"About {snap['days_of_cover']} day(s) of cover at {snap['avg_daily_usage']}/day.")
@@ -929,8 +1174,13 @@ def _alert_message(snap: Dict[str, Any]) -> str:
         f"({snap['rest_day']} excluded); a batch ordered today is ready "
         f"{snap['expected_ready_if_ordered_today']}."
     )
-    if snap.get("suggested_print_qty"):
-        bits.append(f"Suggested print quantity: {snap['suggested_print_qty']}.")
+    # The printer sells sheets, so the alert speaks sheets -- with the label
+    # equivalence so the reader does not have to do the layout maths.
+    sheets = _int(snap.get("suggested_print_sheets"))
+    if sheets:
+        per_sheet = _int(snap.get("labels_per_sheet"))
+        equivalence = f" ({sheets * per_sheet} labels)" if per_sheet else ""
+        bits.append(f"Suggested order: {sheets} sheet(s){equivalence}.")
     return " ".join(bits)
 
 

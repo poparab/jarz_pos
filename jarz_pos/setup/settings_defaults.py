@@ -85,6 +85,14 @@ SEED_DEFAULTS: Dict[str, Any] = {
     "label_reorder_buffer_days": 3,
     "label_auto_consume_on_invoice": 1,
     "label_alerts_enabled": 1,
+    # Sheet geometry + COGS posting. The print house lays out 21 labels on a
+    # Medium sheet and 18 on a Large one; ordering happens in sheets while
+    # stock is counted in labels.
+    "labels_per_sheet_medium": 21,
+    "labels_per_sheet_large": 18,
+    "label_default_print_sheets": 2,
+    "label_post_cogs_journal": 1,
+    "label_printing_item": "Customer Label Printing",
 }
 
 
@@ -108,6 +116,20 @@ def _dynamic_defaults() -> Dict[str, Any]:
     except Exception:
         # A missing default is harmless; an exception here would take the whole
         # seeding pass down with it.
+        pass
+    try:
+        # Label accounts carry the real company abbreviation, so they cannot be
+        # constants. label_setup.ensure_label_accounting runs earlier in
+        # after_migrate and creates them; the usual Link-existence check below
+        # still guards the case where it could not.
+        from jarz_pos.setup.label_setup import resolve_label_account_names
+
+        names = resolve_label_account_names()
+        if names.get("inventory"):
+            out["label_inventory_account"] = names["inventory"]
+        if names.get("cogs"):
+            out["label_cogs_account"] = names["cogs"]
+    except Exception:
         pass
     return out
 

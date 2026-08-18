@@ -29,7 +29,11 @@ class JarzLabelMovement(Document):
             self.posting_date = frappe.utils.today()
 
         qty = int(self.qty or 0)
-        if qty == 0:
+        # A zero-qty row is normally a mistake -- except a revaluation, which
+        # changes only the VALUE of stock already on the shelf (a batch billed
+        # after it was received). Those rows are flagged by the code that posts
+        # them; a human in Desk still cannot save a zero-qty movement.
+        if qty == 0 and not self.flags.get("allow_zero_qty"):
             frappe.throw(_("Qty Change cannot be zero."))
 
         # Normalise rather than reject: a human typing "50" against Consumed

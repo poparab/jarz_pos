@@ -12,12 +12,18 @@
   "naming_series",
   "label",
   "customer",
+  "qty_sheets",
   "qty",
   "column_break_head",
   "status",
   "requested_on",
   "expected_ready_date",
   "detail_section",
+  "supplier",
+  "total_cost",
+  "purchase_invoice",
+  "cost_per_label",
+  "billing_status",
   "requested_by",
   "printer_name",
   "column_break_detail",
@@ -61,8 +67,9 @@
    "fieldname": "qty",
    "fieldtype": "Int",
    "in_list_view": 1,
-   "label": "Qty Ordered",
-   "reqd": 1
+   "label": "Qty (Labels)",
+   "read_only": 1,
+   "description": "Computed: sheets × labels per sheet."
   },
   {
    "fieldname": "column_break_head",
@@ -130,6 +137,51 @@
    "fieldname": "notes",
    "fieldtype": "Small Text",
    "label": "Notes"
+  },
+  {
+   "description": "Sheets sent to the printer. The label quantity is sheets × labels-per-sheet for this design's size.",
+   "fieldname": "qty_sheets",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Sheets",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "supplier",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Print Supplier",
+   "options": "Supplier"
+  },
+  {
+   "description": "The supplier invoice this batch was billed on. Created or linked when the batch is received with a cost.",
+   "fieldname": "purchase_invoice",
+   "fieldtype": "Link",
+   "label": "Purchase Invoice",
+   "options": "Purchase Invoice",
+   "read_only": 1
+  },
+  {
+   "description": "What the printer charged for this batch, before VAT.",
+   "fieldname": "total_cost",
+   "fieldtype": "Currency",
+   "label": "Batch Cost (net)"
+  },
+  {
+   "fieldname": "cost_per_label",
+   "fieldtype": "Currency",
+   "label": "Cost / Label",
+   "precision": "4",
+   "read_only": 1
+  },
+  {
+   "default": "Unbilled",
+   "fieldname": "billing_status",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Billing",
+   "options": "Unbilled\nBilled",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,

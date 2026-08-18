@@ -71,6 +71,12 @@ after_migrate = [
     # template, and it will only do so once the template actually exists — a
     # Link naming a missing record poisons every later full save of the Single.
     "jarz_pos.setup.purchase_setup.ensure_purchase_vat_template",
+    # Create the label-COGS masters (Labels Inventory / Label Cost accounts and
+    # the Customer Label Printing item). Deliberately NOT gated on settings the
+    # way ensure_pos_accounts is: account-if-configured plus seed-if-exists
+    # deadlocks for a brand-new account, so this creates first and
+    # settings_defaults links after.
+    "jarz_pos.setup.label_setup.ensure_label_accounting",
     # Fill ONLY the empty fields on Jarz POS Settings. Replaces the Single
     # fixture, which rebuilt the doc every migrate and reverted every feature
     # flag. Must run after ensure_pos_accounts so the account names it seeds

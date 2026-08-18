@@ -13,19 +13,26 @@
   "customer",
   "customer_name",
   "label_title",
+  "item",
+  "size",
   "column_break_identity",
   "enabled",
   "we_print",
-  "applies_to_item_group",
+  "storage_location",
   "labels_per_unit",
   "stock_section",
   "on_hand_qty",
   "min_stock_qty",
-  "reorder_qty",
+  "labels_per_sheet",
+  "default_print_sheets",
   "column_break_stock",
   "avg_daily_usage",
   "days_of_cover",
   "status",
+  "cost_section",
+  "avg_cost_per_label",
+  "column_break_cost",
+  "stock_value",
   "tracking_section",
   "last_movement_on",
   "last_counted_on",
@@ -65,13 +72,12 @@
    "read_only": 1
   },
   {
-   "default": "Default",
-   "description": "Name of this label design, e.g. \"250g Jar\" or \"Large\". One customer may have several.",
+   "default": "",
+   "description": "Display name of this design. Defaults to the flavour item's name.",
    "fieldname": "label_title",
    "fieldtype": "Data",
    "in_list_view": 1,
-   "label": "Label",
-   "reqd": 1
+   "label": "Label"
   },
   {
    "fieldname": "column_break_identity",
@@ -94,15 +100,8 @@
    "label": "We Print This Label"
   },
   {
-   "description": "Optional. When set, only invoice lines in this Item Group consume this label. Leave blank when the customer has a single label for everything.",
-   "fieldname": "applies_to_item_group",
-   "fieldtype": "Link",
-   "label": "Applies To Item Group",
-   "options": "Item Group"
-  },
-  {
    "default": "1",
-   "description": "Labels used per unit sold. Normally 1 label per jar.",
+   "description": "Labels used per jar sold. Normally 1.",
    "fieldname": "labels_per_unit",
    "fieldtype": "Float",
    "label": "Labels Per Unit",
@@ -126,12 +125,6 @@
    "fieldname": "min_stock_qty",
    "fieldtype": "Int",
    "label": "Minimum Stock"
-  },
-  {
-   "description": "How many labels a normal print batch produces. Pre-fills the print order.",
-   "fieldname": "reorder_qty",
-   "fieldtype": "Int",
-   "label": "Print Batch Qty"
   },
   {
    "fieldname": "column_break_stock",
@@ -195,6 +188,71 @@
    "fieldname": "notes",
    "fieldtype": "Small Text",
    "label": "Notes"
+  },
+  {
+   "description": "The flavour this label is printed for — one label design per flavour per size. The item already encodes the size through its Item Group (Medium / Large).",
+   "fieldname": "item",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Flavour (Item)",
+   "options": "Item",
+   "search_index": 1
+  },
+  {
+   "description": "Size, from the flavour item's group.",
+   "fetch_from": "item.item_group",
+   "fieldname": "size",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Size",
+   "read_only": 1
+  },
+  {
+   "description": "Where this customer's labels physically live: the branch warehouse closest to them, or the factory.",
+   "fieldname": "storage_location",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Storage Location",
+   "options": "Warehouse"
+  },
+  {
+   "description": "Labels on one printed sheet for THIS design. Leave 0 to use the size default from Jarz POS Settings (21 Medium / 18 Large).",
+   "fieldname": "labels_per_sheet",
+   "fieldtype": "Int",
+   "label": "Labels Per Sheet (Override)",
+   "non_negative": 1
+  },
+  {
+   "description": "Sheets ordered per print batch for this design. Leave 0 to use the site default.",
+   "fieldname": "default_print_sheets",
+   "fieldtype": "Int",
+   "label": "Print Batch (Sheets)",
+   "non_negative": 1
+  },
+  {
+   "description": "Weighted-average printed cost of one label, from received print batches. Drives the COGS journal on consumption.",
+   "fieldname": "avg_cost_per_label",
+   "fieldtype": "Currency",
+   "label": "Avg Cost / Label",
+   "precision": "4",
+   "read_only": 1
+  },
+  {
+   "description": "On hand × average cost — what this label stock is worth.",
+   "fieldname": "stock_value",
+   "fieldtype": "Currency",
+   "label": "Stock Value",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cost_section",
+   "fieldtype": "Section Break",
+   "label": "Cost"
+  },
+  {
+   "fieldname": "column_break_cost",
+   "fieldtype": "Column Break"
   }
  ],
  "index_web_pages_for_search": 1,

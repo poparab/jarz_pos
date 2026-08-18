@@ -242,6 +242,10 @@ def get_b2b_pipeline():
     # the board itself shows when a prospect was last visited and what is due.
     _attach_journey_summaries(columns)
 
+    # Stamp the printed-label warning on cards that resolve to a customer, so a
+    # rep sees "this account cannot be packed" before promising a delivery.
+    _attach_label_alerts(columns)
+
     return {"stages": stages, "columns": columns}
 
 
@@ -288,6 +292,55 @@ def _attach_journey_summaries(columns):
             summary = summaries.get(card.get("name"))
             if summary:
                 card.update(summary)
+
+
+def _attach_label_alerts(columns):
+    """Stamp ``label_alert`` (count of flavours needing printing) on each card.
+
+    Only Opportunity cards can resolve to a Customer, and only customers with
+    tracked labels get a non-zero count -- so the whole pass is two queries,
+    not one per card. Best-effort: cards default to 0 and a failure changes
+    nothing, because a wrong badge is worse than none.
+    """
+    with_customer = []
+    for stage_cards in columns.values():
+        for card in stage_cards:
+            card.setdefault("label_alert", 0)
+            if str(card.get("customer") or "").strip():
+                with_customer.append(card)
+    if not with_customer:
+        return
+
+    try:
+        if not _doctype_exists("Jarz Customer Label"):
+            return
+        customers = sorted({str(c["customer"]).strip() for c in with_customer})
+        rows = frappe.get_all(
+            "Jarz Customer Label",
+            filters={
+                "customer": ["in", customers],
+                "enabled": 1,
+                "we_print": 1,
+                # The cached status column: refreshed on every movement and by
+                # the daily pass, which is fresh enough for a card badge. The
+                # labels board itself always recomputes from the ledger.
+                "status": ["in", ["Out of Stock", "Reorder Now", "Reorder Soon"]],
+            },
+            fields=["customer"],
+            limit_page_length=0,
+        )
+        counts = {}
+        for row in rows or []:
+            counts[row["customer"]] = counts.get(row["customer"], 0) + 1
+        if not counts:
+            return
+        for card in with_customer:
+            card["label_alert"] = counts.get(str(card["customer"]).strip(), 0)
+    except Exception:
+        frappe.log_error(
+            title="crm.get_b2b_pipeline: label alerts failed",
+            message=frappe.get_traceback(),
+        )
 
 
 def _resolve_opp_customer(party_name):
@@ -380,7 +433,47 @@ def get_account(doctype, name):
     # on a site that has not migrated the journey DocType yet.
     result["journey_notes"] = _journey_notes(doctype, name)
 
+    # Printed-label position, so a rep about to promise delivery can see the
+    # labels are not there. Guarded -> None (never raises, absent pre-migrate).
+    result["labels"] = _label_summary_for_customer(customer) if customer else None
+
     return result
+
+
+def _label_summary_for_customer(customer):
+    """Compact label position for one customer, or None when unavailable.
+
+    Small on purpose: the account screen needs "is this customer packable",
+    not the whole board -- that lives one tap away on the labels screen.
+    """
+    try:
+        if not _doctype_exists("Jarz Customer Label"):
+            return None
+        from jarz_pos.services import label_stock
+
+        snapshots = label_stock.list_label_snapshots(customer=customer)
+        if not snapshots:
+            return None
+        summary = label_stock.summarise(snapshots)
+        return {
+            "total": summary["total"],
+            "needs_attention": summary["needs_attention"],
+            "out_of_stock": summary["out_of_stock"],
+            "reorder_now": summary["reorder_now"],
+            "flavours": [
+                {
+                    "label": s["name"],
+                    "title": s["label_title"],
+                    "size": s.get("size"),
+                    "on_hand_qty": s["on_hand_qty"],
+                    "status": s["status"],
+                }
+                for s in snapshots
+            ],
+        }
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"crm: label summary failed for {customer}")
+        return None
 
 
 def _journey_notes(doctype, name, limit=100):

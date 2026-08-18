@@ -63,8 +63,17 @@
   "label_print_rest_day",
   "column_break_label",
   "label_reorder_buffer_days",
+  "labels_per_sheet_medium",
+  "labels_per_sheet_large",
+  "label_default_print_sheets",
   "label_auto_consume_on_invoice",
-  "label_alerts_enabled"
+  "label_alerts_enabled",
+  "label_accounting_section",
+  "label_inventory_account",
+  "label_cogs_account",
+  "column_break_label_acct",
+  "label_printing_item",
+  "label_post_cogs_journal"
  ],
  "fields": [
   {
@@ -471,6 +480,67 @@
    "fieldname": "label_alerts_enabled",
    "fieldtype": "Check",
    "label": "Enable Label Reorder Alerts"
+  },
+  {
+   "default": "21",
+   "description": "Labels on one printed sheet for Medium jars.",
+   "fieldname": "labels_per_sheet_medium",
+   "fieldtype": "Int",
+   "label": "Labels Per Sheet (Medium)",
+   "non_negative": 1
+  },
+  {
+   "default": "18",
+   "description": "Labels on one printed sheet for Large jars.",
+   "fieldname": "labels_per_sheet_large",
+   "fieldtype": "Int",
+   "label": "Labels Per Sheet (Large)",
+   "non_negative": 1
+  },
+  {
+   "default": "2",
+   "description": "Sheets ordered per flavor when nothing else is set on the label.",
+   "fieldname": "label_default_print_sheets",
+   "fieldtype": "Int",
+   "label": "Default Print Batch (Sheets)",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "label_accounting_section",
+   "fieldtype": "Section Break",
+   "label": "Label Accounting"
+  },
+  {
+   "description": "Asset account debited by label print Purchase Invoices. Its balance should always equal the value of labels on the shelves.",
+   "fieldname": "label_inventory_account",
+   "fieldtype": "Link",
+   "label": "Labels Inventory Account",
+   "options": "Account"
+  },
+  {
+   "description": "COGS account label cost moves into as labels are consumed by invoices.",
+   "fieldname": "label_cogs_account",
+   "fieldtype": "Link",
+   "label": "Label Cost (COGS) Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "column_break_label_acct",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The non-stock item label print batches are billed against on the supplier's Purchase Invoice.",
+   "fieldname": "label_printing_item",
+   "fieldtype": "Link",
+   "label": "Label Printing Item",
+   "options": "Item"
+  },
+  {
+   "default": "1",
+   "description": "Post the Journal Entry that moves label cost from inventory to COGS as labels are consumed. Turn off only if labels should stay a pure count with no GL impact.",
+   "fieldname": "label_post_cogs_journal",
+   "fieldtype": "Check",
+   "label": "Post Label COGS Journal Entries"
   }
  ],
  "index_web_pages_for_search": 0,

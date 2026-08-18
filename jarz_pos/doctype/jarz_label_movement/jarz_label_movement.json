@@ -16,7 +16,10 @@
   "column_break_head",
   "qty",
   "posting_date",
+  "unit_cost",
+  "value",
   "print_order",
+  "journal_entry",
   "reference_section",
   "reference_doctype",
   "reference_name",
@@ -120,6 +123,29 @@
    "fieldname": "remarks",
    "fieldtype": "Small Text",
    "label": "Remarks"
+  },
+  {
+   "description": "Cost of one label applied to this movement. Receipts carry the batch's printed cost; consumption carries the running average.",
+   "fieldname": "unit_cost",
+   "fieldtype": "Currency",
+   "label": "Unit Cost",
+   "precision": "4",
+   "read_only": 1
+  },
+  {
+   "description": "Signed value change to label inventory (qty × unit cost). The Labels Inventory account should always equal the sum of this column.",
+   "fieldname": "value",
+   "fieldtype": "Currency",
+   "label": "Value Change",
+   "read_only": 1
+  },
+  {
+   "description": "The COGS journal this movement's value was posted through, when GL posting is on.",
+   "fieldname": "journal_entry",
+   "fieldtype": "Link",
+   "label": "Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,

@@ -45,12 +45,25 @@ def _settings(**overrides):
         yield
 
 
-def _item(qty, item_group="Medium", is_bundle_parent=0):
-    return SimpleNamespace(qty=qty, item_group=item_group, is_bundle_parent=is_bundle_parent)
+def _item(qty, item_code="MANGO-M", item_group="Medium", item_name=None, is_bundle_parent=0):
+    return SimpleNamespace(
+        qty=qty,
+        item_code=item_code,
+        item_name=item_name or item_code,
+        item_group=item_group,
+        is_bundle_parent=is_bundle_parent,
+    )
 
 
-def _label(name, group=None, per_unit=1.0):
-    return {"name": name, "label_title": name, "applies_to_item_group": group, "labels_per_unit": per_unit}
+def _label(name, item="MANGO-M", per_unit=1.0, location=None):
+    return {
+        "name": name,
+        "label_title": name,
+        "item": item,
+        "size": "Medium",
+        "labels_per_unit": per_unit,
+        "storage_location": location,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -245,57 +258,105 @@ class TestStatus(unittest.TestCase):
 # Invoice -> label attribution
 # ---------------------------------------------------------------------------
 class TestInvoiceUsage(unittest.TestCase):
-    def test_single_catch_all_label_counts_every_line(self):
-        doc = SimpleNamespace(items=[_item(10, "Medium"), _item(5, "Large")])
-        self.assertEqual(ls.invoice_label_usage(doc, [_label("L1")]), {"L1": 15})
+    """v2 attribution: every flavour has its own label, matched by item_code."""
+
+    def test_each_flavour_draws_its_own_label(self):
+        doc = SimpleNamespace(items=[_item(10, "MANGO-M"), _item(4, "BERRY-M")])
+        labels = [_label("L-MANGO", "MANGO-M"), _label("L-BERRY", "BERRY-M")]
+        usage, unmatched = ls.invoice_label_usage(doc, labels)
+        self.assertEqual(usage, {"L-MANGO": 10, "L-BERRY": 4})
+        self.assertEqual(unmatched, [])
 
     def test_bundle_parent_rows_are_skipped(self):
         # The parent carries the bundle SKU at 100% discount; the jars are the
         # children. Counting both would double every bundled order.
         doc = SimpleNamespace(
             items=[
-                _item(2, "Bundles", is_bundle_parent=1),
-                _item(4, "Medium"),
-                _item(2, "Large"),
+                _item(2, "BUNDLE-X", item_group="Medium", is_bundle_parent=1),
+                _item(4, "MANGO-M"),
+                _item(2, "BERRY-M"),
             ]
         )
-        self.assertEqual(ls.invoice_label_usage(doc, [_label("L1")]), {"L1": 6})
+        labels = [_label("L-MANGO", "MANGO-M"), _label("L-BERRY", "BERRY-M")]
+        usage, unmatched = ls.invoice_label_usage(doc, labels)
+        self.assertEqual(usage, {"L-MANGO": 4, "L-BERRY": 2})
+        self.assertEqual(unmatched, [])
 
-    def test_item_group_scoping_routes_each_line_to_its_own_label(self):
-        doc = SimpleNamespace(items=[_item(10, "Medium"), _item(4, "Large")])
-        labels = [_label("MED", "Medium"), _label("LRG", "Large")]
-        self.assertEqual(ls.invoice_label_usage(doc, labels), {"MED": 10, "LRG": 4})
+    def test_a_flavour_without_a_label_is_reported_unmatched(self):
+        # Customers add flavours at will; an untracked one must surface, not
+        # silently consume nothing.
+        doc = SimpleNamespace(items=[_item(10, "MANGO-M"), _item(3, "NEWFLAV-M")])
+        usage, unmatched = ls.invoice_label_usage(doc, [_label("L-MANGO", "MANGO-M")])
+        self.assertEqual(usage, {"L-MANGO": 10})
+        self.assertEqual(len(unmatched), 1)
+        self.assertEqual(unmatched[0]["item_code"], "NEWFLAV-M")
+        self.assertEqual(unmatched[0]["labels"], 3)
 
-    def test_catch_all_absorbs_only_the_unclaimed_groups(self):
-        doc = SimpleNamespace(
-            items=[_item(10, "Medium"), _item(4, "Large"), _item(3, "Small")]
-        )
-        labels = [_label("MED", "Medium"), _label("REST")]
-        self.assertEqual(ls.invoice_label_usage(doc, labels), {"MED": 10, "REST": 7})
+    def test_non_jar_lines_are_ignored_not_unmatched(self):
+        # Merch and services carry no customer label; reporting them unmatched
+        # would auto-create nonsense labels.
+        doc = SimpleNamespace(items=[_item(10, "MANGO-M"), _item(1, "TOTE", item_group="Merch")])
+        usage, unmatched = ls.invoice_label_usage(doc, [_label("L-MANGO", "MANGO-M")])
+        self.assertEqual(usage, {"L-MANGO": 10})
+        self.assertEqual(unmatched, [])
 
-    def test_lines_with_no_matching_label_are_ignored(self):
-        doc = SimpleNamespace(items=[_item(10, "Medium"), _item(4, "Merch")])
-        self.assertEqual(ls.invoice_label_usage(doc, [_label("MED", "Medium")]), {"MED": 10})
+    def test_the_meduim_typo_group_still_counts_as_a_jar(self):
+        doc = SimpleNamespace(items=[_item(5, "MANGO-M", item_group="Meduim")])
+        usage, unmatched = ls.invoice_label_usage(doc, [_label("L-MANGO", "MANGO-M")])
+        self.assertEqual(usage, {"L-MANGO": 5})
 
     def test_labels_per_unit_multiplies(self):
         # A jar that carries a body label and a lid label.
-        doc = SimpleNamespace(items=[_item(10, "Medium")])
-        self.assertEqual(ls.invoice_label_usage(doc, [_label("L1", per_unit=2)]), {"L1": 20})
+        doc = SimpleNamespace(items=[_item(10, "MANGO-M")])
+        usage, _ = ls.invoice_label_usage(doc, [_label("L1", "MANGO-M", per_unit=2)])
+        self.assertEqual(usage, {"L1": 20})
 
     def test_return_invoice_yields_a_positive_credit(self):
         # Return lines carry negative qty; the labels come back on the jars.
-        doc = SimpleNamespace(items=[_item(-6, "Medium")])
-        self.assertEqual(ls.invoice_label_usage(doc, [_label("L1")]), {"L1": -6})
+        doc = SimpleNamespace(items=[_item(-6, "MANGO-M")])
+        usage, _ = ls.invoice_label_usage(doc, [_label("L1", "MANGO-M")])
+        self.assertEqual(usage, {"L1": -6})
 
     def test_zero_qty_and_empty_invoices_produce_nothing(self):
-        self.assertEqual(ls.invoice_label_usage(SimpleNamespace(items=[]), [_label("L1")]), {})
-        self.assertEqual(
-            ls.invoice_label_usage(SimpleNamespace(items=[_item(0)]), [_label("L1")]), {}
+        usage, unmatched = ls.invoice_label_usage(SimpleNamespace(items=[]), [_label("L1")])
+        self.assertEqual((usage, unmatched), ({}, []))
+        usage, unmatched = ls.invoice_label_usage(
+            SimpleNamespace(items=[_item(0)]), [_label("L1")]
         )
+        self.assertEqual((usage, unmatched), ({}, []))
 
-    def test_no_labels_configured_consumes_nothing(self):
-        doc = SimpleNamespace(items=[_item(10, "Medium")])
-        self.assertEqual(ls.invoice_label_usage(doc, []), {})
+    def test_no_labels_still_reports_jar_lines_unmatched(self):
+        doc = SimpleNamespace(items=[_item(10, "MANGO-M")])
+        usage, unmatched = ls.invoice_label_usage(doc, [])
+        self.assertEqual(usage, {})
+        self.assertEqual(len(unmatched), 1)
+
+
+class TestSheets(unittest.TestCase):
+    """Sheet geometry: 21 labels per Medium sheet, 18 per Large."""
+
+    def _settings(self):
+        return {"sheet_medium": 21, "sheet_large": 18, "default_print_sheets": 2}
+
+    def test_medium_uses_21(self):
+        row = {"size": "Medium", "labels_per_sheet": 0}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=self._settings()), 21)
+
+    def test_large_uses_18(self):
+        row = {"size": "Large", "labels_per_sheet": 0}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=self._settings()), 18)
+
+    def test_the_meduim_typo_size_falls_back_to_medium(self):
+        row = {"size": "Meduim", "labels_per_sheet": 0}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=self._settings()), 21)
+
+    def test_per_label_override_wins(self):
+        row = {"size": "Large", "labels_per_sheet": 30}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=self._settings()), 30)
+
+    def test_missing_size_is_treated_as_medium(self):
+        row = {"size": None, "labels_per_sheet": 0}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=self._settings()), 21)
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +364,61 @@ class TestInvoiceUsage(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestOnHand(unittest.TestCase):
     def test_on_hand_is_the_signed_sum_of_the_ledger(self):
-        rows = [{"qty": 1000}, {"qty": -120}, {"qty": -80}, {"qty": 25}]
+        rows = [
+            {"qty": 1000, "value": 500.0},
+            {"qty": -120, "value": -60.0},
+            {"qty": -80, "value": -40.0},
+            {"qty": 25, "value": 12.5},
+        ]
         with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
             ls.frappe, "get_all", return_value=rows
         ):
             self.assertEqual(ls.get_on_hand("LBL-1"), 825)
+
+    def test_position_carries_value_and_weighted_average(self):
+        rows = [
+            {"qty": 1000, "value": 500.0},   # printed at 0.50
+            {"qty": -200, "value": -100.0},  # consumed at 0.50
+        ]
+        with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
+            ls.frappe, "get_all", return_value=rows
+        ):
+            position = ls.get_position("LBL-1")
+        self.assertEqual(position["on_hand"], 800)
+        self.assertEqual(position["value"], 400.0)
+        self.assertEqual(position["avg_cost"], 0.5)
+
+    def test_two_batches_at_different_costs_weight_the_average(self):
+        # 500 at 0.40 plus 500 at 0.60 = 1000 worth 500.00 -> 0.50 each.
+        rows = [
+            {"qty": 500, "value": 200.0},
+            {"qty": 500, "value": 300.0},
+        ]
+        with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
+            ls.frappe, "get_all", return_value=rows
+        ):
+            self.assertEqual(ls.get_position("LBL-1")["avg_cost"], 0.5)
+
+    def test_a_billed_later_revaluation_lifts_the_average(self):
+        # Received unbilled (value 0), then a zero-qty revaluation carries the
+        # bill's value: the average must absorb it.
+        rows = [
+            {"qty": 420, "value": 0.0},    # unbilled receipt
+            {"qty": 0, "value": 210.0},    # revaluation when the PI landed
+        ]
+        with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
+            ls.frappe, "get_all", return_value=rows
+        ):
+            self.assertEqual(ls.get_position("LBL-1")["avg_cost"], 0.5)
+
+    def test_zero_stock_has_zero_average_not_a_division_error(self):
+        rows = [{"qty": 100, "value": 50.0}, {"qty": -100, "value": -50.0}]
+        with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
+            ls.frappe, "get_all", return_value=rows
+        ):
+            position = ls.get_position("LBL-1")
+        self.assertEqual(position["on_hand"], 0)
+        self.assertEqual(position["avg_cost"], 0.0)
 
     def test_empty_ledger_is_zero_not_an_error(self):
         with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
@@ -344,7 +455,7 @@ class TestConsumptionHook(unittest.TestCase):
             customer="CUST-A",
             posting_date="2026-08-17",
             is_return=is_return,
-            items=[_item(10, "Medium")],
+            items=[_item(10, "MANGO-M")],
         )
 
     def test_b2c_invoice_fast_exits_without_posting(self):
@@ -356,7 +467,7 @@ class TestConsumptionHook(unittest.TestCase):
 
     def test_label_customer_is_consumed_negatively(self):
         with _settings(), patch.object(
-            ls, "labels_for_customer", return_value=[_label("L1")]
+            ls, "labels_for_customer", return_value=[_label("L1", "MANGO-M")]
         ), patch.object(ls, "_movements_for_invoice", return_value=[]), patch.object(
             ls, "post_movement"
         ) as post:
@@ -372,7 +483,7 @@ class TestConsumptionHook(unittest.TestCase):
         # Idempotency is checked against the ledger, not a flag on the invoice --
         # Sales Invoice is at the MariaDB column limit and cannot take another field.
         with _settings(), patch.object(
-            ls, "labels_for_customer", return_value=[_label("L1")]
+            ls, "labels_for_customer", return_value=[_label("L1", "MANGO-M")]
         ), patch.object(
             ls, "_movements_for_invoice", return_value=[{"name": "M1", "label": "L1", "qty": -10}]
         ), patch.object(ls, "post_movement") as post:
@@ -381,7 +492,7 @@ class TestConsumptionHook(unittest.TestCase):
 
     def test_auto_consume_off_posts_nothing(self):
         with _settings(label_auto_consume_on_invoice=0), patch.object(
-            ls, "labels_for_customer", return_value=[_label("L1")]
+            ls, "labels_for_customer", return_value=[_label("L1", "MANGO-M")]
         ), patch.object(ls, "post_movement") as post:
             ls.consume_labels_on_invoice_submit(self._invoice())
         post.assert_not_called()
@@ -394,8 +505,46 @@ class TestConsumptionHook(unittest.TestCase):
             ls.consume_labels_on_invoice_submit(self._invoice())
         log.assert_called()
 
+    def test_a_new_flavour_is_auto_created_and_consumed_dark(self):
+        # ilo adds a flavour: the first invoice carrying it must create its
+        # label at zero stock and draw it negative, so the board shows Out of
+        # Stock instead of the flavour silently not existing.
+        invoice = SimpleNamespace(
+            name="SI-2",
+            customer="CUST-A",
+            posting_date="2026-08-17",
+            is_return=0,
+            items=[_item(10, "MANGO-M"), _item(3, "NEWFLAV-M")],
+        )
+        with _settings(), patch.object(
+            ls, "labels_for_customer", return_value=[_label("L1", "MANGO-M")]
+        ), patch.object(ls, "_movements_for_invoice", return_value=[]), patch.object(
+            ls, "_auto_create_label", return_value="L-NEW"
+        ) as created, patch.object(ls, "post_movement") as post:
+            ls.consume_labels_on_invoice_submit(invoice)
+        created.assert_called_once()
+        posted = {c.kwargs["label"]: c.kwargs["qty"] for c in post.call_args_list}
+        self.assertEqual(posted, {"L1": -10, "L-NEW": -3})
+
+    def test_auto_create_failure_still_consumes_the_matched_flavours(self):
+        invoice = SimpleNamespace(
+            name="SI-3",
+            customer="CUST-A",
+            posting_date="2026-08-17",
+            is_return=0,
+            items=[_item(10, "MANGO-M"), _item(3, "NEWFLAV-M")],
+        )
+        with _settings(), patch.object(
+            ls, "labels_for_customer", return_value=[_label("L1", "MANGO-M")]
+        ), patch.object(ls, "_movements_for_invoice", return_value=[]), patch.object(
+            ls, "_auto_create_label", return_value=None
+        ), patch.object(ls, "post_movement") as post:
+            ls.consume_labels_on_invoice_submit(invoice)
+        posted = {c.kwargs["label"]: c.kwargs["qty"] for c in post.call_args_list}
+        self.assertEqual(posted, {"L1": -10})
+
     def test_cancel_credits_the_net_back(self):
-        rows = [{"name": "M1", "label": "L1", "qty": -10, "movement_type": "Consumed"}]
+        rows = [{"name": "M1", "label": "L1", "qty": -10, "value": -5.0, "movement_type": "Consumed"}]
         with patch.object(ls, "_movements_for_invoice", return_value=rows), patch.object(
             ls, "post_movement"
         ) as post:
@@ -403,10 +552,21 @@ class TestConsumptionHook(unittest.TestCase):
         post.assert_called_once()
         self.assertEqual(post.call_args.kwargs["qty"], 10)
 
+    def test_cancel_reverses_at_the_original_cost_not_todays_average(self):
+        # Consumed at 0.50, then a newer batch moved the average to 0.80. The
+        # reversal must credit back exactly the 5.00 the consumption took out,
+        # or the inventory account keeps a 3.00 residue forever.
+        rows = [{"name": "M1", "label": "L1", "qty": -10, "value": -5.0, "movement_type": "Consumed"}]
+        with patch.object(ls, "_movements_for_invoice", return_value=rows), patch.object(
+            ls, "post_movement"
+        ) as post:
+            ls.reverse_labels_on_invoice_cancel(SimpleNamespace(name="SI-1"))
+        self.assertEqual(post.call_args.kwargs["unit_cost"], 0.5)
+
     def test_cancelling_an_already_reversed_invoice_does_not_double_credit(self):
         rows = [
-            {"name": "M1", "label": "L1", "qty": -10, "movement_type": "Consumed"},
-            {"name": "M2", "label": "L1", "qty": 10, "movement_type": "Adjustment"},
+            {"name": "M1", "label": "L1", "qty": -10, "value": -5.0, "movement_type": "Consumed"},
+            {"name": "M2", "label": "L1", "qty": 10, "value": 5.0, "movement_type": "Adjustment"},
         ]
         with patch.object(ls, "_movements_for_invoice", return_value=rows), patch.object(
             ls, "post_movement"
@@ -420,6 +580,100 @@ class TestConsumptionHook(unittest.TestCase):
         ) as post:
             ls.reverse_labels_on_invoice_cancel(SimpleNamespace(name="SI-1"))
         post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Movement valuation + GL decision
+# ---------------------------------------------------------------------------
+class TestMovementValuation(unittest.TestCase):
+    """post_movement prices rows and decides when the GL hears about them."""
+
+    def _run(self, *, movement_type, qty, unit_cost=None, post_gl=True, avg_cost=0.5):
+        from unittest.mock import MagicMock
+
+        doc = MagicMock()
+        with patch.object(ls.frappe, "new_doc", return_value=doc), patch.object(
+            ls, "get_position", return_value={"on_hand": 100, "value": 50.0, "avg_cost": avg_cost}
+        ), patch.object(ls, "_post_value_journal") as je, patch.object(
+            ls, "refresh_label"
+        ):
+            ls.post_movement(
+                label="L1",
+                movement_type=movement_type,
+                qty=qty,
+                unit_cost=unit_cost,
+                post_gl=post_gl,
+            )
+        return doc, je
+
+    def test_consumption_prices_at_the_running_average(self):
+        doc, je = self._run(movement_type="Consumed", qty=10, avg_cost=0.5)
+        self.assertEqual(doc.qty, -10)
+        self.assertEqual(doc.unit_cost, 0.5)
+        self.assertEqual(doc.value, -5.0)
+        je.assert_called_once()
+
+    def test_receipts_price_at_the_batch_cost_and_skip_the_je(self):
+        # The PI already debited the inventory account; a JE too would double it.
+        doc, je = self._run(
+            movement_type="Print Received", qty=420, unit_cost=0.4762, post_gl=False
+        )
+        self.assertEqual(doc.qty, 420)
+        self.assertEqual(doc.unit_cost, 0.4762)
+        self.assertAlmostEqual(doc.value, 200.0, places=1)
+        je.assert_not_called()
+
+    def test_a_return_credit_carries_positive_value_and_posts(self):
+        doc, je = self._run(movement_type="Adjustment", qty=6, avg_cost=0.5)
+        self.assertEqual(doc.value, 3.0)
+        je.assert_called_once()
+
+    def test_zero_value_movements_skip_the_je(self):
+        # An unbilled label has no cost yet: the count moves, the GL does not.
+        doc, je = self._run(movement_type="Consumed", qty=10, avg_cost=0.0)
+        self.assertEqual(doc.value, 0.0)
+        je.assert_not_called()
+
+    def test_negative_unit_cost_is_clamped_to_zero(self):
+        doc, je = self._run(movement_type="Consumed", qty=10, unit_cost=-3)
+        self.assertEqual(doc.unit_cost, 0.0)
+        self.assertEqual(doc.value, 0.0)
+
+
+class TestValueJournalGuards(unittest.TestCase):
+    """_post_value_journal must fail into a log line, never into the sale."""
+
+    def _movement(self, value=-5.0):
+        from unittest.mock import MagicMock
+
+        movement = MagicMock()
+        movement.value = value
+        movement.qty = -10
+        movement.label = "L1"
+        movement.name = "JLMV-1"
+        movement.posting_date = "2026-08-17"
+        return movement
+
+    def test_unconfigured_accounts_mean_count_only_mode(self):
+        with patch.object(ls, "get_label_settings", return_value={
+            "post_cogs": True, "inventory_account": "", "cogs_account": "",
+        }), patch.object(ls.frappe, "new_doc") as new_doc:
+            ls._post_value_journal(self._movement())
+        new_doc.assert_not_called()
+
+    def test_the_kill_switch_stops_posting(self):
+        with patch.object(ls, "get_label_settings", return_value={
+            "post_cogs": False, "inventory_account": "A", "cogs_account": "B",
+        }), patch.object(ls.frappe, "new_doc") as new_doc:
+            ls._post_value_journal(self._movement())
+        new_doc.assert_not_called()
+
+    def test_a_je_crash_is_logged_not_raised(self):
+        with patch.object(ls, "get_label_settings", side_effect=RuntimeError("boom")), patch.object(
+            ls.frappe, "log_error"
+        ) as log:
+            ls._post_value_journal(self._movement())  # must not raise
+        log.assert_called()
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +705,8 @@ class TestAlertMessage(unittest.TestCase):
     def test_message_states_the_lead_time_and_the_ready_date(self):
         snap = {
             "customer_name": "Cafe X",
-            "label_title": "250g",
+            "label_title": "Mango",
+            "size": "Medium",
             "on_hand_qty": 40,
             "days_of_cover": 4.0,
             "avg_daily_usage": 10.0,
@@ -460,15 +715,20 @@ class TestAlertMessage(unittest.TestCase):
             "lead_days_max": 3,
             "rest_day": "Friday",
             "expected_ready_if_ordered_today": "2026-08-20",
-            "suggested_print_qty": 500,
+            "suggested_print_sheets": 2,
+            "labels_per_sheet": 21,
         }
         message = ls._alert_message(snap)
         self.assertIn("Cafe X", message)
+        self.assertIn("Mango", message)
+        self.assertIn("(Medium)", message)
         self.assertIn("40 label(s) left", message)
         self.assertIn("2-3 working days", message)
         self.assertIn("Friday excluded", message)
         self.assertIn("2026-08-20", message)
-        self.assertIn("500", message)
+        # The printer sells sheets: the ask is 2 sheets, with the 42-label
+        # equivalence spelled out.
+        self.assertIn("2 sheet(s) (42 labels)", message)
 
 
 # ---------------------------------------------------------------------------
