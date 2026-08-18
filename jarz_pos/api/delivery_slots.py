@@ -4,13 +4,74 @@ Provides delivery time slot management based on POS Profile Timetable configurat
 """
 
 from __future__ import annotations
-import contextlib
 import frappe
-import io
 import json
+import logging
 from datetime import datetime, timedelta, time
 from typing import List, Dict, Any, Union
 from jarz_pos.constants import TIMING_MODES
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────────────────────────────────
+
+#: site_config.json key that raises this module's log level, e.g.
+#: ``"jarz_delivery_slots_log_level": "DEBUG"``. Accepts any standard level name.
+_LOG_LEVEL_CONF_KEY = "jarz_delivery_slots_log_level"
+
+_LOGGER_NAME = "jarz_pos.api.delivery_slots"
+
+
+def _get_logger() -> logging.Logger:
+    """Return this module's logger with its level set explicitly.
+
+    ``frappe.get_logger`` applies ``frappe.log_level or default_log_level``, and
+    ``default_log_level`` is ERROR on anything that is not a dev server (see
+    ``frappe/utils/logger.py``). Staging and production set neither
+    ``developer_mode`` nor ``log_level``, so a bare ``.info()`` — and ``.warning()``
+    — is silently discarded there. Only ERROR and above ever reach
+    ``sites/<site>/logs/jarz_pos.api.delivery_slots.log``.
+
+    Defaulting to ERROR here is a deliberate choice, not an accident.
+    ``get_available_delivery_slots`` runs on every POS profile load and its
+    slot-by-slot trace was ~182 lines of ``print()`` per call on the backend
+    container's stdout. That trace is now ``.debug()``: off in normal operation,
+    and recoverable without a deploy by setting ``jarz_delivery_slots_log_level``
+    to ``"DEBUG"`` in ``site_config.json``. Genuine faults — schema drift, the
+    infinite-loop guard, unhandled exceptions — are logged at ERROR and are
+    therefore always written.
+
+    Debug calls use lazy ``%s`` formatting so the arguments are not rendered at
+    all while the level is ERROR; the trace costs nothing on the hot path.
+    """
+    try:
+        logger = frappe.logger(_LOGGER_NAME, allow_site=frappe.local.site)
+    except Exception:
+        # No site context (e.g. imported outside a request). A plain stdlib
+        # logger keeps error reporting working rather than dropping it.
+        logger = logging.getLogger(_LOGGER_NAME)
+
+    logger.setLevel(logging.ERROR)  # floor: guarantees failures are never lost
+
+    try:
+        configured = frappe.conf.get(_LOG_LEVEL_CONF_KEY)
+    except Exception as exc:
+        logger.error("Could not read %s from site config: %s", _LOG_LEVEL_CONF_KEY, exc)
+        return logger
+
+    if configured:
+        level = logging.getLevelName(str(configured).strip().upper())
+        if isinstance(level, int):
+            logger.setLevel(level)
+        else:
+            logger.error(
+                "Ignoring invalid %s=%r in site config; keeping ERROR.",
+                _LOG_LEVEL_CONF_KEY,
+                configured,
+            )
+
+    return logger
 
 
 @frappe.whitelist()
@@ -25,46 +86,21 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
         List[Dict]: Available time slots with date, time, label, and datetime
     """
     
-    # Comprehensive debugging for development
-    print("\n" + "="*80)
-    print("🚀 DELIVERY SLOTS API CALL STARTED")
-    print("="*80)
-    print(f"📍 TIMESTAMP: {frappe.utils.now()}")
-    print(f"👤 USER: {frappe.session.user}")
-    print(f"🏢 POS PROFILE: {pos_profile_name}")
-    print(f"🌐 SITE: {frappe.local.site}")
-    print(f"🔗 METHOD: get_available_delivery_slots")
-    
-    # Frappe best practice: Use frappe.logger() for structured logging
-    logger = frappe.logger("jarz_pos.api.delivery_slots", allow_site=frappe.local.site)
-    
-    frappe.log_error(
-        title="Delivery Slots API Call Debug",
-        message=f"""
-API ENDPOINT: get_available_delivery_slots
-TIMESTAMP: {frappe.utils.now()}
-USER: {frappe.session.user}
-POS_PROFILE: {pos_profile_name}
-""",
-        reference_doctype="POS Profile",
-        reference_name=pos_profile_name
+    logger = _get_logger()
+    logger.debug(
+        "get_available_delivery_slots called | user=%s | site=%s | pos_profile=%s",
+        frappe.session.user,
+        getattr(frappe.local, "site", None),
+        pos_profile_name,
     )
-    
+
     try:
         # Check if POS Profile exists and is enabled
-        print(f"\n🔍 STEP 1: Checking if POS Profile exists and is enabled...")
         from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
         assert_pos_profile_enabled(pos_profile_name)
-        print(f"📊 POS Profile '{pos_profile_name}' is active")
-        
-        # Get POS Profile Timetable configuration
-        print(f"\n🔍 STEP 2: Looking for POS Profile Timetable...")
-        print(f"🔎 Searching for timetable with pos_profile = '{pos_profile_name}'")
-        
-        # First, let's check what POS Profile Timetables exist
-        all_timetables = frappe.get_all("POS Profile Timetable", fields=["name", "pos_profile", "slot_hours", "slot_minutes"])
-        print(f"📋 All available timetables: {all_timetables}")
+        logger.debug("POS Profile %r is active", pos_profile_name)
 
+        # Get POS Profile Timetable configuration
         timetable_config = frappe.get_value(
             "POS Profile Timetable",
             {"pos_profile": pos_profile_name},
@@ -72,12 +108,20 @@ POS_PROFILE: {pos_profile_name}
             as_dict=True
         )
 
-        print(f"📊 Timetable config found: {timetable_config}")
+        logger.debug("Timetable config for %r: %s", pos_profile_name, timetable_config)
 
         if not timetable_config:
             error_msg = f"No timetable configured for POS Profile '{pos_profile_name}'"
-            print(f"❌ ERROR: {error_msg}")
-            logger.error(f"❌ {error_msg}")
+            # Listing every timetable only earns its query cost on the failure
+            # path - it used to run on every call just to feed a print().
+            logger.error(
+                "%s | timetables that do exist: %s",
+                error_msg,
+                frappe.get_all(
+                    "POS Profile Timetable",
+                    fields=["name", "pos_profile", "slot_hours", "slot_minutes"],
+                ),
+            )
             frappe.throw(error_msg)
 
         slot_duration_minutes = int(timetable_config.slot_hours or 1) * 60 + int(timetable_config.slot_minutes or 0)
@@ -89,15 +133,14 @@ POS_PROFILE: {pos_profile_name}
             )
         timetable_name = timetable_config.name
 
-        print(f"\n🔍 STEP 3: Processing timetable configuration...")
-        print(f"📊 Timetable name: {timetable_name}")
-        print(f"⏰ Slot duration: {slot_duration_minutes} minutes, last slot: {last_slot_duration_minutes} minutes")
-        
+        logger.debug(
+            "Timetable %s | slot duration %s min | custom last slot %s min",
+            timetable_name,
+            slot_duration_minutes,
+            last_slot_duration_minutes,
+        )
+
         # Get day timings from the child table
-        print(f"\n🔍 STEP 4: Getting day timings from child table...")
-        print(f"🔎 Searching POS Profile Day Timing with parent = '{timetable_name}'")
-        
-        # First, check what fields are available in the DocType
         try:
             # Try to get fields including same_day
             day_timings = frappe.get_all(
@@ -106,9 +149,15 @@ POS_PROFILE: {pos_profile_name}
                 fields=["day", "opening_time", "closing_time", "same_day"],
                 order_by="idx"
             )
-            print(f"✅ Successfully queried with same_day field")
         except Exception as e:
-            print(f"⚠️  same_day field not available, falling back to basic fields: {str(e)}")
+            # Schema drift: without same_day every "Next Day" window silently
+            # collapses to same-day and the late slots disappear. Log at ERROR
+            # so this stays visible on staging/production, then degrade.
+            logger.error(
+                "same_day unavailable on POS Profile Day Timing, falling back to basic fields "
+                "(Next Day windows will be treated as Same Day): %s",
+                e,
+            )
             # Fallback to basic fields if same_day doesn't exist
             day_timings = frappe.get_all(
                 "POS Profile Day Timing",
@@ -119,25 +168,33 @@ POS_PROFILE: {pos_profile_name}
             # Add default same_day value
             for timing in day_timings:
                 timing['same_day'] = TIMING_MODES.SAME_DAY  # Default value
-        
-        print(f"📊 Day timings found: {len(day_timings)} records")
-        print(f"📋 Day timings details: {day_timings}")
-        
+
+        logger.debug("Day timings for %s: %s record(s) %s", timetable_name, len(day_timings), day_timings)
+
         if not day_timings:
-            print(f"🔍 No day timings found, checking all day timings...")
-            try:
-                all_day_timings = frappe.get_all("POS Profile Day Timing", fields=["name", "parent", "day", "opening_time", "closing_time", "same_day"])
-            except:
-                all_day_timings = frappe.get_all("POS Profile Day Timing", fields=["name", "parent", "day", "opening_time", "closing_time"])
-            print(f"📋 All available day timings: {all_day_timings}")
-            
             error_msg = f"No day timings configured for POS Profile '{pos_profile_name}'"
-            print(f"❌ ERROR: {error_msg}")
-            logger.error(f"❌ {error_msg}")
+            try:
+                all_day_timings = frappe.get_all(
+                    "POS Profile Day Timing",
+                    fields=["name", "parent", "day", "opening_time", "closing_time", "same_day"],
+                )
+            except Exception as e:
+                logger.error(
+                    "Could not list POS Profile Day Timing with same_day (%s); retrying without it", e
+                )
+                all_day_timings = frappe.get_all(
+                    "POS Profile Day Timing",
+                    fields=["name", "parent", "day", "opening_time", "closing_time"],
+                )
+            logger.error(
+                "%s | timetable=%s | day timings that do exist: %s",
+                error_msg,
+                timetable_name,
+                all_day_timings,
+            )
             frappe.throw(error_msg)
-        
+
         # Create day mapping for quick lookup
-        print(f"\n🔍 STEP 5: Creating day configuration mapping...")
         day_config = {}
         for timing in day_timings:
             # Handle same_day field with fallback
@@ -147,18 +204,19 @@ POS_PROFILE: {pos_profile_name}
                 'closing_time': timing.closing_time,
                 'same_day': same_day
             }
-            print(f"📅 Day {timing.day}: {timing.opening_time} - {timing.closing_time} (same_day: {same_day})")
-        
-        logger.info(f"✅ Found {len(day_timings)} day configurations with {slot_duration_minutes} minute slots")
-        print(f"\n✅ Found {len(day_timings)} day configurations with {slot_duration_minutes} minute slots")
-        print(f"📅 Day configurations: {day_config}")
-        
+
+        logger.debug(
+            "Found %s day configuration(s) with %s minute slots: %s",
+            len(day_timings),
+            slot_duration_minutes,
+            day_config,
+        )
+
         # Generate slots for next 5 days
-        print(f"\n🔍 STEP 6: Generating slots for next 5 days...")
         slots = []
         current_datetime = frappe.utils.now_datetime()
-        print(f"⏰ Current datetime: {current_datetime}")
-        
+        logger.debug("Current datetime: %s", current_datetime)
+
         # Create a more comprehensive day mapping that handles different day name formats
         day_name_variations = {
             'Monday': ['Monday', 'Mon', 'monday', 'MONDAY'],
@@ -169,20 +227,17 @@ POS_PROFILE: {pos_profile_name}
             'Saturday': ['Saturday', 'Sat', 'saturday', 'SATURDAY'],
             'Sunday': ['Sunday', 'Sun', 'sunday', 'SUNDAY']
         }
-        
+
         for day_offset in range(5):  # Next 5 days
             target_date = current_datetime.date() + timedelta(days=day_offset)
             day_name = target_date.strftime('%A')  # Monday, Tuesday, etc.
-            
-            print(f"\n📅 Processing day {day_offset + 1}: {day_name} ({target_date})")
-            
+
             # Find the matching day configuration - use direct matching first
             matching_day_config = None
-            
+
             # First try direct match
             if day_name in day_config:
                 matching_day_config = day_config[day_name]
-                print(f"✅ Direct match found for {day_name}")
             else:
                 # Then try variations
                 for db_day_name, day_info in day_config.items():
@@ -190,26 +245,36 @@ POS_PROFILE: {pos_profile_name}
                     for standard_day, variations in day_name_variations.items():
                         if standard_day == day_name and db_day_name in variations:
                             matching_day_config = day_info
-                            print(f"✅ Found matching config for {day_name}: database has '{db_day_name}'")
+                            logger.debug("Matched %s to stored day name %r", day_name, db_day_name)
                             break
                     if matching_day_config:
                         break
-            
+
             # Check if this day is configured
             if not matching_day_config:
-                print(f"⚠️  No configuration for {day_name} ({target_date})")
-                print(f"📋 Available day configs: {list(day_config.keys())}")
-                logger.info(f"📅 No configuration for {day_name} ({target_date})")
+                logger.debug(
+                    "No configuration for %s (%s); configured days: %s",
+                    day_name,
+                    target_date,
+                    list(day_config.keys()),
+                )
                 continue
-            
+
             opening_time = matching_day_config['opening_time']
             closing_time = matching_day_config['closing_time']
             same_day = matching_day_config['same_day']
-            
-            print(f"⏰ {day_name} hours: {opening_time} - {closing_time} (same_day: {same_day})")
-            
+
+            logger.debug(
+                "Day %s of 5: %s (%s) hours %s - %s (same_day: %s)",
+                day_offset + 1,
+                day_name,
+                target_date,
+                opening_time,
+                closing_time,
+                same_day,
+            )
+
             # Generate time slots for this day
-            print(f"🔍 Generating slots for {day_name}...")
             day_slots = _generate_day_slots(
                 target_date,
                 opening_time,
@@ -219,39 +284,29 @@ POS_PROFILE: {pos_profile_name}
                 current_datetime if day_offset == 0 else None,  # Only check current time for today
                 last_slot_duration_minutes
             )
-            
-            print(f"📊 Generated {len(day_slots)} slots for {day_name}")
+
+            logger.debug("Generated %s slot(s) for %s", len(day_slots), day_name)
             slots.extend(day_slots)
-        
+
         # Sort slots by datetime
-        print(f"\n🔍 STEP 7: Finalizing slots...")
-        print(f"📊 Total slots before sorting: {len(slots)}")
         slots.sort(key=lambda x: x['datetime'])
-        
+
         # Mark the next available slot as default
         if slots:
             slots[0]['is_default'] = True
-            print(f"🎯 Default slot set: {slots[0]['label']}")
-        
-        logger.info(f"✅ Generated {len(slots)} total delivery slots")
-        print(f"\n✅ Generated {len(slots)} total delivery slots")
-        print(f"📋 Sample slots: {slots[:3] if slots else 'None'}")
-        
-        print("\n" + "="*80)
-        print("🎉 DELIVERY SLOTS API CALL COMPLETED SUCCESSFULLY")
-        print("="*80)
-        
+
+        logger.debug(
+            "Generated %s total delivery slot(s) for %r; default=%s",
+            len(slots),
+            pos_profile_name,
+            slots[0]['label'] if slots else None,
+        )
+
         return slots
-        
+
     except Exception as e:
         error_msg = f"Error generating delivery slots: {str(e)}"
-        print(f"\n❌❌❌ EXCEPTION IN DELIVERY SLOTS API ❌❌❌")
-        print(f"❌ Error: {error_msg}")
-        logger.error(f"❌ {error_msg}")
-        print(f"❌ Full traceback:")
-        import traceback
-        traceback.print_exc()
-        print("="*80)
+        logger.error("%s\n%s", error_msg, frappe.get_traceback())
         frappe.throw(f"Error loading delivery slots: {str(e)}")
 
 
@@ -281,6 +336,7 @@ def _generate_day_slots(
         List of time slots for the day
     """
     slots = []
+    logger = _get_logger()
 
     # Convert timedelta to time if needed (Frappe Time fields return timedelta)
     if isinstance(opening_time, timedelta):
@@ -288,8 +344,15 @@ def _generate_day_slots(
     if isinstance(closing_time, timedelta):
         closing_time = (datetime.min + closing_time).time()
 
-    print(f"🔍 Converting times - Opening: {opening_time} (type: {type(opening_time)}), Closing: {closing_time} (type: {type(closing_time)})")
-    print(f"🔍 Same day setting: {same_day}")
+    logger.debug(
+        "Slot inputs for %s | opening=%s (%s) closing=%s (%s) same_day=%s",
+        target_date,
+        opening_time,
+        type(opening_time).__name__,
+        closing_time,
+        type(closing_time).__name__,
+        same_day,
+    )
 
     # Convert times to datetime objects for easier calculation
     current_slot_time = datetime.combine(target_date, opening_time)
@@ -297,58 +360,72 @@ def _generate_day_slots(
     # Handle same_day vs next_day closing times
     if same_day == TIMING_MODES.NEXT_DAY:
         end_time = datetime.combine(target_date + timedelta(days=1), closing_time)
-        print(f"🌙 Next day closing: {end_time}")
     else:
         end_time = datetime.combine(target_date, closing_time)
-        print(f"🌅 Same day closing: {end_time}")
 
-    print(f"🕐 Slot generation window: {current_slot_time} to {end_time}")
+    logger.debug("Slot generation window: %s to %s", current_slot_time, end_time)
 
     # Validate that end_time is after start_time
     if end_time <= current_slot_time:
-        print(f"❌ Invalid time window: end_time ({end_time}) <= start_time ({current_slot_time})")
+        logger.debug(
+            "Invalid time window for %s: end_time (%s) <= start_time (%s)",
+            target_date,
+            end_time,
+            current_slot_time,
+        )
         return slots
 
     # If this is today, ensure we only show future slots
     if current_datetime:
         # Add buffer of 30 minutes for preparation
         min_slot_time = current_datetime + timedelta(minutes=30)
-        print(f"⏰ Minimum slot time (current + 30min buffer): {min_slot_time}")
+        logger.debug("Minimum slot time (current + 30min buffer): %s", min_slot_time)
 
         if current_slot_time < min_slot_time:
             # Round up to next slot boundary
             minutes_since_opening = (min_slot_time - current_slot_time).total_seconds() / 60
             slots_to_skip = int(minutes_since_opening / slot_duration_minutes) + 1
             current_slot_time += timedelta(minutes=slot_duration_minutes * slots_to_skip)
-            print(f"⏭️  Adjusted start time for today: {current_slot_time} (skipped {slots_to_skip} slots)")
+            logger.debug(
+                "Adjusted start time for today: %s (skipped %s slots)",
+                current_slot_time,
+                slots_to_skip,
+            )
 
             # Check if adjusted time is still valid
             if current_slot_time >= end_time:
-                print(f"⚠️  No valid slots for today after time adjustment")
+                logger.debug("No valid slots left today after time adjustment")
                 return slots
 
     slot_count = 0
     max_iterations = 50  # Safety limit to prevent infinite loops
     iteration_count = 0
 
-    print(f"🔄 Starting slot generation loop...")
     while current_slot_time < end_time and iteration_count < max_iterations:
         iteration_count += 1
         slot_end_time = current_slot_time + timedelta(minutes=slot_duration_minutes)
 
-        print(f"🔄 Iteration {iteration_count}: Checking slot {current_slot_time} - {slot_end_time}")
+        logger.debug(
+            "Iteration %s: checking slot %s - %s", iteration_count, current_slot_time, slot_end_time
+        )
 
         # Regular slot overflows closing time — try custom last slot before stopping
         if slot_end_time > end_time:
-            print(f"🛑 Regular slot would extend beyond closing time: {slot_end_time} > {end_time}")
+            logger.debug(
+                "Regular slot would extend beyond closing time: %s > %s", slot_end_time, end_time
+            )
             if last_slot_duration_minutes:
                 last_slot_end = current_slot_time + timedelta(minutes=last_slot_duration_minutes)
                 if last_slot_end <= end_time:
-                    print(f"🔚 Adding custom last slot: {current_slot_time} - {last_slot_end}")
+                    logger.debug(
+                        "Adding custom last slot: %s - %s", current_slot_time, last_slot_end
+                    )
                     slot_end_time = last_slot_end
                     # Fall through to append, then exit loop
                 else:
-                    print(f"🛑 Custom last slot also overflows: {last_slot_end} > {end_time}")
+                    logger.debug(
+                        "Custom last slot also overflows: %s > %s", last_slot_end, end_time
+                    )
                     break
             else:
                 break
@@ -370,7 +447,7 @@ def _generate_day_slots(
 
         slots.append(slot_data)
         slot_count += 1
-        print(f"✅ Generated slot {slot_count}: {time_label}")
+        logger.debug("Generated slot %s: %s", slot_count, time_label)
 
         # If we appended a custom last slot, the loop must end now
         if slot_end_time != current_slot_time + timedelta(minutes=slot_duration_minutes):
@@ -379,9 +456,18 @@ def _generate_day_slots(
         current_slot_time += timedelta(minutes=slot_duration_minutes)
 
     if iteration_count >= max_iterations:
-        print(f"⚠️  Stopped slot generation after {max_iterations} iterations to prevent infinite loop")
+        # Not cosmetic: the returned list is truncated, so the POS silently
+        # offers fewer slots than the timetable configures. ERROR so it is
+        # actually visible on staging/production.
+        logger.error(
+            "Stopped slot generation for %s after %s iterations (infinite-loop guard); "
+            "a %s minute slot over this window needs more slots than the guard allows",
+            target_date,
+            max_iterations,
+            slot_duration_minutes,
+        )
 
-    print(f"📊 Total slots generated for {target_date}: {len(slots)}")
+    logger.debug("Total slots generated for %s: %s", target_date, len(slots))
     return slots
 
 
@@ -549,19 +635,15 @@ def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any
             continue
 
         # current_datetime=None → full day, not filtered against "now".
-        # The generator prints ~50 debug lines per day. The Desk form calls this
-        # on every edit, so swallow that here rather than flooding the backend
-        # container's stdout with a form preview.
-        with contextlib.redirect_stdout(io.StringIO()):
-            generated = _generate_day_slots(
-                target_date,
-                opening_time,
-                closing_time,
-                same_day,
-                slot_duration_minutes,
-                None,
-                last_slot_duration_minutes,
-            )
+        generated = _generate_day_slots(
+            target_date,
+            opening_time,
+            closing_time,
+            same_day,
+            slot_duration_minutes,
+            None,
+            last_slot_duration_minutes,
+        )
 
         entry["slots"] = [
             {
