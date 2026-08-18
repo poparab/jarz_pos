@@ -415,3 +415,178 @@ def get_next_available_slot(pos_profile_name: str) -> Dict[str, Any] | None:
         return slots[0]
     
     return None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Timetable preview (Desk form) — see POS Profile Timetable client script.
+# ──────────────────────────────────────────────────────────────────────────
+
+WEEKDAYS = [
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+]
+
+# Reference week used only to render labels; any Monday works because the
+# generator is date-agnostic once "today" filtering is switched off.
+_PREVIEW_WEEK_START = datetime(2024, 1, 1).date()  # a Monday
+
+
+def _coerce_time(value: Union[str, time, timedelta, None]) -> time | None:
+    """Accept whatever a Time field hands us and return a ``datetime.time``.
+
+    Frappe Time fields come back as ``timedelta`` from the DB, but the Desk
+    form posts them as ``"HH:MM:SS"`` (sometimes ``"HH:MM"``) strings.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, time):
+        return value
+    if isinstance(value, timedelta):
+        return (datetime.min + value).time()
+    text = str(value).strip()
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+@frappe.whitelist()
+def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Render the weekly slot plan for an (possibly unsaved) timetable config.
+
+    Drives the live preview on the POS Profile Timetable form so the operator
+    can see what a slot-length or opening-hours change produces *before*
+    saving. Deliberately calls the same ``_generate_day_slots`` the real API
+    uses, so the preview cannot drift from what the POS actually offers.
+
+    Args:
+        config: dict (or JSON string) with ``slot_hours``, ``slot_minutes``,
+            ``has_custom_last_slot``, ``last_slot_hours``, ``last_slot_minutes``
+            and ``timetable``: a list of ``{day, opening_time, closing_time,
+            same_day}`` rows.
+
+    Returns:
+        Dict with ``slot_duration_minutes``, ``last_slot_duration_minutes``,
+        ``total_slots`` and ``days``: one entry per weekday holding the
+        generated slots plus any uncovered tail before closing.
+    """
+    if isinstance(config, str):
+        config = json.loads(config or "{}")
+    config = config or {}
+
+    slot_duration_minutes = (
+        int(config.get("slot_hours") or 0) * 60 + int(config.get("slot_minutes") or 0)
+    )
+    if slot_duration_minutes <= 0:
+        frappe.throw("Slot length must be greater than zero.")
+
+    last_slot_duration_minutes = None
+    if int(config.get("has_custom_last_slot") or 0):
+        last_slot_duration_minutes = (
+            int(config.get("last_slot_hours") or 0) * 60
+            + int(config.get("last_slot_minutes") or 0)
+        )
+        if last_slot_duration_minutes <= 0:
+            last_slot_duration_minutes = None
+
+    rows_by_day: Dict[str, Dict[str, Any]] = {}
+    for row in config.get("timetable") or []:
+        day = (row or {}).get("day")
+        if day in WEEKDAYS:
+            rows_by_day[day] = row
+
+    days = []
+    total_slots = 0
+
+    for offset, day in enumerate(WEEKDAYS):
+        row = rows_by_day.get(day)
+        entry: Dict[str, Any] = {
+            "day": day,
+            "configured": bool(row),
+            "opening_time": None,
+            "closing_time": None,
+            "same_day": None,
+            "slots": [],
+            "slot_count": 0,
+            "uncovered_minutes": 0,
+            "note": None,
+        }
+
+        if not row:
+            entry["note"] = "Not configured - no delivery slots on this day."
+            days.append(entry)
+            continue
+
+        opening_time = _coerce_time(row.get("opening_time"))
+        closing_time = _coerce_time(row.get("closing_time"))
+        same_day = row.get("same_day") or TIMING_MODES.SAME_DAY
+
+        entry["opening_time"] = opening_time.isoformat() if opening_time else None
+        entry["closing_time"] = closing_time.isoformat() if closing_time else None
+        entry["same_day"] = same_day
+
+        if not opening_time or not closing_time:
+            entry["note"] = "Opening or closing time missing."
+            days.append(entry)
+            continue
+
+        target_date = _PREVIEW_WEEK_START + timedelta(days=offset)
+        start_dt = datetime.combine(target_date, opening_time)
+        if same_day == TIMING_MODES.NEXT_DAY:
+            end_dt = datetime.combine(target_date + timedelta(days=1), closing_time)
+        else:
+            end_dt = datetime.combine(target_date, closing_time)
+
+        if end_dt <= start_dt:
+            entry["note"] = (
+                "Closing time is not after opening time - set 'Next Day' if the "
+                "branch closes after midnight."
+            )
+            days.append(entry)
+            continue
+
+        # current_datetime=None → full day, not filtered against "now".
+        generated = _generate_day_slots(
+            target_date,
+            opening_time,
+            closing_time,
+            same_day,
+            slot_duration_minutes,
+            None,
+            last_slot_duration_minutes,
+        )
+
+        entry["slots"] = [
+            {
+                "time_label": slot["time_label"],
+                "start": slot["datetime"][11:16],
+                "end": slot["end_datetime"][11:16],
+            }
+            for slot in generated
+        ]
+        entry["slot_count"] = len(generated)
+        entry["open_minutes"] = int((end_dt - start_dt).total_seconds() // 60)
+
+        if generated:
+            last_end = datetime.fromisoformat(generated[-1]["end_datetime"])
+            entry["uncovered_minutes"] = int((end_dt - last_end).total_seconds() // 60)
+        else:
+            entry["uncovered_minutes"] = entry["open_minutes"]
+            entry["note"] = "Open window is shorter than one slot - no slots."
+
+        if entry["uncovered_minutes"] > 0 and entry["slot_count"]:
+            entry["note"] = (
+                f"{entry['uncovered_minutes']} min before closing is not covered "
+                "by any slot."
+            )
+
+        total_slots += entry["slot_count"]
+        days.append(entry)
+
+    return {
+        "slot_duration_minutes": slot_duration_minutes,
+        "last_slot_duration_minutes": last_slot_duration_minutes,
+        "total_slots": total_slots,
+        "days": days,
+    }

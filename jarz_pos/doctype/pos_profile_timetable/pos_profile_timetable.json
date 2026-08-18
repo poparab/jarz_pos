@@ -11,7 +11,9 @@
   "has_custom_last_slot",
   "last_slot_hours",
   "last_slot_minutes",
-  "timetable"
+  "timetable",
+  "slot_preview_section",
+  "slot_preview"
  ],
  "fields": [
   {
@@ -60,12 +62,22 @@
    "fieldtype": "Select",
    "label": "Last Slot Minutes",
    "options": "0\n15\n30\n45"
+  },
+  {
+   "fieldname": "slot_preview_section",
+   "fieldtype": "Section Break",
+   "label": "Slot Preview"
+  },
+  {
+   "fieldname": "slot_preview",
+   "fieldtype": "HTML",
+   "label": "Slot Preview"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-06-06 00:00:00.000000",
+ "modified": "2026-08-18 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "POS Profile Timetable",
