@@ -213,6 +213,132 @@ def assert_gl_balanced(voucher_type: str, voucher_no: str) -> tuple[bool, str]:
     return balanced, f"DR={total_debit:.2f} CR={total_credit:.2f}"
 
 
+def _explicit_zero_price_exists(item_code: str, price_list: str) -> bool:
+    """True when *item_code* is DELIBERATELY priced at zero in *price_list*.
+
+    A real ``Item Price`` row (or a ``Jarz Price List Category Rate`` for the
+    item's group) that says 0.00 is a decision someone made. NO row at all is a
+    pricing miss - which is the failure mode the zero-total check exists for, so
+    the two must never be conflated.
+    """
+    if not item_code or not price_list:
+        return False
+    try:
+        rate = frappe.db.get_value(
+            "Item Price",
+            {"item_code": item_code, "price_list": price_list, "selling": 1},
+            "price_list_rate",
+        )
+        if rate is not None and abs(float(rate or 0)) <= TOLERANCE:
+            return True
+    except Exception:
+        pass
+    try:
+        item_group = frappe.db.get_value("Item", item_code, "item_group")
+        if item_group and frappe.db.exists("DocType", "Jarz Price List Category Rate"):
+            rate = frappe.db.get_value(
+                "Jarz Price List Category Rate",
+                {"price_list": price_list, "item_group": item_group},
+                "rate",
+            )
+            if rate is not None and abs(float(rate or 0)) <= TOLERANCE:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def zero_total_is_intentional(invoice_name: str) -> tuple[bool, str]:
+    """Decide whether a zero-total invoice is zero BY DESIGN or because pricing failed.
+
+    The check this feeds exists to catch ONE thing: an invoice that totals zero
+    because pricing silently resolved nothing (no Item Price, no category rate, a
+    policy that quietly zeroed the rates). Everything below is an attempt to prove
+    the zero was DELIBERATE; anything it cannot explain still fails.
+
+    Legitimate shapes:
+
+    1. An invoice-level 100% discount that zeroed a NON-ZERO gross
+       (``additional_discount_percentage`` >= 100, or ``discount_amount`` equal to
+       ``total``).
+    2. Every plain row carries a 100% LINE discount over a real
+       ``price_list_rate``. This is how a Sample commercial policy zeroes an order:
+       ``services/invoice_creation.py:841-855`` stamps ``discount_percentage`` onto
+       each non-bundle row, and ERPNext's ``Sales Invoice.total`` is already NET of
+       line discounts - so the invoice-level fields BOTH read 0 and shape 1 can
+       never see it. Reading only those fields is what failed the two Sample
+       purposes on a run whose pricing was healthy.
+    3. Every row prices off an explicit zero in the invoice's own price list (a
+       zero-rated sample item). An explicit 0.00 row is a decision; a missing row
+       is the bug.
+
+    Returns ``(intentional, evidence)``.
+    """
+    header = frappe.db.get_value(
+        "Sales Invoice",
+        invoice_name,
+        ["total", "discount_amount", "additional_discount_percentage", "selling_price_list"],
+        as_dict=True,
+    ) or {}
+    gross = float(header.get("total") or 0)
+    discount = float(header.get("discount_amount") or 0)
+    pct = float(header.get("additional_discount_percentage") or 0)
+    price_list = str(header.get("selling_price_list") or "")
+
+    if gross > TOLERANCE and (
+        pct >= 100 - TOLERANCE or abs(discount - gross) <= TOLERANCE
+    ):
+        return True, (
+            f"invoice-level discount zeroed a non-zero gross: total={gross} "
+            f"discount_amount={discount} additional_discount_percentage={pct}"
+        )
+
+    rows = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": invoice_name, "parenttype": "Sales Invoice"},
+        fields=[
+            "idx", "item_code", "qty", "rate", "price_list_rate",
+            "discount_percentage", "discount_amount", "amount",
+        ],
+        order_by="idx asc",
+        limit_page_length=200,
+    ) or []
+    if not rows:
+        return False, "invoice carries NO item rows at all"
+
+    explained: list[str] = []
+    unexplained: list[str] = []
+    for r in rows:
+        code = str(r.get("item_code") or "")
+        list_rate = float(r.get("price_list_rate") or 0)
+        row_pct = float(r.get("discount_percentage") or 0)
+        row_disc = float(r.get("discount_amount") or 0)
+        tag = (
+            f"#{r.get('idx')} {code} price_list_rate={list_rate} "
+            f"discount_percentage={row_pct} discount_amount={row_disc} "
+            f"amount={r.get('amount')}"
+        )
+        if list_rate > TOLERANCE and row_pct >= 100 - TOLERANCE:
+            explained.append(f"{tag} -> 100% line discount over a real rate")
+        elif (
+            list_rate > TOLERANCE
+            and row_disc > TOLERANCE
+            and abs(row_disc - list_rate) <= TOLERANCE
+        ):
+            explained.append(f"{tag} -> line discount_amount cancels the rate")
+        elif list_rate <= TOLERANCE and _explicit_zero_price_exists(code, price_list):
+            explained.append(f"{tag} -> explicit 0.00 price in {price_list}")
+        else:
+            unexplained.append(tag)
+
+    if unexplained:
+        return False, (
+            f"price_list={price_list!r}; rows with NO deliberate zero: {unexplained} "
+            f"(explained: {explained}) - this is what a silent pricing failure looks like"
+        )
+    return True, f"price_list={price_list!r}; every row deliberately zeroed: {explained}"
+
+
 def capture_invoice_accounting(invoice_name: str) -> dict:
     """Capture a stable, comparable snapshot of all accounting tied to an invoice.
 
@@ -970,37 +1096,35 @@ def _run_purpose_case(ctx: RunContext, env: dict, spec: dict) -> None:
                    f"value={cap_after_create['custom_no_courier']}")
         _mark(nc_ok)
 
-        # SI GL must balance. A 100%-discount sample posts a zero-total invoice with
-        # no GL entries — that is correct. But the old code accepted ANY zero-total
+        # SI GL must balance. A zeroed sample posts a zero-total invoice with no GL
+        # entries - that is correct. The ORIGINAL code accepted ANY zero-total
         # invoice as "trivially balanced" without looking at it, so an invoice that
-        # totalled zero BECAUSE pricing silently failed (no Item Price resolved, or
-        # a policy that zeroed the rates) passed the accounting check. A zero total
-        # is only legitimate when the discount deliberately made it zero.
+        # totalled zero BECAUSE pricing silently failed passed the accounting check.
+        # The first tightening then looked ONLY at the INVOICE-level discount
+        # fields, which a Sample commercial policy never touches: it stamps a 100%
+        # discount on each LINE (services/invoice_creation.py:841-855), and ERPNext
+        # reports ``total`` already net of line discounts, so gross/discount/pct all
+        # read 0 for a perfectly deliberate zero - which is why both Sample purposes
+        # failed on a run whose pricing was healthy. zero_total_is_intentional
+        # inspects the ROWS instead, and still fails an invoice whose zero nobody
+        # chose (no price, no discount, no explicit 0.00 rate).
         si_grand_total = float(frappe.db.get_value("Sales Invoice", inv, "grand_total") or 0)
         if abs(si_grand_total) <= TOLERANCE:
-            totals = frappe.db.get_value(
-                "Sales Invoice", inv,
-                ["total", "discount_amount", "additional_discount_percentage"],
-                as_dict=True,
-            ) or {}
-            gross = float(totals.get("total") or 0)
-            discount = float(totals.get("discount_amount") or 0)
-            pct = float(totals.get("additional_discount_percentage") or 0)
-            intentional = (
-                pct >= 100 - TOLERANCE
-                or (discount > TOLERANCE and abs(discount - gross) <= TOLERANCE)
-            )
+            intentional, evidence = zero_total_is_intentional(inv)
             live_gl = frappe.db.count(
                 "GL Entry",
                 {"voucher_type": "Sales Invoice", "voucher_no": inv, "is_cancelled": 0},
             )
-            ok = intentional and live_gl == 0
+            if live_gl == 0:
+                gl_ok, gl_detail = True, "no GL rows (nothing to post at zero)"
+            else:
+                gl_ok, gl_detail = assert_gl_balanced("Sales Invoice", inv)
+            ok = intentional and gl_ok
             row["si_gl_balanced"] = ok
             ctx.record(
                 f"PART B [{purpose}]: SI GL balanced", ok,
-                f"zero-total invoice: gross={gross} discount={discount} pct={pct} "
-                f"live_gl_rows={live_gl} — legitimate only when a 100% discount zeroed a "
-                f"non-zero gross and no GL was posted (was: unconditional PASS)",
+                f"zero-total invoice: intentional={intentional} :: {evidence} :: "
+                f"live_gl_rows={live_gl} {gl_detail}",
             )
             _mark(ok)
         else:

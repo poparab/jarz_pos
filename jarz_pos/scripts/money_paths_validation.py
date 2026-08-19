@@ -212,6 +212,40 @@ def _grand_total(invoice: str) -> float:
     return flt(_invoice_value(invoice, "grand_total"))
 
 
+def _receivable_total(invoice: str) -> float:
+    """The amount ERPNext actually books to the receivable for this invoice.
+
+    With rounding enabled (``disable_rounded_total`` = 0) ERPNext posts the
+    Debtors line -- and therefore ``outstanding_amount`` -- at ``rounded_total``,
+    NOT at ``grand_total``. Comparing a receivable or an outstanding against
+    ``grand_total`` on such an invoice reports a phantom delta of up to half a
+    currency unit and accuses the product of losing money it never lost. That is
+    exactly what C3 did (grand_total 361.73 vs a ledger and outstanding of
+    362.00). Every receivable/outstanding assertion in this module goes through
+    here; amounts the product itself derives from ``grand_total`` (Courier
+    Transaction amounts, settlement previews) deliberately do NOT.
+    """
+    row = frappe.db.get_value(
+        "Sales Invoice",
+        invoice,
+        ["grand_total", "rounded_total", "disable_rounded_total"],
+        as_dict=True,
+    ) or {}
+    grand = flt(row.get("grand_total"))
+    if int(row.get("disable_rounded_total") or 0):
+        return grand
+    rounded = flt(row.get("rounded_total"))
+    return rounded if abs(rounded) > 0.0001 else grand
+
+
+def _pe_gl_net(invoice: str, account: str) -> float:
+    """Live net movement on *account* across the submitted Payment Entries of one invoice."""
+    return round(
+        sum(_gl_net("Payment Entry", pe, account) for pe in _submitted_payment_entries_for(invoice)),
+        2,
+    )
+
+
 def _payment_entries_for(invoice: str) -> List[str]:
     return sorted(set(frappe.get_all(
         "Payment Entry Reference",
@@ -418,6 +452,51 @@ def _ensure_mp_territory(ctx: RunContext, name: str, income: float, expense: flo
     if updates:
         frappe.db.set_value("Territory", name, updates, update_modified=False)
     return name
+
+
+def _ensure_territory_pos_profile(territory: str, pos_profile: str) -> Tuple[bool, str]:
+    """Point the fixture Territory at the POS profile these cases drive.
+
+    api/manager.py:1252-1262 runs ``assert_pos_profile_matches_territory`` before
+    ANY amendment write, and utils/invoice_utils.py:1177 only lets it pass when
+    the ORDER territory's own ``pos_profile`` equals the selected profile.
+    ``b2b_accounting_validation._ensure_territory`` never sets that link, so the
+    real endpoint rejected every amendment with POS_PROFILE_TERRITORY_MISMATCH
+    and the case crashed. Building the production shape (territory -> branch) is
+    the honest fix; passing ``pos_profile_override`` would skip the very guard
+    production traffic has to satisfy.
+
+    Returns ``(satisfied, evidence)``. A site whose Territory has no
+    ``pos_profile`` field at all cannot host this precondition -- that is a SKIP,
+    never a pass.
+    """
+    from jarz_pos.utils.invoice_utils import resolve_pos_profile_for_territory
+
+    try:
+        field = frappe.get_meta("Territory").get_field("pos_profile")
+    except Exception as exc:
+        return False, f"could not read Territory meta: {exc}"
+    if not field:
+        return False, (
+            "Territory has no pos_profile field on this site, so "
+            "resolve_pos_profile_for_territory returns None for EVERY territory and "
+            "assert_pos_profile_matches_territory can only be satisfied by an explicit "
+            "manager pos_profile_override"
+        )
+    try:
+        frappe.db.set_value(
+            "Territory", territory, {"pos_profile": pos_profile}, update_modified=False
+        )
+        frappe.db.commit()
+    except Exception as exc:
+        return False, f"could not stamp pos_profile={pos_profile!r} on Territory {territory}: {exc}"
+    resolved = resolve_pos_profile_for_territory(territory) or ""
+    if resolved != pos_profile:
+        return False, (
+            f"Territory {territory} still resolves to POS profile {resolved!r} after "
+            f"stamping {pos_profile!r}"
+        )
+    return True, f"Territory {territory} -> POS Profile {pos_profile}"
 
 
 def _addresses_for_customer(customer: str) -> List[str]:
@@ -906,6 +985,7 @@ def _case_collection_method_change(ctx: RunContext, env: Dict[str, Any]) -> None
         handle_out_for_delivery_transition,
         _get_courier_outstanding_account,
         _get_online_collection_account,
+        _is_online_collection_method,
     )
 
     courier = env["courier"]
@@ -973,12 +1053,26 @@ def _case_collection_method_change(ctx: RunContext, env: Dict[str, Any]) -> None
         return
     frappe.db.commit()
     data = (res or {}).get("data") or res or {}
+    # The ENDPOINT contract is "payment_collection_changed": delivery_handling.py:3441-3460
+    # builds its own payload and merges it LAST (``{**result, **payload}``), so the inner
+    # strategy's "cod_to_online" (:3832) is overwritten on every fresh change. Only the
+    # idempotent-replay short-circuit at :3378-3389 ever returns "cod_to_online". The
+    # direction is carried by ``new_method``, so assert on that instead of the label --
+    # a change that silently landed on a CASH method still fails here.
+    changed_mode = str(data.get("mode") or "")
+    changed_method = str(data.get("new_method") or data.get("actual_payment_method") or "")
     ctx.record(
         f"{case}.collection_change_succeeded",
-        bool((res or {}).get("success")) and data.get("mode") == "cod_to_online",
+        bool((res or {}).get("success"))
+        and (
+            (changed_mode == "payment_collection_changed"
+             and bool(changed_method) and _is_online_collection_method(changed_method))
+            or changed_mode == "cod_to_online"
+        ),
         json.dumps({k: data.get(k) for k in
-                    ("mode", "journal_entry", "order_amount", "shipping_amount")},
-                   default=str)[:250],
+                    ("mode", "new_method", "payment_changed", "journal_entry",
+                     "order_amount", "shipping_amount")},
+                   default=str)[:300],
     )
 
     je_name = data.get("journal_entry")
@@ -1148,6 +1242,15 @@ def _case_amendment_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
     from jarz_pos.api.manager import submit_invoice_amendment
     from jarz_pos.utils.account_utils import get_pos_cash_account
 
+    # Precondition, checked BEFORE any fixture is created: the amendment endpoint
+    # refuses outright when the order territory does not map to the selected POS
+    # profile (api/manager.py:1252-1262). Build that mapping if the schema allows
+    # it; skip -- with the reason -- when it does not.
+    mapped, mapping_detail = _ensure_territory_pos_profile(env["territory"], env["pos_profile"])
+    if not mapped:
+        _skip(ctx, case, f"POS profile / territory mapping could not be built: {mapping_detail}")
+        return
+
     invoice = _new_invoice(ctx, env, case)
     _pay_invoice_full_cash(ctx, invoice, env["pos_profile"])
     frappe.db.commit()
@@ -1166,12 +1269,27 @@ def _case_amendment_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
                          "so there is nothing for :1476 to cancel")
         return
 
-    result = submit_invoice_amendment(
-        invoice_id=invoice,
-        reuse_source_cart=1,
-        pos_profile_name=env["pos_profile"],
-        expected_source_grand_total=source_grand,
-    ) or {}
+    try:
+        result = submit_invoice_amendment(
+            invoice_id=invoice,
+            reuse_source_cart=1,
+            pos_profile_name=env["pos_profile"],
+            expected_source_grand_total=source_grand,
+        ) or {}
+    except Exception as exc:
+        # A guard that refuses on an environment fact (not on the accounting under
+        # test) is a precondition, not a defect -- and never a crash that aborts
+        # the rest of the case.
+        message = str(exc)[:400]
+        if "POS_PROFILE_TERRITORY_MISMATCH" in message:
+            _skip(
+                ctx, case,
+                f"assert_pos_profile_matches_territory still refuses after mapping "
+                f"[{mapping_detail}]: {message}",
+            )
+        else:
+            ctx.record(f"{case}.amendment_succeeded", False, message)
+        return
     frappe.db.commit()
 
     if not result.get("success"):
@@ -1228,19 +1346,23 @@ def _case_amendment_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
         str(amended_from or "") == invoice,
         f"amended_from={amended_from} expected={invoice}",
     )
+    new_receivable = _receivable_total(replacement)
     ctx.record(
         f"{case}.replacement_outstanding_is_its_grand_total",
-        abs(_outstanding(replacement) - new_grand) <= _TOL,
-        f"outstanding={_outstanding(replacement)} grand_total={new_grand}",
+        abs(_outstanding(replacement) - new_receivable) <= _TOL,
+        f"outstanding={_outstanding(replacement)} receivable total={new_receivable} "
+        f"(grand_total={new_grand}; ERPNext books the receivable at rounded_total "
+        f"unless disable_rounded_total is set)",
     )
     _assert_voucher_balanced(ctx, case, "Sales Invoice", replacement)
 
     net_receivable = _gl_net_for_invoices([invoice, replacement], receivable_acc)
     ctx.record(
         f"{case}.net_receivable_equals_the_new_total",
-        abs(net_receivable - new_grand) <= _TOL,
+        abs(net_receivable - new_receivable) <= _TOL,
         f"net {receivable_acc} across source+replacement={net_receivable} new "
-        f"grand_total={new_grand} (source was {source_grand})",
+        f"receivable total={new_receivable} (grand_total={new_grand}; source was "
+        f"{source_grand})",
     )
 
     dn_after = len(_delivery_notes_for(invoice)) + len(_delivery_notes_for(replacement))
@@ -1305,9 +1427,15 @@ def _case_amendment_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
 #                            save(ignore_validate_update_after_submit) on a
 #                            SUBMITTED invoice               (verified)
 #
-# api/customer.py contains NO make_gl_entries, NO repost and NO
-# update_outstanding_amt, so the assertions below compare the receivable ledger
-# and the outstanding against the NEW total and report the exact delta.
+# api/customer.py calls no make_gl_entries and no update_outstanding_amt ITSELF,
+# but that is not the same as "the ledger does not follow". The save() at :1271 is
+# a save on a SUBMITTED document, so the framework's own on_update_after_submit
+# repost fires and the receivable + outstanding ARE rewritten to the new total --
+# verified directly on ACC-SINV-2026-17999/18014 (grand_total 361.73,
+# rounded_total 362.00, outstanding 362.00, Debtors 362.00). The assertions below
+# therefore compare against ``_receivable_total`` (rounded_total when rounding is
+# enabled), not against grand_total: the earlier grand_total comparison invented a
+# 0.27 shortfall that no ledger ever had.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _prepare_c3_customer(ctx: RunContext, env: Dict[str, Any], suffix: str,
@@ -1434,25 +1562,29 @@ def _case_address_territory_change(ctx: RunContext, env: Dict[str, Any]) -> None
         f"grand_total {old_grand} -> {new_grand} expected {expected_grand}",
     )
 
+    new_receivable = _receivable_total(invoice)
     receivable_debit = _gl_net_for_invoices([invoice], receivable_acc)
-    delta = round(receivable_debit - new_grand, 2)
+    delta = round(receivable_debit - new_receivable, 2)
     ctx.record(
         f"{case}.receivable_gl_equals_the_new_grand_total",
         abs(delta) <= _TOL,
         f"live SUM(debit-credit) on {receivable_acc} for {invoice} = {receivable_debit}; "
-        f"new grand_total = {new_grand}; DELTA = {delta} (old grand_total was {old_grand}; "
-        f"income moved {old_income} -> {new_income}). api/customer.py posts no GL and runs "
-        "no repost after the tax-row rewrite at :1258-1271.",
+        f"new receivable total = {new_receivable} (grand_total={new_grand}); DELTA = "
+        f"{delta} (old grand_total was {old_grand}; income moved {old_income} -> "
+        f"{new_income}). The save() on the submitted invoice at api/customer.py:1271 "
+        "triggers the framework repost, and ERPNext books the receivable at "
+        "rounded_total whenever disable_rounded_total is 0.",
     )
 
     allocated = _allocated_total(invoice)
     outstanding = _outstanding(invoice)
-    expected_outstanding = round(new_grand - allocated, 2)
+    expected_outstanding = round(new_receivable - allocated, 2)
     ctx.record(
         f"{case}.outstanding_equals_new_total_minus_payments",
         abs(outstanding - expected_outstanding) <= _TOL,
         f"outstanding={outstanding} expected={expected_outstanding} "
-        f"(grand_total={new_grand} - allocated={allocated}); DELTA = "
+        f"(receivable total={new_receivable} from grand_total={new_grand} - "
+        f"allocated={allocated}); DELTA = "
         f"{round(outstanding - expected_outstanding, 2)}",
     )
 
@@ -1582,12 +1714,13 @@ def _case_address_territory_change(ctx: RunContext, env: Dict[str, Any]) -> None
         "the courier expense follows the new territory.",
     )
     free_receivable_debit = _gl_net_for_invoices([free_invoice], free_receivable)
+    free_new_receivable = _receivable_total(free_invoice)
     ctx.record(
         f"{case}.free_shipping_receivable_still_matches_its_own_total",
-        abs(free_receivable_debit - free_new_grand) <= _TOL,
+        abs(free_receivable_debit - free_new_receivable) <= _TOL,
         f"live SUM(debit-credit) on {free_receivable} = {free_receivable_debit}; "
-        f"grand_total = {free_new_grand}; DELTA = "
-        f"{round(free_receivable_debit - free_new_grand, 2)}",
+        f"receivable total = {free_new_receivable} (grand_total={free_new_grand}); "
+        f"DELTA = {round(free_receivable_debit - free_new_receivable, 2)}",
     )
 
 
@@ -1673,10 +1806,12 @@ def _case_online_unpaid_lifecycle(ctx: RunContext, env: Dict[str, Any]) -> None:
         not _submitted_payment_entries_for(invoice),
         f"payment entries after dispatch={_submitted_payment_entries_for(invoice)}",
     )
+    receivable = _receivable_total(invoice)
     ctx.record(
         f"{case}.dispatch_leaves_the_full_amount_outstanding",
-        abs(_outstanding(invoice) - grand) <= _TOL,
-        f"outstanding={_outstanding(invoice)} grand_total={grand}",
+        abs(_outstanding(invoice) - receivable) <= _TOL,
+        f"outstanding={_outstanding(invoice)} receivable total={receivable} "
+        f"(grand_total={grand})",
     )
 
     cts = _courier_transactions(invoice)
@@ -1748,15 +1883,19 @@ def _case_online_unpaid_lifecycle(ctx: RunContext, env: Dict[str, Any]) -> None:
         for pe in pes:
             _assert_voucher_balanced(ctx, case, "Payment Entry", pe)
             gl = _gl_by_account("Payment Entry", pe)
+            # confirm_online_payment pays the OUTSTANDING (delivery_handling.py:1597),
+            # which ERPNext carries at rounded_total, so the ledger is measured
+            # against the receivable total rather than grand_total.
             ctx.record(
                 f"{case}.confirm_debits_the_online_ledger::{pe}",
-                abs(flt(gl.get(online_acc, 0.0)) - grand) <= _TOL,
-                f"{online_acc} net={gl.get(online_acc, 0.0)} expected={grand}",
+                abs(flt(gl.get(online_acc, 0.0)) - receivable) <= _TOL,
+                f"{online_acc} net={gl.get(online_acc, 0.0)} expected={receivable} "
+                f"(grand_total={grand})",
             )
             ctx.record(
                 f"{case}.confirm_credits_the_receivable::{pe}",
-                abs(flt(gl.get(receivable_acc, 0.0)) + grand) <= _TOL,
-                f"{receivable_acc} net={gl.get(receivable_acc, 0.0)} expected={-grand}",
+                abs(flt(gl.get(receivable_acc, 0.0)) + receivable) <= _TOL,
+                f"{receivable_acc} net={gl.get(receivable_acc, 0.0)} expected={-receivable}",
             )
         ctx.record(
             f"{case}.confirm_clears_the_outstanding",
@@ -1800,13 +1939,15 @@ def _case_online_unpaid_lifecycle(ctx: RunContext, env: Dict[str, Any]) -> None:
     _absorb(ctx, conv_invoice)
 
     conv_pes = _submitted_payment_entries_for(conv_invoice)
+    conv_receivable = _receivable_total(conv_invoice)
     moved = round(sum(_gl_net("Payment Entry", pe, courier_outstanding_acc)
                       for pe in conv_pes), 2)
     ctx.record(
         f"{case}.convert_moves_the_receivable_to_courier_outstanding",
-        abs(moved - conv_grand) <= _TOL and not conv_error,
+        abs(moved - conv_receivable) <= _TOL and not conv_error,
         f"{courier_outstanding_acc} debit across {conv_pes} = {moved} "
-        f"expected={conv_grand} error={conv_error!r}",
+        f"expected={conv_receivable} (the Payment Entry moves the OUTSTANDING; "
+        f"grand_total={conv_grand}) error={conv_error!r}",
     )
     ctx.record(
         f"{case}.convert_clears_the_outstanding",
@@ -1836,6 +1977,7 @@ def _case_settlement_preview_token(ctx: RunContext, env: Dict[str, Any]) -> None
     case = "C6-PREVIEW-TOKEN"
 
     from jarz_pos.api.couriers import confirm_settlement, generate_settlement_preview
+    from jarz_pos.services.delivery_handling import _get_courier_outstanding_account
     from jarz_pos.utils.account_utils import (
         get_freight_expense_account,
         get_pos_cash_account,
@@ -1889,12 +2031,36 @@ def _case_settlement_preview_token(ctx: RunContext, env: Dict[str, Any]) -> None
     frappe.db.commit()
     _absorb(ctx, invoice_a)
 
+    # api/couriers.py:799 maps the request mode onto the strategy key ("pay_now"/"now"
+    # -> "now", everything else -> "later"), but the response built at :817-831 sets
+    # ``"mode": mode`` -- the REQUEST mode -- and then merges the strategy result with
+    # ``if k not in base``, so the handler's own "unpaid_settle_now" label is dropped
+    # and NEVER reaches the caller. Asserting on it could only ever fail. The ledger
+    # is asked instead: handle_unpaid_settle_now (settlement_strategies.py:148) pays
+    # the receivable into the POS cash account, while handle_unpaid_settle_later moves
+    # it to Courier Outstanding -- so a confirm that silently took the "later" branch
+    # still fails this check.
+    cash_acc = get_pos_cash_account(env["pos_profile"], env["company"])
+    courier_outstanding_acc = _get_courier_outstanding_account(env["company"])
+    now_pe = str(res.get("payment_entry") or "")
+    now_pe_row = frappe.db.get_value(
+        "Payment Entry", now_pe, ["docstatus", "paid_to", "paid_amount"], as_dict=True
+    ) if now_pe else None
+    now_to_courier = _pe_gl_net(invoice_a, courier_outstanding_acc)
     ctx.record(
         f"{case}.confirm_selects_the_strategy_the_preview_promised",
-        str(res.get("mode") or "") == "unpaid_settle_now",
+        not confirm_error
+        and bool(res.get("success"))
+        and str(res.get("mode") or "") == "pay_now"
+        and bool(now_pe_row)
+        and int((now_pe_row or {}).get("docstatus") or 0) == 1
+        and str((now_pe_row or {}).get("paid_to") or "") == cash_acc
+        and abs(now_to_courier) <= _TOL,
         f"preview said is_unpaid_effective={preview.get('is_unpaid_effective')} "
-        f"mode=pay_now; confirm_settlement mapped strat_mode 'now' -> "
-        f"{res.get('mode')!r} error={confirm_error!r}",
+        f"mode=pay_now; endpoint echoed mode={res.get('mode')!r} and returned "
+        f"payment_entry={now_pe!r} -> {now_pe_row} (expected a submitted PE paid into "
+        f"{cash_acc}); courier-outstanding movement across this invoice's payment "
+        f"entries={now_to_courier} (must be 0) error={confirm_error!r}",
     )
     ctx.record(
         f"{case}.confirm_reports_the_cached_preview_amounts",
@@ -1906,7 +2072,6 @@ def _case_settlement_preview_token(ctx: RunContext, env: Dict[str, Any]) -> None
         f"shipping={preview.get('shipping_amount')}",
     )
 
-    cash_acc = get_pos_cash_account(env["pos_profile"], env["company"])
     pes = _submitted_payment_entries_for(invoice_a)
     cash_in = round(sum(_gl_net("Payment Entry", pe, cash_acc) for pe in pes), 2)
     ctx.record(
@@ -1968,10 +2133,33 @@ def _case_settlement_preview_token(ctx: RunContext, env: Dict[str, Any]) -> None
         error_b = str(exc)[:300]
     frappe.db.commit()
     _absorb(ctx, invoice_b)
+    # Same shadowing as above: the endpoint echoes the request mode ("later") and
+    # drops the handler's "unpaid_settle_later". The proof that the LATER strategy
+    # ran is that the receivable moved to Courier Outstanding through a Payment
+    # Entry (mark_courier_outstanding, delivery_handling.py:1119-1148) and NO branch
+    # cash was taken. A confirm that took the "now" branch by mistake debits cash
+    # instead and fails here.
+    later_pe = str(res_b.get("payment_entry") or "")
+    later_pe_row = frappe.db.get_value(
+        "Payment Entry", later_pe, ["docstatus", "paid_to", "paid_amount"], as_dict=True
+    ) if later_pe else None
+    later_to_courier = _pe_gl_net(invoice_b, courier_outstanding_acc)
+    later_to_cash = _pe_gl_net(invoice_b, cash_acc)
     ctx.record(
         f"{case}.settle_later_maps_to_the_later_strategy",
-        str(res_b.get("mode") or "") == "unpaid_settle_later",
-        f"mode={res_b.get('mode')!r} error={error_b!r}",
+        not error_b
+        and bool(res_b.get("success"))
+        and str(res_b.get("mode") or "") == "later"
+        and bool(later_pe_row)
+        and int((later_pe_row or {}).get("docstatus") or 0) == 1
+        and str((later_pe_row or {}).get("paid_to") or "") == courier_outstanding_acc
+        and abs(later_to_courier - _receivable_total(invoice_b)) <= _TOL
+        and abs(later_to_cash) <= _TOL,
+        f"endpoint echoed mode={res_b.get('mode')!r}; payment_entry={later_pe!r} -> "
+        f"{later_pe_row} (expected a submitted PE paid into {courier_outstanding_acc}); "
+        f"courier outstanding debited {later_to_courier} of a receivable total "
+        f"{_receivable_total(invoice_b)}; branch cash movement={later_to_cash} "
+        f"(must be 0) error={error_b!r}",
     )
 
 
@@ -1998,12 +2186,18 @@ def _case_cancel_guards(ctx: RunContext, env: Dict[str, Any]) -> None:
     inside = _new_invoice(ctx, env, f"{case}-INSIDE")
     frappe.db.commit()
     grand_inside = _grand_total(inside)
-    if grand_inside <= CANCEL_RESIDUE_OUTSIDE_TOLERANCE + 1:
-        _skip(ctx, case, f"fixture invoice total {grand_inside} is too small to leave a "
-                         "meaningful partial residue")
+    # The residue must be measured against what is ACTUALLY outstanding (the
+    # rounded receivable), not against grand_total: on a rounded invoice the two
+    # differ by up to half a unit, which is enough to push a residue meant to sit
+    # inside kanban.py's 0.50 tolerance outside it and fail a healthy product.
+    open_inside = _outstanding(inside)
+    if open_inside <= CANCEL_RESIDUE_OUTSIDE_TOLERANCE + 1:
+        _skip(ctx, case, f"fixture invoice outstanding {open_inside} (grand_total "
+                         f"{grand_inside}) is too small to leave a meaningful partial "
+                         "residue")
         return
     _pay_invoice_partial(ctx, inside, env["pos_profile"],
-                         grand_inside - CANCEL_RESIDUE_INSIDE_TOLERANCE)
+                         open_inside - CANCEL_RESIDUE_INSIDE_TOLERANCE)
     frappe.db.commit()
     residue_inside = _outstanding(inside)
 
@@ -2032,8 +2226,9 @@ def _case_cancel_guards(ctx: RunContext, env: Dict[str, Any]) -> None:
     outside = _new_invoice(ctx, env, f"{case}-OUTSIDE")
     frappe.db.commit()
     grand_outside = _grand_total(outside)
+    open_outside = _outstanding(outside)
     _pay_invoice_partial(ctx, outside, env["pos_profile"],
-                         grand_outside - CANCEL_RESIDUE_OUTSIDE_TOLERANCE)
+                         open_outside - CANCEL_RESIDUE_OUTSIDE_TOLERANCE)
     frappe.db.commit()
     residue_outside = _outstanding(outside)
     result = cancel_invoice(outside, "money paths validation") or {}
