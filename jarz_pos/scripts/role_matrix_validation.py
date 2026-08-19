@@ -350,20 +350,41 @@ def _pin_user_to_branch(
     """
     if not own_profile:
         return
+    # Frappe lowercases the User name on insert, so the stored link reads
+    # ``_roletest_line_manager@...`` while ``email`` still carries the
+    # ``_ROLETEST_`` prefix this module builds. A case-sensitive comparison
+    # therefore fails on BOTH halves of this loop at once: the own-branch link
+    # is never recognised, so a fresh row is appended on every run, and the
+    # other-branch links inherited from the template user are never recognised
+    # either, so they are never removed.
+    #
+    # The consequence was not a cosmetic leak. It left the personas assigned to
+    # three branches, which silently deleted the meaning of every cross-branch
+    # probe: "the branch that is not yours" had no referent, the guard correctly
+    # allowed the call, and the matrix reported a branch-scoping failure that
+    # does not exist. Compare case-insensitively.
+    target = email.strip().lower()
     for profile in _enabled_profiles():
         try:
             prof = frappe.get_doc("POS Profile", profile)
             rows = list(prof.get("applicable_for_users") or [])
-            linked = any(r.user == email for r in rows)
+            mine = [r for r in rows if str(r.user or "").strip().lower() == target]
             if profile == own_profile:
-                if not linked:
+                # Exactly one row, even if earlier runs left several.
+                if len(mine) != 1:
+                    kept = [r for r in rows if str(r.user or "").strip().lower() != target]
+                    prof.set("applicable_for_users", kept)
                     prof.append("applicable_for_users", {"user": email})
                     prof.save(ignore_permissions=True)
-                    ctx.profile_links.append((profile, email))
-            elif linked:
-                # Residue from an interrupted run. The email is synthetic, so
-                # any link to it is ours to remove.
-                prof.set("applicable_for_users", [r for r in rows if r.user != email])
+                ctx.profile_links.append((profile, email))
+            elif mine:
+                # Residue from an interrupted run, or a link inherited from the
+                # template user. The email is synthetic, so any link to it is
+                # ours to remove.
+                prof.set(
+                    "applicable_for_users",
+                    [r for r in rows if str(r.user or "").strip().lower() != target],
+                )
                 prof.save(ignore_permissions=True)
         except Exception:
             frappe.log_error(frappe.get_traceback(), "role_matrix: profile pin failed")
@@ -374,7 +395,11 @@ def _deprovision(ctx: RoleRunContext) -> None:
     for profile, email in ctx.profile_links:
         try:
             prof = frappe.get_doc("POS Profile", profile)
-            rows = [r for r in (prof.get("applicable_for_users") or []) if r.user != email]
+            target = email.strip().lower()
+            rows = [
+                r for r in (prof.get("applicable_for_users") or [])
+                if str(r.user or "").strip().lower() != target
+            ]
             if len(rows) != len(prof.get("applicable_for_users") or []):
                 prof.set("applicable_for_users", rows)
                 prof.save(ignore_permissions=True)
