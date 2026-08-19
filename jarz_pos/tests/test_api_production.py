@@ -8,6 +8,8 @@ module-level ``frappe`` symbol patched wholesale so nothing reaches a database.
 import unittest
 from unittest.mock import patch
 
+from jarz_pos.constants import ROLES
+
 def passthrough_translate():
     """Neutralise ``from frappe import _`` for tests that trip ``frappe.throw``.
 
@@ -448,14 +450,48 @@ class TestAccessGates(unittest.TestCase):
                 production._ensure_production_view_access()
 
     def test_manager_gate_stays_narrower_than_the_view_gate(self):
+        """The write gate must stay a strict subset of the read gate.
+
+        Demonstrated with ``Production Operator`` rather than ``JARZ Manager``.
+        The operator is the role that makes this invariant meaningful: the whole
+        point of the floor role is that it may *see* the board and start a batch
+        without holding the manager authority behind it.
+
+        ``JARZ Manager`` used to be the example here, on the basis that it was in
+        PRODUCTION_VIEW but not in MANUFACTURING. That gap was not a design — it
+        was the bug: the mobile drawer gated Cash Transfer, Stock Transfer,
+        Inventory Count, Purchase and the Production Board on a set that includes
+        JARZ Manager, so the app offered four entries and the Batch tab's item
+        picker to a JARZ-Manager-only user and the server answered "Not
+        permitted" to every one. The owner's call (2026-08-19) was that the
+        server was wrong, so JARZ Manager is now in MANUFACTURING and this
+        example no longer demonstrates anything.
+        """
         from jarz_pos.api import production
 
         with passthrough_translate(), patch("jarz_pos.api.production.frappe") as mock_frappe:
-            mock_frappe.get_roles.return_value = ["JARZ Manager"]
+            mock_frappe.get_roles.return_value = [ROLES.PRODUCTION_OPERATOR]
             mock_frappe.throw.side_effect = PermissionError("denied")
 
             with self.assertRaises(PermissionError):
                 production._ensure_manager_access()
+
+    def test_jarz_manager_may_now_reach_the_production_manager_gate(self):
+        """Pins the decision above, so a silent revert is a failing test."""
+        from jarz_pos.api import production
+
+        self.assertIn(ROLES.JARZ_MANAGER, ROLES.MANUFACTURING)
+        self.assertLess(
+            len(ROLES.MANUFACTURING),
+            len(ROLES.PRODUCTION_VIEW),
+            "the write gate must remain strictly narrower than the read gate",
+        )
+
+        with passthrough_translate(), patch("jarz_pos.api.production.frappe") as mock_frappe:
+            mock_frappe.get_roles.return_value = [ROLES.JARZ_MANAGER]
+            mock_frappe.throw.side_effect = PermissionError("denied")
+
+            production._ensure_manager_access()  # must not raise
 
 
 if __name__ == "__main__":
