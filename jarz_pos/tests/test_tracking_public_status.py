@@ -32,6 +32,7 @@ import frappe
 from frappe.utils import add_to_date, now_datetime
 
 from jarz_pos.services import tracking
+from jarz_pos.utils import settings_utils
 
 TOKEN = "Zx9-QbT1kLmN4pRs7wYvUA"
 INVOICE = "ACC-SINV-2026-00042"
@@ -173,7 +174,7 @@ class _Harness:
         self.supplier = supplier
         self.cache_values = dict(cache_values or {})
         self.meta_fields = meta_fields
-        self._patch = None
+        self._patches = []
         self.frappe = None
         self.cache = None
 
@@ -206,8 +207,42 @@ class _Harness:
                 return [dict(item) for item in self.items]
             return []
 
+        def _sql(query, values=None, *args, **kwargs):
+            """Serve the raw ``tabSingles`` read that ``settings_utils`` performs.
+
+            ``tracking_link_ttl_hours`` is read through
+            :func:`jarz_pos.utils.settings_utils.single_int`, which queries
+            ``tabSingles`` directly rather than calling
+            ``frappe.db.get_single_value``. It has to: ``get_single_value`` casts
+            Int through ``cint()``, so a field nobody has ever written comes back
+            as ``0`` — indistinguishable from an operator who deliberately chose
+            0, which for this field is the meaningful value "never expire". The
+            declared 24-hour default could therefore never apply.
+
+            That means the ``get_single_value`` stub above no longer covers this
+            setting, and a test that only stubs it silently loses control of the
+            value: the real query runs against the test site, where the row
+            happens to hold 0, and every expiry assertion passes vacuously
+            because nothing ever expires. This stub is what keeps
+            ``self.settings`` authoritative for both read paths.
+            """
+            text = " ".join(str(query).split()).lower()
+            if "tabsingles" not in text:
+                return []
+            field = None
+            if isinstance(values, (tuple, list)) and len(values) >= 2:
+                field = values[1]
+            elif isinstance(values, dict):
+                field = values.get("field")
+            if field is None or field not in self.settings:
+                return []
+            value = self.settings[field]
+            # A stored NULL and an absent row both mean "never written".
+            return [] if value is None else [(str(value),)]
+
         mock = MagicMock()
         mock.db.get_single_value.side_effect = _get_single_value
+        mock.db.sql.side_effect = _sql
         mock.db.get_value.side_effect = _get_value
         mock.get_all.side_effect = _get_all
         mock.get_meta.return_value = _FakeMeta(self.meta_fields)
@@ -221,14 +256,23 @@ class _Harness:
         )
         mock.cache.return_value = cache
 
-        self._patch = patch.object(tracking, "frappe", mock)
-        self._patch.start()
+        # Both modules, not just ``tracking``. ``settings_utils`` holds its own
+        # module-level ``frappe`` reference, so patching only the caller leaves
+        # the helper talking to the real database — which is exactly how the
+        # expiry setting escaped this harness's control.
+        self._patches = [
+            patch.object(tracking, "frappe", mock),
+            patch.object(settings_utils, "frappe", mock),
+        ]
+        for started in self._patches:
+            started.start()
         self.frappe = mock
         self.cache = cache
         return self
 
     def __exit__(self, *exc):
-        self._patch.stop()
+        for started in reversed(self._patches):
+            started.stop()
         return False
 
 
