@@ -1484,6 +1484,19 @@ def _run_invoice_amendment_job(
                 f"entry/entries: {'; '.join(pe_cancel_errors)}"
             )
 
+        if cancelled_payment_entries:
+            # Cancelling a Payment Entry writes back to the invoice it paid --
+            # outstanding_amount, status and therefore `modified`. This document
+            # was loaded before that happened, so its timestamp is now stale and
+            # `.cancel()` raises TimestampMismatchError:
+            #   "has been modified after you have opened it ... Please refresh".
+            #
+            # The window is the whole point: an UNPAID amendment has no Payment
+            # Entry to cancel, so nothing touches the invoice in between and the
+            # bug never fires. Only amending a PAID order hits it, which is why
+            # it survived -- the unpaid path is the one that gets exercised.
+            source_invoice.reload()
+
         source_invoice.flags.ignore_permissions = True
         source_invoice.flags.ignore_woo_outbound = True
         source_invoice.cancel()
