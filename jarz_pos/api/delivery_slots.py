@@ -514,11 +514,21 @@ def _generate_day_slots(
 def _build_slot(
     target_date: datetime.date, start: datetime, end: datetime
 ) -> Dict[str, Any]:
-    """Shape one slot the way the POS and the preview both expect."""
+    """Shape one slot the way the POS and the preview both expect.
+
+    ``date``/``time`` describe the real start instant, NOT the business day the
+    slot belongs to. They differ for the anchored last slot of a day that closes
+    after midnight: a 13:00-01:00 Wednesday ends with 00:00-01:00 on Thursday.
+    The kanban reschedule dialog posts ``date`` + ``time`` straight to the
+    backend, so a business-day ``date`` there rescheduled the order a full day
+    early. ``business_date`` keeps the day the slot is sold under, which is what
+    ``day_label`` is derived from.
+    """
     day_label = _get_day_label(target_date)
     time_label = f"{start.strftime('%I:%M %p')} - {end.strftime('%I:%M %p')}"
     return {
-        "date": target_date.isoformat(),
+        "date": start.date().isoformat(),
+        "business_date": target_date.isoformat(),
         "time": start.time().isoformat(),
         "datetime": start.isoformat(),
         "end_datetime": end.isoformat(),
@@ -541,6 +551,106 @@ def _get_day_label(target_date: datetime.date) -> str:
         return "Tomorrow"
     else:
         return target_date.strftime('%A')  # Monday, Tuesday, etc.
+
+
+def _parse_slot_datetime(raw: Any) -> datetime | None:
+    """Read one of the ISO datetimes a slot dict carries. Never raises."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        try:
+            return frappe.utils.get_datetime(raw)
+        except Exception:
+            return None
+
+
+def normalize_delivery_window(
+    pos_profile_name: str | None,
+    start: datetime | None,
+    end: datetime | None = None,
+) -> tuple[datetime | None, datetime | None, str]:
+    """Snap a requested delivery window onto the profile's real slot grid.
+
+    The POS auto-selects a slot when the cart is first opened and never revisits
+    that choice, so a cart left open past its own slot submits a start that has
+    already gone by. That used to be rewritten to "now + 5 minutes" with the
+    timetable's default length bolted on, producing windows like 22:24-23:54 —
+    a window no timetable offers, that no courier is scheduled for, and that
+    hides the real cause. Snapping to the next slot the profile actually sells
+    keeps the stored window meaningful.
+
+    Returns ``(start, end, note)``:
+
+    - ``"matched"``  — the start IS a real slot; that slot's own end is used,
+      which also repairs a missing or contradictory end.
+    - ``"snapped"``  — the start had passed; the next available slot is used.
+    - ``"kept"``     — a future, off-grid start (manual entry) is left alone.
+    - ``"unresolved"`` — no profile, no timetable or no slots left; the caller
+      decides what to do, because this module cannot invent a window.
+    """
+    logger = _get_logger()
+
+    if start is None:
+        return None, end, "unresolved"
+
+    if not pos_profile_name:
+        return start, end, "unresolved"
+
+    try:
+        slots = get_available_delivery_slots(pos_profile_name) or []
+    except Exception as exc:  # the order must not fail over a slot lookup
+        logger.error(
+            "Could not read delivery slots for %r while normalising %s: %s",
+            pos_profile_name,
+            start,
+            exc,
+        )
+        return start, end, "unresolved"
+
+    parsed: List[tuple[datetime, datetime | None]] = []
+    for slot in slots:
+        slot_start = _parse_slot_datetime(slot.get("datetime"))
+        if slot_start is None:
+            continue
+        parsed.append((slot_start, _parse_slot_datetime(slot.get("end_datetime"))))
+
+    # Exact slot the caller asked for. Minute resolution: the POS sends whole
+    # minutes and a stored Time keeps seconds, so a second-level compare would
+    # miss a slot the operator really did pick.
+    for slot_start, slot_end in parsed:
+        if slot_start.replace(second=0, microsecond=0) == start.replace(second=0, microsecond=0):
+            return slot_start, slot_end or end, "matched"
+
+    now = frappe.utils.now_datetime()
+    if start > now:
+        # Future but off-grid: an amendment carrying an older grid, or a manual
+        # datetime. Respect it; only repair an end that cannot be true.
+        if end and end > start:
+            return start, end, "kept"
+        return start, None, "kept"
+
+    if not parsed:
+        logger.error(
+            "Delivery slot %s for %r has passed and the profile offers no further "
+            "slots; leaving the window untouched.",
+            start,
+            pos_profile_name,
+        )
+        return start, end, "unresolved"
+
+    next_start, next_end = parsed[0]
+    logger.error(
+        "Delivery slot %s for %r had already passed when the order was placed "
+        "(now %s); snapped to the next available slot %s - %s.",
+        start,
+        pos_profile_name,
+        now,
+        next_start,
+        next_end,
+    )
+    return next_start, next_end, "snapped"
 
 
 @frappe.whitelist()

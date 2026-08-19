@@ -135,3 +135,84 @@ class TestInvoiceUtils(unittest.TestCase):
 		# This requires a real invoice object, which is complex to mock
 		# We'll test that it can be called (may fail without proper data)
 		pass
+
+
+class TestTerritoryLabels(unittest.TestCase):
+	"""A WooCommerce area code must never be what an operator reads.
+
+	Territories synced from WooCommerce are *named* by their Woo state code
+	("EGNASRCITY"), so every surface that prints the raw Link value prints a
+	code. The kanban card already resolves Arabic-first; the details payload and
+	the address string have to agree with it.
+	"""
+
+	def _patched(self, values):
+		"""Patch the single Territory read both helpers make."""
+		from unittest import mock
+		from jarz_pos.utils import invoice_utils
+
+		return mock.patch.object(
+			invoice_utils.frappe.db, "get_value", return_value=values
+		)
+
+	def test_labels_prefer_the_names_over_the_code(self):
+		from jarz_pos.utils.invoice_utils import get_territory_labels
+
+		with self._patched(
+			{"territory_name": "Nasr City", "custom_territory_name_ar": "مدينة نصر"}
+		):
+			labels = get_territory_labels("EGNASRCITY")
+
+		self.assertEqual(labels["territory"], "EGNASRCITY")
+		self.assertEqual(labels["territory_display"], "Nasr City")
+		self.assertEqual(labels["territory_name_ar"], "مدينة نصر")
+
+	def test_area_label_is_arabic_first_then_title_then_the_code(self):
+		from jarz_pos.utils.invoice_utils import get_area_label
+
+		with self._patched(
+			{"territory_name": "Nasr City", "custom_territory_name_ar": "مدينة نصر"}
+		):
+			self.assertEqual(get_area_label("EGNASRCITY"), "مدينة نصر")
+
+		with self._patched({"territory_name": "Nasr City", "custom_territory_name_ar": ""}):
+			self.assertEqual(get_area_label("EGNASRCITY"), "Nasr City")
+
+		# An unknown / unsynced territory still reads as itself, never as blank.
+		with self._patched(None):
+			self.assertEqual(get_area_label("EGNASRCITY"), "EGNASRCITY")
+
+	def test_no_territory_yields_no_label(self):
+		from jarz_pos.utils.invoice_utils import get_area_label, get_territory_labels
+
+		self.assertEqual(get_area_label(None), "")
+		self.assertEqual(
+			get_territory_labels(""),
+			{"territory": "", "territory_display": "", "territory_name_ar": ""},
+		)
+
+	def test_address_prints_the_area_name_not_the_woo_code(self):
+		"""``Address.city`` holds the Woo code on every Woo-sourced address."""
+		from types import SimpleNamespace
+		from unittest import mock
+		from jarz_pos.utils import invoice_utils
+
+		address = SimpleNamespace(
+			address_line1="حدائق الاهرام، عمارة 297",
+			address_line2=None,
+			city="EGHADAYEQAH",
+		)
+
+		with mock.patch.object(invoice_utils.frappe, "get_doc", return_value=address), 			mock.patch.object(
+				invoice_utils.frappe.db,
+				"get_value",
+				return_value={
+					"territory_name": "Hadayek Al-Ahram",
+					"custom_territory_name_ar": "حدائق الاهرام",
+				},
+			):
+			rendered = invoice_utils.get_address_details("SOME-ADDRESS")
+
+		self.assertNotIn("EGHADAYEQAH", rendered)
+		self.assertTrue(rendered.endswith("حدائق الاهرام"), rendered)
+

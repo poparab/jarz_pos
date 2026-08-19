@@ -330,3 +330,112 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		# The 23:30-00:00 gap is interior, not a tail - it must still be reported.
 		self.assertEqual(by_day["Monday"]["uncovered_minutes"], 30)
 		self.assertEqual(by_day["Friday"]["uncovered_minutes"], 0)
+
+	# ------------------------------------------------------------------
+	# The stored delivery window must be a slot the timetable really sells
+	# ------------------------------------------------------------------
+
+	def test_anchored_slot_dates_the_real_start_not_the_business_day(self):
+		"""A 13:00-01:00 day ends after midnight; ``date`` must say so.
+
+		The kanban reschedule dialog posts ``date`` + ``time`` verbatim, so a
+		business-day ``date`` on the anchored last slot moved the order a full
+		day early.
+		"""
+		from jarz_pos.api.delivery_slots import _build_slot
+
+		slot = _build_slot(
+			datetime.date(2030, 1, 6),
+			datetime.datetime(2030, 1, 7, 0, 0),
+			datetime.datetime(2030, 1, 7, 1, 0),
+		)
+
+		self.assertEqual(slot["date"], "2030-01-07")
+		self.assertEqual(slot["time"], "00:00:00")
+		self.assertEqual(slot["business_date"], "2030-01-06")
+
+	def _normalize(self, start, end=None, slots=None, now=None):
+		"""Run normalize_delivery_window against a fixed grid and clock."""
+		from unittest import mock
+		from jarz_pos.api import delivery_slots
+
+		grid = [
+			{"datetime": "2030-01-07T00:00:00", "end_datetime": "2030-01-07T01:00:00"},
+			{"datetime": "2030-01-07T13:00:00", "end_datetime": "2030-01-07T14:30:00"},
+		] if slots is None else slots
+
+		with mock.patch.object(
+			delivery_slots, "get_available_delivery_slots", side_effect=lambda _p: list(grid)
+		), mock.patch.object(
+			delivery_slots.frappe.utils,
+			"now_datetime",
+			return_value=now or datetime.datetime(2030, 1, 6, 22, 19, 21),
+		):
+			return delivery_slots.normalize_delivery_window("Test POS Profile", start, end)
+
+	def test_a_slot_that_has_passed_snaps_to_the_next_one(self):
+		"""The 16906 case: a cart left open submits a slot that already started."""
+		start, end, note = self._normalize(
+			datetime.datetime(2030, 1, 6, 22, 0), datetime.datetime(2030, 1, 6, 23, 30)
+		)
+
+		self.assertEqual(note, "snapped")
+		self.assertEqual(start, datetime.datetime(2030, 1, 7, 0, 0))
+		self.assertEqual(end, datetime.datetime(2030, 1, 7, 1, 0))
+
+	def test_a_real_slot_keeps_its_own_end_when_none_was_sent(self):
+		"""A missing end must not fall back to the timetable's default length."""
+		start, end, note = self._normalize(datetime.datetime(2030, 1, 7, 13, 0))
+
+		self.assertEqual(note, "matched")
+		self.assertEqual(end, datetime.datetime(2030, 1, 7, 14, 30))
+
+	def test_seconds_on_a_stored_time_do_not_defeat_the_match(self):
+		"""Time fields keep seconds; the grid is generated on whole minutes."""
+		_start, end, note = self._normalize(datetime.datetime(2030, 1, 7, 13, 0, 45))
+
+		self.assertEqual(note, "matched")
+		self.assertEqual(end, datetime.datetime(2030, 1, 7, 14, 30))
+
+	def test_a_future_off_grid_start_is_respected(self):
+		"""An amendment on an older grid still gets the window it asked for."""
+		start, end, note = self._normalize(
+			datetime.datetime(2030, 1, 8, 17, 15), datetime.datetime(2030, 1, 8, 18, 45)
+		)
+
+		self.assertEqual(note, "kept")
+		self.assertEqual(start, datetime.datetime(2030, 1, 8, 17, 15))
+		self.assertEqual(end, datetime.datetime(2030, 1, 8, 18, 45))
+
+	def test_an_impossible_end_is_dropped_rather_than_stored(self):
+		"""An end before its start would render as a negative delivery window."""
+		_start, end, note = self._normalize(
+			datetime.datetime(2030, 1, 8, 17, 15), datetime.datetime(2030, 1, 8, 16, 0)
+		)
+
+		self.assertEqual(note, "kept")
+		self.assertIsNone(end)
+
+	def test_no_slots_left_is_reported_not_invented(self):
+		"""With nothing left to offer, this module refuses to make a window up."""
+		start, _end, note = self._normalize(datetime.datetime(2030, 1, 6, 22, 0), slots=[])
+
+		self.assertEqual(note, "unresolved")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 0))
+
+	def test_a_failing_slot_lookup_never_takes_the_order_down(self):
+		"""Slot normalisation is advisory; an exception must not block a sale."""
+		from unittest import mock
+		from jarz_pos.api import delivery_slots
+
+		with mock.patch.object(
+			delivery_slots,
+			"get_available_delivery_slots",
+			side_effect=RuntimeError("no timetable"),
+		):
+			start, _end, note = delivery_slots.normalize_delivery_window(
+				"Test POS Profile", datetime.datetime(2030, 1, 6, 22, 0)
+			)
+
+		self.assertEqual(note, "unresolved")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 0))

@@ -415,6 +415,59 @@ def verify_invoice_totals(invoice_doc, logger):
         raise
 
 
+def get_territory_labels(territory: str | None) -> Dict[str, str]:
+    """Human names for a Territory whose record name is a WooCommerce area code.
+
+    Territories synced from WooCommerce are *named* by their Woo state code
+    ("EGNASRCITY", "EGHADAYEQAH"), so any surface that prints the raw Link value
+    prints a code at an operator. ``territory_name`` carries the title and
+    ``custom_territory_name_ar`` the Arabic name the WooCommerce checkout shows —
+    the kanban board already prefers the Arabic one, and the invoice details
+    payload has to agree with it or the same order reads differently on the card
+    and in the sheet it opens.
+
+    Returns ``{"territory": <raw>, "territory_display": <title>,
+    "territory_name_ar": <arabic>}``; the display always falls back to the raw
+    value, never to an empty string.
+    """
+    raw = str(territory or "").strip()
+    if not raw:
+        return {"territory": "", "territory_display": "", "territory_name_ar": ""}
+
+    values = None
+    try:
+        values = frappe.db.get_value(
+            "Territory",
+            raw,
+            ["territory_name", "custom_territory_name_ar"],
+            as_dict=True,
+        )
+    except Exception:
+        values = None
+
+    title = str((values or {}).get("territory_name") or raw).strip() or raw
+    try:
+        title = frappe._(title)
+    except Exception:
+        pass
+    arabic = str((values or {}).get("custom_territory_name_ar") or "").strip()
+    return {
+        "territory": raw,
+        "territory_display": sanitize_printable_text(title),
+        "territory_name_ar": sanitize_printable_text(arabic),
+    }
+
+
+def get_area_label(territory: str | None) -> str:
+    """The single best human name for an area: Arabic, then title, then the code."""
+    labels = get_territory_labels(territory)
+    return (
+        labels["territory_name_ar"]
+        or labels["territory_display"]
+        or labels["territory"]
+    )
+
+
 def get_address_details(address_name: str) -> str:
     """Get formatted address string from an Address document.
     
@@ -434,7 +487,10 @@ def get_address_details(address_name: str) -> str:
         if address_doc.address_line2:
             full_address += f", {sanitize_printable_text(address_doc.address_line2)}"
         if address_doc.city:
-            full_address += f", {sanitize_printable_text(address_doc.city)}"
+            # ``city`` holds the WooCommerce area code on every Woo-sourced
+            # address ("EGHADAYEQAH"), so print the area's own name instead of
+            # tacking a code onto an otherwise Arabic address.
+            full_address += f", {get_area_label(address_doc.city) or sanitize_printable_text(address_doc.city)}"
         return full_address.strip(", ")
     except Exception as e:
         frappe.log_error(f"Error fetching address details: {str(e)}", "Address Utils")
@@ -687,6 +743,11 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         "customer_name": sanitize_printable_text(invoice.customer_name or invoice.customer),
         "customer": sanitize_printable_text(invoice.customer),
         "territory": sanitize_printable_text(invoice.territory or ""),
+        # Same Arabic-first area naming the kanban card uses. Without these the
+        # details sheet falls back to the raw Link value and shows the Woo code.
+        **get_territory_labels(invoice.territory),
+        "sub_territory": sanitize_printable_text(invoice.get("custom_sub_territory") or ""),
+        "sub_territory_display": get_area_label(invoice.get("custom_sub_territory")),
         "sales_partner": invoice.get("sales_partner"),
     # New delivery slot fields
         "delivery_date": invoice.get("custom_delivery_date"),

@@ -5,7 +5,6 @@ This module contains all validation functions for POS invoice creation,
 including cart data validation, customer validation, and POS profile validation.
 """
 
-from datetime import timedelta
 
 import frappe
 from frappe import _dict
@@ -210,14 +209,19 @@ def validate_delivery_datetime(required_delivery_datetime, logger):
 
             current_datetime = frappe.utils.now_datetime()
             if delivery_datetime <= current_datetime:
-                adjusted = current_datetime + timedelta(minutes=5)
-                warning_msg = (
-                    "Delivery datetime adjusted forward because it was in the past. "
-                    f"Provided: {delivery_datetime}, Adjusted: {adjusted}"
+                # Deliberately NOT rewritten here. This used to become
+                # "now + 5 minutes", which invents a delivery window that exists
+                # in no timetable (an order taken at 22:19 was booked 22:24-23:54)
+                # and hides the real cause: the POS submitted a slot that had
+                # already passed. The caller snaps it onto the profile's real
+                # slot grid instead - see
+                # jarz_pos.api.delivery_slots.normalize_delivery_window.
+                stale_msg = (
+                    "Delivery datetime is in the past; leaving it for slot "
+                    f"normalisation. Provided: {delivery_datetime}, now: {current_datetime}"
                 )
-                logger.warning(warning_msg)
-                print(f"   ⚠️ {warning_msg}")
-                delivery_datetime = adjusted
+                logger.error(stale_msg)
+                print(f"   ⚠️ {stale_msg}")
             else:
                 print(f"   ✅ Delivery datetime validated: {delivery_datetime}")
 

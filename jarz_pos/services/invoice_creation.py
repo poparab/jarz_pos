@@ -8,6 +8,7 @@ including validation, document creation, and submission.
 import frappe
 import json
 import traceback
+from datetime import timedelta
 from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
 from jarz_pos.constants import ROLES
 from jarz_pos.services import delivery_promotions as _delivery_promotions
@@ -534,7 +535,61 @@ def _resolve_item_rate(item_code, price_list, fallback_rate=0.0, customer=None) 
     return float(get_item_price(item_code, price_list) or fallback_rate or 0.0)
 
 
-def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
+def _requested_delivery_end():
+    """The end of the slot the POS says it picked, as sent with the request."""
+    try:
+        raw = getattr(frappe, "form_dict", {}).get("delivery_end_datetime")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return frappe.utils.get_datetime(raw)
+    except Exception:
+        return None
+
+
+def _normalize_delivery_window(pos_profile_name, delivery_datetime, logger):
+    """Return ``(start, end)`` for a delivery window a timetable really sells.
+
+    Falls back to the historical "a past slot becomes now + 5 minutes" behaviour
+    only when the grid cannot be resolved at all (no timetable, or nothing left
+    to offer) - and says so at ERROR, because that fallback is exactly what
+    quietly produced windows like 22:24-23:54 that no courier is scheduled for.
+    """
+    if not delivery_datetime:
+        return delivery_datetime, None
+
+    requested_end = _requested_delivery_end()
+    try:
+        from jarz_pos.api.delivery_slots import normalize_delivery_window
+
+        start, end, note = normalize_delivery_window(
+            pos_profile_name, delivery_datetime, requested_end
+        )
+    except Exception as exc:  # never fail an order over slot normalisation
+        logger.error(f"Delivery slot normalisation failed: {exc}")
+        return delivery_datetime, requested_end
+
+    if note == "snapped":
+        logger.error(
+            f"Delivery slot had passed; snapped {delivery_datetime} -> {start} "
+            f"for POS Profile {pos_profile_name}"
+        )
+        print(f"   Delivery slot had passed; snapped to {start}")
+    elif note == "unresolved" and start and start <= frappe.utils.now_datetime():
+        adjusted = frappe.utils.now_datetime() + timedelta(minutes=5)
+        logger.error(
+            f"Delivery slot {start} has passed and no slot grid could be resolved "
+            f"for POS Profile {pos_profile_name}; falling back to {adjusted}"
+        )
+        print(f"   No slot grid available; delivery time set to {adjusted}")
+        return adjusted, None
+
+    return start, end
+
+
+def _apply_delivery_slot_fields(invoice_doc, delivery_datetime, delivery_end_datetime=None):
     """Populate new delivery slot fields on the Sales Invoice from a datetime.
 
     Fields:
@@ -584,9 +639,15 @@ def _apply_delivery_slot_fields(invoice_doc, delivery_datetime):
         invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
 
         # --- Calculate duration from end_datetime (preferred) ---
+        # ``delivery_end_datetime`` is passed in by the caller once the window has
+        # been snapped onto the profile's slot grid, so the duration describes the
+        # slot that was actually stored. The form_dict read stays as the fallback
+        # for callers that never normalised.
         duration_set = False
         try:
-            raw_end = getattr(frappe, "form_dict", {}).get("delivery_end_datetime")
+            raw_end = delivery_end_datetime or getattr(frappe, "form_dict", {}).get(
+                "delivery_end_datetime"
+            )
             if raw_end:
                 end_dt = frappe.utils.get_datetime(raw_end)
                 duration_seconds = int((end_dt - dt).total_seconds())
@@ -795,6 +856,15 @@ def create_pos_invoice(
         # STEP 3: POS Profile Validation
         print("\n3️⃣ POS PROFILE VALIDATION:")
         pos_profile = validate_pos_profile(pos_profile_name, logger)
+
+        # STEP 3.1: Snap the requested delivery window onto this profile's real
+        # slot grid. The POS picks a slot when the cart is opened and never
+        # revisits it, so a cart left open past its own slot arrives with a start
+        # that has already gone by; storing it verbatim (or, as before, rewriting
+        # it to "now + 5 minutes") books a window no timetable sells.
+        delivery_datetime, delivery_end_datetime = _normalize_delivery_window(
+            pos_profile.name, delivery_datetime, logger
+        )
 
         # STEP 3.5: Resolve Commercial Policy / Order Purpose (gated; Standard is inert)
         policy_decision = _commercial_policy.resolve_commercial_policy(
@@ -1277,7 +1347,7 @@ def create_pos_invoice(
 
         # STEP 9: Save Document
         print("\n9️⃣ SAVING DOCUMENT:")
-        _save_document(invoice_doc, delivery_datetime, logger)
+        _save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime)
 
         # STEP 10: Submit Document
         print("\n🔟 SUBMITTING DOCUMENT:")
@@ -1689,13 +1759,15 @@ def _log_discount_diagnostics_final(invoice_doc):
         print(f"      ✅ Net total verified correctly")
 
 
-def _save_document(invoice_doc, delivery_datetime, logger):
+def _save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime=None):
     """Save the invoice document."""
     logger.debug("Saving document")
     try:
         # Set new delivery slot fields before insert if delivery datetime provided
         if delivery_datetime:
-            _apply_delivery_slot_fields(invoice_doc, delivery_datetime)
+            _apply_delivery_slot_fields(
+                invoice_doc, delivery_datetime, delivery_end_datetime
+            )
 
         # Frappe best practice: Use insert() for new documents
         invoice_doc.insert(ignore_permissions=True)
@@ -1704,7 +1776,9 @@ def _save_document(invoice_doc, delivery_datetime, logger):
         
         # Verify delivery datetime field after save
         if delivery_datetime:
-            _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger)
+            _verify_delivery_field_after_save(
+                invoice_doc, delivery_datetime, logger, delivery_end_datetime
+            )
             
     except Exception as e:
         error_msg = f"Error saving document: {str(e)}"
@@ -1713,7 +1787,9 @@ def _save_document(invoice_doc, delivery_datetime, logger):
         frappe.throw(error_msg)
 
 
-def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger):
+def _verify_delivery_field_after_save(
+    invoice_doc, delivery_datetime, logger, delivery_end_datetime=None
+):
     """Verify delivery slot fields were set correctly after save."""
     print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
     # Reload document to get fresh state from database
@@ -1731,7 +1807,9 @@ def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger):
     if not (date_attr and time_from_attr and duration_attr):
         # Attempt to apply from provided delivery_datetime again
         try:
-            _apply_delivery_slot_fields(invoice_doc, delivery_datetime)
+            _apply_delivery_slot_fields(
+                invoice_doc, delivery_datetime, delivery_end_datetime
+            )
             invoice_doc.save(ignore_permissions=True)
             # Reload the document after save to sync timestamps
             invoice_doc.reload()
