@@ -260,7 +260,9 @@ def _normalise(result: Any) -> Dict[str, Any]:
     return out
 
 
-def _run_suite(suite: Dict[str, Any], cleanup: bool) -> Dict[str, Any]:
+def _run_suite(
+    suite: Dict[str, Any], cleanup: bool, extra: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Run one suite, converting a crash into a reported failure.
 
     A suite that raises must not take the run down with it: the whole point of
@@ -289,12 +291,30 @@ def _run_suite(suite: Dict[str, Any], cleanup: bool) -> Dict[str, Any]:
         return record
 
     kwargs = dict(suite.get("kwargs") or {})
+    # Per-suite opt-ins the caller passes explicitly, filtered against the
+    # entry point's real signature so a renamed parameter fails loudly here
+    # rather than being silently dropped and leaving the suite in the mode
+    # nobody asked for.
+    if extra:
+        kwargs.update(extra)
     # Only pass cleanup to suites that accept it; the signatures differ.
     try:
         import inspect
 
-        if "cleanup" in inspect.signature(entry).parameters:
+        params = inspect.signature(entry).parameters
+        if "cleanup" in params:
             kwargs["cleanup"] = cleanup
+        unknown = [k for k in kwargs if k not in params]
+        if unknown:
+            record.update({
+                "status": "unavailable", "passed": 0, "failed": 1, "skipped": 0,
+                "checks": [],
+                "error": (
+                    f"{suite['module']}.{suite['entry']}() does not accept {unknown}; "
+                    "refusing to run it in a mode the caller did not ask for"
+                ),
+            })
+            return record
     except (TypeError, ValueError):
         pass
 
@@ -362,9 +382,24 @@ def run(
     cleanup: bool = True,
     only: Optional[List[str]] = None,
     skip: Optional[List[str]] = None,
+    allow_woo_mutations: bool = False,
 ) -> Dict[str, Any]:
+    """Run the suites.
+
+    ``allow_woo_mutations`` is off by default and deliberately separate from
+    ``cleanup``. The Woo suite's mutating cases create real orders and customers
+    on the WooCommerce store, and staging's store shares an id space with the
+    cloned production data — so turning them on is a decision someone makes on
+    purpose, not something that rides along with a default. With it off the Woo
+    suite still runs its capability probes and every pure-function case, which
+    is most of what regresses.
+    """
     if isinstance(cleanup, str):
         cleanup = cleanup.strip().lower() not in {"", "0", "false", "no"}
+    if isinstance(allow_woo_mutations, str):
+        allow_woo_mutations = allow_woo_mutations.strip().lower() not in {
+            "", "0", "false", "no",
+        }
     if isinstance(only, str):
         only = [s.strip() for s in only.split(",") if s.strip()]
     if isinstance(skip, str):
@@ -389,9 +424,16 @@ def run(
         "cleanup": cleanup,
     }
 
+    report["allow_woo_mutations"] = allow_woo_mutations
+
     started = time.time()
     for suite in selected:
-        report["suites"].append(_run_suite(suite, cleanup))
+        extra = (
+            {"allow_staging_mutations": True}
+            if allow_woo_mutations and suite["key"] == "woo"
+            else None
+        )
+        report["suites"].append(_run_suite(suite, cleanup, extra=extra))
 
     if cleanup:
         _sweep(report)
