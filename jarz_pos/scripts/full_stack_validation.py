@@ -254,7 +254,18 @@ def _normalise(result: Any) -> Dict[str, Any]:
     if skipped is None:
         skipped = sum(1 for c in checks if c.get("skipped"))
     out["skipped"] = int(skipped or 0)
-    for extra in ("report_path", "note", "skipped_checks"):
+    # Diagnostics, not decoration. A suite may count a failure somewhere other
+    # than its checks list — the Woo suite folds in cases that RAISED and
+    # preflight assertions, precisely so a broken preflight with zero checks
+    # cannot read as a clean pass. Dropping those keys here reproduced the same
+    # blindness one level up: the report said "8 failed" over a checks list where
+    # every row was Pass or Skip, which tells the reader nothing and invites them
+    # to disbelieve the number.
+    for extra in (
+        "report_path", "note", "skipped_checks",
+        "failing_cases", "infra_failures", "errors", "check_failures",
+        "documented_gaps", "capabilities", "settings_restore",
+    ):
         if result.get(extra) is not None:
             out[extra] = result[extra]
     return out
