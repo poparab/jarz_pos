@@ -17,6 +17,7 @@ from jarz_pos.utils.customer_address_utils import (
     set_customer_primary_shipping_address,
 )
 from jarz_pos.utils.invoice_utils import resolve_address_territory
+from jarz_pos.utils.phone import phone_search_terms, phone_variants
 
 # ---------------------------------------------------------------------------
 # Door pin (COURIER_CONTRACTS §3, §4, §10a)
@@ -553,11 +554,19 @@ def search_customers(name=None, phone=None, customer_type=None):
         frappe.logger().info(f"Searching customers by name: {name}")
 
     elif phone:
-        phone_conditions = ["`mobile_no` LIKE %(search_term)s"]
+        # Match every stored spelling of the number. A search for 01111034268 has
+        # to surface a record stored as +201111034268 — otherwise the operator
+        # cannot see the customer they already have and creates a second one.
+        phone_fields = ["mobile_no"]
         if frappe.db.has_column("Customer", "phone"):
-            phone_conditions.append("`phone` LIKE %(search_term)s")
+            phone_fields.append("phone")
+        phone_conditions = []
+        for term_index, term in enumerate(phone_search_terms(phone) or [phone]):
+            param_key = f"phone_term_{term_index}"
+            params[param_key] = f"%{term}%"
+            for fieldname in phone_fields:
+                phone_conditions.append(f"`{fieldname}` LIKE %({param_key})s")
         conditions.append(f"({' OR '.join(phone_conditions)})")
-        params['search_term'] = f"%{phone}%"
         frappe.logger().info(f"Searching customers by phone: {phone}")
 
     if not conditions:
@@ -664,7 +673,9 @@ def _contacts_block_lead_conversion(mobile_no, source_lead):
     """
     try:
         contacts = frappe.get_all(
-            "Contact", filters={"mobile_no": mobile_no}, pluck="name"
+            "Contact",
+            filters={"mobile_no": ["in", phone_variants(mobile_no) or [mobile_no]]},
+            pluck="name",
         )
         if not contacts:
             return False
@@ -724,8 +735,12 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         if not customer_name or not mobile_no or not customer_primary_address or not territory_id:
             frappe.throw("Missing required parameters: customer_name, mobile_no, customer_primary_address, territory_id")
         
-        # Allow duplicate names but block duplicate phone numbers to avoid merges/confusion
-        if frappe.db.exists("Customer", {"mobile_no": mobile_no}):
+        # Allow duplicate names but block duplicate phone numbers to avoid merges/confusion.
+        # Matched across every stored spelling of the number: production holds the
+        # same subscriber as 01111034268 and +201111034268, and an exact-string
+        # check lets a second record through whenever the two forms disagree.
+        phone_forms = phone_variants(mobile_no) or [mobile_no]
+        if frappe.db.exists("Customer", {"mobile_no": ["in", phone_forms]}):
             frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
         # Also guard against existing contacts with the same mobile.
         # Lead-aware: when converting a Lead -> Customer, ignore the Lead's own
@@ -736,7 +751,7 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         if valid_source_lead:
             if _contacts_block_lead_conversion(mobile_no, source_lead):
                 frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
-        elif frappe.db.exists("Contact", {"mobile_no": mobile_no}):
+        elif frappe.db.exists("Contact", {"mobile_no": ["in", phone_forms]}):
             frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
         
         # Validate territory exists
