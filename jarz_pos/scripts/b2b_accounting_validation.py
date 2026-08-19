@@ -93,6 +93,12 @@ PURPOSE_MATRIX = [
     },
 ]
 
+#: PART A/PART C case keys whose capture is produced by the courier settlement
+#: path. Without a profile-matched courier those legs do not run at all, so the
+#: golden diff would compare two identically-degraded captures — a pass that
+#: proves nothing. Those diffs are SKIPPED instead (see ``run``).
+COURIER_DEPENDENT_GOLDEN_CASES = {"paid_settle_now", "unpaid_settle_later"}
+
 
 # ---------------------------------------------------------------------------
 # Result tracking
@@ -103,6 +109,9 @@ class CheckResult:
     name: str
     passed: bool
     detail: str = ""
+    #: A check that never ran because the ENVIRONMENT could not satisfy its
+    #: precondition. Counted separately from passed/failed — see RunContext.skip.
+    skipped: bool = False
 
 
 @dataclass
@@ -131,13 +140,48 @@ class RunContext:
         print(f"   [{status}] {name}" + (f" :: {detail}" if detail else ""))
         return cr
 
+    def skip(self, name: str, reason: str) -> CheckResult:
+        """Record a check that did NOT run because the environment cannot host it.
+
+        WHY this exists: every harness used to write ``record(f"{case}.skipped",
+        True, ...)`` for a missing courier / second cash account / warehouse /
+        stock / Delivery Partner. That is a *pass* — so a site that could not
+        exercise a single money path reported all-green having proven nothing.
+        A missing precondition is a third state: never a pass, always visible.
+        """
+        cr = CheckResult(name=name, passed=False, detail=reason, skipped=True)
+        self.checks.append(cr)
+        print(f"   [SKIP] {name}" + (f" :: {reason}" if reason else ""))
+        return cr
+
     @property
     def passed(self) -> int:
-        return sum(1 for c in self.checks if c.passed)
+        # Skipped checks are excluded from BOTH counters on purpose: an
+        # assertion that did not run is neither proof nor a defect.
+        return sum(1 for c in self.checks if c.passed and not c.skipped)
 
     @property
     def failed(self) -> int:
-        return sum(1 for c in self.checks if not c.passed)
+        return sum(1 for c in self.checks if not c.passed and not c.skipped)
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for c in self.checks if c.skipped)
+
+    @property
+    def skipped_checks(self) -> list[CheckResult]:
+        return [c for c in self.checks if c.skipped]
+
+    def summary_checks(self) -> list[dict]:
+        """Every check as a JSON-safe dict, carrying the skip marker."""
+        return [
+            {"name": c.name, "passed": c.passed, "detail": c.detail, "skipped": c.skipped}
+            for c in self.checks
+        ]
+
+    def summary_skipped(self) -> list[dict]:
+        """The skipped checks only — surfaced alongside the ``skipped`` count."""
+        return [{"name": c.name, "reason": c.detail} for c in self.skipped_checks]
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +410,22 @@ def _ensure_territory(company: str) -> str:
     return TEST_TERRITORY
 
 
+def _territory_shipping_expense(territory: str | None) -> float:
+    """The delivery expense CONFIGURED on a territory, across schema variants.
+
+    Reads the same column ``_ensure_territory`` stamps, in the same order, so an
+    expectation can be derived from configuration BEFORE the code under test
+    runs — instead of from whatever that code happened to persist afterwards.
+    """
+    if not territory:
+        return 0.0
+    cols = set(frappe.db.get_table_columns("Territory") or [])
+    for f in ("custom_delivery_expense", "custom_shipping_expense", "delivery_expense"):
+        if f in cols:
+            return float(frappe.db.get_value("Territory", territory, f) or 0)
+    return 0.0
+
+
 def _ensure_customer_group() -> str:
     if not frappe.db.exists("Customer Group", TEST_CUSTOMER_GROUP):
         parent = frappe.db.get_value("Customer Group", {"is_group": 1}, "name") or "All Customer Groups"
@@ -506,7 +566,11 @@ def _ensure_item_prices(ctx: RunContext, items: list[str]) -> None:
                 ip.insert(ignore_permissions=True)
                 ctx.item_prices.append(ip.name)
             except Exception as e:
-                print(f"   (item price seed skipped {code}@{pl}: {e})")
+                # WHY: this used to print() only. A run whose fixture prices never
+                # seeded produced zero-total invoices, and every downstream money
+                # assertion then measured nothing — invisibly, because a print is
+                # not a check. A broken fixture is a failed run, not a footnote.
+                ctx.record(f"fixture: Item Price seeded {code}@{pl}", False, str(e))
 
 
 def _ensure_stock(ctx: RunContext, items: list[str], pos_profile: str) -> None:
@@ -520,10 +584,24 @@ def _ensure_stock(ctx: RunContext, items: list[str], pos_profile: str) -> None:
             "Warehouse", {"company": company, "is_group": 0, "disabled": 0}, "name"
         )
     if not warehouse:
+        # WHY: a bare ``return`` made the whole seeding step a silent no-op, so
+        # every stock-dependent case downstream ran against an empty warehouse
+        # and still reported green.
+        ctx.skip(
+            "fixture: stock seeded for the test items",
+            f"POS Profile {pos_profile} resolves no warehouse — nothing could be seeded",
+        )
         return
-    for code in items:
-        if not frappe.db.get_value("Item", code, "is_stock_item"):
-            continue
+    stock_items = [c for c in items if frappe.db.get_value("Item", c, "is_stock_item")]
+    if not stock_items:
+        # Non-stock fixture items are a legitimate environment shape, but the
+        # stock-movement assertions downstream cannot mean anything on them.
+        ctx.skip(
+            "fixture: stock seeded for the test items",
+            f"none of {items} is a stock item — stock-movement assertions cannot run",
+        )
+        return
+    for code in stock_items:
         try:
             se = frappe.new_doc("Stock Entry")
             se.stock_entry_type = "Material Receipt"
@@ -533,7 +611,10 @@ def _ensure_stock(ctx: RunContext, items: list[str], pos_profile: str) -> None:
             se.submit()
             ctx.stock_entries.append(se.name)
         except Exception as e:
-            print(f"   (stock seed skipped {code}@{warehouse}: {e})")
+            # WHY: printed, never recorded. Without stock the Delivery Note
+            # auto-creation fails and the courier/freight path is never
+            # exercised — the run was reporting on cases that could not happen.
+            ctx.record(f"fixture: stock seeded {code}@{warehouse}", False, str(e))
 
 
 def _delivery_notes_for_invoice(invoice_name: str) -> set:
@@ -716,6 +797,16 @@ def _run_standard_cases(ctx: RunContext, env: dict, section: str) -> dict:
                 party_type=party_type,
                 party=party,
             )
+        else:
+            # WHY: this leg used to vanish silently. PART A and PART C then both
+            # captured a create+pay-only invoice, the golden diff compared two
+            # identically-degraded captures and passed — proving nothing about
+            # the settlement path it is named after.
+            ctx.skip(
+                f"{section}: Standard paid+settle-now settlement leg",
+                "no profile-matched courier — handle_out_for_delivery_paid never ran, "
+                "so this section's capture excludes the whole settlement path",
+            )
         _absorb_related(ctx, inv)
         cap = capture_invoice_accounting(inv)
         captures["paid_settle_now"] = cap
@@ -742,6 +833,15 @@ def _run_standard_cases(ctx: RunContext, env: dict, section: str) -> dict:
             _absorb_related(ctx, inv)
             _delivery.settle_single_invoice_paid(
                 invoice_name=inv, pos_profile=pos_profile, party_type=party_type, party=party
+            )
+        else:
+            # WHY: same false pass as Case 1 — with no courier the invoice is
+            # merely created, and "unpaid+settle-later" captures neither the
+            # Courier Outstanding move nor the settlement.
+            ctx.skip(
+                f"{section}: Standard unpaid+settle-later settlement leg",
+                "no profile-matched courier — mark_courier_outstanding and "
+                "settle_single_invoice_paid never ran",
             )
         _absorb_related(ctx, inv)
         cap = capture_invoice_accounting(inv)
@@ -871,13 +971,38 @@ def _run_purpose_case(ctx: RunContext, env: dict, spec: dict) -> None:
         _mark(nc_ok)
 
         # SI GL must balance. A 100%-discount sample posts a zero-total invoice with
-        # no GL entries — that is correct, so treat zero-total as trivially balanced.
+        # no GL entries — that is correct. But the old code accepted ANY zero-total
+        # invoice as "trivially balanced" without looking at it, so an invoice that
+        # totalled zero BECAUSE pricing silently failed (no Item Price resolved, or
+        # a policy that zeroed the rates) passed the accounting check. A zero total
+        # is only legitimate when the discount deliberately made it zero.
         si_grand_total = float(frappe.db.get_value("Sales Invoice", inv, "grand_total") or 0)
         if abs(si_grand_total) <= TOLERANCE:
-            row["si_gl_balanced"] = True
-            ctx.record(f"PART B [{purpose}]: SI GL balanced", True,
-                       "zero-total invoice (no GL entries expected)")
-            _mark(True)
+            totals = frappe.db.get_value(
+                "Sales Invoice", inv,
+                ["total", "discount_amount", "additional_discount_percentage"],
+                as_dict=True,
+            ) or {}
+            gross = float(totals.get("total") or 0)
+            discount = float(totals.get("discount_amount") or 0)
+            pct = float(totals.get("additional_discount_percentage") or 0)
+            intentional = (
+                pct >= 100 - TOLERANCE
+                or (discount > TOLERANCE and abs(discount - gross) <= TOLERANCE)
+            )
+            live_gl = frappe.db.count(
+                "GL Entry",
+                {"voucher_type": "Sales Invoice", "voucher_no": inv, "is_cancelled": 0},
+            )
+            ok = intentional and live_gl == 0
+            row["si_gl_balanced"] = ok
+            ctx.record(
+                f"PART B [{purpose}]: SI GL balanced", ok,
+                f"zero-total invoice: gross={gross} discount={discount} pct={pct} "
+                f"live_gl_rows={live_gl} — legitimate only when a 100% discount zeroed a "
+                f"non-zero gross and no GL was posted (was: unconditional PASS)",
+            )
+            _mark(ok)
         else:
             si_bal, si_det = assert_gl_balanced("Sales Invoice", inv)
             row["si_gl_balanced"] = si_bal
@@ -917,7 +1042,21 @@ def _run_purpose_case(ctx: RunContext, env: dict, spec: dict) -> None:
             # mark_courier_outstanding, so we must drive the full paid settlement to
             # validate the "shipping expense as usual" guarantee.
             _pay_invoice_full_cash(ctx, inv, pos_profile)
+
+            # The expected freight expense is resolved from the TERRITORY, BEFORE
+            # the dispatch under test runs.
+            # WHY: the old code read ``custom_shipping_expense`` off the capture
+            # taken AFTER dispatch and, whenever it was 0, took an unconditional
+            # ``True`` branch. So the one failure mode that matters — dispatch not
+            # persisting the expense — made the harness exempt itself from the
+            # assertion written to catch it.
+            invoice_territory = (
+                frappe.db.get_value("Sales Invoice", inv, "territory") or env.get("territory")
+            )
+            expected_expense = _territory_shipping_expense(invoice_territory)
+
             ofd_je = None
+            ofd_ran = False
             if party_type:
                 try:
                     ofd_res = _delivery.handle_out_for_delivery_paid(
@@ -930,9 +1069,19 @@ def _run_purpose_case(ctx: RunContext, env: dict, spec: dict) -> None:
                     )
                     if isinstance(ofd_res, dict):
                         ofd_je = ofd_res.get("journal_entry")
+                    ofd_ran = True
                 except Exception as oe:
                     ctx.record(f"PART B [{purpose}]: out-for-delivery (paid)", False, f"raised unexpectedly: {oe}")
                     _mark(False)
+            else:
+                # WHY: with no courier the dispatch never happened, yet the freight
+                # and Courier Transaction assertions below still ran against a
+                # never-dispatched invoice.
+                ctx.skip(
+                    f"PART B [{purpose}]: out-for-delivery (paid)",
+                    "no profile-matched courier — handle_out_for_delivery_paid never ran, so "
+                    "every settlement assertion for this purpose is skipped, not passed",
+                )
             _absorb_related(ctx, inv)
             if ofd_je and ofd_je not in ctx.journal_entries:
                 ctx.journal_entries.append(ofd_je)  # ensure cleanup (title heuristic misses it)
@@ -943,24 +1092,51 @@ def _run_purpose_case(ctx: RunContext, env: dict, spec: dict) -> None:
             # title heuristic does not always find it.
             freight_present = _je_debits_freight(ofd_je) or _has_freight_je(cap)
             row["freight_je_present"] = freight_present
-            if resolved_expense > TOLERANCE:
-                # Real assertion: a courier purpose with a resolved expense MUST book a
-                # Freight expense JE (this is the "shipping expense as usual" guarantee).
+            if not ofd_ran:
+                ctx.skip(
+                    f"PART B [{purpose}]: Freight expense JE present (expense>0)",
+                    "dispatch did not run in this environment — nothing could book freight",
+                )
+            elif expected_expense > TOLERANCE:
+                # Real assertion: a courier purpose whose territory configures an
+                # expense MUST book a Freight expense JE (the "shipping expense as
+                # usual" guarantee) AND persist that expense on the invoice.
                 ctx.record(f"PART B [{purpose}]: Freight expense JE present (expense>0)", freight_present,
-                           f"expense={resolved_expense} freight_je_present={freight_present}")
+                           f"territory {invoice_territory!r} expense={expected_expense} "
+                           f"persisted custom_shipping_expense={resolved_expense} "
+                           f"freight_je_present={freight_present}")
                 _mark(freight_present)
+                expense_persisted = abs(resolved_expense - expected_expense) <= TOLERANCE
+                ctx.record(
+                    f"PART B [{purpose}]: shipping expense persisted from the territory",
+                    expense_persisted,
+                    f"expected {expected_expense} from territory {invoice_territory!r}, "
+                    f"invoice carries {resolved_expense} "
+                    f"(new check; previously folded into the unconditional-True branch of "
+                    f"'Freight expense JE (no territory expense in this env)')",
+                )
+                _mark(expense_persisted)
             else:
-                # No territory expense resolved in this environment (e.g. dev box without
-                # the jarz Territory expense field) -> no JE is correct. Informational.
-                ctx.record(f"PART B [{purpose}]: Freight expense JE (no territory expense in this env)", True,
-                           f"custom_shipping_expense={resolved_expense} (skipped real assertion)")
-                _mark(True)
+                # The territory genuinely configures no delivery expense here (e.g. a
+                # dev box without the jarz Territory expense field): the assertion has
+                # no ground truth to test against, so it is SKIPPED, not passed.
+                ctx.skip(
+                    f"PART B [{purpose}]: Freight expense JE present (expense>0)",
+                    f"territory {invoice_territory!r} configures no delivery expense "
+                    f"(alias of the former check "
+                    f"'PART B [{purpose}]: Freight expense JE (no territory expense in this env)', "
+                    f"which recorded an unconditional PASS)",
+                )
 
             ct_present = len(cap["courier_transactions"]) > 0
             row["courier_txn_present"] = ct_present
-            ctx.record(f"PART B [{purpose}]: Courier Transaction present (courier)", ct_present,
-                       f"ct_count={len(cap['courier_transactions'])}")
-            _mark(ct_present)
+            if ofd_ran:
+                ctx.record(f"PART B [{purpose}]: Courier Transaction present (courier)", ct_present,
+                           f"ct_count={len(cap['courier_transactions'])}")
+                _mark(ct_present)
+            else:
+                ctx.skip(f"PART B [{purpose}]: Courier Transaction present (courier)",
+                         "dispatch did not run in this environment — no CT could be created")
 
             # PE / JE GL balanced
             all_bal = True
@@ -1094,8 +1270,20 @@ def _emit_report(ctx: RunContext, report_path: str, baseline_diff_ok: bool, diff
     lines.append(f"- Total checks: {len(ctx.checks)}")
     lines.append(f"- Passed: **{ctx.passed}**")
     lines.append(f"- Failed: **{ctx.failed}**")
+    # Skipped is a first-class third state: an assertion that could not run in
+    # this environment. Never folded into passed.
+    lines.append(f"- Skipped: **{ctx.skipped}**")
     lines.append(f"- Overall: **{'PASS' if ctx.failed == 0 else 'FAIL'}**")
     lines.append("")
+
+    if ctx.skipped:
+        lines.append("## Skipped Checks (did NOT run — not evidence of anything)")
+        lines.append("")
+        lines.append("| Check | Reason |")
+        lines.append("|---|---|")
+        for c in ctx.skipped_checks:
+            lines.append(f"| {c.name} | {c.detail} |")
+        lines.append("")
 
     # Golden baseline diff
     lines.append("## Golden Baseline Regression (PART A vs PART C)")
@@ -1148,7 +1336,8 @@ def _emit_report(ctx: RunContext, report_path: str, baseline_diff_ok: bool, diff
     lines.append("| # | Check | Result | Detail |")
     lines.append("|---|---|---|---|")
     for i, c in enumerate(ctx.checks, 1):
-        lines.append(f"| {i} | {c.name} | {'PASS' if c.passed else 'FAIL'} | {c.detail} |")
+        status = "SKIP" if c.skipped else ("PASS" if c.passed else "FAIL")
+        lines.append(f"| {i} | {c.name} | {status} | {c.detail} |")
     lines.append("")
 
     content = "\n".join(lines)
@@ -1179,7 +1368,12 @@ def run(cleanup: bool = True, report_path: str | None = None) -> dict:
             ``sites/b2b_accounting_validation_report.md``.
 
     Returns:
-        {"passed": int, "failed": int, "report_path": str}
+        {"passed": int, "failed": int, "skipped": int, "skipped_checks": list,
+         "checks": list, "report_path": str}
+
+        ``skipped`` counts assertions that did NOT run because this environment
+        could not host them (no courier, no second cash account, no stock...).
+        They are never folded into ``passed``.
     """
     if isinstance(cleanup, str):
         cleanup = cleanup.strip().lower() not in {"0", "false", "no"}
@@ -1231,11 +1425,19 @@ def run(cleanup: bool = True, report_path: str | None = None) -> dict:
 
         print(f"\nEnvironment: company={company} pos_profile={pos_profile} items={items}")
         print(f"             territory={territory} courier={party_type}/{party}")
-        if not party_type:
-            # Informational, not a failure: without a profile-matched courier the
-            # settlement-path checks are skipped (creation + GL checks still run).
-            ctx.record("Environment: profile-matched courier available (settlement checks skipped if absent)", True,
-                       "no profile-matched Employee/Supplier — settlement-path cases skipped")
+        # WHY: this check only ever fired when a courier was NOT available, and
+        # recorded passed=True — a check literally named "courier available"
+        # scoring a PASS precisely when there was none. Record the real answer in
+        # both directions, and make the absent case a visible SKIP.
+        _courier_check = "Environment: profile-matched courier available (settlement checks skipped if absent)"
+        if party_type:
+            ctx.record(_courier_check, True, f"{party_type}/{party}")
+        else:
+            ctx.skip(
+                _courier_check,
+                "no profile-matched Employee/Supplier — every settlement-path assertion "
+                "below is SKIPPED, not passed",
+            )
 
         # PART A — golden baseline (Standard cycle)
         print("\n--- PART A: golden baseline (Standard cycle) ---")
@@ -1265,16 +1467,29 @@ def run(cleanup: bool = True, report_path: str | None = None) -> dict:
                 continue
             b_cmp = _comparable(base_cap)
             r_cmp = _comparable(reg_cap)
-            if b_cmp != r_cmp:
+            identical = b_cmp == r_cmp
+            if not identical:
                 baseline_diff_ok = False
                 diff_lines.append(f"[{case_key}] DIVERGED")
                 diff_lines.append(f"  baseline:   {json.dumps(b_cmp, sort_keys=True)}")
                 diff_lines.append(f"  regression: {json.dumps(r_cmp, sort_keys=True)}")
-            ctx.record(
-                f"Regression: Standard '{case_key}' accounting identical to baseline",
-                b_cmp == r_cmp,
-                "identical" if b_cmp == r_cmp else "DIVERGED — see report",
-            )
+            check_name = f"Regression: Standard '{case_key}' accounting identical to baseline"
+            if case_key in COURIER_DEPENDENT_GOLDEN_CASES and not party_type:
+                # WHY: with no courier the settlement leg is absent from BOTH
+                # captures, so this compared two identically-degraded snapshots
+                # and passed — a green golden diff over a flow that never ran.
+                ctx.skip(
+                    check_name,
+                    f"no profile-matched courier: PART A and PART C both skipped the "
+                    f"settlement leg, so this diff compares two identically-degraded "
+                    f"captures (raw diff: {'identical' if identical else 'DIVERGED'})",
+                )
+            else:
+                ctx.record(
+                    check_name,
+                    identical,
+                    "identical" if identical else "DIVERGED — see report",
+                )
         diff_detail = "\n".join(diff_lines)
 
     except Exception as e:
@@ -1285,7 +1500,11 @@ def run(cleanup: bool = True, report_path: str | None = None) -> dict:
             try:
                 _cleanup(ctx)
             except Exception as e:
-                print(f"Cleanup error (best-effort): {e}")
+                # WHY: a swallowed cleanup leaves this run's submitted fixtures
+                # live in the ledger while the summary still reports its counts.
+                # The report is emitted after this block, so record it as a real
+                # failure rather than only printing it.
+                ctx.record("cleanup.completed", False, f"{type(e).__name__}: {e}")
                 print(traceback.format_exc())
         else:
             print("\nCleanup skipped (cleanup=False). Created documents retained.")
@@ -1293,8 +1512,17 @@ def run(cleanup: bool = True, report_path: str | None = None) -> dict:
     _emit_report(ctx, report_path, baseline_diff_ok, diff_detail)
 
     print("\n" + "=" * 90)
-    print(f"SUMMARY: passed={ctx.passed} failed={ctx.failed} "
+    print(f"SUMMARY: passed={ctx.passed} failed={ctx.failed} skipped={ctx.skipped} "
           f"baseline_regression={'PASS' if baseline_diff_ok else 'FAIL'}")
     print("=" * 90 + "\n")
 
-    return {"passed": ctx.passed, "failed": ctx.failed, "report_path": report_path}
+    # ``skipped`` is returned so a caller can tell "nothing was proven here" from
+    # "everything passed" — the two used to be indistinguishable.
+    return {
+        "passed": ctx.passed,
+        "failed": ctx.failed,
+        "skipped": ctx.skipped,
+        "skipped_checks": ctx.summary_skipped(),
+        "checks": ctx.summary_checks(),
+        "report_path": report_path,
+    }

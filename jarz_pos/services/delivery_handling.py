@@ -45,6 +45,207 @@ DN_LOGIC_VERSION = "2026-05-04a"
 PARTNER_FEES_VAT_RATE = 0.14  # 14%
 
 
+# ---------------------------------------------------------------------------
+# Entry guards
+#
+# Every money-moving function below is whitelisted, and FOUR of them are called
+# by name by the deployed mobile client
+# (``/api/method/jarz_pos.jarz_pos.services.delivery_handling.<fn>``) instead of
+# through the ``jarz_pos.api.couriers`` wrappers: settle_delivery_party,
+# settle_courier, sales_partner_unpaid_out_for_delivery and
+# sales_partner_paid_out_for_delivery. The wrappers' ``_guard_invoice_action`` /
+# ``_guard_branch_action`` therefore never ran for those calls, which made branch
+# scoping and shift enforcement on courier cash dead code in production. The
+# ``jarz_pos.page.custom_pos`` Desk re-exports are a third route in.
+#
+# The whitelist cannot simply be removed — the shipped app calls these paths by
+# name and would break for every user on the current build — so the guard lives
+# INSIDE the function.
+#
+# Running behind the API wrapper now double-guards. That is intended and safe:
+# both primitives are read-only lookups (POS Profile User rows / POS Opening
+# Entry) that mutate nothing, so evaluating them twice is idempotent.
+#
+# ``Administrator`` (and migrate/install/patch context) is exempt inside
+# ``access_control.UNRESTRICTED_USERS``, which is what keeps the bench scripts,
+# the maintenance harnesses and the CI suites — all of which run as
+# Administrator — working unchanged.
+#
+# The access-control primitives are imported INSIDE the helpers rather than at
+# module scope so that ``patch("jarz_pos.utils.access_control.<fn>")`` keeps
+# resolving for the suites that neutralise the guards.
+# ---------------------------------------------------------------------------
+
+
+def _guard_cash_pos_profile(pos_profile: str | None, *, action_label: str) -> str:
+    """Branch-scope a CALLER-SUPPLIED cash branch, before anything else is read.
+
+    Several of these functions take the branch whose CASH ACCOUNT is
+    debited/credited as an argument, so a user scoped to branch A could otherwise
+    name branch B's drawer while acting on their own order — something the
+    ``api.couriers`` wrapper cannot see because it only inspects the invoice.
+
+    Deliberately checked FIRST, before the invoice is loaded: this is the most
+    attacker-controlled input, it needs no document, and refusing here also stops
+    a caller who is not in the named branch from learning whether an invoice name
+    exists.
+
+    Returns the cleaned profile (empty string when none was supplied — an absent
+    argument is not this helper's business; see
+    :func:`_resolve_guarded_settlement_profile` for the endpoints where an absent
+    profile was itself the bypass).
+    """
+    from jarz_pos.utils.access_control import ensure_profile_scoped_invoice_access
+
+    profile = str(pos_profile or "").strip()
+    if not profile:
+        return ""
+
+    ensure_profile_scoped_invoice_access(
+        frappe._dict({"custom_kanban_profile": profile}),
+        action_label=action_label,
+    )
+    return profile
+
+
+def _guard_courier_money_action(
+    inv,
+    *,
+    action_label: str,
+    cash_pos_profile: str | None = None,
+    require_shift: bool = True,
+) -> None:
+    """Branch-scope and shift-gate an invoice-level courier money action.
+
+    Mirrors ``jarz_pos.api.couriers._guard_invoice_action``, plus the
+    caller-supplied cash branch (see :func:`_guard_cash_pos_profile`).
+
+    The shift gate stays on the ORDER's branch, exactly as the wrapper does it.
+    The kanban card the client reads its ``pos_profile`` from is serialised from
+    ``custom_kanban_profile`` (``api.kanban``), which is the same value
+    ``get_invoice_branch`` returns — so in normal use the two are identical and
+    this is not a second, stricter shift requirement.
+    """
+    from jarz_pos.utils.access_control import (
+        ensure_open_shift_for_invoice,
+        ensure_profile_scoped_invoice_access,
+    )
+
+    _guard_cash_pos_profile(cash_pos_profile, action_label=action_label)
+    ensure_profile_scoped_invoice_access(inv, action_label=action_label)
+    if require_shift:
+        ensure_open_shift_for_invoice(inv, action_label=action_label)
+
+
+def _guard_courier_money_action_by_name(
+    invoice_name: str,
+    *,
+    action_label: str,
+    cash_pos_profile: str | None = None,
+    require_shift: bool = True,
+):
+    """:func:`_guard_courier_money_action` for callers holding only a name.
+
+    Uses the same cheap branch lookup as ``api.couriers._invoice_branch_row``
+    rather than loading the whole document just to gate it. The caller-supplied
+    cash branch is checked before that lookup runs.
+    """
+    profile = _guard_cash_pos_profile(cash_pos_profile, action_label=action_label)
+
+    name = str(invoice_name or "").strip()
+    if not name:
+        frappe.throw(_("invoice_name is required"))
+    row = frappe.db.get_value(
+        "Sales Invoice",
+        name,
+        ["name", "custom_kanban_profile", "pos_profile"],
+        as_dict=True,
+    )
+    if not row:
+        frappe.throw(_("Sales Invoice {0} was not found").format(name))
+    _guard_courier_money_action(
+        row,
+        action_label=action_label,
+        cash_pos_profile=profile,
+        require_shift=require_shift,
+    )
+    return row
+
+
+def _resolve_guarded_settlement_profile(
+    pos_profile: str | None, *, action_label: str
+) -> str:
+    """Resolve AND guard the branch whose cash account funds a party-wide settlement.
+
+    THE ``None`` BYPASS THIS CLOSES
+    -------------------------------
+    ``settle_courier`` and ``settle_delivery_party`` declare ``pos_profile``
+    optional, and two things conspired around that:
+
+    * ``jarz_pos.api.couriers._guard_branch_action`` RETURNS EARLY without
+      guarding anything when the profile is empty; and
+    * this module answered "no profile" with
+      ``frappe.db.get_value("POS Profile", {"disabled": 0}, "name")`` — whichever
+      enabled branch the database happened to return first.
+
+    Together, passing ``pos_profile=None`` let any logged-in user post a
+    settlement Journal Entry against an arbitrary branch's cash drawer with no
+    branch check at all.
+
+    DECISION: never silently guess a branch for a restricted user.
+
+    * profile supplied — guard it: branch membership + open shift on that branch.
+    * omitted, unrestricted caller (Administrator / migrate / patch) — keep the
+      legacy "first enabled profile" fallback. Those callers already bypass branch
+      scoping by design, and the bench maintenance scripts rely on the optional
+      signature.
+    * omitted, ordinary user — resolve from the user's OWN assigned branches.
+      Exactly one is unambiguous, so use it and shift-gate it. Zero or several is
+      ambiguous, so REFUSE and demand an explicit ``pos_profile`` rather than
+      pick one on the user's behalf. This costs nothing on the real client:
+      ``CourierService.settleAllForParty`` declares ``posProfile`` required and
+      always sends it.
+    """
+    from jarz_pos.utils.access_control import (
+        BranchAccessError,
+        ensure_open_shift,
+        ensure_profile_scoped_invoice_access,
+        ensure_user_pos_profiles,
+        is_unrestricted_user,
+    )
+
+    profile = str(pos_profile or "").strip()
+    if profile:
+        ensure_profile_scoped_invoice_access(
+            frappe._dict({"custom_kanban_profile": profile}),
+            action_label=action_label,
+        )
+        ensure_open_shift(profile, action_label=action_label)
+        return profile
+
+    if is_unrestricted_user():
+        fallback = frappe.db.get_value("POS Profile", {"disabled": 0}, "name")
+        if not fallback:
+            frappe.throw(_("POS Profile is required to resolve Cash account"))
+        return str(fallback)
+
+    owned = ensure_user_pos_profiles(action_label=action_label)
+    if len(owned) != 1:
+        frappe.throw(
+            _(
+                "Select the branch (POS Profile) that pays before {0}. You are "
+                "assigned to {1} branches, so the branch whose cash account funds "
+                "this settlement cannot be inferred."
+            ).format(action_label, len(owned)),
+            BranchAccessError,
+            title=_("Branch Required"),
+        )
+
+    resolved = owned[0]
+    ensure_open_shift(resolved, action_label=action_label)
+    return resolved
+
+
 def _publish_branch_event(event: str, payload: dict, *, invoice=None) -> list:
     """Emit *event* to the branch that owns the order.
 
@@ -749,8 +950,12 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
     Args:
         delivery_trip: Optional Delivery Trip name to link on Courier Transaction.
         shipping_override: Optional shipping amount override (e.g. doubled for double-shipping trips).
+
+    Branch scoping and the shift gate are applied in
+    :func:`_mark_courier_outstanding_locked`, on the invoice document it already
+    loads — see the guard call there.
     """
-    
+
     # Serialise concurrent dispatches of the SAME invoice.
     #
     # Everything below is check-then-act: "is there already a Payment Entry to
@@ -795,10 +1000,17 @@ def _mark_courier_outstanding_locked(
     shipping_override: float | None = None,
 ):
     """Body of :func:`mark_courier_outstanding`, run under the per-invoice lock."""
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+    # Branch scope + shift gate. Guarded here rather than in the whitelisted
+    # wrapper so it reuses the document that is loaded anyway, and so it runs
+    # before ANY mutation. The lock is already held at this point; a rejection
+    # still releases it through the caller's ``finally``.
+    _guard_courier_money_action(inv, action_label="recording courier outstanding")
+
     # PICKUP / NO-COURIER VALIDATION: Reject courier assignment when the order
     # purpose does not require courier delivery (pickup, or Employee / Sample-No-Courier
     # commercial policies that set custom_no_courier).
-    inv = frappe.get_doc("Sales Invoice", invoice_name)
     is_pickup = bool(getattr(inv, "custom_is_pickup", 0))
     if is_pickup:
         frappe.throw("Cannot assign courier to pickup orders. Pickup orders do not require courier delivery.")
@@ -1467,6 +1679,19 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
     if not pos_profile:
         frappe.throw("pos_profile required")
 
+    # Branch scope + shift gate. This endpoint is called BY NAME by the mobile
+    # client (it never passes through api.couriers), and it collects the full
+    # outstanding in cash into ``pos_profile``'s cash account — so that profile is
+    # branch-scoped too, not just the order's own branch.
+    #
+    # Guarded BEFORE the document is loaded so that a caller who is not in the
+    # named branch is refused without learning whether the invoice exists.
+    _guard_courier_money_action_by_name(
+        invoice_name,
+        action_label="dispatching a sales partner order",
+        cash_pos_profile=pos_profile,
+    )
+
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
@@ -1645,6 +1870,18 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
         frappe.throw("invoice_name required")
 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+    # Branch scope + shift gate. Called BY NAME by the mobile client, and it moves
+    # the order Out for Delivery and cuts a Delivery Note (stock), so it is gated
+    # like every other dispatch. It takes no pos_profile argument, so the order's
+    # own branch is the only branch involved.
+    #
+    # Internal caller note: jarz_pos.services.invoice_creation calls this right
+    # after creating an online sales-partner invoice. That path already ran
+    # ``api.invoices._guard_branch_sale`` on the same profile (branch + shift), so
+    # the same user passes here by construction.
+    _guard_courier_money_action(inv, action_label="dispatching a sales partner order")
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
 
@@ -1789,11 +2026,21 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     the same invoice will NOT generate duplicate Journal Entries.
     """
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+    # Branch scope + shift gate — mirrors api.couriers.pay_delivery_expense.
+    # ``pos_profile`` selects the cash account that is credited, so it is
+    # branch-scoped alongside the order's own branch.
+    _guard_courier_money_action(
+        inv,
+        action_label="paying a delivery expense",
+        cash_pos_profile=pos_profile,
+    )
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted.")
-    
+
     company = inv.company
-    
+
     # Ensure the invoice is marked Out for delivery before proceeding.
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     
@@ -1848,6 +2095,10 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     reduced by the delivery fee they will collect from us.
     """
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+    # Branch scope + shift gate — mirrors api.couriers.courier_delivery_expense_only.
+    _guard_courier_money_action(inv, action_label="paying a courier expense")
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted.")
     if not (party_type and party):
@@ -1867,7 +2118,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
             party = existing_party[0].get("party")
         else:
             frappe.throw("party_type & party are required (courier must be an Employee or Supplier)")
-    
+
     # Ensure state is Out for delivery (idempotent)
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
     
@@ -1925,6 +2176,10 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
 def settle_courier(courier: str, pos_profile: str | None = None):
     """Deprecated alias retained for compatibility. Uses party-based settlement when possible.
 
+    Not guarded here on purpose: this is a pure delegation with no side effects of
+    its own, and :func:`settle_delivery_party` applies the branch scope, the shift
+    gate and the ``pos_profile=None`` resolution below. Guarding twice would only
+    duplicate the same read-only checks.
     """
     return settle_delivery_party(party_type="", party=courier, pos_profile=pos_profile)
 
@@ -1938,10 +2193,14 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
         party: party name/id; if omitted, function will settle all legacy rows without party
         pos_profile: POS Profile name to resolve Cash account
     """
-    if not pos_profile:
-        pos_profile = frappe.db.get_value("POS Profile", {"disabled": 0}, "name")
-        if not pos_profile:
-            frappe.throw("POS Profile is required to resolve Cash account")
+    # Branch scope + shift gate + the pos_profile=None bypass fix. See
+    # _resolve_guarded_settlement_profile for why "no profile supplied" is no
+    # longer a silent skip: api.couriers._guard_branch_action returns early on an
+    # empty profile, and the old fallback here grabbed whichever enabled branch
+    # the database returned first.
+    pos_profile = _resolve_guarded_settlement_profile(
+        pos_profile, action_label="settling a delivery party"
+    )
 
     # §5-D: NEVER let the generic (non-partner) courier sweep pick up delivery-partner
     # orders. Partner orders are booked with the hybrid money model and settle ONLY
@@ -2059,15 +2318,18 @@ def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None
     # _guard_invoice_action wrapper. Apply the same branch-scope and shift gate here so
     # every route in is guarded. Re-running it behind the API wrapper is harmless: these
     # are read-only checks.
-    from jarz_pos.utils.access_control import (
-        ensure_open_shift_for_invoice,
-        ensure_profile_scoped_invoice_access,
-    )
-
-    _ACTION = "settling a courier for this order"
+    #
+    # ``pos_profile`` is branch-scoped as well: it is optional, but when supplied it
+    # OVERRIDES the invoice's own profile when resolving the cash account below, so
+    # leaving it unchecked would let a user settle their own order against another
+    # branch's drawer. When it is omitted the invoice's own profile is used, which
+    # the invoice guard has already covered.
     inv = frappe.get_doc("Sales Invoice", invoice_name)
-    ensure_profile_scoped_invoice_access(inv, action_label=_ACTION)
-    ensure_open_shift_for_invoice(inv, action_label=_ACTION)
+    _guard_courier_money_action(
+        inv,
+        action_label="settling a courier for this order",
+        cash_pos_profile=pos_profile,
+    )
 
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted.")
@@ -2215,6 +2477,17 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         frappe.throw("pos_profile required")
 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+    # Branch scope + shift gate — mirrors api.couriers.handle_out_for_delivery_paid.
+    # The role check above is not a substitute: "Sales User" is held by every POS
+    # operator, so it says nothing about WHICH branch's orders and cash this user
+    # may touch. ``pos_profile`` resolves the cash account, so it is scoped too.
+    _guard_courier_money_action(
+        inv,
+        action_label="dispatching an order",
+        cash_pos_profile=pos_profile,
+    )
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
     # Ensure already paid (allow tiny residual rounding)
@@ -2422,6 +2695,21 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
       - A realtime "collect cash" prompt is published for unpaid invoices.
       - PICKUP ORDERS: Do not require courier assignment and should not have courier info.
     """
+    # Branch scope + shift gate — mirrors api.couriers.handle_out_for_delivery_transition.
+    #
+    # DELIBERATELY OUTSIDE the try below: that handler re-raises every exception as
+    # a generic ``frappe.throw(f"Failed Out For Delivery transition: {err}")``,
+    # which would erase the BranchAccessError / ShiftRequiredError class the Flutter
+    # client keys on to route the user to Start Shift instead of a red toast.
+    #
+    # Uses the cheap branch row rather than the document because the body loads its
+    # own ``inv`` inside the try and the guard must run before it.
+    _guard_courier_money_action_by_name(
+        invoice_name,
+        action_label="dispatching an order",
+        cash_pos_profile=pos_profile,
+    )
+
     try:
         # ---- Normalize inputs ----
         invoice_name = (invoice_name or '').strip()
@@ -2573,6 +2861,16 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             frappe.throw("party_type & party required (unable to derive from existing courier transactions)")
 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+    # Branch scope + shift gate — mirrors api.couriers.settle_single_invoice_paid.
+    # ``pos_profile`` resolves the cash account this pays the courier FROM, so it
+    # is branch-scoped alongside the order's own branch.
+    _guard_courier_money_action(
+        inv,
+        action_label="settling this order",
+        cash_pos_profile=pos_profile,
+    )
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
 
@@ -2874,6 +3172,16 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         frappe.throw("party_type & party required")
 
     inv = frappe.get_doc("Sales Invoice", invoice_name)
+
+    # Branch scope + shift gate — mirrors api.couriers.settle_courier_collected_payment.
+    # ``pos_profile`` resolves the cash account the collected money lands in, so it
+    # is branch-scoped alongside the order's own branch.
+    _guard_courier_money_action(
+        inv,
+        action_label="settling a collected payment",
+        cash_pos_profile=pos_profile,
+    )
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
 

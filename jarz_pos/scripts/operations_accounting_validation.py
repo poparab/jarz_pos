@@ -121,7 +121,13 @@ def _case_cash_transfer(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) -
 
     accounts = [a for a in (list_accounts(env["company"]) or []) if a.get("account")]
     if len(accounts) < 2:
-        ctx.record(f"{case}.skipped", True, "needs two cash/bank accounts")
+        # WHY: recorded passed=True. A site with one cash account reported the
+        # cash-transfer money path green without moving a piastre.
+        ctx.skip(
+            f"{case}.skipped",
+            f"needs two cash/bank accounts, {env['company']} exposes {len(accounts)} — "
+            "no transfer was performed and nothing was asserted",
+        )
         return
 
     source = accounts[0]["account"]
@@ -166,23 +172,49 @@ def _case_expense_request(ctx: RunContext, env: Dict[str, Any], art: _Artifacts)
     from jarz_pos.api.expenses import approve_expense, create_expense
 
     company = env["company"]
+    # create_expense only accepts a reason account sitting under Indirect
+    # Expenses, and it is right to: an expense request is an operating cost, not
+    # a cost of goods. Picking the first Expense ledger on the site ignored that
+    # and drew ``Label Cost - J``, so every run of this case died on the guard
+    # instead of validating the money path — a crash that read as a product
+    # failure when it was only a loose fixture.
+    #
+    # Scope by lft/rgt rather than parent_account: the guard walks the parent
+    # chain to any depth (jarz_expense_request.py:45), so a direct-parent filter
+    # would still miss valid ledgers nested further down.
+    group = frappe.db.get_value(
+        "Account",
+        {
+            "company": company, "is_group": 1,
+            "account_name": ["in", ["Indirect Expenses", "Indirect Expense"]],
+        },
+        ["name", "lft", "rgt"],
+        as_dict=True,
+    )
     expense_head = frappe.db.get_value(
         "Account",
         {
             "company": company, "root_type": "Expense", "is_group": 0, "disabled": 0,
+            "lft": [">", group.lft], "rgt": ["<", group.rgt],
             # Cash Over/Short is the shift-discrepancy ledger; posting test
             # expenses there would pollute a balance other checks reason about.
             "account_name": ["not like", "%Over%Short%"],
         },
         "name",
-    )
+    ) if group else None
     paying = frappe.db.get_value(
         "Account",
         {"company": company, "account_type": "Cash", "is_group": 0, "disabled": 0},
         "name",
     )
     if not expense_head or not paying:
-        ctx.record(f"{case}.skipped", True, f"expense_head={expense_head} paying={paying}")
+        # WHY: recorded passed=True — an unusable chart of accounts made the
+        # whole expense money path score a pass.
+        ctx.skip(
+            f"{case}.skipped",
+            f"no usable accounts: indirect_group={(group or {}).get('name')} "
+            f"expense_head={expense_head} paying={paying} — no expense was created",
+        )
         return
 
     created = create_expense(payload=json.dumps({
@@ -211,7 +243,16 @@ def _case_expense_request(ctx: RunContext, env: Dict[str, Any], art: _Artifacts)
     else:
         # create_expense submits straight away when the creator may approve, so
         # a second approval is correctly refused — nothing to do here.
-        ctx.record(f"{case}.auto_approved_on_create", True, f"docstatus={docstatus}")
+        # WHY the condition: this recorded True for ANY non-zero docstatus,
+        # which includes 2 — a CANCELLED expense request scored "auto approved"
+        # and the money assertions below then ran against a voided document.
+        auto_approved = docstatus == 1
+        ctx.record(
+            f"{case}.auto_approved_on_create", auto_approved,
+            f"docstatus={docstatus} (1=submitted; 2=CANCELLED, which is not an approval)",
+        )
+        if not auto_approved:
+            return
     frappe.db.commit()
 
     je = frappe.db.get_value("Jarz Expense Request", name, "journal_entry")
@@ -249,12 +290,18 @@ def _case_stock_transfer(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) 
         "name",
     )
     if not item or not source or not target:
-        ctx.record(f"{case}.skipped", True, f"item={item} source={source} target={target}")
+        # WHY: recorded passed=True — a site with a single warehouse "passed"
+        # the warehouse-transfer case without transferring anything.
+        ctx.skip(
+            f"{case}.skipped",
+            f"needs an item and two warehouses: item={item} source={source} target={target}",
+        )
         return
 
     available = _bin_qty(item, source)
     if available < 1:
-        ctx.record(f"{case}.skipped", True, f"no stock of {item} in {source}")
+        # WHY: recorded passed=True. No stock means no transfer means no proof.
+        ctx.skip(f"{case}.skipped", f"no stock of {item} in {source} (qty={available})")
         return
 
     before_src, before_tgt = available, _bin_qty(item, target)
@@ -297,7 +344,9 @@ def _case_inventory_count(ctx: RunContext, env: Dict[str, Any], art: _Artifacts)
     item = env["items"][0] if env["items"] else None
     warehouse = env["warehouse"]
     if not item or not warehouse:
-        ctx.record(f"{case}.skipped", True, "no item or warehouse")
+        # WHY: recorded passed=True — the inventory-count case scored a pass
+        # with nothing to count.
+        ctx.skip(f"{case}.skipped", f"no item or warehouse (item={item} warehouse={warehouse})")
         return
 
     before = _bin_qty(item, warehouse)
@@ -387,9 +436,13 @@ def _case_shift_discrepancy(ctx: RunContext, env: Dict[str, Any], art: _Artifact
                 print(f"   {case}: could not grant access on {candidate}: {exc}")
 
     if not profile:
-        ctx.record(
-            f"{case}.skipped", True,
-            f"{user} has no closed branch to open ({len(mine)} membership(s)) and none could be granted",
+        # WHY: recorded passed=True. The shift-discrepancy path has a history of
+        # failing SILENTLY (a dangling account made the Cash Over/Short entry
+        # skip entirely) — the one case that most needs to be seen not running.
+        ctx.skip(
+            f"{case}.skipped",
+            f"{user} has no closed branch to open ({len(mine)} membership(s)) and none "
+            "could be granted — the Cash Over/Short path was NOT exercised",
         )
         return
 
@@ -413,29 +466,78 @@ def _case_shift_discrepancy(ctx: RunContext, env: Dict[str, Any], art: _Artifact
 
 def _run_shift_case(ctx: RunContext, case: str, profile: str, art: _Artifacts) -> None:
     """Open a shift, close it over by a known amount, assert the discrepancy."""
-    from jarz_pos.api.shift import end_shift, get_shift_summary, start_shift
+    from jarz_pos.api.shift import (
+        _get_account_balance,
+        _resolve_pos_profile_account,
+        end_shift,
+        get_shift_summary,
+        start_shift,
+    )
 
-
-    # start_shift requires a declared opening count per payment mode. Declare
-    # the system balance so the OPENING is clean and the only discrepancy in
-    # this case is the one we deliberately introduce at close.
+    profile_doc = frappe.get_doc("POS Profile", profile)
     modes = [
         r.mode_of_payment
-        for r in (frappe.get_doc("POS Profile", profile).get("payments") or [])
+        for r in (profile_doc.get("payments") or [])
         if r.mode_of_payment
     ] or ["Cash"]
-    opening_rows = [{"mode_of_payment": modes[0], "opening_amount": 0}]
+
+    # start_shift requires a declared opening count per payment mode, and books
+    # any gap between that count and the account's book balance to Cash Over/
+    # Short as an opening discrepancy. Declaring a flat 0 therefore writes the
+    # whole drawer off: this harness zeroed a live 770.00 drawer on
+    # ``Nasr city - J`` exactly that way, and the branch it picks is whichever
+    # one happens to be closed — one of them holds five figures. Read the
+    # balance through the very helpers start_shift will use, so the declared
+    # count and the system balance are the same number and the opening posts
+    # nothing at all.
+    branch_account = _resolve_pos_profile_account(profile_doc.company, profile, None, modes[0])
+    if not branch_account:
+        # WHY: recorded passed=True — and an unresolvable branch cash account is
+        # the very shape of the bug this case exists to catch.
+        ctx.skip(f"{case}.skipped", f"no cash account resolves for POS Profile {profile}")
+        return
+    opening_balance = _get_account_balance(branch_account, profile_doc.company)
+    if opening_balance < 0:
+        # A declared count may not be negative, so an overdrawn drawer cannot be
+        # opened cleanly at all. Skipping is honest; declaring 0 would book the
+        # entire negative balance to Cash Over/Short, which is the bug above.
+        # WHY: recorded passed=True.
+        ctx.skip(
+            f"{case}.skipped",
+            f"{branch_account} book balance is negative ({opening_balance}); "
+            "cannot open without a write-off",
+        )
+        return
+    opening_rows = [{"mode_of_payment": modes[0], "opening_amount": opening_balance}]
 
     try:
         opened = start_shift(profile, opening_rows)
     except Exception as exc:
-        ctx.record(f"{case}.skipped", True, f"could not open a shift: {exc}")
+        # WHY: recorded passed=True for any failure to open a shift, which is
+        # how a broken start_shift would have looked from here — green.
+        ctx.skip(
+            f"{case}.skipped",
+            f"could not open a shift on {profile}: {type(exc).__name__}: {exc} — "
+            "the discrepancy assertions did NOT run",
+        )
         return
 
     opening_entry = opened.get("opening_entry") if isinstance(opened, dict) else None
+    # The opening discrepancy JE is a separate document from the opening entry.
+    # Registering only the latter left the JE orphaned in the ledger after
+    # teardown deleted the entry its remark referenced — it had to be removed by
+    # hand. Register it whether or not one is expected, so a regression here
+    # cleans up after itself instead of leaking into the books.
+    opening_je = opened.get("journal_entry") if isinstance(opened, dict) else None
     art.add("POS Opening Entry", opening_entry)
+    art.add("Journal Entry", opening_je)
     frappe.db.commit()
     ctx.record(f"{case}.shift_opened", bool(opening_entry), str(opening_entry))
+    ctx.record(
+        f"{case}.opening_posted_no_discrepancy",
+        not opening_je,
+        f"declared {opening_balance} against {branch_account} -> JE {opening_je}",
+    )
     if not opening_entry:
         return
 
@@ -446,10 +548,23 @@ def _run_shift_case(ctx: RunContext, case: str, profile: str, art: _Artifacts) -
         rows[0] if rows else None,
     )
     if not cash_row:
-        ctx.record(f"{case}.skipped", True, "shift summary exposes no payment rows")
+        # WHY: recorded passed=True — no payment row means the shift can never
+        # be closed with a declared amount, so nothing below could run.
+        ctx.skip(f"{case}.skipped", "shift summary exposes no payment rows")
         return
 
-    expected = flt(cash_row.get("expected_amount") or cash_row.get("closing_amount") or 0)
+    # The summary deliberately withholds every amount: it answers
+    # ``amounts_hidden: 1`` and each reconciliation row carries mode_of_payment
+    # and nothing else, so the cashier counts the drawer blind. Reading
+    # ``expected_amount`` off it therefore never found a key and fell through to
+    # 0.0 on every run — and the case still passed, because the opening
+    # write-off above had forced the real balance to 0.0 too. One harness bug
+    # was manufacturing the precondition that made the other look correct;
+    # fixing the opening is what exposed this.
+    #
+    # end_shift measures the gap against the account's book balance
+    # (_close_shift: system_expected), so take the expectation from there.
+    expected = flt(_get_account_balance(branch_account, profile_doc.company))
     declared = flt(expected + _SHIFT_SURPLUS, 2)
 
     closed = end_shift(opening_entry, [{
@@ -530,6 +645,7 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
 
     ctx = RunContext()
     art = _Artifacts()
+    summary: Dict[str, Any] = {}
     try:
         pos_profile = _pick_pos_profile()
         company = frappe.db.get_value("POS Profile", pos_profile, "company")
@@ -557,14 +673,20 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
                 frappe.log_error(frappe.get_traceback(), f"operations case failed: {case.__name__}")
 
         for check in ctx.checks:
-            print(f"   [{'PASS' if check.passed else 'FAIL'}] {check.name} :: {check.detail}")
-        print(f"operations_accounting_validation: {ctx.passed} passed, {ctx.failed} failed")
+            status = "SKIP" if check.skipped else ("PASS" if check.passed else "FAIL")
+            print(f"   [{status}] {check.name} :: {check.detail}")
+        print(f"operations_accounting_validation: {ctx.passed} passed, {ctx.failed} failed, "
+              f"{ctx.skipped} skipped")
 
-        summary = {
+        summary.update({
             "passed": ctx.passed,
             "failed": ctx.failed,
-            "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in ctx.checks],
-        }
+            # A site missing a second cash account / warehouse / stock now says
+            # so out loud instead of returning all-green having exercised nothing.
+            "skipped": ctx.skipped,
+            "skipped_checks": ctx.summary_skipped(),
+            "checks": ctx.summary_checks(),
+        })
         print(MARKER_START)
         print(json.dumps(summary, indent=2, default=str))
         print(MARKER_END)
@@ -574,5 +696,17 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
             try:
                 art.unwind()      # documents these cases created
                 _cleanup(ctx)     # the stock/price fixtures seeded for them
-            except Exception:
+            except Exception as exc:
                 frappe.log_error(frappe.get_traceback(), "operations validation cleanup failed")
+                # WHY: swallowed. These cases post real Journal Entries, Stock
+                # Entries and shift documents; a teardown that dies leaves them
+                # live in the ledger while the run reports its counts unchanged.
+                # ``summary`` is the dict already handed to the caller.
+                ctx.record("cleanup.teardown_completed", False, f"{type(exc).__name__}: {exc}")
+                summary.update({
+                    "passed": ctx.passed,
+                    "failed": ctx.failed,
+                    "skipped": ctx.skipped,
+                    "skipped_checks": ctx.summary_skipped(),
+                    "checks": ctx.summary_checks(),
+                })

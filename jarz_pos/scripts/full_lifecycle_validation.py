@@ -15,7 +15,13 @@ Each case asserts the same bundle:
 * nothing was double-posted (one Delivery Note, one Payment Entry per purpose);
 * stock moved exactly once, through the Delivery Note.
 
-Synthetic ``_LIFECYCLE_`` fixtures only; real invoices are never touched.
+Synthetic fixtures only; real invoices are never touched. They are *not* named
+after this module: the customers come from ``b2b_accounting_validation``'s
+``_ensure_customer``, which stamps that module's own ``CUSTOMER_PREFIX``, so the
+records land as ``_B2BVALID_*`` no matter which harness created them. That is
+also the prefix ``purge_test_fixtures`` sweeps — grep for ``_B2BVALID_``, not for
+this file's name, when hunting residue.
+
 Refuses to run against production. Cleans up in ``finally``.
 
 Run::
@@ -93,6 +99,28 @@ def _gl_by_account(voucher_type: str, voucher_no: str) -> Dict[str, float]:
     return {r["account"]: flt(r["net"]) for r in rows}
 
 
+def _net_across_all_vouchers(invoice: str) -> Dict[str, float]:
+    """Net movement per account across EVERY voucher reachable from *invoice*.
+
+    WHY this exists: the dispatch assertion used to snapshot
+    ``_gl_by_account("Sales Invoice", invoice)`` before and after dispatch. But
+    dispatch never posts against the Sales Invoice voucher — it posts Payment
+    Entries, Journal Entries and a Delivery Note — so ``before == after`` was
+    structurally true and the check could not fail no matter what dispatch did
+    with the money. Reuses ``return_money_audit._vouchers_for``, which already
+    discovers the whole voucher graph of an order.
+    """
+    # Imported lazily: return_money_audit pulls in the return services, and this
+    # module must stay importable without them.
+    from jarz_pos.scripts.return_money_audit import _vouchers_for
+
+    net: Dict[str, float] = {}
+    for voucher_type, voucher_no in _vouchers_for(invoice):
+        for account, amount in _gl_by_account(voucher_type, voucher_no).items():
+            net[account] = round(net.get(account, 0.0) + flt(amount), 2)
+    return {k: v for k, v in net.items() if abs(v) > _TOL}
+
+
 def _assert_voucher_balanced(ctx: RunContext, case: str, doctype: str, name: str) -> None:
     passed, detail = assert_gl_balanced(doctype, name)
     ctx.record(f"{case}.{doctype.replace(' ', '_').lower()}_balanced::{name}", passed, detail)
@@ -123,8 +151,19 @@ def _assert_single_delivery_note(ctx: RunContext, case: str, invoice: str) -> Op
     return unique[0] if unique else None
 
 
-def _assert_stock_moved_once(ctx: RunContext, case: str, invoice: str) -> None:
-    """Stock must move via the Delivery Note and never via the invoice itself."""
+def _assert_stock_moved_once(
+    ctx: RunContext, case: str, invoice: str, *, expect_delivery_note: bool = False
+) -> None:
+    """Stock must move via the Delivery Note and never via the invoice itself.
+
+    WHY the second half exists: this used to assert ONLY that the invoice moved
+    no stock. ``events/sales_invoice.suppress_pos_invoice_stock_update`` forces
+    ``update_stock = 0`` on every save, so that count is structurally 0 and the
+    check could never fail — and it said nothing at all about whether the goods
+    ever left the warehouse. The half that matters is that the Delivery Note DID
+    move the stock: one Stock Ledger Entry per stock line, for the invoiced qty,
+    against the DN voucher.
+    """
     si_rows = frappe.db.count(
         "Stock Ledger Entry",
         {"voucher_type": "Sales Invoice", "voucher_no": invoice, "is_cancelled": 0},
@@ -133,6 +172,49 @@ def _assert_stock_moved_once(ctx: RunContext, case: str, invoice: str) -> None:
         f"{case}.invoice_moves_no_stock",
         si_rows == 0,
         f"stock ledger rows against the invoice={si_rows} (must be 0)",
+    )
+
+    stock_lines = [
+        r for r in (frappe.get_all(
+            "Sales Invoice Item",
+            filters={"parent": invoice, "parenttype": "Sales Invoice"},
+            fields=["item_code", "qty"], limit_page_length=0,
+        ) or [])
+        if frappe.db.get_value("Item", r["item_code"], "is_stock_item")
+    ]
+    dns = sorted(set(frappe.get_all(
+        "Delivery Note Item",
+        filters={"against_sales_invoice": invoice, "docstatus": 1},
+        pluck="parent", limit_page_length=20,
+    ) or []))
+
+    if not stock_lines:
+        ctx.skip(
+            f"{case}.delivery_note_moved_the_stock",
+            f"invoice {invoice} carries no stock items — no stock movement is expected",
+        )
+        return
+    if not dns:
+        if expect_delivery_note:
+            ctx.record(
+                f"{case}.delivery_note_moved_the_stock", False,
+                "no submitted Delivery Note exists after dispatch — the goods never "
+                "left the warehouse",
+            )
+        return
+
+    rows = frappe.get_all(
+        "Stock Ledger Entry",
+        filters={"voucher_type": "Delivery Note", "voucher_no": ["in", dns], "is_cancelled": 0},
+        fields=["voucher_no", "item_code", "actual_qty"], limit_page_length=0,
+    ) or []
+    expected_qty = sum(flt(r["qty"]) for r in stock_lines)
+    moved_qty = sum(flt(r["actual_qty"]) for r in rows)
+    ctx.record(
+        f"{case}.delivery_note_moved_the_stock",
+        len(rows) == len(stock_lines) and abs(moved_qty + expected_qty) <= 0.001,
+        f"delivery notes={dns} stock ledger rows={len(rows)} (expected {len(stock_lines)}), "
+        f"qty moved={moved_qty} (expected -{expected_qty})",
     )
 
 
@@ -149,10 +231,17 @@ def _assert_no_duplicate_payment(ctx: RunContext, case: str, invoice: str) -> No
     )
     total = sum(flt(r["allocated_amount"]) for r in rows)
     grand = flt(frappe.db.get_value("Sales Invoice", invoice, "grand_total"))
+    # WHY the equality: this was ``total <= grand + 1.0`` — one-sided, so an
+    # UNDER-allocation (the receivable silently left unpaid) always passed, and
+    # a full EGP of over-payment was tolerated on top. Every call site here
+    # settles the invoice in full, so the allocation must equal the grand total
+    # within the harness tolerance. (Historically named ``no_over_payment``;
+    # it now asserts exact allocation in both directions.)
     ctx.record(
         f"{case}.no_over_payment",
-        total <= grand + 1.0,
-        f"allocated={total} grand_total={grand} across {len(rows)} payment(s)",
+        abs(total - grand) <= _TOL,
+        f"allocated={total} grand_total={grand} across {len(rows)} payment(s); "
+        f"delta={round(total - grand, 2)} (must be 0 within {_TOL} — over AND under)",
     )
 
 
@@ -285,7 +374,10 @@ def _case_dispatch_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
     _pay_invoice_full_cash(ctx, invoice, env["pos_profile"])
     frappe.db.commit()
 
-    before = _gl_by_account("Sales Invoice", invoice)
+    # Snapshot the WHOLE voucher graph (invoice + payment + any JE), not just the
+    # invoice voucher: dispatch never posts against the invoice, so the old
+    # before/after comparison of the invoice's own GL was always equal.
+    before = _net_across_all_vouchers(invoice)
     handle_out_for_delivery_transition(
         invoice_name=invoice, courier="", mode="pay_now",
         pos_profile=env["pos_profile"],
@@ -299,13 +391,28 @@ def _case_dispatch_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
         _assert_voucher_balanced(ctx, case, "Delivery Note", dn)
     _assert_outstanding(ctx, case, invoice, 0.0)
     _assert_no_duplicate_payment(ctx, case, invoice)
-    _assert_stock_moved_once(ctx, case, invoice)
+    _assert_stock_moved_once(ctx, case, invoice, expect_delivery_note=True)
 
-    after = _gl_by_account("Sales Invoice", invoice)
+    after = _net_across_all_vouchers(invoice)
+    # The ONLY new GL a paid dispatch may produce is the Delivery Note's own
+    # stock/COGS pair. Anything else — a second Payment Entry, a freight JE, a
+    # Courier Outstanding move — is money that must not have moved.
+    dn_gl = _gl_by_account("Delivery Note", dn) if dn else {}
+    expected = dict(before)
+    for account, amount in dn_gl.items():
+        expected[account] = round(expected.get(account, 0.0) + flt(amount), 2)
+    diffs = [
+        f"{a}: expected {flt(expected.get(a, 0.0)):+.2f}, got {flt(after.get(a, 0.0)):+.2f}"
+        for a in sorted(set(expected) | set(after))
+        if abs(flt(expected.get(a, 0.0)) - flt(after.get(a, 0.0))) > _TOL
+    ]
     ctx.record(
         f"{case}.paid_dispatch_posts_no_extra_money",
-        before == after,
-        "invoice GL unchanged by dispatching an already-paid order",
+        bool(before) and not diffs,
+        (f"unexpected movement: {'; '.join(diffs)}" if diffs else
+         f"no money moved beyond the delivery note's stock GL "
+         f"({len(before)} account(s) snapshotted before dispatch, "
+         f"{len(dn_gl)} touched by the DN)"),
     )
 
     cts = frappe.get_all("Courier Transaction", filters={"reference_invoice": invoice}, pluck="name")
@@ -319,7 +426,14 @@ def _case_dispatch_unpaid_cod(ctx: RunContext, env: Dict[str, Any]) -> None:
 
     case = "LC-DISPATCH-UNPAID-COD"
     if not env["courier"]:
-        ctx.record(f"{case}.skipped", True, "no courier bound to this branch")
+        # WHY: this used to record passed=True. On a site with no courier the
+        # whole COD dispatch path — the receivable moving to Courier Outstanding
+        # — went unexercised and the suite reported it green.
+        ctx.skip(
+            f"{case}.skipped",
+            "no courier bound to this branch — the entire COD dispatch path "
+            "(Courier Outstanding move, freight accrual, courier row) did NOT run",
+        )
         return
 
     invoice = _new_invoice(ctx, env, case)
@@ -337,7 +451,7 @@ def _case_dispatch_unpaid_cod(ctx: RunContext, env: Dict[str, Any]) -> None:
         _assert_voucher_balanced(ctx, case, "Delivery Note", dn)
     _assert_outstanding(ctx, case, invoice, 0.0)
     _assert_no_duplicate_payment(ctx, case, invoice)
-    _assert_stock_moved_once(ctx, case, invoice)
+    _assert_stock_moved_once(ctx, case, invoice, expect_delivery_note=True)
 
     pes = sorted(set(frappe.get_all(
         "Payment Entry Reference",
@@ -380,7 +494,13 @@ def _case_dispatch_is_idempotent(ctx: RunContext, env: Dict[str, Any]) -> None:
 
     case = "LC-DISPATCH-IDEMPOTENT"
     if not env["courier"]:
-        ctx.record(f"{case}.skipped", True, "no courier bound to this branch")
+        # WHY: recorded passed=True. The duplicate-payment defect this case
+        # exists to catch was never exercised, and the suite said so in green.
+        ctx.skip(
+            f"{case}.skipped",
+            "no courier bound to this branch — the double-dispatch idempotency "
+            "path did NOT run",
+        )
         return
 
     invoice = _new_invoice(ctx, env, case)
@@ -394,8 +514,27 @@ def _case_dispatch_is_idempotent(ctx: RunContext, env: Dict[str, Any]) -> None:
                 pos_profile=env["pos_profile"],
                 party_type=env["courier"]["party_type"], party=env["courier"]["party"],
             )
+            # Dispatch is designed to be idempotent: the second call is expected
+            # to return quietly having posted nothing new (the assertions below
+            # are what prove it).
+            ctx.record(
+                f"{case}.attempt{attempt + 1}_note", True,
+                "dispatch returned without raising (idempotent no-op expected on attempt 2)",
+            )
         except Exception as exc:
-            ctx.record(f"{case}.attempt{attempt + 1}_note", True, f"second dispatch refused: {exc}")
+            # WHY this is no longer an unconditional pass: the old code recorded
+            # passed=True for ANY exception, so a genuine crash halfway through
+            # posting — payment written, courier row not — read as "the guard
+            # refused, all good". Only a deliberate guard (frappe.throw, i.e. a
+            # ValidationError) counts as an acceptable refusal; anything else is
+            # a crash and must fail the case.
+            expected_refusal = isinstance(exc, frappe.ValidationError)
+            ctx.record(
+                f"{case}.attempt{attempt + 1}_note",
+                expected_refusal,
+                f"dispatch raised {type(exc).__name__}: {exc} — "
+                f"{'an explicit guard refusal (acceptable)' if expected_refusal else 'NOT a guard refusal; this is a crash mid-posting'}",
+            )
         frappe.db.commit()
 
     pes = sorted(set(frappe.get_all(
@@ -420,8 +559,12 @@ def _case_dispatch_is_idempotent(ctx: RunContext, env: Dict[str, Any]) -> None:
     )
     ctx.record(
         f"{case}.not_paid_twice",
-        total_allocated <= grand + 1.0,
-        f"total allocated={total_allocated} grand_total={grand}",
+        # Same one-EGP slop as ``no_over_payment`` had: a second partial
+        # allocation under 1.00 slipped through. The COD dispatch allocates the
+        # grand total exactly once, so hold it to the harness tolerance.
+        total_allocated <= grand + _TOL,
+        f"total allocated={total_allocated} grand_total={grand} "
+        f"(excess={round(total_allocated - grand, 2)})",
     )
     _assert_single_delivery_note(ctx, case, invoice)
 
@@ -574,6 +717,7 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
     frappe.flags.ignore_woo_outbound = True
 
     ctx = RunContext()
+    summary: Dict[str, Any] = {}
     try:
         pos_profile = _pick_pos_profile()
         items = _pick_sellable_items(pos_profile, 2)
@@ -596,14 +740,20 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
                 ctx.record(f"{case.__name__}.crashed", False, f"{exc}")
                 frappe.log_error(frappe.get_traceback(), f"lifecycle case failed: {case.__name__}")
 
-        summary = {
+        summary.update({
             "passed": ctx.passed,
             "failed": ctx.failed,
-            "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in ctx.checks],
-        }
+            # Skipped is its own state: checks that could not run here. A caller
+            # can now tell "nothing was proven" from "everything passed".
+            "skipped": ctx.skipped,
+            "skipped_checks": ctx.summary_skipped(),
+            "checks": ctx.summary_checks(),
+        })
         for check in ctx.checks:
-            print(f"   [{'PASS' if check.passed else 'FAIL'}] {check.name} :: {check.detail}")
-        print(f"full_lifecycle_validation: {ctx.passed} passed, {ctx.failed} failed")
+            status = "SKIP" if check.skipped else ("PASS" if check.passed else "FAIL")
+            print(f"   [{status}] {check.name} :: {check.detail}")
+        print(f"full_lifecycle_validation: {ctx.passed} passed, {ctx.failed} failed, "
+              f"{ctx.skipped} skipped")
         print(MARKER_START)
         print(json.dumps(summary, indent=2, default=str))
         print(MARKER_END)
@@ -613,5 +763,18 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
             try:
                 _teardown_dispatched(ctx)
                 _cleanup(ctx)
-            except Exception:
+            except Exception as exc:
                 frappe.log_error(frappe.get_traceback(), "full_lifecycle_validation cleanup failed")
+                # WHY: this swallowed the failure entirely. A teardown that dies
+                # halfway leaves dispatched fixtures, Payment Entries and JEs live
+                # in the ledger — while the run still returns its green counts.
+                # ``summary`` is the object already returned to the caller, so
+                # mutating it here makes the leak visible in the report too.
+                ctx.record("cleanup.teardown_completed", False, f"{type(exc).__name__}: {exc}")
+                summary.update({
+                    "passed": ctx.passed,
+                    "failed": ctx.failed,
+                    "skipped": ctx.skipped,
+                    "skipped_checks": ctx.summary_skipped(),
+                    "checks": ctx.summary_checks(),
+                })

@@ -331,7 +331,9 @@ def _case_partial_shipping(ctx: RunContext, env: Dict[str, Any],
     invoice = _setup_order(ctx, env, case, prepay=False, courier=courier)
     inv = frappe.get_doc("Sales Invoice", invoice)
     if len(inv.items) < 2:
-        ctx.record(f"{case}.skipped", True, "fixture invoice has a single line")
+        # WHY: recorded passed=True. A single-line fixture means the partial
+        # return — the whole point of this case — never happened.
+        ctx.skip(f"{case}.skipped", "fixture invoice has a single line; no partial return was run")
         return
 
     first = inv.items[0]
@@ -367,7 +369,8 @@ def _case_partial_twice_never_exceeds_invoice(ctx: RunContext, env: Dict[str, An
     invoice = _setup_order(ctx, env, case, prepay=False, courier=courier)
     inv = frappe.get_doc("Sales Invoice", invoice)
     if len(inv.items) < 2:
-        ctx.record(f"{case}.skipped", True, "fixture invoice has a single line")
+        # WHY: recorded passed=True — the two-leg over-credit check never ran.
+        ctx.skip(f"{case}.skipped", "fixture invoice has a single line; no two-leg return was run")
         return
     grand_total = round(flt(inv.grand_total), 2)
 
@@ -403,7 +406,13 @@ def _case_settle_after_return(ctx: RunContext, env: Dict[str, Any],
     """
     case = "MONEY-SETTLE-AFTER-RETURN"
     if not courier:
-        ctx.record(f"{case}.skipped", True, "no courier bound to this branch")
+        # WHY: recorded passed=True. The double-release defect this case hunts —
+        # settlement releasing Courier Outstanding a second time after a return —
+        # was never exercised, and the audit still reported green.
+        ctx.skip(
+            f"{case}.skipped",
+            "no courier bound to this branch — the settle-after-return path did NOT run",
+        )
         return
 
     acc: Accounts = env["accounts"]
@@ -422,27 +431,53 @@ def _case_settle_after_return(ctx: RunContext, env: Dict[str, Any],
     from jarz_pos.services.delivery_handling import settle_single_invoice_paid
 
     settled: Dict[str, Any] = {}
+    settlement_ran = False
     try:
         settled = settle_single_invoice_paid(
             invoice, env["pos_profile"], courier.get("party_type"), courier.get("party")
         ) or {}
+        settlement_ran = True
         ctx.record(f"{case}.settlement_ran", True, json.dumps(settled, default=str)[:300])
     except Exception as exc:
         # Refusing to settle a returned order is a perfectly good outcome — better
-        # than posting a wrong entry — so this is recorded, not failed.
-        ctx.record(f"{case}.settlement_refused", True, f"settlement declined: {exc}")
+        # than posting a wrong entry.
+        # WHY this is now conditional: both branches used to record True, so a
+        # crash halfway through the settlement (partially posted, then blew up)
+        # read exactly like a deliberate refusal. Only an explicit guard —
+        # frappe.throw, i.e. a ValidationError — counts as a refusal; any other
+        # exception type is a defect in the code under test.
+        expected_refusal = isinstance(exc, frappe.ValidationError)
+        ctx.record(
+            f"{case}.settlement_refused", expected_refusal,
+            f"settlement raised {type(exc).__name__}: {exc} — "
+            f"{'explicit guard refusal (acceptable)' if expected_refusal else 'NOT a guard refusal; this is a crash mid-settlement'}",
+        )
 
     # The courier was paid for the trip, so once the settlement runs the fee has
     # left the till: freight is expensed and cash is down by the same amount. What
     # must NOT happen is the settlement releasing Courier Outstanding a second
     # time, or the branch banking the order value on returned goods — both are
     # pinned at zero here.
-    expected = {
-        acc.receivable: 0.0,
-        acc.courier_outstanding: 0.0,
-        acc.freight: ship_expense,
-        acc.cash: -ship_expense,
-    }
+    #
+    # When the settlement was REFUSED the fee never left the till: it is still
+    # owed to the courier, so it sits in Creditors instead of coming out of cash.
+    # The old code asserted the settled shape either way, which meant the refusal
+    # branch was graded against a ledger it could not produce.
+    if settlement_ran:
+        expected = {
+            acc.receivable: 0.0,
+            acc.courier_outstanding: 0.0,
+            acc.freight: ship_expense,
+            acc.cash: -ship_expense,
+        }
+    else:
+        expected = {
+            acc.receivable: 0.0,
+            acc.courier_outstanding: 0.0,
+            acc.freight: ship_expense,
+            acc.creditors: -ship_expense,
+            acc.cash: 0.0,
+        }
     _record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
 
 
@@ -456,14 +491,18 @@ def _case_partner_return(ctx: RunContext, env: Dict[str, Any]) -> None:
     case = "MONEY-PARTNER-RETURN"
     partner = frappe.db.get_value("Delivery Partner", {}, ["name", "settlement_account"], as_dict=True)
     if not partner or not partner.get("settlement_account"):
-        ctx.record(f"{case}.skipped", True, "no Delivery Partner with a settlement account")
+        # WHY: recorded passed=True. Without a Delivery Partner the partner
+        # return path — the one that must never touch Courier Outstanding —
+        # was never run, yet the audit claimed it green.
+        ctx.skip(f"{case}.skipped", "no Delivery Partner with a settlement account on this site")
         return
 
     party = frappe.db.get_value(
         "Supplier", {"custom_delivery_partner": partner["name"]}, "name"
     ) or frappe.db.get_value("Employee", {"custom_delivery_partner": partner["name"]}, "name")
     if not party:
-        ctx.record(f"{case}.skipped", True, f"no courier bound to partner {partner['name']}")
+        # WHY: recorded passed=True.
+        ctx.skip(f"{case}.skipped", f"no courier bound to partner {partner['name']}")
         return
     party_type = "Supplier" if frappe.db.exists("Supplier", party) else "Employee"
 
@@ -473,7 +512,8 @@ def _case_partner_return(ctx: RunContext, env: Dict[str, Any]) -> None:
 
     profile = resolve_courier_branch(party_type, party) or env["pos_profile"]
     if not frappe.db.exists("POS Profile", profile):
-        ctx.record(f"{case}.skipped", True, f"courier branch {profile!r} is not a POS Profile")
+        # WHY: recorded passed=True.
+        ctx.skip(f"{case}.skipped", f"courier branch {profile!r} is not a POS Profile")
         return
 
     company = frappe.db.get_value("POS Profile", profile, "company")
@@ -581,22 +621,33 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
             try:
                 _teardown_dispatched_fixtures(ctx)
                 _cleanup(ctx)
-            except Exception:
+            except Exception as exc:
                 frappe.log_error(frappe.get_traceback(), "return_money_audit cleanup failed")
+                # WHY: swallowed. A failed teardown leaves dispatched fixtures,
+                # credit notes and JEs live in the ledger while the audit prints
+                # its counts as if the run were clean. The report is built below,
+                # so this failure lands in it.
+                ctx.record("cleanup.teardown_completed", False, f"{type(exc).__name__}: {exc}")
         _restore_returns(previous_flag)
         frappe.db.commit()
 
-    failures = [c for c in ctx.checks if not c.passed]
+    # Skipped checks are not failures — but they are not passes either, so they
+    # get their own line rather than disappearing into the pass count.
+    failures = [c for c in ctx.checks if not c.passed and not c.skipped]
     print("\n" + "=" * 78)
-    print(f"RETURN MONEY AUDIT — {ctx.passed} passed, {ctx.failed} failed")
+    print(f"RETURN MONEY AUDIT — {ctx.passed} passed, {ctx.failed} failed, {ctx.skipped} skipped")
     print("=" * 78)
     for check in failures:
         print(f"  FAIL  {check.name}\n        {check.detail}")
+    for check in ctx.skipped_checks:
+        print(f"  SKIP  {check.name}\n        {check.detail}")
 
     report = {
         "passed": ctx.passed,
         "failed": ctx.failed,
-        "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in ctx.checks],
+        "skipped": ctx.skipped,
+        "skipped_checks": ctx.summary_skipped(),
+        "checks": ctx.summary_checks(),
     }
     print(REPORT_MARKER_START)
     print(json.dumps(report, default=str))

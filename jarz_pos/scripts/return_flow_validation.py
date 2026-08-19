@@ -434,7 +434,14 @@ def _case_partial_then_complete(ctx: RunContext, env: Dict[str, Any]) -> None:
 
     lines = _full_lines(invoice)
     if len(lines) < 2:
-        ctx.record(f"{case}.skipped", True, "needs at least two invoice lines")
+        # WHY: recorded passed=True. With a single-line fixture the partial
+        # return, the over-return refusal and the replay-idempotency check all
+        # went unexercised — and the suite reported them green.
+        ctx.skip(
+            f"{case}.skipped",
+            f"needs at least two invoice lines, fixture has {len(lines)}; the partial, "
+            "over-return and idempotency assertions did NOT run",
+        )
         return
 
     # Partial by LINE rather than by quantity: the fixtures carry qty 1, and
@@ -642,6 +649,7 @@ def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, An
     previous_switch = _enable_returns()
     ctx = RunContext()
     report_path = report_path or "sites/return_flow_validation_report.md"
+    result: Dict[str, Any] = {}
 
     try:
         pos_profile = _pick_pos_profile()
@@ -680,22 +688,26 @@ def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, An
         _case_partial_then_complete(ctx, env)
         _case_guards(ctx, env)
 
-        passed = ctx.passed
-        failed = ctx.failed
         try:
             _emit_report(ctx, report_path, True, "")
-        except Exception:
+        except Exception as exc:
             frappe.log_error(frappe.get_traceback(), "return_flow_validation report failed")
+            # WHY: swallowed entirely. The run kept printing its counts while the
+            # report — the artefact anyone actually reads — was never written, so
+            # a silently missing report looked identical to a clean run.
+            ctx.record("report.emitted", False, f"{type(exc).__name__}: {exc}")
 
-        result = {
-            "passed": passed,
-            "failed": failed,
+        result.update({
+            "passed": ctx.passed,
+            "failed": ctx.failed,
+            # Skipped is a distinct state: assertions this environment could not run.
+            "skipped": ctx.skipped,
+            "skipped_checks": ctx.summary_skipped(),
             "report_path": report_path,
-            "checks": [
-                {"name": c.name, "passed": c.passed, "detail": c.detail} for c in ctx.checks
-            ],
-        }
-        print(f"return_flow_validation: {passed} passed, {failed} failed")
+            "checks": ctx.summary_checks(),
+        })
+        print(f"return_flow_validation: {ctx.passed} passed, {ctx.failed} failed, "
+              f"{ctx.skipped} skipped")
         return result
 
     finally:
@@ -703,8 +715,20 @@ def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, An
             try:
                 _teardown_dispatched_fixtures(ctx)
                 _cleanup(ctx)
-            except Exception:
+            except Exception as exc:
                 frappe.log_error(frappe.get_traceback(), "return_flow_validation cleanup failed")
+                # WHY: swallowed. A failed teardown leaves dispatched fixtures and
+                # their credit notes / JEs live in the ledger while the run still
+                # reports its counts. ``result`` is the dict already returned to
+                # the caller, so mutating it here surfaces the leak.
+                ctx.record("cleanup.teardown_completed", False, f"{type(exc).__name__}: {exc}")
+                result.update({
+                    "passed": ctx.passed,
+                    "failed": ctx.failed,
+                    "skipped": ctx.skipped,
+                    "skipped_checks": ctx.summary_skipped(),
+                    "checks": ctx.summary_checks(),
+                })
         _restore_returns(previous_switch)
 
 

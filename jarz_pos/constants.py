@@ -29,20 +29,37 @@ class ACCOUNTS:
 # ── Role name sets ──────────────────────────────────────────────────────
 
 class ROLES:
-    MANAGER = {"System Manager", "Accounts Manager", "Stock Manager",
-               "Manufacturing Manager", "Purchase Manager"}
-    STOCK = {"System Manager", "Stock Manager", "Manufacturing Manager",
-             "Accounts Manager"}
-    MANUFACTURING = {"System Manager", "Manufacturing Manager",
-                     "Stock Manager", "Purchase Manager"}
-    PURCHASE = {"System Manager", "Stock Manager", "Manufacturing Manager",
-                "Purchase Manager", "Accounts Manager"}
-    ADMIN = {"System Manager", "POS Manager"}
+    # Individual role names first, so the sets below can be built from them
+    # rather than repeating the literals. The sets used to come first, which is
+    # why JARZ_MANAGER could not appear in them and why the divergence below
+    # went unnoticed for so long.
     JARZ_MANAGER = "JARZ Manager"
     JARZ_LINE_MANAGER = "jarz line manager"
+    #: Both spellings exist as real Role records on staging and production.
+    #: Anywhere the line manager is named, name both — a set that carries only
+    #: one silently excludes half the people holding the role.
+    JARZ_LINE_MANAGER_ALT = "JARZ line manager"
     ADMINISTRATOR = "Administrator"
     SYSTEM_MANAGER = "System Manager"
     PRODUCTION_OPERATOR = "Production Operator"
+
+    # JARZ Manager is a member of all four operational sets below. It was in
+    # none of them, while the mobile drawer gated Cash Transfer, Stock Transfer,
+    # Inventory Count and Purchase Invoice on `hasManagerAccess` — which does
+    # include JARZ Manager. So the app showed a JARZ-Manager-only user four
+    # entries and the server answered "Not permitted: Managers only" on every
+    # one, along with the Production Board's item picker and Return-WIP.
+    # The owner's call (2026-08-19) is that the server was wrong: a JARZ Manager
+    # is meant to do these things.
+    MANAGER = {"System Manager", "Accounts Manager", "Stock Manager",
+               "Manufacturing Manager", "Purchase Manager", JARZ_MANAGER}
+    STOCK = {"System Manager", "Stock Manager", "Manufacturing Manager",
+             "Accounts Manager", JARZ_MANAGER}
+    MANUFACTURING = {"System Manager", "Manufacturing Manager",
+                     "Stock Manager", "Purchase Manager", JARZ_MANAGER}
+    PURCHASE = {"System Manager", "Stock Manager", "Manufacturing Manager",
+                "Purchase Manager", "Accounts Manager", JARZ_MANAGER}
+    ADMIN = {"System Manager", "POS Manager"}
     # Everything a JARZ line manager may do, the manager tier and the
     # Administrator may do too.  The line manager is a *narrower* manager — a
     # floor supervisor — never the holder of an authority its own manager
@@ -53,7 +70,7 @@ class ROLES:
     # real Role records on staging and production.
     LINE_MANAGER_TIER = {
         JARZ_LINE_MANAGER,
-        "JARZ line manager",
+        JARZ_LINE_MANAGER_ALT,
         JARZ_MANAGER,
         ADMINISTRATOR,
         SYSTEM_MANAGER,
@@ -84,7 +101,19 @@ class ROLES:
     PURCHASE_REQUEST = (
         PURCHASE
         | PRODUCTION_VIEW
-        | {JARZ_MANAGER, JARZ_LINE_MANAGER, PRODUCTION_OPERATOR, "POS User", "POS Manager"}
+        | {
+            JARZ_MANAGER,
+            JARZ_LINE_MANAGER,
+            # Carried here too, and this one was genuinely missing: this set
+            # named only the lower-case spelling, so a line manager holding the
+            # "JARZ line manager" Role record — the capitalised one, which is
+            # the spelling the mobile client matches on — could not raise an
+            # item request at all. Every other tier check carries both.
+            JARZ_LINE_MANAGER_ALT,
+            PRODUCTION_OPERATOR,
+            "POS User",
+            "POS Manager",
+        }
     )
     # Review the whole request queue and reject entries.  Requesters see only
     # their own branch's queue; this set sees and acts on everything.

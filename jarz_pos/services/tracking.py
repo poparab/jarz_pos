@@ -56,6 +56,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe.utils import cint, flt, get_datetime, get_url, now_datetime
+from jarz_pos.utils.settings_utils import single_int
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema / routing constants
@@ -262,18 +263,21 @@ def expose_courier_phone() -> bool:
 
 
 def tracking_link_ttl_hours() -> int:
-    """Hours a link keeps working past a terminal state. ``0`` means never expire."""
-    try:
-        raw = frappe.db.get_single_value("Jarz POS Settings", "tracking_link_ttl_hours")
-    except Exception:
-        return DEFAULT_TTL_HOURS
-    if raw in (None, ""):
-        return DEFAULT_TTL_HOURS
-    try:
-        hours = int(cint(raw))
-    except Exception:
-        return DEFAULT_TTL_HOURS
-    return max(0, hours)
+    """Hours a link keeps working past a terminal state. ``0`` means never expire.
+
+    Read through ``single_int`` rather than ``frappe.db.get_single_value``. The
+    latter casts an ``Int`` through ``cint()``, so a field nobody has ever set
+    comes back as ``0`` — and the ``raw in (None, "")`` guard that used to sit
+    here could therefore never fire. The effective TTL was 0 on every site,
+    ``_is_expired`` returned ``False`` for every link, and customer tracking
+    links never expired at all despite the declared 24-hour default. With
+    ``expose_courier_phone_to_customer`` on, that left a courier's mobile number
+    on a permanently live public URL.
+
+    An explicit 0 still means "never expire" — that is a real choice an operator
+    can make, and it is why the default cannot simply be applied to any zero.
+    """
+    return max(0, single_int("Jarz POS Settings", "tracking_link_ttl_hours", DEFAULT_TTL_HOURS))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

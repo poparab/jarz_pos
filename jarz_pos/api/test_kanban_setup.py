@@ -72,7 +72,18 @@ def test_kanban_setup():
 
 @frappe.whitelist(allow_guest=False)
 def create_sales_invoice_state_field():
-    """Create the sales_invoice_state custom field if it doesn't exist"""
+    """Create the sales_invoice_state custom field if it doesn't exist.
+
+    System Manager only: this mutates the SCHEMA (inserts a Custom Field on Sales
+    Invoice, which alters the table). ``allow_guest=False`` alone meant any logged
+    in user — every POS cashier — could change the schema.
+
+    Kept rather than deleted because ``sales_invoice_state`` is still read as the
+    legacy fallback for ``custom_sales_invoice_state`` across api/kanban.py,
+    api/manager.py, api/notifications.py and events/sales_invoice.py, so this is a
+    live recovery tool rather than dead code.
+    """
+    frappe.only_for("System Manager")
     try:
         # Check if field already exists
         if frappe.db.exists("Custom Field", {"dt": "Sales Invoice", "fieldname": "sales_invoice_state"}):
@@ -101,7 +112,17 @@ def create_sales_invoice_state_field():
 
 @frappe.whitelist(allow_guest=False) 
 def fix_existing_invoices_state():
-    """Set default state for existing POS invoices that don't have a state"""
+    """Set default state for existing POS invoices that don't have a state.
+
+    System Manager only: this is an unbounded bulk write. It loads EVERY submitted
+    POS invoice with an empty state and ``save(ignore_permissions=True)``s each one
+    — across every branch, with no scoping and no limit. Any logged in user could
+    fire it and rewrite the whole board.
+
+    Kept rather than deleted for the same reason as the field creator above: the
+    legacy state field is still read, so the backfill still has a purpose.
+    """
+    frappe.only_for("System Manager")
     try:
         # Find POS invoices without a state
         invoices = frappe.get_all(

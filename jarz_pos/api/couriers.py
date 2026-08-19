@@ -575,6 +575,17 @@ def _latest_payment_info(inv_name: str) -> dict | None:
 def generate_settlement_preview(invoice: str, party_type: str | None = None, party: str | None = None, mode: str = "pay_now", recent_payment_seconds: int = 30):
     """Produce a settlement preview and mint a short-lived token to be used on confirmation.
 
+    Branch-scoped since 2026-08-19. This endpoint and :func:`confirm_settlement`
+    are the pair the mobile client drives for the whole out-for-delivery
+    pay-now flow, and neither carried any guard at all: no role, no branch, no
+    shift. Every *other* invoice-level action in this module goes through
+    :func:`_guard_invoice_action`; these two were simply missed, so any logged-in
+    POS user could mint a preview against any branch's invoice and then settle
+    it. The shift requirement is deliberately left off here — a preview posts
+    nothing, and refusing to *look* before the drawer is open would be a
+    behaviour change rather than a fix. ``confirm_settlement``, which posts, does
+    require one.
+
     Returns:
       {
         invoice, party_type, party, mode,
@@ -585,6 +596,10 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
     """
     if not invoice:
         frappe.throw("invoice is required")
+
+    _guard_invoice_action(
+        invoice, action_label="preview a settlement", require_shift=False
+    )
 
     inv = frappe.get_doc("Sales Invoice", invoice)
     if inv.docstatus != 1:
@@ -743,6 +758,14 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
         frappe.throw("invoice is required")
     if not preview_token:
         frappe.throw("preview_token is required")
+
+    # Branch-scoped and shift-gated since 2026-08-19. This posts Payment Entries
+    # and Journal Entries through _dispatch_settlement below, and carried no
+    # guard of any kind — no role, no branch, no shift — while being the exact
+    # endpoint the mobile client calls to settle an order. The preview token is
+    # not a substitute: it is minted by generate_settlement_preview, which was
+    # equally unguarded, so a caller could simply mint their own.
+    _guard_invoice_action(invoice, action_label="confirm a settlement")
 
     cache_key = f"jarz_pos:settle_preview:{preview_token}"
     data = frappe.cache().hget(cache_key, "data")

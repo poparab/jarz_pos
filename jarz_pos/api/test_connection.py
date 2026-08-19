@@ -90,10 +90,15 @@ def get_backend_info():
         }
     }
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
     """Emit a realtime test event to verify Socket.IO delivery to clients.
     Default event is 'jarz_pos_new_invoice'. Requires auth.
+
+    The decorator now matches that last sentence (changed 2026-08-19). It read
+    ``allow_guest=True`` while the docstring claimed auth was required — and the
+    docstring was the correct description of the intent. Anyone on the internet
+    could push a fake new-order event to staff clients.
     """
     try:
         now = frappe.utils.now()
@@ -124,7 +129,15 @@ def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
 def reload_jarz_doctypes():
     """Reload standard DocTypes shipped with this app into the site DB.
     Useful when DocTypes were removed during migrate and need restoring.
+
+    System Manager only: ``frappe.reload_doc`` re-imports DocType definitions from
+    disk and runs the resulting schema changes, then commits. ``allow_guest=False``
+    alone meant any logged in user could trigger a schema reload on production.
+
+    Kept rather than deleted: it is the documented recovery path for DocTypes lost
+    during a migrate, and it has no internal callers to break.
     """
+    frappe.only_for("System Manager")
     doctypes = [
         ("jarz_pos", "doctype", "jarz_bundle"),
         ("jarz_pos", "doctype", "jarz_bundle_item_group"),

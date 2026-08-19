@@ -2504,6 +2504,118 @@ class FullCycleRunner:
         except Exception:
             return 0
 
+    def _max_mapped_woo_customer_id(self) -> int:
+        """Highest ``woo_customer_id`` any Customer on this site already claims.
+
+        The order path has had a ceiling like this for a long time; the customer
+        path never did, and that asymmetry is not cosmetic. Staging is a
+        production clone, so ``tabCustomer`` already carries ids up to
+        production's counter while the demo store's own counter sits *below*
+        that range. A freshly created demo customer therefore gets handed an id
+        that already belongs to a real cloned customer, and
+        ``process_customer_record`` overwrites that record's name, phone, email
+        and addresses in place.
+
+        This is not hypothetical — it is how roughly 17 real customer records
+        were corrupted previously, and the existing assertion cannot see it:
+        WI-CUST-01.06 checks that exactly one Customer is bound to the id, which
+        is equally true whether the harness created that Customer or destroyed
+        one. Only the id range can tell the two apart.
+        """
+        rows = frappe.db.sql(
+            """
+            SELECT MAX(CAST(woo_customer_id AS UNSIGNED)) AS max_woo_customer_id
+            FROM `tabCustomer`
+            WHERE IFNULL(woo_customer_id, '') != ''
+            """,
+            as_dict=True,
+        )
+        if not rows:
+            return 0
+        try:
+            return int(rows[0].get("max_woo_customer_id") or 0)
+        except Exception:
+            return 0
+
+    def _preexisting_customer_artifacts(self, woo_customer_id: str | None) -> dict[str, Any]:
+        """Whether binding to this Woo customer id would hijack an existing record.
+
+        A Customer already carrying this id is a collision, full stop — but one
+        that also has invoices is unambiguously a *real* customer with trading
+        history, so it is reported separately and treated as fatal rather than
+        as something to burn past.
+        """
+        customer_name = self._find_customer_by_woo_customer_id(woo_customer_id)
+        invoice_count = 0
+        if customer_name:
+            try:
+                invoice_count = frappe.db.count("Sales Invoice", {"customer": customer_name})
+            except Exception:
+                invoice_count = -1
+        return {
+            "has_collision": bool(customer_name),
+            "customer": customer_name,
+            "invoice_count": invoice_count,
+        }
+
+    def _allocate_unhijacked_woo_customer(
+        self, payload_factory: Any
+    ) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+        """Create a Woo customer whose id cannot belong to a real ERP customer.
+
+        Mirrors the order-side burn-up loop, with one deliberate difference: an
+        id is accepted only when it is **above** the mapped ceiling, not merely
+        when nothing currently occupies it. "Unoccupied" is too weak a test —
+        a gap inside production's used range is unoccupied today and claimed by
+        the next clone, so binding there produces a collision that appears long
+        after this run has reported success.
+        """
+        ceiling = self._max_mapped_woo_customer_id()
+        attempts: list[dict[str, Any]] = []
+        attempt = 0
+        hard_cap = 250
+
+        while attempt < hard_cap:
+            attempt += 1
+            payload = payload_factory(attempt)
+            candidate = self._woo_client().post("customers", payload)
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id:
+                raise RuntimeError(f"Woo customer create did not return an id: {candidate!r}")
+
+            collision = self._preexisting_customer_artifacts(candidate_id)
+            try:
+                candidate_id_int = int(candidate_id)
+            except Exception:
+                candidate_id_int = 0
+
+            if collision["has_collision"] and collision["invoice_count"] > 0:
+                # Stop rather than burn past it. An id bound to a customer with
+                # trading history means the ceiling query is not seeing what it
+                # should, and continuing would create more Woo customers while
+                # the real problem goes unreported.
+                raise RuntimeError(
+                    "Refusing to continue: Woo customer id "
+                    f"{candidate_id} is already bound to ERP customer "
+                    f"{collision['customer']!r}, which has {collision['invoice_count']} "
+                    "invoices. This run would have overwritten a real customer."
+                )
+
+            if candidate_id_int > ceiling and not collision["has_collision"]:
+                return candidate, candidate_id, attempts
+
+            attempts.append({
+                "attempt": attempt,
+                "woo_customer_id": candidate_id,
+                "ceiling": ceiling,
+                "collision": collision,
+            })
+
+        raise RuntimeError(
+            f"Unable to allocate a Woo customer id above the mapped ceiling ({ceiling}) "
+            f"after {attempt} attempts: {attempts!r}"
+        )
+
     def _ensure_customer_synced_to_woo(self, customer_name: str, scope: str | None = None) -> dict[str, Any]:
         from jarz_woocommerce_integration.services import outbound_sync, sync_events
 

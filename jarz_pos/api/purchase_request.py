@@ -44,6 +44,7 @@ from jarz_pos.utils.access_control import (
     is_unrestricted_user,
 )
 from jarz_pos.utils.warehouse_utils import resolve_request_warehouse
+from jarz_pos.utils.settings_utils import single_int
 
 #: Request statuses that still want stock. Anything else is done or abandoned.
 OPEN_STATUSES = ("Pending", "Partially Received", "Ordered", "Partially Ordered")
@@ -97,14 +98,16 @@ def _coerce_rows(value: Any) -> List[Dict[str, Any]]:
 
 
 def _settings_int(fieldname: str, default: int) -> int:
-    try:
-        value = frappe.db.get_single_value("Jarz POS Settings", fieldname)
-    except Exception:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+    """Int setting, with ``default`` applied only when nobody has ever set it.
+
+    Was ``int(frappe.db.get_single_value(...))``. That helper casts an ``Int``
+    through ``cint()``, so an unwritten field arrives as ``0``, ``int(0)``
+    succeeds, and the ``except (TypeError, ValueError)`` branch carrying the
+    default could never be reached. Every team item request raised without an
+    explicit date was therefore dated *today* instead of the declared three days
+    out — the requester got no lead time and the buyer got no warning.
+    """
+    return single_int("Jarz POS Settings", fieldname, default)
 
 
 def _resolve_company(company: Optional[str] = None) -> str:

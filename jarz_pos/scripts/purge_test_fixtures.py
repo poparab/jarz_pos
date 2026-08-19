@@ -23,6 +23,13 @@ Two hard limits, both deliberate:
   name pattern on the invoice — a real order can never be swept in by being
   created at an unlucky moment.
 
+The fixture Territory and Customer Group are the exception to that resolution
+rule, and have to be: nothing points back at them once their customers are gone,
+so resolving from documents left ``_B2BVALID_Territory`` and ``_B2BVALID_Group``
+sitting on the site after every single purge. They are matched by name prefix
+instead, and deleted without ``force`` so Frappe's own link check — not a
+hand-written list of referrers — decides whether anything still uses them.
+
 Usage::
 
     bench --site frontend execute jarz_pos.scripts.purge_test_fixtures.run
@@ -82,6 +89,28 @@ def _fixture_customers() -> List[str]:
                 limit_page_length=0,
             ) or []
     return sorted(set(names))
+
+
+def _fixture_taxonomy() -> Dict[str, List[str]]:
+    """Fixture Territory and Customer Group records, matched by name prefix.
+
+    Unlike every other candidate here these cannot be resolved from a document.
+    A Territory is not referenced by anything once its customers are deleted, so
+    a document-driven sweep finds nothing and reports a clean site while the rows
+    are still there. Matching the prefix directly is the only way to see them.
+    """
+    found: Dict[str, List[str]] = {"Territory": [], "Customer Group": []}
+    for doctype in found:
+        names: List[str] = []
+        for prefix in FIXTURE_PREFIXES:
+            names += frappe.get_all(
+                doctype,
+                filters={"name": ["like", f"{prefix}%"]},
+                pluck="name",
+                limit_page_length=0,
+            ) or []
+        found[doctype] = sorted(set(names))
+    return found
 
 
 def _fixture_invoices(customers: List[str]) -> List[Dict[str, Any]]:
@@ -153,6 +182,32 @@ def _cancel_and_delete(doctype: str, name: str, report: Dict[str, Any]) -> None:
         report["failed"].append({"doctype": doctype, "name": name, "error": str(exc)[:300]})
 
 
+def _delete_if_unreferenced(doctype: str, name: str, report: Dict[str, Any]) -> None:
+    """Delete a shared lookup record, with Frappe's link check left enabled.
+
+    Deliberately not ``force=True``. The invoices and customers above are known
+    fixtures resolved from a prefix, but a Territory or Customer Group is a
+    shared lookup that a real record may have been pointed at by hand — and the
+    forced delete used elsewhere here skips link validation entirely, which is
+    exactly how a previous run stranded links. Frappe's own check is exhaustive
+    where an enumerated list of referrers would not be, so anything still in use
+    is kept and reported rather than quietly unlinked.
+    """
+    try:
+        if not frappe.db.exists(doctype, name):
+            return
+        frappe.delete_doc(
+            doctype, name, ignore_permissions=True, ignore_missing=True,
+            delete_permanently=True,
+        )
+        report["deleted"].append(f"{doctype}:{name}")
+    except Exception as exc:
+        report["failed"].append({
+            "doctype": doctype, "name": name,
+            "error": f"kept: still referenced — {str(exc)[:200]}",
+        })
+
+
 def run(dry_run: bool = True) -> Dict[str, Any]:
     _guard_environment()
 
@@ -205,6 +260,8 @@ def run(dry_run: bool = True) -> Dict[str, Any]:
     credit_notes = [r["name"] for r in invoices if int(r.get("is_return") or 0)]
     source_invoices = [r["name"] for r in invoices if not int(r.get("is_return") or 0)]
 
+    taxonomy = _fixture_taxonomy()
+
     plan = {
         "payment_entries": sorted({r["name"] for r in payment_entries}),
         "journal_entries": sorted({r["name"] for r in journal_entries}),
@@ -213,6 +270,8 @@ def run(dry_run: bool = True) -> Dict[str, Any]:
         "credit_notes": sorted(credit_notes),
         "delivery_notes": sorted(set(delivery_notes)),
         "source_invoices": sorted(source_invoices),
+        "territories": taxonomy["Territory"],
+        "customer_groups": taxonomy["Customer Group"],
     }
     report["plan"] = {k: len(v) for k, v in plan.items()}
     report["plan_detail"] = plan
@@ -289,6 +348,13 @@ def run(dry_run: bool = True) -> Dict[str, Any]:
         ) or []:
             _cancel_and_delete("Address", address, report)
         _cancel_and_delete("Customer", name, report)
+
+    # Last, and only now: every fixture customer above carries a territory and a
+    # customer group, so these cannot go while any of them survive.
+    for name in plan["territories"]:
+        _delete_if_unreferenced("Territory", name, report)
+    for name in plan["customer_groups"]:
+        _delete_if_unreferenced("Customer Group", name, report)
 
     frappe.db.commit()
 

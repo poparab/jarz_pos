@@ -221,11 +221,19 @@ def check_for_updates(last_check: Optional[str] = None) -> Dict[str, Any]:
         }
 
 
-@frappe.whitelist(allow_guest=True)  # Allow guest for debugging
+@frappe.whitelist()
 def test_websocket_emission() -> Dict[str, Any]:
     """
     Test endpoint to manually emit websocket events for debugging.
     Emits both new invoice and state change events.
+
+    No longer ``allow_guest`` (changed 2026-08-19). Debugging convenience was the
+    stated reason for it, but what the endpoint actually does is inject
+    ``jarz_pos_new_invoice`` and state-change events into staff realtime rooms —
+    so unauthenticated callers could put fabricated orders on every cashier's
+    screen, indefinitely and from anywhere. A debug helper that emits to other
+    people's sessions is not a read-only probe, and there is no version of
+    "for debugging" that justifies leaving it open to the internet.
     """
     try:
         timestamp = frappe.utils.now()
