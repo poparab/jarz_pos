@@ -100,7 +100,21 @@ WOO_DEAD = frozenset({"cancelled", "refunded", "failed"})
 PAYMENT_ACCOUNTS = {
     "cod": "Cash - {abbr}",
     "instapay": "Bank Account - {abbr}",
+    # Card/wallet money is collected by the Kashier gateway and sits in its
+    # holding account until it settles to the bank. 507 historical Payment
+    # Entries already land here, so this is the established treatment, not a
+    # new one invented by the migration.
+    "kashier_card": "kashier - {abbr}",
+    "kashier_wallet": "kashier - {abbr}",
+    "wallet": "kashier - {abbr}",
 }
+
+#: Methods where a gateway takes the money rather than a courier. For these the
+#: migration books only when WooCommerce recorded an actual ``date_paid``: the
+#: gateway either charged the card or it did not, and there is no courier whose
+#: word could stand in for that. A COD order can legitimately be collected with
+#: no ``date_paid`` recorded; a card order cannot.
+GATEWAY_METHODS = frozenset({"kashier_card", "kashier_wallet", "wallet"})
 
 #: Stop the run rather than grind through a failure mode nobody has looked at.
 MAX_FAILURES = 3
@@ -188,16 +202,23 @@ def _company_abbr(company: str) -> str:
     return frappe.db.get_value("Company", company, "abbr") or ""
 
 
-def _resolve_account(company: str, woo_payment_method: str) -> Optional[str]:
+def _resolve_account(company: str, woo_payment_method: str,
+                     woo_date_paid: str = "") -> Optional[str]:
     """The account that receives this payment, or None if we will not guess.
 
-    ``kashier_card`` / ``kashier_wallet`` deliberately return None: those orders
-    are collected by the gateway and already carry an automatic Payment Entry,
-    so an outstanding balance on one means something unusual that a human should
-    look at.
+    A method with no mapping returns None and the invoice goes to a human --
+    booking cash into a guessed account is worse than leaving the order stale.
+
+    A gateway method with no ``date_paid`` also returns None: the usual reason a
+    card order still shows a balance is that the gateway never charged it, and
+    debiting the Kashier holding account for money it never took would invent an
+    asset.
     """
-    template = PAYMENT_ACCOUNTS.get((woo_payment_method or "").strip().lower())
+    method = (woo_payment_method or "").strip().lower()
+    template = PAYMENT_ACCOUNTS.get(method)
     if not template:
+        return None
+    if method in GATEWAY_METHODS and not str(woo_date_paid or "").strip():
         return None
     account = template.format(abbr=_company_abbr(company))
     if not frappe.db.exists("Account", account):
@@ -269,9 +290,10 @@ def preflight() -> Dict[str, Any]:
 #: Written to every bucket CSV. ``classify`` is the only thing that decides what
 #: happens to an invoice; ``run`` just executes a bucket and re-checks the guards.
 BUCKET_COLUMNS = [
-    "name", "woo_order_id", "woo_status", "woo_date_completed", "woo_payment_method",
-    "docstatus", "status", "ops_state", "legacy_state", "outstanding_amount",
-    "grand_total", "posting_date", "company", "customer", "live_siblings",
+    "name", "woo_order_id", "woo_status", "woo_date_completed", "woo_date_paid",
+    "woo_payment_method", "docstatus", "status", "ops_state", "legacy_state",
+    "outstanding_amount", "grand_total", "posting_date", "company", "customer",
+    "live_siblings",
 ]
 
 
@@ -310,6 +332,7 @@ def classify() -> Dict[str, int]:
         for row in rows:
             row["woo_status"] = woo_status
             row["woo_date_completed"] = (woo or {}).get("date_completed", "")
+            row["woo_date_paid"] = (woo or {}).get("date_paid", "")
             row["woo_payment_method"] = (woo or {}).get("payment_method", "")
             row["live_siblings"] = len(live)
 
@@ -363,7 +386,9 @@ def classify() -> Dict[str, int]:
         needs_payment = invoice.outstanding_amount > 0
         needs_state = state != "Delivered"
 
-        if needs_payment and not _resolve_account(invoice.company, invoice.woo_payment_method):
+        if needs_payment and not _resolve_account(
+            invoice.company, invoice.woo_payment_method, invoice.woo_date_paid
+        ):
             buckets["MANUAL_unmapped_payment"].append(invoice)
             continue
 
@@ -447,11 +472,14 @@ def _build_payment_entry(invoice: Any, account: str) -> Any:
     return payment
 
 
-def _receive_payment(invoice: Any, woo_payment_method: str, dry_run: bool):
+def _receive_payment(invoice: Any, woo_payment_method: str, dry_run: bool,
+                     woo_date_paid: str = ""):
     """Book the outstanding amount into the account matching how they paid."""
-    account = _resolve_account(invoice.company, woo_payment_method)
+    account = _resolve_account(invoice.company, woo_payment_method, woo_date_paid)
     if not account:
-        return None, "SKIP", "no account mapping for payment_method={0!r}".format(woo_payment_method)
+        return None, "SKIP", "no account for payment_method={0!r} (date_paid={1!r})".format(
+            woo_payment_method, woo_date_paid
+        )
 
     amount = invoice.outstanding_amount
     if amount <= 0:
@@ -564,7 +592,8 @@ def run(bucket: str = "B1_pay_and_state", dry_run: bool = True,
                     notes.append("payment already migrated")
                 else:
                     payment_name, status, message = _receive_payment(
-                        invoice, row["woo_payment_method"], dry_run
+                        invoice, row["woo_payment_method"], dry_run,
+                        row.get("woo_date_paid", ""),
                     )
                     record["payment_entry"] = payment_name or ""
                     notes.append(message)
