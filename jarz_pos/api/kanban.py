@@ -488,6 +488,120 @@ def _resolve_customer_phone(customer: str) -> str:
 
 
 
+def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Resolve the payment method the customer ACTUALLY paid with, per invoice.
+
+    ``rows`` are dicts carrying ``name``, ``outstanding_amount`` and ``status``.
+
+    Two sources, in priority order:
+      1. The submitted Payment Entry's ``paid_to`` account (only meaningful once the
+         invoice is settled), mapped onto the three POS methods.
+      2. The ``payment_mode`` of an unsettled Courier Transaction whose notes record a
+         collection-method change — the only trace of a COD -> online switch, because
+         that flow posts a Journal Entry rather than a Payment Entry.
+
+    Shared by the board (``get_kanban_invoices``) and the single-invoice details
+    endpoint so a card and its printed receipt can never disagree about the method.
+    """
+    method_map: Dict[str, str] = {}
+    invoice_names = [str(r.get("name") or "").strip() for r in rows if str(r.get("name") or "").strip()]
+    if not invoice_names:
+        return method_map
+
+    try:
+        paid_inv_names = [
+            str(r.get("name")).strip()
+            for r in rows
+            if float(r.get("outstanding_amount") or 0) < 0.01
+            and str(r.get("status") or "").strip().lower() in ("paid", "return", "credit note issued")
+        ]
+        if paid_inv_names:
+            pe_refs = frappe.get_all(
+                "Payment Entry Reference",
+                filters={
+                    "reference_doctype": "Sales Invoice",
+                    "reference_name": ["in", paid_inv_names],
+                },
+                fields=["reference_name", "parent"],
+            )
+            pe_names = list({r.parent for r in pe_refs})
+            if pe_names:
+                pes = frappe.get_all(
+                    "Payment Entry",
+                    filters={"name": ["in", pe_names], "docstatus": 1, "payment_type": "Receive"},
+                    fields=["name", "paid_to"],
+                )
+                pe_account_map = {pe.name: pe.paid_to or "" for pe in pes}
+                for ref in pe_refs:
+                    account = pe_account_map.get(ref.parent, "").lower()
+                    if "mobile wallet" in account:
+                        method_map[ref.reference_name] = "Mobile Wallet"
+                    elif "bank account" in account:
+                        method_map[ref.reference_name] = "Instapay"
+                    elif account:
+                        method_map[ref.reference_name] = "Cash"
+    except Exception:
+        pass
+
+    try:
+        ct_rows = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": ["in", invoice_names],
+                "status": ["!=", "Settled"],
+                "payment_mode": ["not in", [None, ""]],
+                "notes": ["like", "%Payment collection changed on%"],
+            },
+            fields=["reference_invoice", "payment_mode", "modified"],
+            order_by="modified desc",
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
+        )
+        for row in ct_rows:
+            invoice_name = row.get("reference_invoice")
+            if invoice_name and invoice_name not in method_map:
+                method_map[invoice_name] = sanitize_printable_text(row.get("payment_mode"))
+    except Exception:
+        pass
+
+    return method_map
+
+
+def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, float]:
+    """Customer cash still to be collected at the door, per invoice.
+
+    This is the CUSTOMER leg of an unsettled Courier Transaction (``amount``), which is
+    NOT the same thing as "the courier transaction is unsettled": a COD order switched
+    to an online method keeps an unsettled row for the SHIPPING leg while its customer
+    ``amount`` is zeroed, because the customer has already paid.
+
+    ``outstanding_amount`` alone cannot answer this — a COD order is settled against
+    Courier Outstanding at Out-for-Delivery, so it reads as fully paid while the
+    customer has not handed over a single pound yet.
+    """
+    amount_map: Dict[str, float] = {}
+    cleaned = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
+    if not cleaned:
+        return amount_map
+    try:
+        rows = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": ["in", cleaned],
+                "status": ["!=", "Settled"],
+            },
+            fields=["reference_invoice", "amount"],
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
+        )
+        for row in rows:
+            invoice_name = row.get("reference_invoice")
+            if not invoice_name:
+                continue
+            amount_map[invoice_name] = amount_map.get(invoice_name, 0.0) + float(row.get("amount") or 0.0)
+    except Exception:
+        return {}
+    return amount_map
+
+
 def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[str, Any]]:
     cleaned_names = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
     if not cleaned_names:
@@ -1255,66 +1369,23 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 except Exception:
                     invoice_items[inv.name] = []
 
-        # Batch fetch actual payment method for paid invoices
-        actual_payment_methods: Dict[str, str] = {}
+        # Batch fetch actual payment method + still-to-collect customer cash.
+        # Both are shared with get_invoice_details so the board card and the printed
+        # receipt read from exactly the same resolution.
         payment_receipts_by_invoice = _get_active_payment_receipt_map([inv.name for inv in invoices])
         invoice_note_counts = _get_invoice_note_counts([inv.name for inv in invoices])
         invoice_latest_notes = _get_invoice_latest_notes([inv.name for inv in invoices])
-        try:
-            paid_inv_names = [
-                inv.name for inv in invoices
-                if float(inv.get("outstanding_amount") or 0) < 0.01
-                and str(inv.status or "").strip().lower() in ("paid", "return", "credit note issued")
-            ]
-            if paid_inv_names:
-                pe_refs = frappe.get_all(
-                    "Payment Entry Reference",
-                    filters={
-                        "reference_doctype": "Sales Invoice",
-                        "reference_name": ["in", paid_inv_names],
-                    },
-                    fields=["reference_name", "parent"],
-                )
-                pe_names = list({r.parent for r in pe_refs})
-                if pe_names:
-                    pes = frappe.get_all(
-                        "Payment Entry",
-                        filters={"name": ["in", pe_names], "docstatus": 1, "payment_type": "Receive"},
-                        fields=["name", "paid_to"],
-                    )
-                    pe_account_map = {pe.name: pe.paid_to or "" for pe in pes}
-                    for ref in pe_refs:
-                        account = pe_account_map.get(ref.parent, "").lower()
-                        if "mobile wallet" in account:
-                            actual_payment_methods[ref.reference_name] = "Mobile Wallet"
-                        elif "bank account" in account:
-                            actual_payment_methods[ref.reference_name] = "Instapay"
-                        elif account:
-                            actual_payment_methods[ref.reference_name] = "Cash"
-        except Exception:
-            pass
-
-        try:
-            invoice_names = [inv.name for inv in invoices]
-            if invoice_names:
-                ct_rows = frappe.get_all(
-                    "Courier Transaction",
-                    filters={
-                        "reference_invoice": ["in", invoice_names],
-                        "status": ["!=", "Settled"],
-                        "payment_mode": ["not in", [None, ""]],
-                        "notes": ["like", "%Payment collection changed on%"],
-                    },
-                    fields=["reference_invoice", "payment_mode", "modified"],
-                    order_by="modified desc",
-                    limit=QUERY_LIMITS.KANBAN_INVOICES,
-                )
-                for row in ct_rows:
-                    invoice_name = row.get("reference_invoice")
-                    if invoice_name and invoice_name not in actual_payment_methods:
-                        actual_payment_methods[invoice_name] = sanitize_printable_text(row.get("payment_mode"))
-        except Exception:
-            pass
+        actual_payment_methods = _get_actual_payment_method_map([
+            {
+                "name": inv.name,
+                "outstanding_amount": inv.get("outstanding_amount"),
+                "status": inv.status,
+            }
+            for inv in invoices
+        ])
+        unsettled_customer_amounts = _get_unsettled_customer_amount_map(
+            [inv.name for inv in invoices]
+        )
 
         # Batch-fetch the shipping income each invoice actually carried. An invoice with
         # no such row charged nothing — see read_invoice_shipping_income for why there is
@@ -1441,6 +1512,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "shipping_income": card_shipping_income,
                 "shipping_expense": terr_ship.get("expense", 0.0),
                 "has_unsettled_courier_txn": bool(has_unsettled),
+                # Customer cash still to be collected at the door. Distinct from the
+                # flag above: a COD order switched to an online method keeps an
+                # unsettled SHIPPING leg while the customer has already paid.
+                "has_unsettled_customer_amount": bool(
+                    float(unsettled_customer_amounts.get(inv.name, 0.0)) > 0.005
+                ),
                 "customer_phone": sanitize_printable_text(customer_phone),
                 "is_pickup": bool(is_pickup),
                 "acceptance_status": sanitize_printable_text(acceptance_status),
@@ -2404,6 +2481,23 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
             )
         except Exception:
             data["has_unsettled_courier_txn"] = False
+        # The board card resolves these two; the details payload must carry them as well
+        # or the printed receipt silently loses the payment method and prints UNPAID for
+        # an order whose collection method was switched to an online one after dispatch.
+        data["has_unsettled_customer_amount"] = bool(
+            float(_get_unsettled_customer_amount_map([invoice.name]).get(invoice.name, 0.0)) > 0.005
+        )
+        data["actual_payment_method"] = sanitize_printable_text(
+            _get_actual_payment_method_map(
+                [
+                    {
+                        "name": invoice.name,
+                        "outstanding_amount": invoice.get("outstanding_amount"),
+                        "status": invoice.get("status"),
+                    }
+                ]
+            ).get(invoice.name)
+        )
         try:
             receipt_data = _get_active_payment_receipt_map([invoice.name]).get(invoice.name, {})
             data.update(receipt_data)
