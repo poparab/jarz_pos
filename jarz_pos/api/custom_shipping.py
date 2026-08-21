@@ -10,9 +10,21 @@ from jarz_pos.constants import ROLES, WS_EVENTS
 from jarz_pos.services.delivery_handling import _get_delivery_expense_amount
 
 
-def _is_manager() -> bool:
-    roles = set(frappe.get_roles(frappe.session.user))
-    return ROLES.JARZ_MANAGER in roles
+def _can_approve_shipping() -> bool:
+    """Who may approve or reject a custom shipping override.
+
+    Mirrors `manager._has_manager_dashboard_access` exactly: the pending
+    requests are surfaced on the Manager Dashboard, so gating the approval on a
+    *narrower* set than the dashboard itself is how a line manager ends up
+    looking at Approve/Reject buttons that answer 403 on every tap. The line
+    manager is a floor supervisor and owns the shipping call on their branch.
+    """
+    roles = {
+        str(role or "").strip()
+        for role in (frappe.get_roles(frappe.session.user) or [])
+        if str(role or "").strip()
+    }
+    return bool(roles.intersection(ROLES.ADMIN | ROLES.LINE_MANAGER_TIER))
 
 
 def _publish_shipping_event(event: str, payload: dict, *, invoice_name: str) -> None:
@@ -112,7 +124,7 @@ def request_custom_shipping(invoice_name: str, amount: float, reason: str):
 
 @frappe.whitelist(allow_guest=False)
 def approve_custom_shipping(request_name: str):
-    """Approve a Custom Shipping Request (JARZ Manager only).
+    """Approve a Custom Shipping Request (manager tier, incl. line manager).
 
     Submits the request doc, which triggers on_submit to set the
     approved amount on the Sales Invoice.
@@ -123,8 +135,8 @@ def approve_custom_shipping(request_name: str):
     Returns:
         dict with approval details
     """
-    if not _is_manager():
-        frappe.throw(_("Only JARZ Managers can approve custom shipping requests"))
+    if not _can_approve_shipping():
+        frappe.throw(_("Only managers can approve custom shipping requests"))
 
     csr = frappe.get_doc("Custom Shipping Request", request_name)
     if csr.docstatus != 0:
@@ -132,6 +144,12 @@ def approve_custom_shipping(request_name: str):
     if csr.status != "Pending":
         frappe.throw(_("Request {0} is not pending").format(request_name))
 
+    # The role gate above is the authority. The DocType's own submit permission
+    # is held by JARZ Manager and System Manager only, and widening it would
+    # mean naming both spellings of the line-manager role in a DocPerm row —
+    # so the API authorizes and the document write follows, exactly as the
+    # request path already does with insert(ignore_permissions=True).
+    csr.flags.ignore_permissions = True
     csr.submit()
     frappe.db.commit()
 
@@ -152,7 +170,7 @@ def approve_custom_shipping(request_name: str):
 
 @frappe.whitelist(allow_guest=False)
 def reject_custom_shipping(request_name: str, rejection_reason: str = ""):
-    """Reject a Custom Shipping Request (JARZ Manager only).
+    """Reject a Custom Shipping Request (manager tier, incl. line manager).
 
     Cancels the request doc, which triggers on_cancel to revert the
     override on the Sales Invoice.
@@ -164,10 +182,11 @@ def reject_custom_shipping(request_name: str, rejection_reason: str = ""):
     Returns:
         dict with rejection details
     """
-    if not _is_manager():
-        frappe.throw(_("Only JARZ Managers can reject custom shipping requests"))
+    if not _can_approve_shipping():
+        frappe.throw(_("Only managers can reject custom shipping requests"))
 
     csr = frappe.get_doc("Custom Shipping Request", request_name)
+    csr.flags.ignore_permissions = True
     if csr.docstatus not in (0, 1):
         frappe.throw(_("Request {0} cannot be rejected").format(request_name))
 

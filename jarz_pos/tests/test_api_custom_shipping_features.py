@@ -5,15 +5,23 @@ from unittest.mock import MagicMock, patch
 class TestCustomShippingNewFeatures(unittest.TestCase):
 
     @patch('jarz_pos.api.custom_shipping.frappe')
-    def test_is_manager_true_false(self, mock_frappe):
-        from jarz_pos.api.custom_shipping import _is_manager
+    def test_can_approve_shipping_tiers(self, mock_frappe):
+        from jarz_pos.api.custom_shipping import _can_approve_shipping
 
         mock_frappe.session.user = 'manager@example.com'
         mock_frappe.get_roles.return_value = ['JARZ Manager']
-        self.assertTrue(_is_manager())
+        self.assertTrue(_can_approve_shipping())
+
+        # A line manager owns the shipping call on their own branch. Both
+        # spellings of the role exist as real Role records, so both must pass.
+        mock_frappe.get_roles.return_value = ['jarz line manager']
+        self.assertTrue(_can_approve_shipping())
+
+        mock_frappe.get_roles.return_value = ['JARZ line manager']
+        self.assertTrue(_can_approve_shipping())
 
         mock_frappe.get_roles.return_value = ['Sales User']
-        self.assertFalse(_is_manager())
+        self.assertFalse(_can_approve_shipping())
 
     @patch('jarz_pos.api.custom_shipping.frappe')
     @patch('jarz_pos.api.custom_shipping._get_delivery_expense_amount')
@@ -72,7 +80,7 @@ class TestCustomShippingNewFeatures(unittest.TestCase):
 
         mock_frappe.get_doc.return_value = csr
 
-        with patch('jarz_pos.api.custom_shipping._is_manager', return_value=True):
+        with patch('jarz_pos.api.custom_shipping._can_approve_shipping', return_value=True):
             result = approve_custom_shipping('CSR-2')
 
         self.assertTrue(result['success'])
@@ -90,7 +98,7 @@ class TestCustomShippingNewFeatures(unittest.TestCase):
 
         mock_frappe.get_doc.return_value = csr
 
-        with patch('jarz_pos.api.custom_shipping._is_manager', return_value=True):
+        with patch('jarz_pos.api.custom_shipping._can_approve_shipping', return_value=True):
             result = reject_custom_shipping('CSR-3', rejection_reason='Not approved')
 
         self.assertTrue(result['success'])

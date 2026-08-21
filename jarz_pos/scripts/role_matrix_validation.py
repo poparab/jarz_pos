@@ -1322,12 +1322,15 @@ def _matrix(env: Dict[str, Any]) -> List[Probe]:
                    "method on this app — every persona got the same 404/417 and the "
                    "matrix read it as the gate answering"),
 
-        # -- custom shipping: request is open, approval is JARZ Manager ---
+        # -- custom shipping: request is open, approval is the manager tier -
         Probe("shipping.approve", "jarz_pos.api.custom_shipping.approve_custom_shipping",
-              {"staff": DENY, "line_manager": DENY, "manager": ALLOW},
+              {"staff": DENY, "line_manager": ALLOW, "manager": ALLOW},
               params={"request_name": env.get("shipping_request") or ""},
               gate_is_first=True,
-              note="custom_shipping.py:126 _is_manager() is the first statement. The "
+              note="custom_shipping.py _can_approve_shipping() is the first statement, "
+                   "and it mirrors the Manager Dashboard's own access set — the line "
+                   "manager sees the pending request on that dashboard, so it approves "
+                   "there too. The "
                    "argument is request_name and it names a Custom Shipping Request, not "
                    "an invoice — the old probe sent invoice_name and 500'd on the "
                    "signature before reaching the gate. With the fixture request present "
