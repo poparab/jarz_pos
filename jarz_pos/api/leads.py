@@ -150,6 +150,11 @@ def _has_takeaway_field():
     return _has_field("Lead", "custom_takeout")
 
 
+def _has_contacts_field():
+    """Whether the site has migrated the contacts child table. Guarded -> False."""
+    return _has_field("Lead", "custom_contacts")
+
+
 def _lead_query_fields():
     """``_LEAD_FLAT_FIELDS`` minus anything this site has not migrated yet."""
     skip = set()
@@ -162,6 +167,20 @@ def _lead_query_fields():
     if not skip:
         return _LEAD_FLAT_FIELDS
     return [f for f in _LEAD_FLAT_FIELDS if f not in skip]
+
+# Child-row (Jarz Lead Contact) fields. One row per PERSON at the venue: a
+# lead is a business, and a rep who walks in meets whoever is on shift, so the
+# owner, the manager, the shift manager and the barista all need to live on the
+# record side by side. ``role`` is deliberately free text -- every venue names
+# its own jobs -- and ``is_primary`` marks the one person to ring first.
+_CONTACT_FIELDS = (
+    "contact_name",
+    "role",
+    "phone",
+    "email",
+    "is_primary",
+    "notes",
+)
 
 # Child-row (Jarz Lead Branch) fields returned in lead detail.
 _BRANCH_FIELDS = (
@@ -280,6 +299,134 @@ def _map_lead_row(row):
 
 
 # ---------------------------------------------------------------------------
+# Contacts (people at the venue)
+# ---------------------------------------------------------------------------
+def _map_contact_row(row):
+    """Map a Jarz Lead Contact child row (dict or Document) to output shape."""
+    return {
+        "contact_name": str(row.get("contact_name") or "").strip(),
+        "role": str(row.get("role") or "").strip(),
+        "phone": str(row.get("phone") or "").strip(),
+        "email": str(row.get("email") or "").strip(),
+        "is_primary": _bool(row.get("is_primary")),
+        "notes": str(row.get("notes") or "").strip(),
+    }
+
+
+def _normalize_contacts(value):
+    """Parse + clean an inbound contacts list into storable rows.
+
+    Accepts a list of dicts or the ``json.dumps`` of one (Frappe delivers list
+    args as strings). Rows with neither a name nor a phone are dropped -- an
+    empty row in the app's editor must not become an empty child row. Exactly
+    one row ends up primary: the first one flagged, or the first row overall,
+    so ``primary_contact`` is always answerable.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            frappe.throw("contacts must be a JSON list of contact objects.")
+    if value is None:
+        value = []
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        frappe.throw("contacts must be a list of contact objects.")
+
+    rows = []
+    primary_taken = False
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        row = _map_contact_row(raw)
+        if not row["contact_name"] and not row["phone"]:
+            continue
+        if row["is_primary"] and primary_taken:
+            row["is_primary"] = False
+        elif row["is_primary"]:
+            primary_taken = True
+        rows.append(row)
+    if rows and not primary_taken:
+        rows[0]["is_primary"] = True
+    return rows
+
+
+def _contact_key(row):
+    """Identity of a contact row for dedup: phone digits, else name+role."""
+    phone = "".join(ch for ch in str(row.get("phone") or "") if ch.isdigit())
+    if phone:
+        return "tel|" + phone[-9:]
+    name = " ".join(str(row.get("contact_name") or "").split()).lower()
+    role = " ".join(str(row.get("role") or "").split()).lower()
+    return f"who|{name}|{role}"
+
+
+def _apply_contacts(doc, contacts):
+    """Replace a Lead's contacts child table with ``contacts`` (normalised).
+
+    Also back-fills the Lead's own ``phone`` from the primary contact when the
+    Lead has none: the catalog card, the "has contact" filter and the journey
+    note default all read that field, and a lead whose only number lives on a
+    person row would otherwise still look unreachable.
+    """
+    rows = _normalize_contacts(contacts)
+    doc.set("custom_contacts", [])
+    for row in rows:
+        doc.append("custom_contacts", dict(row))
+
+    if not str(doc.get("phone") or "").strip():
+        primary = next(
+            (r for r in rows if r["is_primary"] and r["phone"]),
+            next((r for r in rows if r["phone"]), None),
+        )
+        if primary:
+            doc.set("phone", primary["phone"])
+    return rows
+
+
+def _lead_contacts(doc):
+    """Mapped contact rows for a loaded Lead doc. Guarded -> []."""
+    return [_map_contact_row(row) for row in (doc.get("custom_contacts") or [])]
+
+
+def _attach_contacts(leads):
+    """Merge each lead's contact rows into its catalog row.
+
+    ONE query for the whole catalog, exactly like the journey summaries: the
+    corpus runs to thousands of leads but only the worked ones carry people, so
+    the child table is a small fraction of it and a per-lead query would be
+    thousands of round trips. Best-effort -- a site that has not migrated the
+    child table yet just gets empty lists.
+    """
+    for lead in leads:
+        lead["contacts"] = []
+    if not leads or not _has_contacts_field():
+        return
+    try:
+        rows = frappe.get_all(
+            "Jarz Lead Contact",
+            filters={"parenttype": "Lead", "parentfield": "custom_contacts"},
+            fields=["parent", "idx", *_CONTACT_FIELDS],
+            order_by="parent asc, idx asc",
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        frappe.log_error(
+            title="leads: contacts lookup failed",
+            message=frappe.get_traceback(),
+        )
+        return
+    by_parent = {}
+    for row in rows:
+        by_parent.setdefault(row.get("parent"), []).append(_map_contact_row(row))
+    for lead in leads:
+        contacts = by_parent.get(lead.get("name"))
+        if contacts:
+            lead["contacts"] = contacts
+
+
+# ---------------------------------------------------------------------------
 # List
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
@@ -335,6 +482,7 @@ def get_leads(category=None, status=None, not_suitable=None, include_merged=0,
 
     leads = [_map_lead_row(row) for row in rows]
     _attach_journey_summaries(leads)
+    _attach_contacts(leads)
     return {"leads": leads, "count": len(leads)}
 
 
@@ -388,6 +536,7 @@ def get_lead(name):
     """Full detail for one Lead: catalog fields + branches + addresses + notes.
 
     Returns all ``get_leads`` fields plus:
+      - ``contacts``: list of mapped Jarz Lead Contact child rows (people).
       - ``branches``: list of mapped Jarz Lead Branch child rows.
       - ``primary_address`` / ``shipping_address``: linked ERPNext Address
         records (or null).
@@ -429,6 +578,9 @@ def get_lead(name):
             }
         )
     result["branches"] = branches
+
+    # People at the venue (custom_contacts child table).
+    result["contacts"] = _lead_contacts(doc)
 
     # Linked ERPNext Address records (via Dynamic Link).
     result["primary_address"] = _lead_address(name, "is_primary_address")
@@ -645,6 +797,12 @@ def save_lead(payload, name=None):
     ):
         doc.set("territory", territory)
 
+    # Contacts child table (replace wholesale when provided). Omitting the key
+    # leaves the existing people untouched, so the catalog importer and every
+    # partial edit the app sends are both safe.
+    if "contacts" in payload and _has_contacts_field():
+        _apply_contacts(doc, payload.get("contacts"))
+
     # Branches child table (replace wholesale when provided).
     if "branches" in payload and payload.get("branches") is not None:
         doc.set("custom_branches", [])
@@ -679,6 +837,33 @@ def _assign_to_caller(lead_name):
         )
     except Exception:
         pass
+
+
+@frappe.whitelist()
+def save_lead_contacts(name, contacts):
+    """Replace the people recorded against a Lead. Returns the stored rows.
+
+    Its own endpoint rather than a ``save_lead`` payload key so the app can add
+    the barista it just met without re-sending (and racing) every other field
+    on the lead.
+
+    Returns: ``{"contacts": [<mapped row>, ...], "phone": <lead phone>}``.
+    """
+    _ensure_b2b_access()
+
+    if not frappe.db.exists("Lead", name):
+        frappe.throw(f"Lead '{name}' not found.")
+    if not _has_contacts_field():
+        frappe.throw(
+            "This site has not migrated the lead contacts table yet. "
+            "Run `bench migrate` and try again."
+        )
+
+    doc = frappe.get_doc("Lead", name)
+    rows = _apply_contacts(doc, contacts)
+    doc.save(ignore_permissions=True)
+
+    return {"contacts": rows, "phone": doc.get("phone") or ""}
 
 
 # ---------------------------------------------------------------------------
@@ -780,7 +965,9 @@ def set_lead_suitability(name, not_suitable=1, reason=None, notes=None):
 
     flat = {f: doc.get(f) for f in _lead_query_fields()}
     flat["name"] = doc.name
-    return {"lead": _map_lead_row(flat)}
+    row = _map_lead_row(flat)
+    row["contacts"] = _lead_contacts(doc)
+    return {"lead": row}
 
 
 def _clear_followup(doc):
@@ -1001,7 +1188,8 @@ def _drop_merge_targets(candidates):
 def merge_leads(target, sources):
     """Fold duplicate Leads into ``target``. Returns the refreshed target row.
 
-    Copies every source branch the target does not already have, unions the
+    Copies every source branch and every source PERSON the target does not
+    already have (contacts dedup on phone, else name+role), unions the
     area/region/governorate lists, fills BLANK target contact fields from the
     sources (never overwrites a value the target already has — the target is
     the record the rep chose to keep), appends source notes with attribution,
@@ -1053,6 +1241,15 @@ def merge_leads(target, sources):
     seen_branches = {
         _branch_key(row) for row in (doc.get("custom_branches") or [])
     }
+    merging_contacts = _has_contacts_field()
+    seen_contacts = (
+        {_contact_key(row) for row in (doc.get("custom_contacts") or [])}
+        if merging_contacts
+        else set()
+    )
+    target_has_primary = any(
+        _bool(row.get("is_primary")) for row in (doc.get("custom_contacts") or [])
+    )
     areas = {v for v in _json_list(doc.get("custom_areas")) if v}
     regions = {v for v in _json_list(doc.get("custom_regions")) if v}
     governorates = {v for v in _json_list(doc.get("custom_governorates")) if v}
@@ -1071,6 +1268,23 @@ def merge_leads(target, sources):
                 continue
             seen_branches.add(key)
             doc.append("custom_branches", _branch_dict(row))
+
+        if merging_contacts:
+            for row in (source.get("custom_contacts") or []):
+                mapped = _map_contact_row(row)
+                if not mapped["contact_name"] and not mapped["phone"]:
+                    continue
+                key = _contact_key(mapped)
+                if key in seen_contacts:
+                    continue
+                seen_contacts.add(key)
+                # The surviving lead keeps its own primary; a merged-in person
+                # joins as an ordinary contact.
+                if target_has_primary:
+                    mapped["is_primary"] = False
+                elif mapped["is_primary"]:
+                    target_has_primary = True
+                doc.append("custom_contacts", mapped)
 
         areas.update(v for v in _json_list(source.get("custom_areas")) if v)
         regions.update(v for v in _json_list(source.get("custom_regions")) if v)
@@ -1128,7 +1342,9 @@ def merge_leads(target, sources):
 
     flat = {f: doc.get(f) for f in _lead_query_fields()}
     flat["name"] = doc.name
-    return {"lead": _map_lead_row(flat), "merged": sources}
+    row = _map_lead_row(flat)
+    row["contacts"] = _lead_contacts(doc)
+    return {"lead": row, "merged": sources}
 
 
 def _rating_pool_from_lead(doc):

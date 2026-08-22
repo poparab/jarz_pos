@@ -836,6 +836,226 @@ class TestLeadMerge(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # 10) importer idempotency + rep-owned field preservation
 # ---------------------------------------------------------------------------
+class TestLeadContacts(unittest.TestCase):
+    """Multiple people per lead: save/read, primary rules, merge, phone backfill.
+
+    Skipped on a site that has not migrated ``custom_contacts`` yet, for the
+    same reason as TestLeadSuitability — the CI logic gate does not migrate.
+    """
+
+    def setUp(self):
+        if not _has_lead_field("custom_contacts"):
+            self.skipTest("Lead.custom_contacts not migrated on this site yet.")
+        _ensure_category(_COFFEE)
+        _ensure_b2b_role()
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    def _lead(self, **extra):
+        payload = {"lead_name": "_TEST Contacts", "category": _COFFEE}
+        payload.update(extra)
+        return leads_api.save_lead(payload)["name"]
+
+    # --- save through save_lead -------------------------------------------
+    def test_save_lead_stores_multiple_people(self):
+        name = self._lead(
+            phone="0100000900",
+            contacts=[
+                {"contact_name": "Omar", "role": "Owner",
+                 "phone": "0100000001", "email": "omar@example.com",
+                 "is_primary": 1, "notes": "decides"},
+                {"contact_name": "Sara", "role": "Shift Manager",
+                 "phone": "0100000002"},
+                {"contact_name": "Ali", "role": "Barista"},
+            ],
+        )
+
+        detail = leads_api.get_lead(name)
+        contacts = detail["contacts"]
+        self.assertEqual(len(contacts), 3)
+        self.assertEqual(
+            [c["contact_name"] for c in contacts], ["Omar", "Sara", "Ali"]
+        )
+        self.assertEqual(
+            [c["role"] for c in contacts], ["Owner", "Shift Manager", "Barista"]
+        )
+        self.assertTrue(contacts[0]["is_primary"])
+        self.assertFalse(contacts[1]["is_primary"])
+        self.assertEqual(contacts[0]["email"], "omar@example.com")
+        self.assertEqual(contacts[0]["notes"], "decides")
+        # A contact with no phone is still a valid person to record.
+        self.assertEqual(contacts[2]["phone"], "")
+
+    def test_omitting_contacts_key_leaves_people_untouched(self):
+        name = self._lead(
+            contacts=[{"contact_name": "Omar", "role": "Owner",
+                       "phone": "0100000001"}]
+        )
+        leads_api.save_lead({"notes": "unrelated edit"}, name=name)
+        self.assertEqual(len(leads_api.get_lead(name)["contacts"]), 1)
+
+    # --- dedicated endpoint -----------------------------------------------
+    def test_save_lead_contacts_replaces_wholesale(self):
+        name = self._lead(
+            contacts=[{"contact_name": "Omar", "role": "Owner",
+                       "phone": "0100000001"}]
+        )
+        out = leads_api.save_lead_contacts(
+            name,
+            [
+                {"contact_name": "Omar", "role": "Owner",
+                 "phone": "0100000001"},
+                {"contact_name": "Ali", "role": "Barista",
+                 "phone": "0100000003", "is_primary": 1},
+            ],
+        )
+        self.assertEqual(len(out["contacts"]), 2)
+        # Explicit primary wins; the first row is NOT auto-promoted.
+        self.assertFalse(out["contacts"][0]["is_primary"])
+        self.assertTrue(out["contacts"][1]["is_primary"])
+        self.assertEqual(len(leads_api.get_lead(name)["contacts"]), 2)
+
+    def test_save_lead_contacts_accepts_a_json_string(self):
+        """Frappe delivers list args as strings; the endpoint must parse them."""
+        name = self._lead()
+        out = leads_api.save_lead_contacts(
+            name,
+            json.dumps([{"contact_name": "Sara", "role": "Manager",
+                         "phone": "0100000002"}]),
+        )
+        self.assertEqual(len(out["contacts"]), 1)
+        self.assertEqual(out["contacts"][0]["contact_name"], "Sara")
+
+    def test_save_lead_contacts_clears_the_list(self):
+        name = self._lead(
+            contacts=[{"contact_name": "Omar", "phone": "0100000001"}]
+        )
+        out = leads_api.save_lead_contacts(name, [])
+        self.assertEqual(out["contacts"], [])
+        self.assertEqual(leads_api.get_lead(name)["contacts"], [])
+
+    def test_save_lead_contacts_rejects_an_unknown_lead(self):
+        with self.assertRaises(Exception):
+            leads_api.save_lead_contacts("_TEST No Such Lead", [])
+
+    # --- normalisation rules ----------------------------------------------
+    def test_blank_rows_are_dropped(self):
+        name = self._lead()
+        out = leads_api.save_lead_contacts(
+            name,
+            [
+                {"contact_name": "", "role": "Barista", "phone": ""},
+                {"contact_name": "  ", "phone": "  "},
+                {"contact_name": "Real Person"},
+                "not a dict",
+            ],
+        )
+        self.assertEqual(len(out["contacts"]), 1)
+        self.assertEqual(out["contacts"][0]["contact_name"], "Real Person")
+
+    def test_first_row_is_promoted_when_none_is_flagged(self):
+        name = self._lead()
+        out = leads_api.save_lead_contacts(
+            name,
+            [
+                {"contact_name": "Sara", "phone": "0100000002"},
+                {"contact_name": "Ali", "phone": "0100000003"},
+            ],
+        )
+        self.assertTrue(out["contacts"][0]["is_primary"])
+        self.assertFalse(out["contacts"][1]["is_primary"])
+
+    def test_only_one_row_stays_primary(self):
+        name = self._lead()
+        out = leads_api.save_lead_contacts(
+            name,
+            [
+                {"contact_name": "Sara", "phone": "0100000002", "is_primary": 1},
+                {"contact_name": "Ali", "phone": "0100000003", "is_primary": 1},
+            ],
+        )
+        self.assertEqual([c["is_primary"] for c in out["contacts"]], [True, False])
+
+    # --- lead phone backfill ----------------------------------------------
+    def test_primary_contact_backfills_a_missing_lead_phone(self):
+        name = self._lead()
+        self.assertFalse(frappe.db.get_value("Lead", name, "phone"))
+        out = leads_api.save_lead_contacts(
+            name,
+            [{"contact_name": "Omar", "role": "Owner", "phone": "0100000001"}],
+        )
+        self.assertEqual(out["phone"], "0100000001")
+        self.assertEqual(
+            frappe.db.get_value("Lead", name, "phone"), "0100000001"
+        )
+
+    def test_an_existing_lead_phone_is_never_overwritten(self):
+        name = self._lead(phone="0100000900")
+        leads_api.save_lead_contacts(
+            name,
+            [{"contact_name": "Omar", "phone": "0100000001", "is_primary": 1}],
+        )
+        self.assertEqual(
+            frappe.db.get_value("Lead", name, "phone"), "0100000900"
+        )
+
+    # --- catalog list ------------------------------------------------------
+    def test_get_leads_carries_contacts(self):
+        name = self._lead(
+            contacts=[
+                {"contact_name": "Omar", "role": "Owner",
+                 "phone": "0100000001"},
+                {"contact_name": "Ali", "role": "Barista"},
+            ]
+        )
+        rows = leads_api.get_leads(category=_COFFEE)["leads"]
+        row = next((r for r in rows if r["name"] == name), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(len(row["contacts"]), 2)
+        self.assertEqual(row["contacts"][0]["role"], "Owner")
+        # Every row carries the key, even leads with nobody recorded.
+        self.assertTrue(all("contacts" in r for r in rows))
+
+    # --- merge -------------------------------------------------------------
+    def test_merge_carries_people_and_dedups_on_phone(self):
+        if not _has_lead_field("custom_merged_into"):
+            self.skipTest("Lead.custom_merged_into not migrated on this site yet.")
+
+        target = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Contacts Brand",
+                "category": _COFFEE,
+                "contacts": [
+                    {"contact_name": "Omar", "role": "Owner",
+                     "phone": "0100000001", "is_primary": 1}
+                ],
+            }
+        )["name"]
+        duplicate = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Contacts Brand",
+                "category": _COFFEE,
+                "contacts": [
+                    # Same human, same number -> deduped away.
+                    {"contact_name": "Omar Owner", "role": "Owner",
+                     "phone": "0100000001", "is_primary": 1},
+                    # New person -> carried over, but never as the primary.
+                    {"contact_name": "Sara", "role": "Manager",
+                     "phone": "0100000002", "is_primary": 1},
+                ],
+            }
+        )["name"]
+
+        merged = leads_api.merge_leads(target, [duplicate])["lead"]
+        contacts = merged["contacts"]
+        self.assertEqual(len(contacts), 2)
+        self.assertEqual(
+            [c["contact_name"] for c in contacts], ["Omar", "Sara"]
+        )
+        self.assertEqual([c["is_primary"] for c in contacts], [True, False])
+
+
 class TestImportIdempotency(unittest.TestCase):
     """import_leads_catalog.run is idempotent on custom_source_brand_id.
 
