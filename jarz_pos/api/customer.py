@@ -609,50 +609,90 @@ def search_customers(name=None, phone=None, customer_type=None):
 
 @frappe.whitelist()
 def get_territories(search=None):
-    """Get territories with custom delivery fields for customer creation"""
+    """Selectable delivery areas — only those carrying a WooCommerce area code.
+
+    Every territory an order can actually ship to is synced from WooCommerce and
+    carries a Woo code (``custom_woo_code``, or the legacy ``woo_code``). What is
+    left over is never a valid choice: the structural nodes ("All Territories",
+    "Egypt", "Rest Of The World"), the delivery sub-zones that live *under* a
+    coded parent and are picked through ``get_sub_territories`` instead, and test
+    fixtures. Listing those let an operator attach an order to an area with no
+    Woo mapping and no delivery rate, so they are filtered out here — at the one
+    endpoint every picker in the app reads.
+
+    Territories are *named* by their Woo code ("EGNASRCITY"), and on production
+    ``territory_name`` equals that code on most records, so ``territory_name_ar``
+    is the only human label. It is always returned; clients must prefer it.
+
+    Args:
+        search: Optional free text matched against the Arabic name, the title,
+            the record name and the Woo code.
+
+    Returns:
+        list[dict]: territory rows with ``territory_name_ar``, ``woo_code`` and
+        delivery income/expense.
+    """
     try:
-        filters = {}
-        if search:
-            filters["territory_name"] = ["like", f"%{search}%"]
-            
-        # Fetch from Territory doctype
-        territories = frappe.get_all(
+        from jarz_pos.utils.invoice_utils import _territory_has_column
+
+        code_fields = [f for f in ("custom_woo_code", "woo_code") if _territory_has_column(f)]
+        optional_fields = [
+            f
+            for f in ("custom_territory_name_ar", "delivery_income", "delivery_expense")
+            if _territory_has_column(f)
+        ]
+
+        rows = frappe.get_all(
             "Territory",
-            fields=["name", "territory_name", "is_group"],
-            filters=filters,
+            fields=["name", "territory_name"] + code_fields + optional_fields,
             order_by="territory_name ASC",
-            limit=50
+            limit=0,
         )
-        
-        # Add delivery income/expense if custom fields exist
-        for territory in territories:
-            territory["territory_name"] = _(territory.get("territory_name", ""))
-            try:
-                territory_doc = frappe.get_doc("Territory", territory['name'])
-                territory["territory_name_ar"] = getattr(
-                    territory_doc,
-                    "custom_territory_name_ar",
-                    "",
-                ) or ""
-                if hasattr(territory_doc, 'delivery_income'):
-                    territory["delivery_income"] = flt(territory_doc.delivery_income)
-                else:
-                    territory["delivery_income"] = 0.0
-                    
-                if hasattr(territory_doc, 'delivery_expense'):
-                    territory["delivery_expense"] = flt(territory_doc.delivery_expense)
-                else:
-                    territory["delivery_expense"] = 0.0
-            except Exception:
-                territory["territory_name_ar"] = ""
-                territory["delivery_income"] = 0.0
-                territory["delivery_expense"] = 0.0
-            
+
+        def _woo_code(row):
+            for fieldname in code_fields:
+                value = str(row.get(fieldname) or "").strip()
+                if value:
+                    return value
+            return ""
+
+        # Only filter when the site actually has a Woo code column — a site
+        # without the WooCommerce app installed would otherwise get an empty
+        # picker instead of an unfiltered one.
+        if code_fields:
+            rows = [r for r in rows if _woo_code(r)]
+
+        needle = str(search or "").strip().casefold()
+
+        territories = []
+        for row in rows:
+            name_ar = str(row.get("custom_territory_name_ar") or "").strip()
+            title = _(row.get("territory_name") or row.get("name") or "")
+            code = _woo_code(row)
+
+            if needle and not any(
+                needle in str(candidate or "").casefold()
+                for candidate in (name_ar, title, row.get("name"), code)
+            ):
+                continue
+
+            territories.append(
+                {
+                    "name": row.get("name"),
+                    "territory_name": title,
+                    "territory_name_ar": name_ar,
+                    "woo_code": code,
+                    "delivery_income": flt(row.get("delivery_income")),
+                    "delivery_expense": flt(row.get("delivery_expense")),
+                }
+            )
+
         return territories
-        
+
     except Exception as e:
         frappe.log_error(f"Error fetching territories: {str(e)}")
         return []
+
 
 def _contacts_block_lead_conversion(mobile_no, source_lead):
     """Return True if existing Contacts with ``mobile_no`` should block creating a

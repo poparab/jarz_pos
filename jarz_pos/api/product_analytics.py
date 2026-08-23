@@ -23,6 +23,7 @@ import frappe
 from frappe import _
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.invoice_utils import get_area_label
 
 # ── Item group sets ──────────────────────────────────────────────────────
 _MEDIUM_GROUPS: Set[str] = {"Medium", "Meduim"}
@@ -296,9 +297,12 @@ def get_product_analytics(
         })
 
     # ── Build output: by_territory ────────────────────────────────────────
+    # Territories are *named* by their WooCommerce area code, so the raw group
+    # key is "EGNASRCITY" — a chart axis full of those is unreadable. Group on
+    # the key, label with the Arabic name.
     by_territory = [
         {
-            "territory": t,
+            "territory": get_area_label(t),
             "orders": len(agg["invoices"]),
             "revenue": round(agg["revenue"], 2),
             "profit": round(agg["revenue"] - agg["cost"], 2),

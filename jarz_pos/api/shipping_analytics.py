@@ -13,7 +13,7 @@ from frappe import _
 from frappe.utils import nowdate, get_first_day, get_last_day, getdate, date_diff
 
 from jarz_pos.constants import ROLES
-from jarz_pos.utils.invoice_utils import get_woo_order_ids
+from jarz_pos.utils.invoice_utils import get_area_label, get_woo_order_ids
 
 
 def _ensure_jarz_manager():
@@ -182,6 +182,10 @@ def get_cost_by_territory(from_date=None, to_date=None):
         r["avg_cost"] = float(r["avg_cost"] or 0)
         r["order_count"] = int(r["order_count"] or 0)
         r["net_pl"] = r["total_income"] - r["total_expense"]
+        # Grouped on the raw territory, labelled with the Arabic name: the
+        # record is *named* by its Woo area code, so the raw value would put
+        # "EGNASRCITY" on the chart axis.
+        r["territory"] = get_area_label(r["territory"])
 
     return rows
 
@@ -325,6 +329,7 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None):
 
     for r in rows:
         r["woo_order_id"] = woo_ids.get(r.get("invoice"))
+        r["territory"] = get_area_label(r.get("territory"))
         r["original_amount"] = float(r["original_amount"] or 0)
         r["requested_amount"] = float(r["requested_amount"] or 0)
         r["delta"] = float(r["delta"] or 0)
@@ -371,6 +376,9 @@ def get_double_shipping_impact(from_date=None, to_date=None):
     for r in rows:
         r["total_shipping_expense"] = float(r["total_shipping_expense"] or 0)
         r["total_orders"] = int(r["total_orders"] or 0)
+        r["double_shipping_territory"] = get_area_label(
+            r.get("double_shipping_territory")
+        )
         r["trip_date"] = str(r["trip_date"]) if r["trip_date"] else ""
         # Double shipping doubles the cost; extra = half the total paid
         r["extra_cost"] = round(r["total_shipping_expense"] / 2, 2)
@@ -506,7 +514,7 @@ def get_alerts_data(from_date=None, to_date=None):
         alerts.append({
             "type": "danger",
             "message": (
-                f"Territory <b>{t['territory']}</b> lost "
+                f"Territory <b>{get_area_label(t['territory'])}</b> lost "
                 f"<b>EGP {loss:,.0f}</b> on shipping (cost exceeds income charged)"
             ),
         })
@@ -554,7 +562,7 @@ def get_alerts_data(from_date=None, to_date=None):
             "type": "warning",
             "message": (
                 f"Override request <b>{csr['name']}</b> on invoice <b>{csr['invoice']}</b>"
-                f" ({csr['territory']}) has been pending for <b>{hours}h</b> — needs manager decision"
+                f" ({get_area_label(csr['territory'])}) has been pending for <b>{hours}h</b> — needs manager decision"
             ),
         })
 
@@ -579,7 +587,7 @@ def get_alerts_data(from_date=None, to_date=None):
         alerts.append({
             "type": "info",
             "message": (
-                f"Large override approved on <b>{lr['invoice']}</b> ({lr['territory']}): "
+                f"Large override approved on <b>{lr['invoice']}</b> ({get_area_label(lr['territory'])}): "
                 f"EGP {orig:,.0f} → EGP {req:,.0f} (<b>+{pct}%</b> above territory rate)"
             ),
         })

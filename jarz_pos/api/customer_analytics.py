@@ -23,6 +23,7 @@ import frappe
 from frappe import _
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.invoice_utils import get_area_label
 
 # Canonical display order for the 8 RFM segments + fallbacks.
 SEGMENT_ORDER = [
@@ -200,6 +201,8 @@ def get_customer_analytics(
         as_dict=True,
     )
     for r in at_risk_customers:
+        # Territories are *named* by their Woo area code; show the Arabic name.
+        r["territory"] = get_area_label(r.get("territory"))
         r["recency_days"] = int(r["recency_days"] or 0)
         r["frequency"] = int(r["frequency"] or 0)
         r["avg_aov"] = round(float(r["avg_aov"] or 0), 2)

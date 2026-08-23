@@ -4,7 +4,6 @@ This module tests customer-related API endpoints.
 """
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
@@ -69,26 +68,101 @@ class TestCustomerAPI(unittest.TestCase):
 		"""Test that get_territories exposes Arabic territory labels for the app."""
 		from jarz_pos.api.customer import get_territories
 
-		territory_doc = SimpleNamespace(
-			territory_name="Nasr City",
-			custom_territory_name_ar="مدينة نصر",
-			delivery_income=25,
-			delivery_expense=10,
-		)
+		rows = [
+			{
+				"name": "EGNASRCITY",
+				"territory_name": "EGNASRCITY",
+				"custom_woo_code": "EGNASRCITY",
+				"custom_territory_name_ar": "مدينة نصر",
+				"delivery_income": 25,
+				"delivery_expense": 10,
+			}
+		]
 
 		with patch(
-			"jarz_pos.api.customer.frappe.get_all",
-			return_value=[{"name": "TER-0001", "territory_name": "Nasr City", "is_group": 0}],
+			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=True
 		), patch(
-			"jarz_pos.api.customer.frappe.get_doc",
-			return_value=territory_doc,
+			"jarz_pos.api.customer.frappe.get_all", return_value=rows
 		):
 			result = get_territories()
 
 		self.assertEqual(len(result), 1)
 		self.assertEqual(result[0]["territory_name_ar"], "مدينة نصر")
+		self.assertEqual(result[0]["woo_code"], "EGNASRCITY")
 		self.assertEqual(result[0]["delivery_income"], 25.0)
 		self.assertEqual(result[0]["delivery_expense"], 10.0)
+
+	def test_get_territories_drops_rows_without_a_woo_code(self):
+		"""Only Woo-coded territories are selectable delivery areas.
+
+		"Egypt" and the Arabic-named sub-zones under a coded parent are real
+		Territory records, but an order can never ship to them directly.
+		"""
+		from jarz_pos.api.customer import get_territories
+
+		rows = [
+			{"name": "All Territories", "territory_name": "All Territories", "custom_woo_code": None},
+			{"name": "Egypt", "territory_name": "Egypt", "custom_woo_code": ""},
+			{"name": "القرية الذكية", "territory_name": "القرية الذكية", "custom_woo_code": "   "},
+			{"name": "EGZAYED", "territory_name": "EGZAYED", "custom_woo_code": "EGZAYED"},
+		]
+
+		with patch(
+			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=True
+		), patch(
+			"jarz_pos.api.customer.frappe.get_all", return_value=rows
+		):
+			result = get_territories()
+
+		self.assertEqual([t["name"] for t in result], ["EGZAYED"])
+
+	def test_get_territories_unfiltered_without_a_woo_code_column(self):
+		"""A site without the WooCommerce app keeps an unfiltered picker.
+
+		Filtering on a column that does not exist would empty the dropdown
+		entirely, which is worse than showing every territory.
+		"""
+		from jarz_pos.api.customer import get_territories
+
+		rows = [{"name": "Egypt", "territory_name": "Egypt"}]
+
+		with patch(
+			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=False
+		), patch(
+			"jarz_pos.api.customer.frappe.get_all", return_value=rows
+		):
+			result = get_territories()
+
+		self.assertEqual([t["name"] for t in result], ["Egypt"])
+		self.assertEqual(result[0]["woo_code"], "")
+
+	def test_get_territories_search_matches_arabic_name(self):
+		"""Search has to hit the Arabic label — the record name is a Woo code."""
+		from jarz_pos.api.customer import get_territories
+
+		rows = [
+			{
+				"name": "EGNASRCITY",
+				"territory_name": "EGNASRCITY",
+				"custom_woo_code": "EGNASRCITY",
+				"custom_territory_name_ar": "مدينة نصر",
+			},
+			{
+				"name": "EGMAADI",
+				"territory_name": "EGMAADI",
+				"custom_woo_code": "EGMAADI",
+				"custom_territory_name_ar": "المعادى",
+			},
+		]
+
+		with patch(
+			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=True
+		), patch(
+			"jarz_pos.api.customer.frappe.get_all", return_value=rows
+		):
+			result = get_territories(search="نصر")
+
+		self.assertEqual([t["name"] for t in result], ["EGNASRCITY"])
 
 	def test_get_territory_structure(self):
 		"""Test that get_territory returns correct structure."""

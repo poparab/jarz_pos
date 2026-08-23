@@ -30,6 +30,7 @@ import frappe
 from frappe import _
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.invoice_utils import get_area_label
 
 # ── Customer groups that count as B2B clients ────────────────────────────
 _B2B_GROUPS = ("B2B", "Distributor")
@@ -338,7 +339,10 @@ def _revenue_by_territory(params: Dict[str, str]) -> List[Dict[str, Any]]:
     )
     return [
         {
-            "territory": r["territory"],
+            # Grouped on the raw territory, labelled with the Arabic name — the
+            # record is *named* by its Woo area code. "Unassigned" has no
+            # Territory to resolve and falls through unchanged.
+            "territory": get_area_label(r["territory"]),
             "revenue": round(float(r["revenue"] or 0), 2),
             "orders": int(r["orders"] or 0),
         }
