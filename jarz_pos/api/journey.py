@@ -22,7 +22,7 @@ Design notes:
 import frappe
 
 # Reuse the CRM access gate verbatim; never reinvent the B2B gating here.
-from jarz_pos.api.crm import _ensure_b2b_access, _manager_roles
+from jarz_pos.api.crm import _ensure_b2b_access, _has_field, _manager_roles
 
 JOURNEY_DOCTYPE = "Jarz Journey Note"
 
@@ -490,3 +490,165 @@ def _ensure_can_edit(name):
             "Not permitted: only the rep who logged this note (or a manager) "
             "may change it."
         )
+
+
+# ---------------------------------------------------------------------------
+# Contacts (who the note was spoken to)
+# ---------------------------------------------------------------------------
+# The editor's WHO box picks from the people already recorded on the account
+# instead of retyping a name every visit. Those people live in exactly one
+# place -- ``Lead.custom_contacts`` (see ``leads.save_lead_contacts``) -- so
+# these endpoints resolve the backing Lead and then delegate to the leads
+# helpers. They never own a second roster: a contact added from the diary is
+# the same row the lead page's contacts section shows.
+
+def _contacts_lead(reference_doctype, reference_name):
+    """The Lead whose people back this record's contact picker. Guarded -> None.
+
+    A note hangs off a Lead, an Opportunity or a Customer, but the venue's
+    people only ever live on the Lead. An Opportunity made from a lead and a
+    Customer converted from one both point back at it, so the roster follows
+    the account down the funnel rather than resetting the moment it converts.
+    """
+    try:
+        if reference_doctype == "Lead":
+            return reference_name
+
+        if reference_doctype == "Opportunity":
+            row = frappe.db.get_value(
+                "Opportunity",
+                reference_name,
+                ["opportunity_from", "party_name"],
+                as_dict=True,
+            )
+            lead = (row or {}).get("party_name")
+            if (row or {}).get("opportunity_from") == "Lead" and lead:
+                return lead if frappe.db.exists("Lead", lead) else None
+            return None
+
+        if reference_doctype == "Customer" and _has_field("Customer", "lead_name"):
+            lead = frappe.db.get_value("Customer", reference_name, "lead_name")
+            if lead and frappe.db.exists("Lead", lead):
+                return lead
+    except Exception:
+        _logger().error(
+            f"_contacts_lead({reference_doctype}, {reference_name}) failed",
+            exc_info=True,
+        )
+    return None
+
+
+def _contacts_payload(lead):
+    """``{"contacts": [...], "lead": str, "can_add": bool}`` for one lead.
+
+    Guarded end to end: an account with no backing lead, or a site that has not
+    migrated the child table yet, gets an empty list and ``can_add`` False --
+    the editor then simply keeps its free-text boxes.
+    """
+    from jarz_pos.api.leads import _has_contacts_field, _lead_contacts
+
+    if not lead or not _has_contacts_field():
+        return {"contacts": [], "lead": lead or "", "can_add": False}
+
+    try:
+        rows = _lead_contacts(frappe.get_doc("Lead", lead))
+    except Exception:
+        _logger().error(f"_contacts_payload({lead}) failed", exc_info=True)
+        return {"contacts": [], "lead": lead, "can_add": True}
+
+    # Primary first; the rest keep the order the rep arranged on the lead page.
+    rows.sort(key=lambda row: 0 if row.get("is_primary") else 1)
+    return {"contacts": rows, "lead": lead, "can_add": True}
+
+
+@frappe.whitelist()
+def get_journey_contacts(reference_doctype, reference_name):
+    """The people on this account, for the note editor's WHO picker.
+
+    Returns: ``{"contacts": [<mapped contact>, ...], "lead": str, "can_add": bool}``.
+    """
+    _ensure_b2b_access()
+    _ensure_reference(reference_doctype, reference_name)
+
+    return _contacts_payload(_contacts_lead(reference_doctype, reference_name))
+
+
+@frappe.whitelist()
+def add_journey_contact(
+    reference_doctype,
+    reference_name,
+    contact_name=None,
+    role=None,
+    phone=None,
+    email=None,
+    notes=None,
+):
+    """Record a new person on this account, straight from the note editor.
+
+    Appends to the backing Lead's ``custom_contacts`` rather than replacing it
+    (``save_lead_contacts`` sends the whole table, which would race a rep
+    editing the lead page). A person whose phone -- or, lacking one, whose
+    name+role -- already matches an existing row is NOT duplicated; that row is
+    returned instead, so tapping "add" twice is harmless.
+
+    Returns the same payload as :func:`get_journey_contacts`, plus ``added``:
+    the mapped row the caller should select.
+    """
+    _ensure_b2b_access()
+    _ensure_reference(reference_doctype, reference_name)
+
+    from jarz_pos.api.leads import (
+        _contact_key,
+        _has_contacts_field,
+        _map_contact_row,
+    )
+
+    lead = _contacts_lead(reference_doctype, reference_name)
+    if not lead:
+        frappe.throw(
+            "This account has no lead record to hold people. Add the contact "
+            "on the lead itself."
+        )
+    if not _has_contacts_field():
+        frappe.throw(
+            "This site has not migrated the lead contacts table yet. "
+            "Run `bench migrate` and try again."
+        )
+
+    row = _map_contact_row(
+        {
+            "contact_name": contact_name,
+            "role": role,
+            "phone": phone,
+            "email": email,
+            "notes": notes,
+        }
+    )
+    if not row["contact_name"] and not row["phone"]:
+        frappe.throw("A contact needs at least a name or a phone number.")
+
+    doc = frappe.get_doc("Lead", lead)
+    existing = doc.get("custom_contacts") or []
+    match = next(
+        (r for r in existing if _contact_key(r.as_dict()) == _contact_key(row)),
+        None,
+    )
+    if match is not None:
+        payload = _contacts_payload(lead)
+        payload["added"] = _map_contact_row(match.as_dict())
+        return payload
+
+    # First person on the record is the one to ring first.
+    row["is_primary"] = not existing
+    doc.append("custom_contacts", dict(row))
+
+    # Same back-fill rule as ``leads._apply_contacts``: a lead whose only
+    # number lives on a person row would otherwise still look unreachable.
+    if row["phone"] and not str(doc.get("phone") or "").strip():
+        doc.set("phone", row["phone"])
+
+    doc.save(ignore_permissions=True)
+
+    payload = _contacts_payload(lead)
+    payload["added"] = row
+    return payload

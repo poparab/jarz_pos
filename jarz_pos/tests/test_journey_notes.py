@@ -738,6 +738,111 @@ class TestJourneyAccess(JourneyTestCase):
             frappe.set_user(original)
 
 
+# ---------------------------------------------------------------------------
+# Contacts (the editor's WHO picker)
+# ---------------------------------------------------------------------------
+class TestJourneyContacts(JourneyTestCase):
+    """``get_journey_contacts`` / ``add_journey_contact``.
+
+    Skips itself until the lead contacts child table is migrated, for the same
+    pre-migrate reason the module skips on a missing journey DocType.
+    """
+
+    def setUp(self):
+        super().setUp()
+        if not leads_api._has_contacts_field():
+            self.skipTest(
+                "Lead.custom_contacts not migrated on this site yet "
+                "(pre-migrate run); re-run after the staging deploy."
+            )
+
+    def test_picker_lists_the_people_on_the_lead(self):
+        lead = _make_lead()
+        leads_api.save_lead_contacts(
+            lead,
+            [
+                {"contact_name": "Sara", "role": "Barista", "phone": "01000000002"},
+                {
+                    "contact_name": "Mostafa",
+                    "role": "Owner",
+                    "phone": "01000000001",
+                    "is_primary": 1,
+                },
+            ],
+        )
+
+        out = journey_api.get_journey_contacts("Lead", lead)
+
+        self.assertEqual(out["lead"], lead)
+        self.assertTrue(out["can_add"])
+        # Primary first, whatever order the rows were saved in.
+        self.assertEqual(
+            [c["contact_name"] for c in out["contacts"]], ["Mostafa", "Sara"]
+        )
+
+    def test_picker_is_empty_on_a_lead_with_no_people(self):
+        out = journey_api.get_journey_contacts("Lead", _make_lead())
+        self.assertEqual(out["contacts"], [])
+        self.assertTrue(out["can_add"])
+
+    def test_add_contact_appends_to_the_lead_roster(self):
+        lead = _make_lead()
+        leads_api.save_lead_contacts(
+            lead, [{"contact_name": "Mostafa", "role": "Owner", "phone": "01000000001"}]
+        )
+
+        out = journey_api.add_journey_contact(
+            "Lead", lead, contact_name="Sara", role="Barista", phone="01000000002"
+        )
+
+        self.assertEqual(out["added"]["contact_name"], "Sara")
+        names = [c["contact_name"] for c in out["contacts"]]
+        self.assertEqual(sorted(names), ["Mostafa", "Sara"])
+        # It is the SAME roster the lead page reads back, not a second list.
+        self.assertEqual(
+            sorted(c["contact_name"] for c in leads_api.get_lead(lead)["contacts"]),
+            ["Mostafa", "Sara"],
+        )
+
+    def test_first_contact_becomes_primary(self):
+        lead = _make_lead()
+        out = journey_api.add_journey_contact(
+            "Lead", lead, contact_name="Mostafa", phone="01000000001"
+        )
+        self.assertTrue(out["added"]["is_primary"])
+
+    def test_adding_the_same_person_twice_does_not_duplicate(self):
+        lead = _make_lead()
+        journey_api.add_journey_contact(
+            "Lead", lead, contact_name="Mostafa", phone="01000000001"
+        )
+        out = journey_api.add_journey_contact(
+            "Lead", lead, contact_name="Mostafa", phone="01000000001"
+        )
+        self.assertEqual(len(out["contacts"]), 1)
+        self.assertEqual(out["added"]["contact_name"], "Mostafa")
+
+    def test_add_contact_backfills_a_blank_lead_phone(self):
+        lead = _make_lead()
+        journey_api.add_journey_contact(
+            "Lead", lead, contact_name="Mostafa", phone="01000000001"
+        )
+        self.assertEqual(
+            frappe.db.get_value("Lead", lead, "phone"), "01000000001"
+        )
+
+    def test_add_contact_requires_a_name_or_a_phone(self):
+        lead = _make_lead()
+        with self.assertRaises(Exception):
+            journey_api.add_journey_contact("Lead", lead, role="Barista")
+
+    def test_add_contact_rejects_an_unknown_record(self):
+        with self.assertRaises(Exception):
+            journey_api.add_journey_contact(
+                "Lead", "_TEST-does-not-exist", contact_name="Mostafa"
+            )
+
+
 def _ensure_rep_user():
     """A non-manager User carrying only the B2B Sales Rep role."""
     email = "_test_journey_rep@example.com"
