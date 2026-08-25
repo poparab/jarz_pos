@@ -1323,6 +1323,42 @@ class TestLeadsTalabat(unittest.TestCase):
         branch = leads_api.get_lead(name)["branches"][0]
         self.assertIs(branch["on_talabat"], True)
 
+    def test_a_merged_duplicate_hands_its_flag_to_the_survivor(self):
+        """Google splits one business across branch names; a rep merges them.
+
+        Without promotion the flag sits on the hidden duplicate and the badge
+        never shows on the lead anyone actually works.
+        """
+        if not frappe.db.has_column("Lead", "custom_merged_into"):
+            self.skipTest("site has not migrated the merge fields yet")
+
+        survivor = leads_api.save_lead({
+            "lead_name": "_TEST PAO Survivor", "category": _COFFEE,
+            "on_talabat": True, "talabat_areas": ["Sheikh Zayed"],
+        })["name"]
+        dup = leads_api.save_lead({
+            "lead_name": "_TEST PAO Duplicate", "category": _COFFEE,
+        })["name"]
+        frappe.db.set_value("Lead", dup, {
+            "custom_merged_into": survivor,
+            "custom_on_talabat": 1,
+            "custom_talabat_areas": json.dumps(["6th of October"]),
+        }, update_modified=False)
+
+        promoted = importer._propagate_talabat_to_merge_targets()
+        self.assertGreaterEqual(promoted, 1)
+
+        # Union, not overwrite -- the survivor keeps the zone it already had.
+        self.assertEqual(int(frappe.db.get_value("Lead", survivor, "custom_on_talabat")), 1)
+        self.assertEqual(
+            json.loads(frappe.db.get_value("Lead", survivor, "custom_talabat_areas")),
+            ["6th of October", "Sheikh Zayed"],
+        )
+        # Idempotent: a second pass promotes nothing new for this pair.
+        before = frappe.db.get_value("Lead", survivor, "custom_talabat_areas")
+        importer._propagate_talabat_to_merge_targets()
+        self.assertEqual(frappe.db.get_value("Lead", survivor, "custom_talabat_areas"), before)
+
 
 if __name__ == "__main__":
     unittest.main()

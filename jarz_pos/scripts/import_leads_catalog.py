@@ -103,11 +103,13 @@ def run(json_path):
                 message=frappe.get_traceback(),
             )
 
+    promoted = _propagate_talabat_to_merge_targets()
+
     frappe.db.commit()
 
     summary = (
         f"import_leads_catalog: created {created}, updated {updated}, "
-        f"failed {failed} (of {len(leads)})"
+        f"failed {failed} (of {len(leads)}), talabat promoted {promoted}"
     )
     print(summary)
     return {
@@ -115,7 +117,76 @@ def run(json_path):
         "updated": updated,
         "failed": failed,
         "total": len(leads),
+        "talabat_promoted": promoted,
     }
+
+
+def _propagate_talabat_to_merge_targets():
+    """Move a merged duplicate's Talabat presence onto the lead that survived.
+
+    The catalog is keyed on the Google-derived brand id, but a rep can merge two
+    of those rows into one Lead when Google split a single business across branch
+    names (PAO Boba & More is listed once per mall). The import then writes the
+    flag onto the duplicate, which ``get_leads`` hides -- so the badge would never
+    appear on the record anyone actually works.
+
+    A merged duplicate IS the same business as its target, so its presence is the
+    target's presence. Union rather than overwrite: the target may have been
+    flagged from its own listing, and losing a zone would be a silent regression.
+
+    Idempotent, and a no-op on a site that has not migrated either field.
+    """
+    if not (_has_field("Lead", "custom_on_talabat")
+            and _has_field("Lead", "custom_merged_into")):
+        return 0
+
+    rows = frappe.get_all(
+        "Lead",
+        filters={"custom_on_talabat": 1, "custom_merged_into": ["is", "set"]},
+        fields=["name", "custom_merged_into", "custom_talabat_areas"],
+    )
+    promoted = 0
+    for row in rows:
+        # Follow the chain: a duplicate can be merged into a lead that was itself
+        # merged away. Bounded so a cycle can never hang the import.
+        target, seen = row.custom_merged_into, {row.name}
+        for _ in range(10):
+            if not target or target in seen:
+                target = None
+                break
+            seen.add(target)
+            nxt = frappe.db.get_value("Lead", target, "custom_merged_into")
+            if not nxt:
+                break
+            target = nxt
+        if not target or not frappe.db.exists("Lead", target):
+            continue
+
+        current = frappe.db.get_value("Lead", target, "custom_talabat_areas")
+        merged = sorted(set(_as_list_json(current)) | set(_as_list_json(row.custom_talabat_areas)))
+        already = frappe.db.get_value("Lead", target, "custom_on_talabat")
+        if int(already or 0) == 1 and merged == sorted(set(_as_list_json(current))):
+            continue
+        frappe.db.set_value(
+            "Lead", target,
+            {"custom_on_talabat": 1, "custom_talabat_areas": json.dumps(merged)},
+            update_modified=False,
+        )
+        promoted += 1
+    return promoted
+
+
+def _as_list_json(value):
+    """Parse a json.dumps([...]) column back to a list. Guarded -> []."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return []
+    return [str(v) for v in parsed] if isinstance(parsed, list) else []
 
 
 def _has_field(doctype, fieldname):
