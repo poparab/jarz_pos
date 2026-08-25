@@ -4795,3 +4795,188 @@ def _create_settlement_journal_entry(
     je.submit()
 
     return je.name
+
+
+# ---------------------------------------------------------------------------
+# Approved custom shipping override -> courier position
+# ---------------------------------------------------------------------------
+
+def _resolve_shipping_payable(ct: dict, company: str) -> tuple[str, str | None, str | None]:
+    """Return (payable_account, party_type, party) for the CT's dispatch accrual.
+
+    Whatever dispatch credited is what an override has to move, and that ledger
+    differs by order type. A delivery-partner order was accrued against the
+    partner's own Payable ``settlement_account`` with the partner's Supplier as
+    the party (see ``create_partner_*_dispatch_je``); an ordinary courier order
+    was accrued against Creditors with the courier's own Employee/Supplier. Using
+    Creditors for a partner order would strand the adjustment in a ledger the
+    partner sweep never reads.
+    """
+    partner = (ct.get("delivery_partner") or "").strip()
+    if ct.get("is_partner_order") and partner:
+        return (
+            _get_partner_settlement_account(partner),
+            "Supplier",
+            get_delivery_partner_supplier(partner),
+        )
+    return (
+        get_creditors_account(company),
+        (ct.get("party_type") or "").strip() or None,
+        (ct.get("party") or "").strip() or None,
+    )
+
+
+def _post_shipping_override_delta_je(
+    *,
+    inv_name: str,
+    company: str,
+    ct: dict,
+    delta: float,
+    tag_type: str,
+    human: str,
+) -> str | None:
+    """Book the freight difference an approved override creates, and only the difference.
+
+    Dispatch already posted ``DR Freight / CR <payable>`` for the old amount, and
+    settlement will later debit that payable by the CT's ``shipping_amount``
+    verbatim. Moving the CT without moving the payable therefore leaves the
+    difference stranded in the payable forever. One delta entry keeps the two in
+    step for every dispatch shape: the ordinary accrual, the partner online
+    accrual and the partner COD entry all put ``shipping_exp`` on the same pair of
+    ledgers, so ``DR Freight (d) / CR <payable> (d)`` corrects all three.
+
+    Returns None when the delta rounds to nothing, or when an entry for this
+    request was already posted (the tag carries the request name, so a *later*
+    request on the same invoice still books its own adjustment).
+    """
+    d = round(float(delta or 0), 2)
+    if abs(d) <= 0.005:
+        return None
+
+    existing = _find_existing_je_by_tag(company, inv_name, tag_type)
+    if existing:
+        return existing
+
+    freight_acc = get_freight_expense_account(company)
+    payable_acc, party_type, party = _resolve_shipping_payable(ct, company)
+    for acc in (freight_acc, payable_acc):
+        validate_account_exists(acc)
+
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Journal Entry"
+    je.posting_date = frappe.utils.nowdate()
+    je.company = company
+    je.title = f"Custom Shipping Adjustment – {inv_name}"
+    je.user_remark = _je_user_remark(inv_name, tag_type, human)
+
+    freight_line = {
+        "account": freight_acc,
+        "debit_in_account_currency": d if d > 0 else 0,
+        "credit_in_account_currency": abs(d) if d < 0 else 0,
+    }
+    payable_line = {
+        "account": payable_acc,
+        "debit_in_account_currency": abs(d) if d < 0 else 0,
+        "credit_in_account_currency": d if d > 0 else 0,
+    }
+    if party_type and party:
+        payable_line["party_type"] = party_type
+        payable_line["party"] = party
+
+    je.append("accounts", freight_line)
+    je.append("accounts", payable_line)
+    je.save(ignore_permissions=True)
+    je.submit()
+    return je.name
+
+
+def apply_shipping_override_to_courier_position(
+    invoice_name: str,
+    new_amount: float,
+    *,
+    request_name: str,
+    reverting: bool = False,
+) -> dict:
+    """Push an approved (or reverted) shipping override onto the courier position.
+
+    The Courier Transaction is the verbatim source of truth for both settlement
+    surfaces — they read ``shipping_amount`` off it and never re-derive it from
+    the invoice. So writing an approved override to the Sales Invoice alone is
+    invisible to settlement whenever the request was raised *after* dispatch,
+    which is the normal case: the courier discovers the real cost on the road.
+    This re-aligns the CT and books the freight difference.
+
+    A request raised before dispatch has no CT yet and needs nothing here —
+    ``_get_delivery_expense_amount`` already prefers the approved override, so the
+    CT is born with the right number.
+    """
+    new_amount = round(float(new_amount or 0), 2)
+
+    cts = frappe.get_all(
+        "Courier Transaction",
+        filters={"reference_invoice": invoice_name, "status": ["!=", "Settled"]},
+        fields=[
+            "name", "amount", "shipping_amount", "party_type", "party",
+            "is_partner_order", "delivery_partner",
+        ],
+        order_by="creation desc",
+    )
+
+    if not cts:
+        # Nothing dispatched yet is the happy path; everything already settled is
+        # not — the money has moved and this override can no longer reach it.
+        if frappe.db.exists("Courier Transaction", {"reference_invoice": invoice_name}):
+            frappe.throw(
+                _(
+                    "The courier position for {0} is already settled, so the shipping "
+                    "amount can no longer be changed. Reverse the settlement first."
+                ).format(invoice_name)
+            )
+        return {"courier_transaction": None, "journal_entry": None, "previous_amount": None}
+
+    with_shipping = [c for c in cts if float(c.get("shipping_amount") or 0) > 0.005]
+    if len(with_shipping) > 1:
+        frappe.throw(
+            _(
+                "Invoice {0} has {1} unsettled courier transactions carrying shipping. "
+                "Resolve them before approving a custom shipping amount."
+            ).format(invoice_name, len(with_shipping))
+        )
+
+    target = with_shipping[0] if with_shipping else cts[0]
+    previous = round(float(target.get("shipping_amount") or 0), 2)
+    if abs(previous - new_amount) <= 0.005:
+        return {
+            "courier_transaction": target["name"],
+            "journal_entry": None,
+            "previous_amount": previous,
+        }
+
+    company = frappe.db.get_value("Sales Invoice", invoice_name, "company")
+    if not company:
+        frappe.throw(_("Sales Invoice {0} not found").format(invoice_name))
+
+    frappe.db.set_value(
+        "Courier Transaction", target["name"], "shipping_amount", new_amount,
+        update_modified=True,
+    )
+
+    suffix = "REV" if reverting else "ADJ"
+    human = (
+        f"Custom shipping {'reverted' if reverting else 'approved'} "
+        f"{previous} → {new_amount} – {invoice_name} ({request_name})"
+    )
+    je_name = _post_shipping_override_delta_je(
+        inv_name=invoice_name,
+        company=company,
+        ct=target,
+        delta=new_amount - previous,
+        tag_type=f"SHIPADJ-{request_name}-{suffix}",
+        human=human,
+    )
+
+    return {
+        "courier_transaction": target["name"],
+        "journal_entry": je_name,
+        "previous_amount": previous,
+    }

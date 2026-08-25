@@ -68,6 +68,19 @@ def request_custom_shipping(invoice_name: str, amount: float, reason: str):
     if inv.docstatus != 1:
         frappe.throw(_("Only submitted Sales Invoices can have custom shipping requests"))
 
+    # An approval can only reach a courier position that is still open. Say so now,
+    # while the requester is still looking at the order, rather than letting the
+    # manager discover it when their approval throws.
+    if frappe.db.exists("Courier Transaction", {"reference_invoice": invoice_name}) and not frappe.db.exists(
+        "Courier Transaction", {"reference_invoice": invoice_name, "status": ["!=", "Settled"]}
+    ):
+        frappe.throw(
+            _(
+                "The courier position for {0} is already settled, so its shipping "
+                "amount can no longer be changed."
+            ).format(invoice_name)
+        )
+
     # Check for existing pending request
     existing = frappe.db.exists(
         "Custom Shipping Request",
@@ -153,11 +166,18 @@ def approve_custom_shipping(request_name: str):
     csr.submit()
     frappe.db.commit()
 
+    # on_submit re-aligns the Courier Transaction settlement reads from, and books
+    # the freight difference. Report it so the caller can refresh the settlement
+    # screen instead of trusting a stale balance.
+    sync = getattr(csr.flags, "courier_position_sync", None) or {}
+
     _publish_shipping_event(WS_EVENTS.CUSTOM_SHIPPING_APPROVED, {
         "request": csr.name,
         "invoice": csr.invoice,
         "approved_amount": float(csr.requested_amount or 0),
         "approved_by": frappe.session.user,
+        "courier_transaction": sync.get("courier_transaction"),
+        "previous_amount": sync.get("previous_amount"),
     }, invoice_name=csr.invoice)
 
     return {
@@ -165,6 +185,9 @@ def approve_custom_shipping(request_name: str):
         "request": csr.name,
         "invoice": csr.invoice,
         "approved_amount": float(csr.requested_amount or 0),
+        "courier_transaction": sync.get("courier_transaction"),
+        "previous_shipping_amount": sync.get("previous_amount"),
+        "adjustment_journal_entry": sync.get("journal_entry"),
     }
 
 

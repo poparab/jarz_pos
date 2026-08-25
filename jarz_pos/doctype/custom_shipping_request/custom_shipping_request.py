@@ -23,6 +23,12 @@ class CustomShippingRequest(Document):
             },
             update_modified=True,
         )
+        # …and to the courier position, which is what settlement actually reads.
+        # The invoice field alone is invisible there: both settlement surfaces take
+        # the Courier Transaction's shipping_amount verbatim, so an override
+        # approved after dispatch (the normal case — the courier learns the real
+        # cost on the road) would otherwise settle at the old territory rate.
+        self._sync_courier_position(float(self.requested_amount or 0))
 
     def on_cancel(self):
         self.status = "Rejected"
@@ -37,3 +43,18 @@ class CustomShippingRequest(Document):
             },
             update_modified=True,
         )
+        self._sync_courier_position(original, reverting=True)
+
+    def _sync_courier_position(self, amount: float, *, reverting: bool = False) -> None:
+        from jarz_pos.services.delivery_handling import (
+            apply_shipping_override_to_courier_position,
+        )
+
+        result = apply_shipping_override_to_courier_position(
+            self.invoice,
+            amount,
+            request_name=self.name,
+            reverting=reverting,
+        )
+        # Surfaced on the approval response so the manager sees what moved.
+        self.flags.courier_position_sync = result
