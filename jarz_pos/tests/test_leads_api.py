@@ -1230,7 +1230,21 @@ class TestLeadsTalabat(unittest.TestCase):
             self.skipTest("site has not migrated the Talabat fields yet")
 
     def tearDown(self):
+        # ``importer.run`` commits, so rollback alone leaves the imported Lead
+        # behind on a populated site (it inflated every staging Talabat count by
+        # one until this was added). Hard-delete it by source id, same as
+        # TestImportIdempotency.
         frappe.db.rollback()
+        for lead in frappe.get_all(
+            "Lead", filters={"custom_source_brand_id": self.SRC}, pluck="name"
+        ):
+            for addr in leads_api._linked_lead_address_names(lead):
+                try:
+                    frappe.delete_doc("Address", addr, force=True, ignore_permissions=True)
+                except Exception:
+                    pass
+            frappe.delete_doc("Lead", lead, force=True, ignore_permissions=True)
+        frappe.db.commit()
 
     def test_save_lead_round_trips_the_flag_and_zones(self):
         out = leads_api.save_lead(
@@ -1345,8 +1359,8 @@ class TestLeadsTalabat(unittest.TestCase):
             "custom_talabat_areas": json.dumps(["6th of October"]),
         }, update_modified=False)
 
-        promoted = importer._propagate_talabat_to_merge_targets()
-        self.assertGreaterEqual(promoted, 1)
+        promoted = importer._propagate_talabat_to_merge_targets(only=[dup])
+        self.assertEqual(promoted, 1)
 
         # Union, not overwrite -- the survivor keeps the zone it already had.
         self.assertEqual(int(frappe.db.get_value("Lead", survivor, "custom_on_talabat")), 1)
@@ -1356,7 +1370,7 @@ class TestLeadsTalabat(unittest.TestCase):
         )
         # Idempotent: a second pass promotes nothing new for this pair.
         before = frappe.db.get_value("Lead", survivor, "custom_talabat_areas")
-        importer._propagate_talabat_to_merge_targets()
+        importer._propagate_talabat_to_merge_targets(only=[dup])
         self.assertEqual(frappe.db.get_value("Lead", survivor, "custom_talabat_areas"), before)
 
 

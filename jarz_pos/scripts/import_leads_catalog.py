@@ -121,7 +121,7 @@ def run(json_path):
     }
 
 
-def _propagate_talabat_to_merge_targets():
+def _propagate_talabat_to_merge_targets(only=None):
     """Move a merged duplicate's Talabat presence onto the lead that survived.
 
     The catalog is keyed on the Google-derived brand id, but a rep can merge two
@@ -134,15 +134,32 @@ def _propagate_talabat_to_merge_targets():
     target's presence. Union rather than overwrite: the target may have been
     flagged from its own listing, and losing a zone would be a silent regression.
 
-    Idempotent, and a no-op on a site that has not migrated either field.
+    ``only`` restricts the scan to the given Lead names. The import leaves it
+    unset (every duplicate is fair game), but a TEST on a populated site MUST
+    pass its own fixtures -- an unrestricted call from CI promotes real business
+    records, which is how this suite once mutated live staging data.
+
+    The count is rows actually mutated, so it does NOT drop to zero on a re-run
+    of the full import: the merge target is itself a catalog row carrying
+    ``onTalabat: false``, so each import resets it before this pass re-promotes
+    it. The END STATE is what converges; the counter is not a no-op signal.
+
+    Idempotent in effect, and a no-op on a site that has not migrated either
+    field.
     """
     if not (_has_field("Lead", "custom_on_talabat")
             and _has_field("Lead", "custom_merged_into")):
         return 0
 
+    filters = {"custom_on_talabat": 1, "custom_merged_into": ["is", "set"]}
+    if only is not None:
+        names = [only] if isinstance(only, str) else list(only)
+        if not names:
+            return 0
+        filters["name"] = ["in", names]
     rows = frappe.get_all(
         "Lead",
-        filters={"custom_on_talabat": 1, "custom_merged_into": ["is", "set"]},
+        filters=filters,
         fields=["name", "custom_merged_into", "custom_talabat_areas"],
     )
     promoted = 0
