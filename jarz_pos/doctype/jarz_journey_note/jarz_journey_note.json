@@ -20,6 +20,9 @@
   "next_action_date",
   "column_break_next",
   "next_action",
+  "next_action_done",
+  "next_action_done_on",
+  "next_action_done_by",
   "section_break_audit",
   "logged_by",
   "column_break_audit",
@@ -120,6 +123,26 @@
    "label": "Next Action"
   },
   {
+   "default": "0",
+   "fieldname": "next_action_done",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Next Action Done"
+  },
+  {
+   "fieldname": "next_action_done_on",
+   "fieldtype": "Datetime",
+   "label": "Done On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "next_action_done_by",
+   "fieldtype": "Link",
+   "label": "Done By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_audit",
    "fieldtype": "Section Break",
    "label": "Logged By"
@@ -145,7 +168,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-12 00:00:00.000000",
+ "modified": "2026-08-25 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Journey Note",

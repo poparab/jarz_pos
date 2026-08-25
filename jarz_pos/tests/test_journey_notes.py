@@ -3,7 +3,9 @@
 Exercises ``jarz_pos.api.journey`` -- the rep's dated field diary -- plus the
 enrichment it adds to the three surfaces that render it: the B2B pipeline board
 (``crm.get_b2b_pipeline``), the account detail (``crm.get_account``) and the
-lead catalog/detail (``leads.get_leads`` / ``leads.get_lead``).
+lead catalog/detail (``leads.get_leads`` / ``leads.get_lead``); and the two
+promise-keeping features on top of it: ``set_journey_action_done`` (per-action
+completion) and ``get_action_calendar`` (the merged month view).
 
 Why plain ``unittest.TestCase`` (not FrappeTestCase): identical to
 ``test_leads_api`` -- on ERPNext v16 FrappeTestCase imports ``erpnext.tests.utils``
@@ -841,6 +843,609 @@ class TestJourneyContacts(JourneyTestCase):
             journey_api.add_journey_contact(
                 "Lead", "_TEST-does-not-exist", contact_name="Mostafa"
             )
+
+
+# ---------------------------------------------------------------------------
+# Completing a next action
+# ---------------------------------------------------------------------------
+class JourneyDoneTestCase(JourneyTestCase):
+    """Base for the completion + calendar cases.
+
+    Skips itself until ``next_action_done`` is migrated, exactly like
+    :class:`TestJourneyContacts` skips on ``Lead.custom_contacts``: CI's logic
+    gate runs BEFORE ``bench migrate``, so the first CI run of these cases is
+    vacuous BY DESIGN and proves nothing. Re-run after the staging deploy.
+    """
+
+    def setUp(self):
+        super().setUp()
+        if not journey_api._has_done_fields():
+            self.skipTest(
+                "Jarz Journey Note.next_action_done not migrated on this site "
+                "yet (pre-migrate run); re-run after the staging deploy."
+            )
+        # The permission memos are per-CONTEXT, and a whole test module is one
+        # context: without this a set_user in an earlier case would answer for
+        # a later one.
+        journey_api.clear_request_cache()
+
+    def tearDown(self):
+        journey_api.clear_request_cache()
+        super().tearDown()
+
+
+class TestJourneyActionDone(JourneyDoneTestCase):
+    def test_completing_closes_the_reminder_and_undo_reopens_it(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Promised to ring the owner",
+            next_action="Ring the owner",
+            next_action_date=_days(3),
+        )
+        self.assertEqual(len(_journey_todos(lead, note["name"])), 1)
+
+        done = journey_api.set_journey_action_done(note["name"])
+
+        self.assertTrue(done["next_action_done"])
+        self.assertTrue(done["next_action_done_on"])
+        self.assertEqual(done["next_action_done_by"], frappe.session.user)
+        self.assertTrue(done["next_action_done_by_name"])
+        # The promise stays readable: settled is not deleted.
+        self.assertEqual(done["next_action"], "Ring the owner")
+        self.assertEqual(done["next_action_date"], _days(3))
+        self.assertEqual(
+            len(_journey_todos(lead, note["name"])),
+            0,
+            "a completed action must stop nagging",
+        )
+
+        undone = journey_api.set_journey_action_done(note["name"], done=0)
+
+        self.assertFalse(undone["next_action_done"])
+        self.assertIsNone(undone["next_action_done_on"])
+        self.assertEqual(undone["next_action_done_by"], "")
+        todos = _journey_todos(lead, note["name"])
+        self.assertEqual(len(todos), 1, "undo must bring the reminder back")
+        self.assertEqual(str(todos[0]["date"]), _days(3))
+
+    def test_the_string_zero_reads_as_undo(self):
+        """Frappe delivers flags as strings, and ``bool("0")`` is True."""
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Call back",
+            next_action="Call back",
+            next_action_date=_days(2),
+        )
+        journey_api.set_journey_action_done(note["name"], done="1")
+        self.assertTrue(
+            frappe.db.get_value(
+                journey_api.JOURNEY_DOCTYPE, note["name"], "next_action_done"
+            )
+        )
+
+        out = journey_api.set_journey_action_done(note["name"], done="0")
+        self.assertFalse(out["next_action_done"])
+
+    def test_a_done_action_drops_out_of_the_summary_but_still_counts(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Visited",
+            entry_date=_days(-1),
+            next_action="Confirm the order",
+            next_action_date=_days(4),
+        )
+        summary = journey_api.journey_summaries("Lead", [lead])[lead]
+        self.assertEqual(summary["next_action_date"], _days(4))
+
+        journey_api.set_journey_action_done(note["name"])
+
+        summary = journey_api.journey_summaries("Lead", [lead])[lead]
+        self.assertIsNone(
+            summary["next_action_date"],
+            "a settled promise must stop showing on the card",
+        )
+        # A done action is still a touch that happened.
+        self.assertEqual(summary["journey_count"], 1)
+        self.assertEqual(summary["last_journey_date"], _days(-1))
+
+    def test_the_pipeline_card_drops_a_completed_action(self):
+        lead = _make_lead("_TEST Journey Done Board")
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Board touch",
+            entry_date=_days(-1),
+            next_action="Confirm the order",
+            next_action_date=_days(4),
+        )
+        journey_api.set_journey_action_done(note["name"])
+
+        card = _find_card(crm_api.get_b2b_pipeline(), lead)
+        self.assertIsNotNone(card)
+        self.assertEqual(card["journey_count"], 1)
+        self.assertIsNone(card["next_action_date"])
+
+    def test_completing_the_only_action_closes_the_record_loop(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="The one promise",
+            next_action="Call",
+            next_action_date=_days(3),
+        )
+        self.assertEqual(
+            str(frappe.db.get_value("Lead", lead, "custom_next_followup_date")),
+            _days(3),
+        )
+
+        journey_api.set_journey_action_done(note["name"])
+
+        row = frappe.db.get_value(
+            "Lead",
+            lead,
+            ["custom_next_followup_date", "custom_followup_done"],
+            as_dict=True,
+        )
+        self.assertIsNone(row.custom_next_followup_date)
+        self.assertEqual(int(row.custom_followup_done or 0), 1)
+
+    def test_completing_one_of_two_repoints_the_date_at_the_other(self):
+        """The one moment it is correct to move a follow-up date LATER.
+
+        ``sync_followup`` only ever pulls the date earlier, so nothing else in
+        the app could ever move it forward when the near promise was kept.
+        """
+        lead = _make_lead()
+        near = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Near",
+            next_action="Ring",
+            next_action_date=_days(2),
+        )
+        journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Far",
+            next_action="Email",
+            next_action_date=_days(6),
+        )
+        self.assertEqual(
+            str(frappe.db.get_value("Lead", lead, "custom_next_followup_date")),
+            _days(2),
+        )
+
+        journey_api.set_journey_action_done(near["name"])
+
+        row = frappe.db.get_value(
+            "Lead",
+            lead,
+            ["custom_next_followup_date", "custom_followup_done"],
+            as_dict=True,
+        )
+        self.assertEqual(str(row.custom_next_followup_date), _days(6))
+        self.assertEqual(int(row.custom_followup_done or 0), 0)
+        # And the card follows the record.
+        summary = journey_api.journey_summaries("Lead", [lead])[lead]
+        self.assertEqual(summary["next_action_date"], _days(6))
+        self.assertEqual(summary["next_action"], "Email")
+
+    def test_a_note_without_a_next_action_cannot_be_completed(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead", reference_name=lead, note="Just a chat"
+        )
+        with self.assertRaises(Exception):
+            journey_api.set_journey_action_done(note["name"])
+
+    def test_an_unrelated_rep_may_not_complete_it(self):
+        lead = _make_lead("_TEST Journey Done Gate")
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Mine to do",
+            next_action="Ring",
+            next_action_date=_days(3),
+        )
+        rep = _ensure_rep_user()
+        original = frappe.session.user
+        try:
+            frappe.set_user(rep)
+            journey_api.clear_request_cache()
+            with self.assertRaises(Exception):
+                journey_api.set_journey_action_done(note["name"])
+        finally:
+            frappe.set_user(original)
+            journey_api.clear_request_cache()
+
+    def test_the_rep_the_reminder_is_assigned_to_may_complete_it(self):
+        """Wider than editing on purpose: the person who OWES the action.
+
+        The reminder does not always land on the author (it can be re-owned),
+        and the whole point of the feature is that whoever has to do the thing
+        can say it is done.
+        """
+        lead = _make_lead("_TEST Journey Done Assignee")
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Somebody must ring them",
+            next_action="Ring",
+            next_action_date=_days(3),
+        )
+        todo = _journey_todos(lead, note["name"])[0]["name"]
+        rep = _ensure_rep_user()
+        frappe.db.set_value("ToDo", todo, "allocated_to", rep, update_modified=False)
+
+        original = frappe.session.user
+        try:
+            frappe.set_user(rep)
+            journey_api.clear_request_cache()
+            out = journey_api.set_journey_action_done(note["name"])
+            self.assertTrue(out["next_action_done"])
+            self.assertEqual(out["next_action_done_by"], rep)
+        finally:
+            frappe.set_user(original)
+            journey_api.clear_request_cache()
+
+    def test_can_complete_is_reported_on_the_note(self):
+        lead = _make_lead()
+        journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Mine",
+            next_action="Ring",
+            next_action_date=_days(3),
+        )
+        listed = journey_api.get_journey_notes("Lead", lead)["notes"][0]
+        self.assertTrue(listed["can_complete"])
+        self.assertFalse(listed["next_action_done"])
+
+
+# ---------------------------------------------------------------------------
+# Action calendar
+# ---------------------------------------------------------------------------
+def _actions_for(calendar, reference_name, source=None):
+    """Every calendar action on one record (optionally of one source)."""
+    return [
+        a
+        for a in calendar["actions"]
+        if a["reference_name"] == reference_name
+        and (source is None or a["source"] == source)
+    ]
+
+
+class TestCompletionRespectsOtherWriters(JourneyDoneTestCase):
+    """Completion may only clear a follow-up date the DIARY put there.
+
+    ``crm.advance_stage`` writes ``custom_next_followup_date`` from the stage
+    editor. Before this was guarded, ticking off any journey action wiped that
+    date and closed the loop, silently losing a chase a rep had booked
+    elsewhere.
+    """
+
+    def test_completing_does_not_clear_a_followup_the_diary_never_set(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Dropped samples",
+            next_action="Ask what they thought",
+            next_action_date=_days(15),
+        )
+        # A stage follow-up booked SOONER than the note, by another writer.
+        frappe.db.set_value(
+            "Lead", lead, "custom_next_followup_date", _days(10), update_modified=False
+        )
+
+        journey_api.set_journey_action_done(note["name"])
+
+        self.assertEqual(
+            str(frappe.db.get_value("Lead", lead, "custom_next_followup_date")),
+            _days(10),
+            "a follow-up booked by the stage editor is not the diary's to drop",
+        )
+        self.assertFalse(
+            frappe.db.get_value("Lead", lead, "custom_followup_done"),
+            "the loop must stay open while that other follow-up is pending",
+        )
+
+    def test_completing_clears_the_date_it_owns(self):
+        lead = _make_lead()
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Promised a callback",
+            next_action="Call back",
+            next_action_date=_days(4),
+        )
+        # The note stamped the record itself, so the record is pointing at it.
+        self.assertEqual(
+            str(frappe.db.get_value("Lead", lead, "custom_next_followup_date")),
+            _days(4),
+        )
+
+        journey_api.set_journey_action_done(note["name"])
+
+        self.assertFalse(
+            frappe.db.get_value("Lead", lead, "custom_next_followup_date")
+        )
+        self.assertTrue(frappe.db.get_value("Lead", lead, "custom_followup_done"))
+
+    def test_a_sooner_pending_action_still_pulls_the_date_forward(self):
+        """The one case completion may overwrite another writer's date.
+
+        A journey action dated BEFORE what is booked is strictly more urgent, so
+        re-pointing at it loses nobody a chase -- it only brings one earlier.
+        """
+        lead = _make_lead()
+        soon = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Ring Tuesday",
+            next_action="Ring Tuesday",
+            next_action_date=_days(2),
+        )
+        later = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Ring next month",
+            next_action="Ring next month",
+            next_action_date=_days(30),
+        )
+        frappe.db.set_value(
+            "Lead", lead, "custom_next_followup_date", _days(20), update_modified=False
+        )
+
+        journey_api.set_journey_action_done(later["name"])
+
+        self.assertEqual(
+            str(frappe.db.get_value("Lead", lead, "custom_next_followup_date")),
+            _days(2),
+            "the sooner pending action wins",
+        )
+        self.assertFalse(frappe.db.get_value("Lead", lead, "custom_followup_done"))
+        # Untouched by the completion of its sibling.
+        self.assertFalse(
+            frappe.db.get_value(
+                journey_api.JOURNEY_DOCTYPE, soon["name"], "next_action_done"
+            )
+        )
+
+
+class TestCalendarSkipsDeadLeads(JourneyDoneTestCase):
+    """The calendar must not promise a chase the reminder passes never make.
+
+    ``crm.follow_ups._pass_lead_followups`` skips leads flagged not-suitable and
+    leads merged away; a follow-up row for one of those is a date nobody will
+    ever action.
+    """
+
+    def _followup_rows_for(self, lead):
+        out = journey_api.get_action_calendar(
+            from_date=_days(-60), to_date=_days(60), scope="all"
+        )
+        return [
+            a
+            for a in out["actions"]
+            if a["reference_name"] == lead and a["source"] == "followup"
+        ]
+
+    def test_a_live_lead_followup_is_listed(self):
+        lead = _make_lead()
+        frappe.db.set_value(
+            "Lead", lead, "custom_next_followup_date", _days(3), update_modified=False
+        )
+        self.assertEqual(len(self._followup_rows_for(lead)), 1)
+
+    def test_a_not_suitable_lead_is_skipped(self):
+        if not leads_api._has_verdict_field():
+            self.skipTest("Lead.custom_not_suitable not migrated on this site yet.")
+        lead = _make_lead()
+        frappe.db.set_value(
+            "Lead",
+            lead,
+            {"custom_next_followup_date": _days(3), "custom_not_suitable": 1},
+            update_modified=False,
+        )
+        self.assertEqual(self._followup_rows_for(lead), [])
+
+    def test_a_merged_away_lead_is_skipped(self):
+        if not leads_api._has_merge_field():
+            self.skipTest("Lead.custom_merged_into not migrated on this site yet.")
+        survivor = _make_lead("_TEST Journey Survivor")
+        lead = _make_lead()
+        frappe.db.set_value(
+            "Lead",
+            lead,
+            {"custom_next_followup_date": _days(3), "custom_merged_into": survivor},
+            update_modified=False,
+        )
+        self.assertEqual(self._followup_rows_for(lead), [])
+
+
+class TestActionCalendar(JourneyDoneTestCase):
+    """``get_action_calendar`` merges journey actions and record follow-ups.
+
+    Every assertion is existence-based, never a total count: this suite runs
+    against a staging clone of production, so the range always contains real
+    leads' real follow-ups alongside the fixtures.
+    """
+
+    def test_it_serves_journey_and_followup_rows_and_dedups_them(self):
+        with_note = _make_lead("_TEST Calendar Journey")
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=with_note,
+            note="Visited",
+            next_action="Confirm the order",
+            next_action_date=_days(2),
+        )
+        # A record-level follow-up with no journey note behind it.
+        followup_only = _make_lead("_TEST Calendar Followup")
+        frappe.db.set_value(
+            "Lead",
+            followup_only,
+            {"custom_next_followup_date": _days(3), "custom_followup_done": 0},
+            update_modified=False,
+        )
+
+        calendar = journey_api.get_action_calendar(
+            from_date=_days(-1), to_date=_days(10)
+        )
+
+        journey_rows = _actions_for(calendar, with_note)
+        self.assertEqual(
+            len(journey_rows),
+            1,
+            "the note stamps the record's follow-up date too -- the echo must "
+            "be deduped away, not rendered twice",
+        )
+        row = journey_rows[0]
+        self.assertEqual(row["source"], "journey")
+        self.assertEqual(row["note"], note["name"])
+        self.assertEqual(row["reference_doctype"], "Lead")
+        self.assertEqual(row["date"], _days(2))
+        self.assertEqual(row["action"], "Confirm the order")
+        # Titles are resolved in one bulk query, not per row -- assert against
+        # what the record actually holds rather than what was passed in.
+        self.assertEqual(
+            row["title"], frappe.db.get_value("Lead", with_note, "lead_name")
+        )
+        self.assertEqual(row["owner"], frappe.session.user)
+        self.assertTrue(row["owner_name"])
+        self.assertTrue(row["can_complete"])
+        self.assertFalse(row["done"])
+        self.assertFalse(row["overdue"])
+
+        followup_rows = _actions_for(calendar, followup_only)
+        self.assertEqual(len(followup_rows), 1)
+        self.assertEqual(followup_rows[0]["source"], "followup")
+        self.assertEqual(followup_rows[0]["note"], "")
+        self.assertEqual(followup_rows[0]["date"], _days(3))
+        self.assertEqual(followup_rows[0]["action"], "")
+        self.assertEqual(
+            followup_rows[0]["title"],
+            frappe.db.get_value("Lead", followup_only, "lead_name"),
+        )
+
+    def test_done_actions_are_omitted_unless_asked_for(self):
+        lead = _make_lead("_TEST Calendar Done")
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Done deal",
+            next_action="Ring",
+            next_action_date=_days(2),
+        )
+        journey_api.set_journey_action_done(note["name"])
+
+        default = journey_api.get_action_calendar(
+            from_date=_days(-1), to_date=_days(10)
+        )
+        self.assertEqual(_actions_for(default, lead), [])
+        # ...but it is still COUNTED, so the screen can offer to show it.
+        self.assertGreaterEqual(default["counts"]["done"], 1)
+
+        included = journey_api.get_action_calendar(
+            from_date=_days(-1), to_date=_days(10), include_done=1
+        )
+        rows = _actions_for(included, lead)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["done"])
+        self.assertFalse(rows[0]["overdue"], "a done action is never overdue")
+
+    def test_it_flags_overdue_actions(self):
+        lead = _make_lead("_TEST Calendar Overdue")
+        journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Should have called last week",
+            entry_date=_days(-10),
+            next_action="Ring",
+            next_action_date=_days(-4),
+        )
+        calendar = journey_api.get_action_calendar(
+            from_date=_days(-20), to_date=_days(20)
+        )
+        rows = _actions_for(calendar, lead, source="journey")
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["overdue"])
+        self.assertGreaterEqual(calendar["counts"]["overdue"], 1)
+        self.assertGreaterEqual(calendar["counts"]["pending"], 1)
+
+    def test_scope_mine_hides_another_reps_action_and_all_shows_it(self):
+        lead = _make_lead("_TEST Calendar Scope")
+        note = journey_api.add_journey_note(
+            reference_doctype="Lead",
+            reference_name=lead,
+            note="Somebody else's promise",
+            next_action="Ring",
+            next_action_date=_days(2),
+        )
+        # Re-stamp authorship: the note is now another rep's diary entry.
+        frappe.db.set_value(
+            journey_api.JOURNEY_DOCTYPE,
+            note["name"],
+            "logged_by",
+            _ensure_rep_user(),
+            update_modified=False,
+        )
+
+        mine = journey_api.get_action_calendar(
+            from_date=_days(-1), to_date=_days(10), scope="mine"
+        )
+        self.assertEqual(_actions_for(mine, lead, source="journey"), [])
+
+        everyone = journey_api.get_action_calendar(
+            from_date=_days(-1), to_date=_days(10), scope="all"
+        )
+        rows = _actions_for(everyone, lead, source="journey")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(everyone["scope"], "all")
+
+    def test_it_defaults_to_the_current_month(self):
+        from frappe.utils import get_first_day, get_last_day, today
+
+        calendar = journey_api.get_action_calendar()
+        self.assertEqual(calendar["from_date"], str(get_first_day(today())))
+        self.assertEqual(calendar["to_date"], str(get_last_day(today())))
+        self.assertEqual(calendar["scope"], "mine")
+
+    def test_it_is_sorted_by_date(self):
+        lead = _make_lead("_TEST Calendar Sort")
+        for offset in (7, 1, 4):
+            journey_api.add_journey_note(
+                reference_doctype="Lead",
+                reference_name=lead,
+                note=f"touch {offset}",
+                next_action="Ring",
+                next_action_date=_days(offset),
+            )
+        calendar = journey_api.get_action_calendar(
+            from_date=_days(0), to_date=_days(10)
+        )
+        dates = [a["date"] for a in _actions_for(calendar, lead)]
+        self.assertEqual(dates, sorted(dates))
+        self.assertEqual(dates, [_days(1), _days(4), _days(7)])
+
+    def test_it_is_gated_like_every_other_b2b_endpoint(self):
+        original = frappe.session.user
+        try:
+            frappe.set_user("Guest")
+            journey_api.clear_request_cache()
+            with self.assertRaises(Exception):
+                journey_api.get_action_calendar()
+        finally:
+            frappe.set_user(original)
+            journey_api.clear_request_cache()
 
 
 def _ensure_rep_user():
