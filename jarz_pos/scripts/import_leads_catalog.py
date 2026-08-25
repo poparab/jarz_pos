@@ -173,6 +173,12 @@ def _upsert_lead(lead):
         doc.custom_takeout = 1 if lead.get("takeout") else 0
         doc.custom_dine_in = 1 if lead.get("dineIn") else 0
         doc.custom_serves_dessert = 1 if lead.get("servesDessert") else 0
+    # Talabat presence is a CATALOG metric, not rep-owned: it comes from sweeping
+    # the delivery app, so a later sweep must be able to refresh it. Set on both
+    # create and update, like the Google signals above.
+    if _has_field("Lead", "custom_on_talabat"):
+        doc.custom_on_talabat = 1 if lead.get("onTalabat") else 0
+        doc.custom_talabat_areas = json.dumps(_as_list(lead.get("talabatAreas")))
     doc.custom_primary_area = lead.get("primaryArea")
     doc.custom_areas = json.dumps(_as_list(lead.get("areas")))
     doc.custom_governorates = json.dumps(_as_list(lead.get("governorates")))
@@ -196,6 +202,7 @@ def _upsert_lead(lead):
             "latitude": _float(b.get("lat")),
             "longitude": _float(b.get("lng")),
             "maps_url": b.get("mapsUrl"),
+            "on_talabat": 1 if b.get("onTalabat") else 0,
         }
         for f in _BRANCH_PASSTHROUGH_FIELDS:
             if f in b:

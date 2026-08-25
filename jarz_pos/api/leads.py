@@ -77,6 +77,8 @@ _LEAD_FLAT_FIELDS = [
     "custom_takeout",
     "custom_dine_in",
     "custom_serves_dessert",
+    "custom_on_talabat",
+    "custom_talabat_areas",
     "custom_primary_area",
     "custom_regions",
     "custom_governorates",
@@ -134,6 +136,17 @@ _TAKEAWAY_FIELDS = (
     "custom_serves_dessert",
 )
 
+# ...and for Talabat presence.
+#
+# IMPORTANT: unlike the Google signals above, this one IS two-state. It is
+# sourced by reading Talabat's own per-area listings, so 0 means "not seen in
+# any area we have checked" and filtering on 0 is meaningful (though it still
+# only covers the areas actually swept -- see custom_talabat_areas).
+_TALABAT_FIELDS = (
+    "custom_on_talabat",
+    "custom_talabat_areas",
+)
+
 
 def _has_verdict_field():
     """Whether the site has migrated the not-suitable fields. Guarded -> False."""
@@ -150,6 +163,11 @@ def _has_takeaway_field():
     return _has_field("Lead", "custom_takeout")
 
 
+def _has_talabat_field():
+    """Whether the site has migrated the Talabat fields. Guarded -> False."""
+    return _has_field("Lead", "custom_on_talabat")
+
+
 def _has_contacts_field():
     """Whether the site has migrated the contacts child table. Guarded -> False."""
     return _has_field("Lead", "custom_contacts")
@@ -164,6 +182,8 @@ def _lead_query_fields():
         skip.update(_MERGE_FIELDS)
     if not _has_takeaway_field():
         skip.update(_TAKEAWAY_FIELDS)
+    if not _has_talabat_field():
+        skip.update(_TALABAT_FIELDS)
     if not skip:
         return _LEAD_FLAT_FIELDS
     return [f for f in _LEAD_FLAT_FIELDS if f not in skip]
@@ -199,6 +219,7 @@ _BRANCH_FIELDS = (
     "address",
     "latitude",
     "longitude",
+    "on_talabat",
 )
 
 
@@ -270,6 +291,11 @@ def _map_lead_row(row):
         "takeout": _bool(row.get("custom_takeout")),
         "dine_in": _bool(row.get("custom_dine_in")),
         "serves_dessert": _bool(row.get("custom_serves_dessert")),
+        # Talabat presence. Two-state (see _TALABAT_FIELDS): False really does
+        # mean "not listed in any area we swept", and talabat_areas names which
+        # delivery zones the listing was seen in.
+        "on_talabat": _bool(row.get("custom_on_talabat")),
+        "talabat_areas": _json_list(row.get("custom_talabat_areas")),
         "primary_area": row.get("custom_primary_area"),
         "regions": _json_list(row.get("custom_regions")),
         "governorates": _json_list(row.get("custom_governorates")),
@@ -431,7 +457,7 @@ def _attach_contacts(leads):
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
 def get_leads(category=None, status=None, not_suitable=None, include_merged=0,
-              takeout=None):
+              takeout=None, on_talabat=None):
     """Return the whole leads catalog (coarse server-side filtering only).
 
     Optional coarse filters: ``category`` -> custom_lead_category,
@@ -450,6 +476,13 @@ def get_leads(category=None, status=None, not_suitable=None, include_merged=0,
     not-suitable filter — a merged duplicate should never reach the cache at
     all, because showing it would re-offer the very row a rep just eliminated.
 
+    ``on_talabat`` is an optional coarse filter over the Talabat-presence flag.
+    Unlike ``takeout`` it is genuinely tri-state, because the flag is two-state:
+      - ``None`` / "" -> everything (default)
+      - truthy -> only brands listed on Talabat
+      - falsy  -> only brands NOT listed on Talabat
+    Clients normally filter this one themselves off the cached catalog.
+
     ``takeout`` is an optional coarse filter for the confirmed-takeaway segment
     (venues Google reports as doing takeaway, i.e. serving drinks in takeaway
     cups). Only ``takeout=1`` is meaningful: a 0 would mean "unknown", not "no",
@@ -467,6 +500,8 @@ def get_leads(category=None, status=None, not_suitable=None, include_merged=0,
         filters["status"] = status
     if _bool(takeout) and _has_takeaway_field():
         filters["custom_takeout"] = 1
+    if on_talabat not in (None, "") and _has_talabat_field():
+        filters["custom_on_talabat"] = 1 if _bool(on_talabat) else 0
     if not_suitable not in (None, "") and _has_verdict_field():
         filters["custom_not_suitable"] = 1 if _bool(not_suitable) else 0
     if not _bool(include_merged) and _has_merge_field():
@@ -575,6 +610,9 @@ def get_lead(name):
                 "address": row.get("address"),
                 "latitude": _float_or_none(row.get("latitude")),
                 "longitude": _float_or_none(row.get("longitude")),
+                # Coerced, not passed through: a Frappe Check column reads back
+                # as 0/1, and the client decodes this key as a real bool.
+                "on_talabat": _bool(row.get("on_talabat")),
             }
         )
     result["branches"] = branches
@@ -710,6 +748,7 @@ _SCALAR_FIELD_MAP = {
     "maps_url": "custom_maps_url",
     "primary_area": "custom_primary_area",
     "is_specialty": "custom_is_specialty",
+    "on_talabat": "custom_on_talabat",
     "open_status": "custom_open_status",
     "confidence": "custom_confidence",
     "notes": "custom_notes",
@@ -727,6 +766,7 @@ _LIST_FIELD_MAP = {
     "areas": "custom_areas",
     "regions": "custom_regions",
     "governorates": "custom_governorates",
+    "talabat_areas": "custom_talabat_areas",
 }
 
 
@@ -762,7 +802,7 @@ def save_lead(payload, name=None):
     for key, field in _SCALAR_FIELD_MAP.items():
         if key in payload:
             value = payload.get(key)
-            if field == "custom_is_specialty":
+            if field in ("custom_is_specialty", "custom_on_talabat"):
                 value = 1 if _bool(value) else 0
             doc.set(field, value)
 

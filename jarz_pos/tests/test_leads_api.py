@@ -1212,5 +1212,117 @@ class TestImportIdempotency(unittest.TestCase):
         )
 
 
+class TestLeadsTalabat(unittest.TestCase):
+    """Talabat presence: a two-state, catalog-owned flag.
+
+    Distinct from the Google service signals (takeout / dine_in / serves_dessert),
+    which are one-way because the Places API omits them when false. This one is
+    read off Talabat's own per-area listings, so 0 genuinely means "not listed in
+    any area we swept" and filtering on 0 is meaningful.
+    """
+
+    SRC = "_TEST-TALABAT-SRC"
+
+    def setUp(self):
+        _ensure_category(_COFFEE)
+        _ensure_b2b_role()
+        if not frappe.db.has_column("Lead", "custom_on_talabat"):
+            self.skipTest("site has not migrated the Talabat fields yet")
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    def test_save_lead_round_trips_the_flag_and_zones(self):
+        out = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Talabat Cafe",
+                "category": _COFFEE,
+                "on_talabat": True,
+                "talabat_areas": ["6th of October", "Sheikh Zayed"],
+            }
+        )
+        doc = frappe.get_doc("Lead", out["name"])
+        self.assertEqual(int(doc.custom_on_talabat), 1)
+        self.assertEqual(
+            json.loads(doc.custom_talabat_areas), ["6th of October", "Sheikh Zayed"]
+        )
+
+        got = leads_api.get_lead(out["name"])
+        self.assertIs(got["on_talabat"], True)
+        self.assertEqual(got["talabat_areas"], ["6th of October", "Sheikh Zayed"])
+
+    def test_flag_defaults_off_and_survives_a_clearing_update(self):
+        out = leads_api.save_lead(
+            {"lead_name": "_TEST Talabat Off", "category": _COFFEE}
+        )
+        got = leads_api.get_lead(out["name"])
+        self.assertIs(got["on_talabat"], False)
+        self.assertEqual(got["talabat_areas"], [])
+
+        leads_api.save_lead({"on_talabat": True, "talabat_areas": ["Sheikh Zayed"]},
+                            name=out["name"])
+        self.assertIs(leads_api.get_lead(out["name"])["on_talabat"], True)
+        # ...and can be turned back off, unlike the one-way Google signals.
+        leads_api.save_lead({"on_talabat": False, "talabat_areas": []},
+                            name=out["name"])
+        got = leads_api.get_lead(out["name"])
+        self.assertIs(got["on_talabat"], False)
+        self.assertEqual(got["talabat_areas"], [])
+
+    def test_get_leads_filters_both_ways(self):
+        on = leads_api.save_lead({
+            "lead_name": "_TEST Talabat Yes", "category": _COFFEE,
+            "on_talabat": True, "talabat_areas": ["Sheikh Zayed"],
+        })["name"]
+        off = leads_api.save_lead({
+            "lead_name": "_TEST Talabat No", "category": _COFFEE,
+        })["name"]
+
+        listed = {l["name"] for l in leads_api.get_leads(on_talabat=1)["leads"]}
+        self.assertIn(on, listed)
+        self.assertNotIn(off, listed)
+
+        unlisted = {l["name"] for l in leads_api.get_leads(on_talabat=0)["leads"]}
+        self.assertIn(off, unlisted)
+        self.assertNotIn(on, unlisted)
+
+        # Omitting the filter returns both -- the client caches the whole catalog.
+        every = {l["name"] for l in leads_api.get_leads()["leads"]}
+        self.assertTrue({on, off} <= every)
+
+    def test_importer_refreshes_the_flag_on_re_run(self):
+        """Talabat presence is a catalog metric, so a later sweep must update it."""
+        def _run(on, areas):
+            doc = {"generated": "2026-08-25", "count": 1, "leads": [{
+                "id": self.SRC, "name": "_TEST Talabat Import", "score": 50,
+                "tier": "B", "category": _COFFEE, "onTalabat": on,
+                "talabatAreas": areas,
+                "branches": [{"name": "Zayed", "area": "Sheikh Zayed",
+                              "onTalabat": on, "lat": 30.0, "lng": 31.0}],
+            }]}
+            fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                             encoding="utf-8")
+            json.dump(doc, fh); fh.close()
+            try:
+                importer.run(fh.name)
+            finally:
+                os.unlink(fh.name)
+
+        _run(False, [])
+        name = frappe.db.get_value("Lead", {"custom_source_brand_id": self.SRC}, "name")
+        self.assertTrue(name)
+        self.assertEqual(int(frappe.db.get_value("Lead", name, "custom_on_talabat")), 0)
+
+        _run(True, ["Sheikh Zayed"])
+        self.assertEqual(int(frappe.db.get_value("Lead", name, "custom_on_talabat")), 1)
+        self.assertEqual(
+            json.loads(frappe.db.get_value("Lead", name, "custom_talabat_areas")),
+            ["Sheikh Zayed"],
+        )
+        # The per-branch flag rides along, and the API decodes it as a real bool.
+        branch = leads_api.get_lead(name)["branches"][0]
+        self.assertIs(branch["on_talabat"], True)
+
+
 if __name__ == "__main__":
     unittest.main()
