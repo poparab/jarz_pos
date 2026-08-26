@@ -56,6 +56,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe.utils import cint, flt, get_datetime, get_url, now_datetime
+from jarz_pos.services import delivery_leg
 from jarz_pos.utils.settings_utils import single_int
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -508,6 +509,11 @@ def _invoice_fields() -> List[str]:
         "modified",
         TOKEN_FIELD,
     ]
+    # The leg gate below reads these off the row we already have, so the
+    # privacy check costs no extra query. Appended only when the site has them:
+    # get_all would throw on an unmigrated column and take the page down.
+    if delivery_leg.leg_fields_present():
+        fields.extend(delivery_leg.LEG_FIELDS)
     fields.extend(_state_fields_present())
     # De-duplicate while keeping order; a site carrying only the custom alias
     # would otherwise ask for the same column twice.
@@ -813,18 +819,35 @@ def resolve_public_status(token: Any) -> Dict[str, Any]:
     label_en, label_ar = STATUS_LABELS.get(status, STATUS_LABELS[STATUS_PROCESSING])
     destination_lat, destination_lng = _destination_pin(row)
     item_count, total_qty = _item_summary(str(row.get("name") or ""))
-    courier_first_name, courier_phone = _courier_identity(row)
 
-    # Live position ONLY while the order is genuinely out. Before dispatch there
-    # is nothing to show; after delivery the courier has moved on to other
-    # customers, and continuing to stream their position would turn a delivered
-    # order's link into a permanent staff tracker.
+    # Live position ONLY while the order is genuinely out AND this order's leg
+    # is open. Both halves are load-bearing.
+    #
+    # The status check alone is what this used to be, and it leaked: dispatch is
+    # a bulk action (api.trips.send_trip_for_delivery), so three or four orders
+    # from one slot enter STATUS_ON_THE_WAY in the same instant, all assigned to
+    # the same courier. Keyed on (branch, party) with no per-order gate, every
+    # one of those customers was handed the same coordinates — watching the
+    # courier drive to the other addresses first, in visiting order, with the
+    # courier's first name and (where exposed) phone number beside it.
+    #
+    # services.delivery_leg answers the second half: is the courier driving
+    # toward THIS customer right now. See its module docstring for what happens
+    # on a site that has not migrated the leg fields yet.
     position: Dict[str, Any] = {}
-    if status == STATUS_ON_THE_WAY:
+    show_courier = status == STATUS_ON_THE_WAY and delivery_leg.live_map_gate_open(row)
+    courier_first_name: Optional[str] = None
+    courier_phone: Optional[str] = None
+    if show_courier:
         position = courier_last_known_position(
             str(row.get("custom_kanban_profile") or row.get("pos_profile") or ""),
             str(row.get("custom_courier_party") or ""),
         )
+        # The identity travels with the position, under the same gate. Naming
+        # the courier to a customer they are not on the way to tells that
+        # customer who is carrying somebody else's order, which is the same
+        # disclosure as the marker and was made on the same terms before.
+        courier_first_name, courier_phone = _courier_identity(row)
 
     payload = {
         "success": True,

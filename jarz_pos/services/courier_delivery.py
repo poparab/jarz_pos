@@ -51,7 +51,7 @@ from frappe import _
 from frappe.utils import flt, now_datetime
 
 from jarz_pos.constants import WS_EVENTS
-from jarz_pos.services import courier_identity
+from jarz_pos.services import courier_identity, delivery_leg
 from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_fields
 from jarz_pos.utils.access_control import (
     ShiftRequiredError,
@@ -73,6 +73,10 @@ class CourierSchemaError(frappe.ValidationError):
 ACTION_ARRIVED = "arrived"
 ACTION_DELIVERED = "delivered"
 ACTION_FAILED = "failed"
+#: The courier set off toward this specific customer. Not a board state and
+#: not an outcome — it gates the live map and nothing else (services/delivery_leg).
+ACTION_LEG_STARTED = "leg_started"
+ACTION_LEG_ENDED = "leg_ended"
 
 #: Board state a successful delivery lands on. Must be one of the seven frozen
 #: options on ``Sales Invoice-custom_sales_invoice_state`` — the Kanban derives
@@ -113,6 +117,8 @@ _REQUIRED_FIELDS: Dict[str, Tuple[str, ...]] = {
         "custom_delivery_longitude",
         "custom_delivery_accuracy_m",
     ),
+    ACTION_LEG_STARTED: delivery_leg.LEG_FIELDS,
+    ACTION_LEG_ENDED: delivery_leg.LEG_FIELDS,
 }
 
 #: How long a ``request_id`` stays replay-protected. Long enough to cover a
@@ -519,6 +525,12 @@ def mark_invoice_delivered(
             # save so the two can never be observed disagreeing.
             "custom_delivery_failure_reason": None,
         }
+        # A terminal outcome closes the leg by itself, in this same save. A
+        # courier who forgets to end a leg must never leave a live map open on a
+        # delivered order, and a second write to close it would be observable in
+        # between as "delivered, still being driven to".
+        if delivery_leg.leg_fields_present():
+            updates.update(delivery_leg.end_updates(updates["custom_delivered_at"]))
         if not inv.get("custom_arrived_at"):
             # A courier who taps Delivered without tapping Arrived (or whose
             # Arrived is still stuck in the offline queue) still needs an arrival
@@ -650,6 +662,14 @@ def mark_invoice_failed(
             "custom_delivery_attempt_no": attempt_no,
         }
         updates.update(_geo_updates(latitude, longitude, accuracy_m))
+        # The attempt is over, so the leg is over — the courier is not driving
+        # toward this customer any more. Note this closes the *leg* and still
+        # changes no board state: the order remains Out for Delivery and a
+        # second attempt simply opens a new leg.
+        if delivery_leg.leg_fields_present():
+            # Explicit timestamp, not end_updates()' own default: that would read
+            # a second clock and stamp this save with two different times.
+            updates.update(delivery_leg.end_updates(now_datetime()))
 
         # Guard the frozen invariant at the point of the write, not only in a
         # test: no board-state alias may ever appear in a failure update.
@@ -695,6 +715,208 @@ def mark_invoice_failed(
     except Exception as exc:
         frappe.log_error(frappe.get_traceback(), f"mark_invoice_failed failed: {invoice_id}")
         return {"success": False, "error": str(exc)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trip leg (services/delivery_leg) — gates the live map, changes no state
+# ─────────────────────────────────────────────────────────────────────────────
+
+def mark_invoice_leg_started(
+    invoice_id: str,
+    *,
+    at: Any = None,
+    request_id: Optional[str] = None,
+) -> dict:
+    """The courier set off toward **this** customer.
+
+    Three things this is not, because each has been assumed at least once:
+
+    * **not a board state.** The order was already ``Out for Delivery`` when the
+      trip was dispatched. Nothing here touches a state alias, and the guard
+      below enforces that the same way :func:`mark_invoice_failed` does.
+    * **not an outcome.** No accounting, no settlement, no arrival.
+    * **not deterministically idempotent.** Re-starting a leg is a legitimate,
+      repeatable action — a courier who skips an order and comes back to it
+      later re-opens it, and the map is expected to reopen. So there is only the
+      caller's ``request_id`` to swallow an offline double-send, exactly as for
+      a failed attempt.
+
+    Starting a leg **closes every other open leg for the same courier.** That is
+    the rule that makes the whole thing worth having: a courier can be driving
+    toward exactly one customer, so a start elsewhere is proof the previous leg
+    is over, whether or not anybody remembered to end it.
+    """
+    invoice_id = str(invoice_id or "").strip()
+    request_id = str(request_id or "").strip()
+
+    if not invoice_id:
+        return {"success": False, "error": _("invoice_id is required")}
+    if not courier_delivery_enabled():
+        return {"success": False, "error": _("Courier delivery actions are not enabled.")}
+
+    replayed = _replay_lookup(invoice_id, ACTION_LEG_STARTED, request_id)
+    if replayed:
+        return {**replayed, "replayed": True}
+
+    _assert_invoice_fields(_REQUIRED_FIELDS[ACTION_LEG_STARTED])
+
+    try:
+        inv = _load_and_gate(invoice_id, action_label="starting the drive to this order")
+
+        blocked = _assert_actionable(inv)
+        if blocked:
+            return {"success": False, "error": blocked}
+        if inv.get("custom_delivered_at"):
+            return {"success": False, "error": _("This order was already delivered")}
+
+        started_at = at or now_datetime()
+        superseded = _close_other_open_legs(inv, at=started_at)
+
+        updates = dict(delivery_leg.start_updates(started_at))
+        trespass = sorted(set(updates) & set(_STATE_FIELD_ALIASES))
+        if trespass:  # pragma: no cover - defensive
+            frappe.throw(
+                _("Starting a leg must not change the invoice state ({0})").format(
+                    ", ".join(trespass)
+                )
+            )
+
+        if not update_submitted_sales_invoice_fields(inv, updates):
+            return {
+                "success": False,
+                "error": _("Could not start the delivery leg on {0}").format(invoice_id),
+            }
+
+        result = _envelope(
+            ACTION_LEG_STARTED,
+            inv,
+            idempotent=False,
+            leg_started_at=str(inv.get(delivery_leg.LEG_STARTED_FIELD)),
+            # Named rather than counted so a client can tell the courier which
+            # stop it just took the map away from, instead of doing it silently.
+            superseded_invoices=superseded,
+        )
+        _replay_store(invoice_id, ACTION_LEG_STARTED, request_id, result)
+        _publish(WS_EVENTS.COURIER_LEG_STARTED, inv, dict(result))
+        return result
+
+    except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
+        raise
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), f"mark_invoice_leg_started failed: {invoice_id}")
+        return {"success": False, "error": str(exc)}
+
+
+def mark_invoice_leg_ended(
+    invoice_id: str,
+    *,
+    at: Any = None,
+    request_id: Optional[str] = None,
+) -> dict:
+    """Close this order's leg. Closes the map, changes nothing else.
+
+    Explicitly **not** a delivery. An order whose leg ended is still
+    ``Out for Delivery`` and still owes an outcome; a client that sends only
+    this when a courier hands the order over leaves it out for delivery forever.
+    Delivered and failed close the leg themselves, so this is only for the
+    abandon case — the courier skipped the stop and is driving somewhere else.
+    """
+    invoice_id = str(invoice_id or "").strip()
+    request_id = str(request_id or "").strip()
+
+    if not invoice_id:
+        return {"success": False, "error": _("invoice_id is required")}
+    if not courier_delivery_enabled():
+        return {"success": False, "error": _("Courier delivery actions are not enabled.")}
+
+    replayed = _replay_lookup(invoice_id, ACTION_LEG_ENDED, request_id)
+    if replayed:
+        return {**replayed, "replayed": True}
+
+    _assert_invoice_fields(_REQUIRED_FIELDS[ACTION_LEG_ENDED])
+
+    try:
+        inv = _load_and_gate(invoice_id, action_label="ending the drive to this order")
+
+        if not delivery_leg.is_leg_open(inv):
+            result = _envelope(
+                ACTION_LEG_ENDED,
+                inv,
+                idempotent=True,
+                leg_ended_at=str(inv.get(delivery_leg.LEG_ENDED_FIELD) or ""),
+                message=_("No open leg on this order"),
+            )
+            _replay_store(invoice_id, ACTION_LEG_ENDED, request_id, result)
+            return result
+
+        ended_at = at or now_datetime()
+        if not update_submitted_sales_invoice_fields(
+            inv, delivery_leg.end_updates(ended_at)
+        ):
+            return {
+                "success": False,
+                "error": _("Could not end the delivery leg on {0}").format(invoice_id),
+            }
+
+        result = _envelope(
+            ACTION_LEG_ENDED,
+            inv,
+            idempotent=False,
+            leg_ended_at=str(inv.get(delivery_leg.LEG_ENDED_FIELD)),
+        )
+        _replay_store(invoice_id, ACTION_LEG_ENDED, request_id, result)
+        _publish(WS_EVENTS.COURIER_LEG_ENDED, inv, dict(result))
+        return result
+
+    except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
+        raise
+    except Exception as exc:
+        frappe.log_error(frappe.get_traceback(), f"mark_invoice_leg_ended failed: {invoice_id}")
+        return {"success": False, "error": str(exc)}
+
+
+def _close_other_open_legs(inv: Any, *, at: Any) -> List[str]:
+    """Close every other open leg this courier holds. Never raises.
+
+    Deliberately best-effort. If closing a stale leg fails, the *new* leg must
+    still open — a courier standing on a doorstep is not helped by an error
+    about a different order. The cost of that failure is one extra live map,
+    which the next terminal outcome closes anyway.
+
+    Writes through ``frappe.db.set_value`` rather than the submitted-invoice
+    saver on purpose: this is a bulk sweep over other documents, each save fires
+    the whole ``on_update_after_submit`` chain, and the field written is a
+    timestamp no hook reads. The one consumer — the public tracking read —
+    queries the column directly.
+    """
+    party_type = str(inv.get("custom_courier_party_type") or "").strip()
+    party = str(inv.get("custom_courier_party") or "").strip()
+    if not (party_type and party):
+        return []
+
+    closed: List[str] = []
+    try:
+        others = delivery_leg.open_legs_for_courier(
+            party_type, party, exclude_invoice=str(getattr(inv, "name", "") or "")
+        )
+        for name in others:
+            try:
+                frappe.db.set_value(
+                    "Sales Invoice",
+                    name,
+                    delivery_leg.LEG_ENDED_FIELD,
+                    at,
+                    update_modified=False,
+                )
+                closed.append(name)
+            except Exception:
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    f"delivery_leg: could not close superseded leg {name}",
+                )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "delivery_leg: superseding sweep failed")
+    return closed
 
 
 # ─────────────────────────────────────────────────────────────────────────────

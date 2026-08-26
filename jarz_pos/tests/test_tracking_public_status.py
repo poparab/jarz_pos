@@ -31,7 +31,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
-from jarz_pos.services import tracking
+from jarz_pos.services import delivery_leg, tracking
 from jarz_pos.utils import settings_utils
 
 TOKEN = "Zx9-QbT1kLmN4pRs7wYvUA"
@@ -263,6 +263,12 @@ class _Harness:
         self._patches = [
             patch.object(tracking, "frappe", mock),
             patch.object(settings_utils, "frappe", mock),
+            # ``delivery_leg`` decides whether the live position may be released
+            # at all, and holds its own module-level ``frappe``. Leaving it
+            # unpatched would let the leg gate ask the real database whether the
+            # leg fields exist — the same escape route the comment above
+            # describes for the expiry setting.
+            patch.object(delivery_leg, "frappe", mock),
         ]
         for started in self._patches:
             started.start()
@@ -422,6 +428,123 @@ class CourierPrivacyTests(unittest.TestCase):
         result = _resolve(invoice=_row(custom_courier_party=None))
         self.assertIsNone(result["courier_first_name"])
         self.assertIsNone(result["courier_phone"])
+
+
+class TripLegGateTests(unittest.TestCase):
+    """The per-order gate. Out for Delivery alone must not release a position.
+
+    Dispatch is bulk: ``api.trips.send_trip_for_delivery`` moves every invoice
+    in a trip to Out for Delivery atomically, so several customers hold that
+    state at once with the same courier on it. Before the leg existed, all of
+    them were handed the same live coordinates and the same courier name — each
+    one watching the courier drive to the others first.
+
+    ``meta_fields`` includes the leg columns in every test here, because that is
+    what makes the gate active; the suite's default omits them, which is how a
+    site that has not migrated yet keeps working.
+    """
+
+    META = (
+        tracking.TOKEN_FIELD,
+        "custom_sales_invoice_state",
+    ) + delivery_leg.LEG_FIELDS
+
+    def _cache(self, branch="Branch A", party="HR-EMP-0001"):
+        return {
+            tracking.courier_location_key(branch, party): json.dumps(
+                {"lat": 30.05, "lng": 31.24, "ts": "2026-08-26 18:10:00"}
+            )
+        }
+
+    def _resolve_with_leg(self, **leg_fields):
+        return _resolve(
+            invoice=_row(**leg_fields),
+            cache_values=self._cache(),
+            meta_fields=self.META,
+        )
+
+    def test_out_for_delivery_without_a_leg_hides_the_courier(self):
+        """The regression. Everything below is a variation on this one."""
+        result = self._resolve_with_leg()
+        self.assertEqual(result["status"], tracking.STATUS_ON_THE_WAY)
+        self.assertIsNone(result["courier_latitude"])
+        self.assertIsNone(result["courier_longitude"])
+        self.assertIsNone(result["courier_updated_at"])
+
+    def test_open_leg_releases_the_courier(self):
+        result = self._resolve_with_leg(custom_leg_started_at="2026-08-26 18:04:00")
+        self.assertAlmostEqual(result["courier_latitude"], 30.05, places=4)
+        self.assertAlmostEqual(result["courier_longitude"], 31.24, places=4)
+
+    def test_closed_leg_hides_the_courier_again(self):
+        result = self._resolve_with_leg(
+            custom_leg_started_at="2026-08-26 18:04:00",
+            custom_leg_ended_at="2026-08-26 18:20:00",
+        )
+        self.assertIsNone(result["courier_latitude"])
+
+    def test_reopened_leg_shows_the_courier_again(self):
+        """A skipped stop the courier returns to. The map must reopen."""
+        result = self._resolve_with_leg(
+            custom_leg_started_at="2026-08-26 18:40:00",
+            custom_leg_ended_at="2026-08-26 18:20:00",
+        )
+        self.assertAlmostEqual(result["courier_latitude"], 30.05, places=4)
+
+    def test_the_name_and_phone_are_gated_with_the_marker(self):
+        """The identity travels under the same gate as the coordinates.
+
+        Naming the courier to a customer they are not on the way to discloses
+        who is carrying somebody else's order — the same leak as the marker,
+        and it was made on the same terms before the gate existed.
+        """
+        hidden = _resolve(
+            invoice=_row(),
+            settings={"expose_courier_phone_to_customer": 1},
+            cache_values=self._cache(),
+            meta_fields=self.META,
+        )
+        self.assertIsNone(hidden["courier_first_name"])
+        self.assertIsNone(hidden["courier_phone"])
+
+        shown = _resolve(
+            invoice=_row(custom_leg_started_at="2026-08-26 18:04:00"),
+            settings={"expose_courier_phone_to_customer": 1},
+            cache_values=self._cache(),
+            meta_fields=self.META,
+        )
+        self.assertEqual(shown["courier_first_name"], "Mahmoud")
+        self.assertEqual(shown["courier_phone"], "01000000001")
+
+    def test_payload_shape_is_unchanged_by_the_gate(self):
+        """The allow-list still governs. A withheld field is null, not absent —
+        a client that reads `courier_latitude` must not start seeing KeyError."""
+        result = self._resolve_with_leg()
+        self.assertEqual(set(result), EXPECTED_KEYS)
+
+    def test_escape_hatch_restores_the_old_behaviour(self):
+        result = _resolve(
+            invoice=_row(),
+            settings={"allow_live_map_without_leg": 1},
+            cache_values=self._cache(),
+            meta_fields=self.META,
+        )
+        self.assertAlmostEqual(result["courier_latitude"], 30.05, places=4)
+
+    def test_delivered_order_stays_hidden_even_with_an_open_leg(self):
+        """Status and leg are ANDed. A stale open leg on a delivered order —
+        which the delivered transition should have closed — must not keep a
+        public link streaming a courier's position."""
+        result = _resolve(
+            invoice=_row(
+                custom_sales_invoice_state="Delivered",
+                custom_leg_started_at="2026-08-26 18:04:00",
+            ),
+            settings={"tracking_link_ttl_hours": 0},
+            cache_values=self._cache(),
+            meta_fields=self.META,
+        )
+        self.assertIsNone(result["courier_latitude"])
 
 
 class LivePositionTests(unittest.TestCase):

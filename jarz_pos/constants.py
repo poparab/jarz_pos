@@ -155,6 +155,10 @@ class WS_EVENTS:
     COURIER_STOP_ARRIVED = "jarz_pos_courier_stop_arrived"
     COURIER_STOP_DELIVERED = "jarz_pos_courier_stop_delivered"
     COURIER_STOP_FAILED = "jarz_pos_courier_stop_failed"
+    # Trip leg. Not a state change — the board does not move — so these are
+    # separate events rather than another COURIER_STOP_* variant.
+    COURIER_LEG_STARTED = "jarz_pos_courier_leg_started"
+    COURIER_LEG_ENDED = "jarz_pos_courier_leg_ended"
     COURIER_DUTY_CHANGED = "jarz_pos_courier_duty_changed"
     COURIER_DEPOSIT_DECLARED = "jarz_pos_courier_deposit_declared"
     ADDRESS_PIN_UPDATED = "jarz_pos_address_pin_updated"

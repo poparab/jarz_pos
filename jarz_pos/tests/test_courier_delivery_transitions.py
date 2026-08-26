@@ -43,6 +43,8 @@ ALL_FIELDS = (
     "custom_delivery_attempt_no",
     "custom_delivery_failure_reason",
     "custom_delivery_sequence",
+    "custom_leg_started_at",
+    "custom_leg_ended_at",
 )
 
 
@@ -75,6 +77,8 @@ def _invoice(**overrides):
         "custom_delivered_at": None,
         "custom_delivery_attempt_no": 0,
         "custom_delivery_failure_reason": None,
+        "custom_leg_started_at": None,
+        "custom_leg_ended_at": None,
     }
     data.update(overrides)
     doc = MagicMock()
@@ -475,6 +479,147 @@ class TestDelivered(unittest.TestCase):
         with _Harness(inv, update_ok=False):
             result = cd.mark_invoice_delivered("ACC-SINV-2026-00001")
         self.assertFalse(result["success"])
+
+
+class TestTripLeg(unittest.TestCase):
+    """Starting and ending the drive to one customer.
+
+    A leg is not a state and not an outcome — it only decides who is allowed to
+    watch the courier move. The assertions that matter most are the negative
+    ones: that starting a leg touches no board state, and that a terminal
+    outcome closes the leg **in the same save** rather than in a second write
+    that could be observed in between.
+    """
+
+    def _harness(self, inv=None, **kwargs):
+        return _Harness(inv if inv is not None else _invoice(), **kwargs)
+
+    def test_start_writes_both_leg_fields(self):
+        with self._harness() as h:
+            result = cd.mark_invoice_leg_started("ACC-SINV-2026-00001")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["action"], cd.ACTION_LEG_STARTED)
+        self.assertEqual(h.updates[0]["custom_leg_started_at"], FROZEN_NOW)
+        # Clearing the end is half the operation: without it, a leg reopened
+        # after a skip still reads as closed.
+        self.assertIsNone(h.updates[0]["custom_leg_ended_at"])
+
+    def test_start_changes_no_board_state(self):
+        """The order was already Out for Delivery when the trip was dispatched.
+        Same invariant the failed transition carries, asserted the same way."""
+        with self._harness() as h:
+            cd.mark_invoice_leg_started("ACC-SINV-2026-00001")
+        written = set(h.updates[0])
+        self.assertEqual(written, {"custom_leg_started_at", "custom_leg_ended_at"})
+        self.assertNotIn(STATE_FIELD, written)
+
+    def test_start_is_refused_on_a_delivered_order(self):
+        inv = _invoice(custom_delivered_at="2026-08-26 18:20:00")
+        with self._harness(inv) as h:
+            result = cd.mark_invoice_leg_started("ACC-SINV-2026-00001")
+        self.assertFalse(result["success"])
+        self.assertEqual(h.updates, [])
+
+    def test_start_closes_the_couriers_other_open_leg(self):
+        """The rule that makes the gate worth having: a courier drives to one
+        customer at a time, so a start elsewhere proves the last leg is over."""
+        with self._harness() as h:
+            with patch.object(
+                cd.delivery_leg, "open_legs_for_courier", return_value=["ACC-SINV-2026-00099"]
+            ), patch.object(frappe.db, "set_value") as set_value:
+                result = cd.mark_invoice_leg_started("ACC-SINV-2026-00001")
+
+        self.assertEqual(result["superseded_invoices"], ["ACC-SINV-2026-00099"])
+        set_value.assert_called_once()
+        args = set_value.call_args.args
+        self.assertEqual(args[0], "Sales Invoice")
+        self.assertEqual(args[1], "ACC-SINV-2026-00099")
+        self.assertEqual(args[2], "custom_leg_ended_at")
+
+    def test_a_failing_sweep_still_opens_the_new_leg(self):
+        """Best-effort by design. A courier on a doorstep is not helped by an
+        error about a different order; the cost is one stale map, which the next
+        terminal outcome closes anyway."""
+        with self._harness() as h:
+            with patch.object(
+                cd.delivery_leg,
+                "open_legs_for_courier",
+                side_effect=RuntimeError("db gone"),
+            ):
+                result = cd.mark_invoice_leg_started("ACC-SINV-2026-00001")
+        self.assertTrue(result["success"])
+        self.assertEqual(h.updates[0]["custom_leg_started_at"], FROZEN_NOW)
+
+    def test_end_closes_an_open_leg(self):
+        inv = _invoice(custom_leg_started_at="2026-08-26 18:04:00")
+        with self._harness(inv) as h:
+            result = cd.mark_invoice_leg_ended("ACC-SINV-2026-00001")
+        self.assertTrue(result["success"])
+        self.assertEqual(h.updates[0], {"custom_leg_ended_at": FROZEN_NOW})
+
+    def test_end_on_a_closed_leg_is_idempotent_and_writes_nothing(self):
+        with self._harness() as h:
+            result = cd.mark_invoice_leg_ended("ACC-SINV-2026-00001")
+        self.assertTrue(result["success"])
+        self.assertTrue(result["idempotent"])
+        self.assertEqual(h.updates, [])
+
+    def test_delivered_closes_the_leg_in_the_same_save(self):
+        """One save, not two. Between two writes a delivered order can be
+        observed with its live map still open."""
+        inv = _invoice(custom_leg_started_at="2026-08-26 18:04:00")
+        with self._harness(inv) as h:
+            cd.mark_invoice_delivered("ACC-SINV-2026-00001")
+        self.assertEqual(len(h.updates), 1)
+        self.assertEqual(h.updates[0]["custom_leg_ended_at"], FROZEN_NOW)
+        self.assertEqual(h.updates[0]["custom_delivered_at"], FROZEN_NOW)
+
+    def test_failed_closes_the_leg_without_touching_the_state(self):
+        """A failed attempt ends the drive but is still not a status: the order
+        stays Out for Delivery with a reason code."""
+        inv = _invoice(custom_leg_started_at="2026-08-26 18:04:00")
+        with self._harness(inv) as h:
+            cd.mark_invoice_failed(
+                "ACC-SINV-2026-00001", failure_reason="CUSTOMER_UNREACHABLE"
+            )
+        self.assertEqual(h.updates[0]["custom_leg_ended_at"], FROZEN_NOW)
+        self.assertNotIn(STATE_FIELD, h.updates[0])
+
+    def test_leg_writes_are_skipped_on_an_unmigrated_site(self):
+        """Delivered must still work on a bench that has not migrated the leg
+        columns, or a deploy-ordering gap becomes a courier who cannot deliver."""
+        meta = _FakeMeta(fields=[f for f in ALL_FIELDS if not f.startswith("custom_leg_")])
+        inv = _invoice()
+        with self._harness(inv, meta=meta) as h:
+            result = cd.mark_invoice_delivered("ACC-SINV-2026-00001")
+        self.assertTrue(result["success"])
+        self.assertNotIn("custom_leg_ended_at", h.updates[0])
+
+    def test_start_requires_the_feature_flag(self):
+        inv = _invoice()
+        with self._harness(inv) as h:
+            h.mocks["enabled"].return_value = False
+            result = cd.mark_invoice_leg_started("ACC-SINV-2026-00001")
+        self.assertFalse(result["success"])
+        self.assertEqual(h.updates, [])
+
+    def test_start_and_end_publish_their_own_events(self):
+        """Separate events, not another COURIER_STOP_* variant — the board does
+        not move, so a client listening for a state change must not be woken."""
+        from jarz_pos.constants import WS_EVENTS
+
+        with self._harness() as h:
+            cd.mark_invoice_leg_started("ACC-SINV-2026-00001")
+            self.assertEqual(
+                h.mocks["publisher"].call_args.args[0], WS_EVENTS.COURIER_LEG_STARTED
+            )
+
+        inv = _invoice(custom_leg_started_at="2026-08-26 18:04:00")
+        with self._harness(inv) as h:
+            cd.mark_invoice_leg_ended("ACC-SINV-2026-00001")
+            self.assertEqual(
+                h.mocks["publisher"].call_args.args[0], WS_EVENTS.COURIER_LEG_ENDED
+            )
 
 
 class TestGuards(unittest.TestCase):
