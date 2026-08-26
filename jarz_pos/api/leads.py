@@ -277,6 +277,31 @@ def _str_or_none(value):
     return str(value) if value not in (None, "") else None
 
 
+# The Lead field is a Select whose options are title-cased so Desk reads nicely,
+# but the wire format every client codes against is lowercase. Normalise on the
+# way out rather than making each client guess: the Flutter badge compares
+# against 'talabat', and "Talabat" silently failed that test, so the rating
+# never rendered.
+_RATING_SOURCE_OUT = {"talabat": "talabat", "google maps": "google_maps",
+                      "google_maps": "google_maps"}
+
+
+def _rating_source(value):
+    return _RATING_SOURCE_OUT.get(str(value or "").strip().lower(), "")
+
+
+def _rating_or_none(value):
+    """A Talabat rating, or None when there isn't one.
+
+    Frappe Float columns default to 0, so an unrated listing reads back as 0.0.
+    Passing that through would rank a venue nobody has rated BELOW the
+    worst-rated one everywhere the score is sorted or averaged. No real rating
+    is ever 0, so 0 means absent.
+    """
+    v = _float_or_none(value)
+    return None if not v else v
+
+
 def _map_lead_row(row):
     """Map a flat Lead row (dict) to the frozen catalog output shape."""
     return {
@@ -309,11 +334,11 @@ def _map_lead_row(row):
         # unrated (the app showed "New"), which is different from not listed at
         # all -- check on_talabat, not this. ``talabat_reviews`` is a LOWER
         # BOUND: the app buckets big counts as "1k+"/"500+" and we store floors.
-        "talabat_rating": _float_or_none(row.get("custom_talabat_rating")),
+        "talabat_rating": _rating_or_none(row.get("custom_talabat_rating")),
         "talabat_reviews": _int(row.get("custom_talabat_reviews")),
         # "talabat" | "google_maps" | "". google_maps means Talabat is showing
         # Google's score because the venue has none of its own yet.
-        "talabat_rating_source": row.get("custom_talabat_rating_source") or "",
+        "talabat_rating_source": _rating_source(row.get("custom_talabat_rating_source")),
         "primary_area": row.get("custom_primary_area"),
         "regions": _json_list(row.get("custom_regions")),
         "governorates": _json_list(row.get("custom_governorates")),
@@ -631,9 +656,9 @@ def get_lead(name):
                 # Coerced, not passed through: a Frappe Check column reads back
                 # as 0/1, and the client decodes this key as a real bool.
                 "on_talabat": _bool(row.get("on_talabat")),
-                "talabat_rating": _float_or_none(row.get("talabat_rating")),
+                "talabat_rating": _rating_or_none(row.get("talabat_rating")),
                 "talabat_reviews": _int(row.get("talabat_reviews")),
-                "talabat_rating_source": row.get("talabat_rating_source") or "",
+                "talabat_rating_source": _rating_source(row.get("talabat_rating_source")),
             }
         )
     result["branches"] = branches

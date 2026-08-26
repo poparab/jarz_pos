@@ -1337,6 +1337,42 @@ class TestLeadsTalabat(unittest.TestCase):
         branch = leads_api.get_lead(name)["branches"][0]
         self.assertIs(branch["on_talabat"], True)
 
+    def test_rating_source_reaches_clients_lowercase(self):
+        """The Select stores "Talabat"; every client codes against 'talabat'.
+
+        This exact mismatch shipped once and silently hid the rating in the app:
+        the badge compares to 'talabat' and never matched "Talabat".
+        """
+        name = leads_api.save_lead({
+            "lead_name": "_TEST Talabat Rated", "category": _COFFEE,
+            "on_talabat": True, "talabat_areas": ["Zamalek"],
+            "talabat_rating": 4.6, "talabat_reviews": 1000,
+            "talabat_rating_source": "Talabat",
+        })["name"]
+        got = leads_api.get_lead(name)
+        self.assertEqual(got["talabat_rating_source"], "talabat")
+        self.assertEqual(got["talabat_rating"], 4.6)
+        self.assertEqual(got["talabat_reviews"], 1000)
+
+        frappe.db.set_value("Lead", name, "custom_talabat_rating_source",
+                            "Google Maps", update_modified=False)
+        self.assertEqual(leads_api.get_lead(name)["talabat_rating_source"], "google_maps")
+
+    def test_an_unrated_listing_reports_no_rating_not_zero(self):
+        """Frappe Floats default to 0; 0 must not read as a real score.
+
+        A 0.0 would sort a venue nobody has rated below the worst-rated one.
+        """
+        name = leads_api.save_lead({
+            "lead_name": "_TEST Talabat Unrated", "category": _COFFEE,
+            "on_talabat": True, "talabat_areas": ["Zamalek"],
+        })["name"]
+        got = leads_api.get_lead(name)
+        self.assertIs(got["on_talabat"], True, "still listed on Talabat")
+        self.assertIsNone(got["talabat_rating"], "unrated, not rated zero")
+        self.assertEqual(got["talabat_reviews"], 0)
+        self.assertEqual(got["talabat_rating_source"], "")
+
     def test_a_merged_duplicate_hands_its_flag_to_the_survivor(self):
         """Google splits one business across branch names; a rep merges them.
 
