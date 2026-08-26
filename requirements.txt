@@ -1,6 +1,11 @@
 # Jarz POS Dependencies
 firebase-admin>=6.0.0
 pywebpush>=2.0.0
+# Present in pyproject.toml but missing here until now. The two files are
+# supposed to be in lockstep: the deploy script decides whether to re-run the
+# editable install by diffing exactly these two paths, so a dependency listed
+# in only one of them is a dependency the deploy can fail to notice.
+sentry-sdk>=2.0.0
 # PDF -> image rasteriser for the B2B sales-material viewer. Keep in lockstep
 # with pyproject.toml: the deploy script only reinstalls when one of these two
 # files changes.
