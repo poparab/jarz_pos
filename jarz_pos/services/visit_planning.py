@@ -225,8 +225,24 @@ class VisitTarget:
 
     @property
     def key(self) -> str:
-        """Stable identity for one door across a planning call."""
-        return f"{self.reference_doctype}:{self.reference_name}:{self.branch_name}"
+        """Stable identity for one door across a planning call.
+
+        Keyed on POSITION, not on the branch label. Chains name every branch
+        after the chain: production carries 7 distinct T-LAB locations all
+        called "T-LAB", and 114 of its 2,645 doors share a name with a
+        different door. Keying on the label collapsed them, so a rep who
+        selected nine stops got eight and one real address vanished from the
+        route with nothing to show it had.
+
+        Five decimal places is about a metre — fine enough that two branches on
+        the same street stay separate, coarse enough that two rows describing
+        the SAME door (the corpus was scraped per location, so a handful of
+        exact duplicates exist) collapse, which is what should happen.
+        """
+        return (
+            f"{self.reference_doctype}:{self.reference_name}:"
+            f"{self.latitude:.5f},{self.longitude:.5f}"
+        )
 
     def as_dict(self) -> Dict[str, Any]:
         return {

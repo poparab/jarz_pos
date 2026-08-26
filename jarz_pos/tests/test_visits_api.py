@@ -233,6 +233,36 @@ class TestVisitPlanCrud(VisitTestCase):
         )
         self.assertEqual(plan["total_stops"], 2)
 
+    def test_two_branches_sharing_a_name_both_survive(self):
+        """Chains name every branch after the chain.
+
+        Production carries 7 distinct T-LAB locations all called "T-LAB", and
+        114 of its 2,645 doors share a name with a different door. Keying the
+        dedup on the label dropped them from the route silently.
+        """
+        lead = _make_lead("_TEST Visit T-LAB")
+        plan = visits_api.create_visit_plan(
+            visit_date=_days(1),
+            stops=[
+                _stop(lead, _MAADI, title="T-LAB", branch_name="T-LAB"),
+                _stop(lead, _ZAMALEK, title="T-LAB", branch_name="T-LAB"),
+                _stop(lead, _HELIOPOLIS, title="T-LAB", branch_name="T-LAB"),
+            ],
+        )
+        self.assertEqual(plan["total_stops"], 3)
+
+    def test_the_same_pin_under_two_names_is_still_one_door(self):
+        """The corpus was scraped per location, so exact duplicates exist."""
+        lead = _make_lead("_TEST Visit Same Pin")
+        plan = visits_api.create_visit_plan(
+            visit_date=_days(1),
+            stops=[
+                _stop(lead, _MAADI, branch_name="Maadi"),
+                _stop(lead, _MAADI, branch_name="Maadi Branch"),
+            ],
+        )
+        self.assertEqual(plan["total_stops"], 1)
+
     def test_delete_removes_the_plan(self):
         lead = _make_lead("_TEST Visit Cafe G")
         plan = visits_api.create_visit_plan(
@@ -460,6 +490,20 @@ class TestVisitPlanList(VisitTestCase):
 # Targets and suggestions
 # ---------------------------------------------------------------------------
 class TestVisitTargets(VisitTestCase):
+    def test_target_keys_are_unique_per_door_even_when_names_repeat(self):
+        """Two branches of one chain, same label, different streets."""
+        lead = _make_lead(
+            "_TEST Visit Key Chain",
+            branches=[
+                _branch("T-LAB", _MAADI),
+                _branch("T-LAB", _ZAMALEK),
+            ],
+        )
+        mine = [t for t in visit_planning.lead_targets()
+                if t.reference_name == lead]
+        self.assertEqual(len(mine), 2)
+        self.assertEqual(len({t.key for t in mine}), 2)
+
     def test_one_target_per_branch_not_per_brand(self):
         lead = _make_lead(
             "_TEST Visit Multi Branch",

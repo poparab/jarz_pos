@@ -62,10 +62,19 @@ class JarzVisitPlan(Document):
                 )
             # The same door twice in one day is a mistake every time; the same
             # BRAND twice is legitimate (two branches, two visits).
+            #
+            # Identity is the POSITION, not the branch label. Chains name every
+            # branch after the chain — production carries 7 distinct T-LAB
+            # locations all called "T-LAB", and 114 of its 2,645 doors share a
+            # name with a different door. Keying on the label silently dropped
+            # them from the route. Five decimals is about a metre: separate
+            # enough for two branches on one street, coarse enough that two
+            # rows describing the same door still collapse.
             key = (
                 row.reference_doctype,
                 row.reference_name,
-                (row.branch_name or "").strip().lower(),
+                round(float(row.latitude), 5),
+                round(float(row.longitude), 5),
             )
             if key in seen:
                 continue
