@@ -561,7 +561,81 @@ def get_leads(category=None, status=None, not_suitable=None, include_merged=0,
     leads = [_map_lead_row(row) for row in rows]
     _attach_journey_summaries(leads)
     _attach_contacts(leads)
+    _attach_locations(leads)
     return {"leads": leads, "count": len(leads)}
+
+
+#: Branch columns the catalog carries. Deliberately a subset of what
+#: ``get_lead`` returns: this is the *routing* view of a branch — where it is
+#: and how to reach it — not the research view with ratings and opening hours.
+_LOCATION_FIELDS = (
+    "branch_name",
+    "area",
+    "latitude",
+    "longitude",
+    "address",
+    "phone",
+    "maps_url",
+)
+
+
+def _attach_locations(leads):
+    """Merge each lead's located branches into its catalog row as ``locations``.
+
+    The catalog has always been one row per BRAND, carrying the brand's single
+    pin. A brand is not a place you can visit, though — a chain with six
+    branches is six doors in six different areas, and a route visits doors. The
+    corpus holds ~2,970 located branches behind ~2,400 brands, so a brand-level
+    map is missing roughly a fifth of the real estate.
+
+    ONE query for the whole catalog, exactly like the contacts and the journey
+    summaries. Rows without a usable pin are dropped rather than shipped as
+    zeroes: (0, 0) is in the Atlantic, and a client that plotted it would put a
+    marker there and route to it.
+
+    Best-effort — a site that has not migrated the branch table just gets empty
+    lists, and every consumer already falls back to the brand pin.
+    """
+    for lead in leads:
+        lead["locations"] = []
+    if not leads or not _has_field("Lead", "custom_branches"):
+        return
+    try:
+        rows = frappe.get_all(
+            "Jarz Lead Branch",
+            filters={"parenttype": "Lead", "parentfield": "custom_branches"},
+            fields=["parent", "idx", *_LOCATION_FIELDS],
+            order_by="parent asc, idx asc",
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        frappe.log_error(
+            title="leads: branch locations lookup failed",
+            message=frappe.get_traceback(),
+        )
+        return
+
+    by_parent = {}
+    for row in rows:
+        latitude = _float_or_none(row.get("latitude"))
+        longitude = _float_or_none(row.get("longitude"))
+        if not latitude or not longitude:
+            continue
+        by_parent.setdefault(row.get("parent"), []).append(
+            {
+                "branch_name": row.get("branch_name") or "",
+                "area": row.get("area") or "",
+                "latitude": latitude,
+                "longitude": longitude,
+                "address": row.get("address") or "",
+                "phone": row.get("phone") or "",
+                "maps_url": row.get("maps_url") or "",
+            }
+        )
+    for lead in leads:
+        locations = by_parent.get(lead.get("name"))
+        if locations:
+            lead["locations"] = locations
 
 
 def _journey_summary_defaults():

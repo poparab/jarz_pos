@@ -41,6 +41,7 @@
   "tracking_section",
   "enable_customer_tracking",
   "expose_courier_phone_to_customer",
+  "allow_live_map_without_leg",
   "column_break_tracking",
   "tracking_link_ttl_hours",
   "production_section",
@@ -73,7 +74,20 @@
   "label_cogs_account",
   "column_break_label_acct",
   "label_printing_item",
-  "label_post_cogs_journal"
+  "label_post_cogs_journal",
+  "visit_planning_section",
+  "visit_route_engine",
+  "visit_osrm_base_url",
+  "visit_osrm_timeout_seconds",
+  "visit_road_factor",
+  "column_break_visit_planning",
+  "visit_avg_speed_kmh",
+  "visit_default_minutes",
+  "visit_max_stops",
+  "visit_day_minutes",
+  "visit_default_start_time",
+  "visit_days",
+  "visit_stale_days"
  ],
  "fields": [
   {
@@ -323,6 +337,13 @@
    "label": "Show Courier Phone To Customer"
   },
   {
+   "default": "0",
+   "description": "Release the courier's live position and name to every customer whose order is Out for Delivery, instead of only the one the courier is currently driving toward. OFF is the safe value and is what an unset field reads as. Turn it on ONLY on a site whose courier app cannot yet mark a trip leg: dispatch sends a whole trip Out for Delivery at once, so with this on, every customer in a slot watches the courier visit the other addresses first, in order, with the courier's name beside the marker.",
+   "fieldname": "allow_live_map_without_leg",
+   "fieldtype": "Check",
+   "label": "Allow Live Map Without A Trip Leg"
+  },
+  {
    "fieldname": "column_break_tracking",
    "fieldtype": "Column Break"
   },
@@ -468,20 +489,6 @@
    "non_negative": 1
   },
   {
-   "default": "1",
-   "description": "Draw labels down automatically when a Sales Invoice is submitted for a customer that has a tracked label. Leave on: with it off the ledger only moves when somebody records a count by hand.",
-   "fieldname": "label_auto_consume_on_invoice",
-   "fieldtype": "Check",
-   "label": "Auto-Consume Labels On Invoice"
-  },
-  {
-   "default": "1",
-   "description": "Send the daily 'labels running low' alert to managers and B2B reps.",
-   "fieldname": "label_alerts_enabled",
-   "fieldtype": "Check",
-   "label": "Enable Label Reorder Alerts"
-  },
-  {
    "default": "21",
    "description": "Labels on one printed sheet for Medium jars.",
    "fieldname": "labels_per_sheet_medium",
@@ -504,6 +511,20 @@
    "fieldtype": "Int",
    "label": "Default Print Batch (Sheets)",
    "non_negative": 1
+  },
+  {
+   "default": "1",
+   "description": "Draw labels down automatically when a Sales Invoice is submitted for a customer that has a tracked label. Leave on: with it off the ledger only moves when somebody records a count by hand.",
+   "fieldname": "label_auto_consume_on_invoice",
+   "fieldtype": "Check",
+   "label": "Auto-Consume Labels On Invoice"
+  },
+  {
+   "default": "1",
+   "description": "Send the daily 'labels running low' alert to managers and B2B reps.",
+   "fieldname": "label_alerts_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Label Reorder Alerts"
   },
   {
    "fieldname": "label_accounting_section",
@@ -541,12 +562,96 @@
    "fieldname": "label_post_cogs_journal",
    "fieldtype": "Check",
    "label": "Post Label COGS Journal Entries"
+  },
+  {
+   "fieldname": "visit_planning_section",
+   "fieldtype": "Section Break",
+   "label": "B2B Visit Planning"
+  },
+  {
+   "fieldname": "visit_route_engine",
+   "fieldtype": "Select",
+   "label": "Route Engine",
+   "options": "auto\nosrm\nstraight_line",
+   "default": "auto",
+   "description": "auto = use the OSRM server when it is configured and answering, else straight-line estimates. straight_line pins it to estimates (the kill switch: no deploy, no restart). osrm behaves as auto - OSRM is never trusted blindly, because a route that fails to plan is worse than one that is approximate."
+  },
+  {
+   "fieldname": "visit_osrm_base_url",
+   "fieldtype": "Data",
+   "label": "OSRM Base URL",
+   "description": "Root of a self-hosted OSRM server, e.g. http://10.0.0.5:5000. Empty means every distance is a straight-line estimate. Never point this at a public demo server for production traffic."
+  },
+  {
+   "fieldname": "visit_osrm_timeout_seconds",
+   "fieldtype": "Int",
+   "label": "OSRM Timeout (seconds)",
+   "non_negative": 1,
+   "description": "Clamped to 1-15. A routing call sits inside a user-facing request; a slow one gets abandoned in favour of the estimate."
+  },
+  {
+   "fieldname": "visit_road_factor",
+   "fieldtype": "Float",
+   "label": "Road Detour Factor",
+   "precision": "2",
+   "description": "Multiplier turning straight-line kilometres into driving kilometres when OSRM is not in play. 1.35 suits dense Cairo. Ignored entirely when OSRM answers."
+  },
+  {
+   "fieldname": "column_break_visit_planning",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "visit_avg_speed_kmh",
+   "fieldtype": "Float",
+   "label": "Average Speed (km/h)",
+   "precision": "1",
+   "description": "Door-to-door average including traffic and parking. Keep it pessimistic: a day plan that cannot be driven gets abandoned by lunchtime."
+  },
+  {
+   "fieldname": "visit_default_minutes",
+   "fieldtype": "Int",
+   "label": "Default Visit Minutes",
+   "non_negative": 1,
+   "description": "Time inside a venue, when the stop does not say otherwise."
+  },
+  {
+   "fieldname": "visit_max_stops",
+   "fieldtype": "Int",
+   "label": "Default Max Stops Per Day",
+   "non_negative": 1,
+   "description": "What the auto-planner aims for. A rep can still add more by hand, up to the hard ceiling of 60."
+  },
+  {
+   "fieldname": "visit_day_minutes",
+   "fieldtype": "Int",
+   "label": "Working Day (minutes)",
+   "non_negative": 1,
+   "description": "Total budget for driving plus visits. The auto-planner drops its lowest-priority stops until the day fits."
+  },
+  {
+   "fieldname": "visit_default_start_time",
+   "fieldtype": "Time",
+   "label": "Default Start Time",
+   "description": "When a new route is assumed to leave, used to estimate arrival times."
+  },
+  {
+   "fieldname": "visit_days",
+   "fieldtype": "Data",
+   "label": "Field Visit Days",
+   "description": "Comma-separated weekday names the team does field visits on, e.g. Saturday,Sunday. Empty means any day. Advisory only - it steers the planner's suggestions and never blocks a date."
+  },
+  {
+   "fieldname": "visit_stale_days",
+   "fieldtype": "Int",
+   "label": "Stale After (days)",
+   "non_negative": 1,
+   "description": "A door not visited in this long is flagged as due. Feeds the auto-planner's priority and the leads filter."
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-09 12:00:00",
+ "modified": "2026-08-26 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Settings",

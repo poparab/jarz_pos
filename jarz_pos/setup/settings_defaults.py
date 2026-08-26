@@ -93,6 +93,25 @@ SEED_DEFAULTS: Dict[str, Any] = {
     "label_default_print_sheets": 2,
     "label_post_cogs_journal": 1,
     "label_printing_item": "Customer Label Printing",
+    # B2B visit planning. Seeded rather than left to the doctype defaults
+    # because a DocType default never lands on an already-populated Single --
+    # every existing site would read blanks and silently fall back to the
+    # module constants, leaving Desk showing empty boxes for values that are
+    # very much in effect. The router tolerates unset values either way; this
+    # is about the form telling the truth.
+    #
+    # visit_osrm_base_url is deliberately absent: an unconfigured routing
+    # server is the correct default, and guessing a URL would trip the circuit
+    # breaker on every fresh site.
+    "visit_route_engine": "auto",
+    "visit_osrm_timeout_seconds": 5,
+    "visit_road_factor": 1.35,
+    "visit_avg_speed_kmh": 22.0,
+    "visit_default_minutes": 20,
+    "visit_max_stops": 12,
+    "visit_day_minutes": 360,
+    "visit_default_start_time": "10:00:00",
+    "visit_stale_days": 60,
 }
 
 

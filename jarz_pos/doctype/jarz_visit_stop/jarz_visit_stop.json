@@ -1,0 +1,206 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "hash",
+ "creation": "2026-08-26 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "reference_doctype",
+  "reference_name",
+  "title",
+  "column_break_target",
+  "branch_name",
+  "area",
+  "status",
+  "section_break_location",
+  "latitude",
+  "longitude",
+  "column_break_location",
+  "address",
+  "phone",
+  "maps_url",
+  "section_break_schedule",
+  "planned_time",
+  "visit_minutes",
+  "locked",
+  "column_break_schedule",
+  "leg_km",
+  "leg_minutes",
+  "section_break_result",
+  "arrived_at",
+  "outcome",
+  "journey_note"
+ ],
+ "fields": [
+  {
+   "default": "Lead",
+   "fieldname": "reference_doctype",
+   "fieldtype": "Select",
+   "label": "Target Type",
+   "options": "Lead\nCustomer\nOpportunity",
+   "reqd": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Target",
+   "options": "reference_doctype",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Brand name at the time the stop was added. Denormalised so a route still reads correctly after a rename or a merge.",
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Name"
+  },
+  {
+   "fieldname": "column_break_target",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Which door. A brand with six branches is six possible stops, and only one of them is on today's route.",
+   "fieldname": "branch_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Branch"
+  },
+  {
+   "fieldname": "area",
+   "fieldtype": "Data",
+   "label": "Area"
+  },
+  {
+   "default": "Planned",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Planned\nVisited\nSkipped\nCancelled"
+  },
+  {
+   "fieldname": "section_break_location",
+   "fieldtype": "Section Break",
+   "label": "Location"
+  },
+  {
+   "description": "Copied onto the stop, not read through the lead. A plan must survive a re-import that rewrites the branch table.",
+   "fieldname": "latitude",
+   "fieldtype": "Float",
+   "label": "Latitude",
+   "precision": "6"
+  },
+  {
+   "fieldname": "longitude",
+   "fieldtype": "Float",
+   "label": "Longitude",
+   "precision": "6"
+  },
+  {
+   "fieldname": "column_break_location",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "address",
+   "fieldtype": "Small Text",
+   "label": "Address"
+  },
+  {
+   "fieldname": "phone",
+   "fieldtype": "Data",
+   "label": "Phone"
+  },
+  {
+   "fieldname": "maps_url",
+   "fieldtype": "Small Text",
+   "label": "Maps URL"
+  },
+  {
+   "fieldname": "section_break_schedule",
+   "fieldtype": "Section Break",
+   "label": "Schedule"
+  },
+  {
+   "description": "Estimated arrival, derived from the plan start time and the legs before it. Recomputed on every optimise.",
+   "fieldname": "planned_time",
+   "fieldtype": "Time",
+   "label": "Planned Arrival",
+   "read_only": 1
+  },
+  {
+   "description": "Minutes inside the venue. 0 falls back to the plan default.",
+   "fieldname": "visit_minutes",
+   "fieldtype": "Int",
+   "label": "Visit Minutes",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "Pin this stop to its position in the route. Use it for a booked appointment: the optimiser reorders everything else around it.",
+   "fieldname": "locked",
+   "fieldtype": "Check",
+   "label": "Pinned"
+  },
+  {
+   "fieldname": "column_break_schedule",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Drive from the previous stop.",
+   "fieldname": "leg_km",
+   "fieldtype": "Float",
+   "label": "Leg (km)",
+   "precision": "2",
+   "read_only": 1
+  },
+  {
+   "fieldname": "leg_minutes",
+   "fieldtype": "Int",
+   "label": "Leg (min)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_result",
+   "fieldtype": "Section Break",
+   "label": "Outcome"
+  },
+  {
+   "fieldname": "arrived_at",
+   "fieldtype": "Datetime",
+   "label": "Checked In At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Small Text",
+   "label": "Outcome"
+  },
+  {
+   "description": "The diary entry this visit produced, if one was written.",
+   "fieldname": "journey_note",
+   "fieldtype": "Link",
+   "label": "Journey Note",
+   "options": "Jarz Journey Note",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Visit Stop",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

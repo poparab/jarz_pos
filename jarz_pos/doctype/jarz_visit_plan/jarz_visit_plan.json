@@ -1,0 +1,260 @@
+{
+ "actions": [],
+ "autoname": "VPL-.YYYY.-.#####",
+ "creation": "2026-08-26 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "visit_date",
+  "rep",
+  "rep_name",
+  "column_break_head",
+  "title",
+  "status",
+  "section_break_start",
+  "start_mode",
+  "start_label",
+  "start_latitude",
+  "start_longitude",
+  "column_break_start",
+  "planned_start_time",
+  "default_visit_minutes",
+  "return_to_start",
+  "section_break_stops",
+  "stops",
+  "section_break_totals",
+  "total_stops",
+  "total_distance_km",
+  "total_drive_minutes",
+  "column_break_totals",
+  "total_duration_minutes",
+  "route_engine",
+  "optimized_on",
+  "section_break_notes",
+  "notes"
+ ],
+ "fields": [
+  {
+   "default": "Today",
+   "fieldname": "visit_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Visit Date",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Who drives this route. A manager may plan a day for a rep; the rep owns it from then on.",
+   "fieldname": "rep",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Rep",
+   "options": "User",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fetch_from": "rep.full_name",
+   "fieldname": "rep_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Rep Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "What this run is, in the rep's words. \"Maadi + Degla\", \"Sahel week 2\".",
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title"
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nPlanned\nIn Progress\nCompleted\nCancelled"
+  },
+  {
+   "fieldname": "section_break_start",
+   "fieldtype": "Section Break",
+   "label": "Start"
+  },
+  {
+   "default": "Current Location",
+   "description": "Where the day begins. \"Current Location\" resolves on the phone when the rep opens the plan; \"Fixed Point\" uses the coordinates below.",
+   "fieldname": "start_mode",
+   "fieldtype": "Select",
+   "label": "Start From",
+   "options": "Current Location\nFixed Point"
+  },
+  {
+   "fieldname": "start_label",
+   "fieldtype": "Data",
+   "label": "Start Label"
+  },
+  {
+   "fieldname": "start_latitude",
+   "fieldtype": "Float",
+   "label": "Start Latitude",
+   "precision": "6"
+  },
+  {
+   "fieldname": "start_longitude",
+   "fieldtype": "Float",
+   "label": "Start Longitude",
+   "precision": "6"
+  },
+  {
+   "fieldname": "column_break_start",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "planned_start_time",
+   "fieldtype": "Time",
+   "label": "Start Time"
+  },
+  {
+   "description": "Minutes per visit, unless a stop overrides it.",
+   "fieldname": "default_visit_minutes",
+   "fieldtype": "Int",
+   "label": "Default Visit Minutes",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "Close the loop back to the start point. Costs the return drive into the day's total.",
+   "fieldname": "return_to_start",
+   "fieldtype": "Check",
+   "label": "Return To Start"
+  },
+  {
+   "fieldname": "section_break_stops",
+   "fieldtype": "Section Break",
+   "label": "Route"
+  },
+  {
+   "description": "Row order IS the visiting order.",
+   "fieldname": "stops",
+   "fieldtype": "Table",
+   "label": "Stops",
+   "options": "Jarz Visit Stop"
+  },
+  {
+   "fieldname": "section_break_totals",
+   "fieldtype": "Section Break",
+   "label": "Totals"
+  },
+  {
+   "fieldname": "total_stops",
+   "fieldtype": "Int",
+   "label": "Stops",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_distance_km",
+   "fieldtype": "Float",
+   "label": "Distance (km)",
+   "precision": "2",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_drive_minutes",
+   "fieldtype": "Int",
+   "label": "Driving (min)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_totals",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Driving plus time inside the venues.",
+   "fieldname": "total_duration_minutes",
+   "fieldtype": "Int",
+   "label": "Total Day (min)",
+   "read_only": 1
+  },
+  {
+   "description": "Which engine produced the totals: osrm = real road distances, haversine = straight-line estimate.",
+   "fieldname": "route_engine",
+   "fieldtype": "Data",
+   "label": "Route Engine",
+   "read_only": 1
+  },
+  {
+   "fieldname": "optimized_on",
+   "fieldtype": "Datetime",
+   "label": "Optimised On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_notes",
+   "fieldtype": "Section Break",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Visit Plan",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "B2B Sales Rep",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "visit_date",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
