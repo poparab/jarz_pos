@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<!--
+	Customer-facing sales-material page: the thing a WhatsApp link opens.
+
+	A DELIBERATELY STANDALONE DOCUMENT, for the same reason www/track.html is.
+	Frappe only wraps a www template in a base template when the source contains
+	neither a Jinja "extends" tag nor a closing body tag (see
+	TemplatePage.set_properties_from_source), so the closing body tag at the
+	bottom is load-bearing: remove it and this page silently starts pulling the
+	whole website asset bundle. Note also that a Jinja tag written literally
+	anywhere in this file - even inside an HTML comment - is still parsed by
+	Jinja, which is why this paragraph spells the tag out in prose.
+
+	No external requests of any kind: no CDN, no web font, no analytics. The
+	audience is a cafe owner on Egyptian mobile data who tapped a link to look
+	at a price list, and every extra origin is another DNS round trip before
+	they see anything. `<meta name="referrer" content="no-referrer">` is a
+	security control on top of that: without it, any third-party request would
+	carry `Referer: https://.../m/<token>` - the link's only credential - into
+	somebody else's access log.
+
+	=====================================================================
+	THE ZOOM, WHICH IS THE ENTIRE POINT OF THIS PAGE
+	=====================================================================
+
+	The brief was "better than the image in his phone's gallery, with no lag".
+	Four decisions get there, and none of them is optional:
+
+	1. TRANSFORMS ONLY, NEVER LAYOUT. Pinch and pan write nothing but
+	   `transform: translate3d(...) scale(...)` on one promoted element. No
+	   width, no height, no `top`, no scroll position - so the browser never
+	   runs layout or paint mid-gesture, only compositing, which is the
+	   difference between 60fps and the stutter everyone recognises.
+
+	2. ONE WRITE PER FRAME. Pointer handlers only mutate a state object; a
+	   single requestAnimationFrame loop is the only thing that touches the
+	   DOM. Handlers that write styles directly force a style recalc per
+	   pointermove event, and a finger produces far more of those than there
+	   are frames.
+
+	3. `will-change: transform` DURING the gesture, REMOVED AFTER IT. This is
+	   the trick that makes the result sharp. A promoted layer is rasterised
+	   once at the scale it had when it was promoted and then stretched by the
+	   compositor - fast, but blurry the moment you zoom in. Dropping
+	   `will-change` when the gesture settles forces the browser to re-raster
+	   at the scale that is actually on screen. So: smooth while moving, crisp
+	   the instant you stop. Keeping the hint on permanently (the usual
+	   "optimisation") would leave every zoomed price list looking soft.
+
+	4. A RESOLUTION LADDER, ESCALATED ON DEMAND. The viewer opens on the
+	   1600px tier because it arrives fast, and swaps in the 3200px tier once
+	   the reader zooms past what 1600 can show. The swap goes through
+	   `img.decode()` so the JPEG is decoded off the main thread and the new
+	   pixels appear on a frame boundary instead of janking one. Only the page
+	   being read holds the big tier; neighbours are downgraded, because a
+	   decoded 3200x2400 JPEG is ~30MB of RAM and three of them is an
+	   out-of-memory kill on the phones this audience carries.
+
+	The consequence worth stating plainly: at 1600px the page is already
+	sharper than the phone can display, and past that it keeps revealing real
+	detail up to roughly 1.5x native device pixels of a 3200px render. That is
+	genuinely more than opening the same file from the gallery, where the
+	system viewer shows a downscaled copy.
+-->
+<html lang="ar" dir="rtl">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="referrer" content="no-referrer">
+	<meta name="robots" content="noindex, nofollow, noarchive">
+	<meta name="theme-color" content="#0f172a">
+	<title>Jarz</title>
+	<style>
+		:root {
+			--bg: #f4f5f7;
+			--card: #ffffff;
+			--ink: #111827;
+			--muted: #6b7280;
+			--line: #e5e7eb;
+			--brand: #0f172a;
+			--accent: #16a34a;
+			--radius: 18px;
+		}
+		* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+		html, body { margin: 0; padding: 0; }
+		body {
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+				"Noto Sans Arabic", "Noto Kufi Arabic", Tahoma, Arial, sans-serif;
+			background: var(--bg);
+			color: var(--ink);
+			-webkit-text-size-adjust: 100%;
+			overflow-wrap: anywhere;
+		}
+		body.locked { overflow: hidden; }
+
+		header {
+			background: var(--brand);
+			color: #fff;
+			padding: 18px 18px calc(18px + env(safe-area-inset-top, 0px));
+			padding-top: calc(18px + env(safe-area-inset-top, 0px));
+			display: flex;
+			align-items: baseline;
+			gap: 10px;
+		}
+		.brand { font-size: 22px; font-weight: 800; letter-spacing: .5px; }
+		.greeting { font-size: 14px; opacity: .82; }
+
+		main { padding: 14px 14px 28px; max-width: 720px; margin: 0 auto; }
+
+		.card {
+			background: var(--card);
+			border: 1px solid var(--line);
+			border-radius: var(--radius);
+			overflow: hidden;
+			margin-bottom: 14px;
+			box-shadow: 0 1px 2px rgba(16, 24, 40, .05);
+		}
+		.shot {
+			display: block;
+			width: 100%;
+			border: 0;
+			padding: 0;
+			margin: 0;
+			background: #eef0f3;
+			cursor: pointer;
+			position: relative;
+			/* Reserve the box before the thumbnail decodes so the list does not
+			   jump under the reader's thumb as images arrive. */
+			aspect-ratio: 4 / 3;
+		}
+		.shot img {
+			width: 100%;
+			height: 100%;
+			object-fit: cover;
+			object-position: top center;
+			display: block;
+		}
+		.badge {
+			position: absolute;
+			inset-inline-end: 10px;
+			top: 10px;
+			background: rgba(15, 23, 42, .78);
+			color: #fff;
+			font-size: 12px;
+			padding: 4px 9px;
+			border-radius: 999px;
+		}
+		.meta { padding: 12px 14px 14px; display: flex; align-items: center; gap: 12px; }
+		.meta h2 { margin: 0; font-size: 16px; font-weight: 700; flex: 1; }
+		.meta .kind { display: block; font-size: 12.5px; color: var(--muted); font-weight: 500; margin-top: 3px; }
+		.dl {
+			flex: none;
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			font-size: 13px;
+			text-decoration: none;
+			color: var(--ink);
+			border: 1px solid var(--line);
+			border-radius: 999px;
+			padding: 8px 12px;
+			background: #fff;
+		}
+		.hintbar {
+			text-align: center;
+			color: var(--muted);
+			font-size: 13px;
+			margin: 2px 0 16px;
+		}
+
+		.state { text-align: center; padding: 60px 24px; color: var(--muted); }
+		.state h2 { color: var(--ink); font-size: 18px; margin: 0 0 8px; }
+		.skel { height: 190px; border-radius: var(--radius); background: linear-gradient(90deg, #e9ebef 25%, #f3f4f6 37%, #e9ebef 63%); background-size: 400% 100%; animation: sh 1.3s ease infinite; margin-bottom: 14px; }
+		@keyframes sh { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+
+		footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 20px 30px; }
+
+		/* ── viewer ───────────────────────────────────────────────────── */
+		#viewer {
+			position: fixed;
+			inset: 0;
+			background: #000;
+			z-index: 50;
+			display: none;
+			/* The stage owns every touch. Without this the browser scrolls the
+			   page and zooms the document underneath our own gesture. */
+			touch-action: none;
+			user-select: none;
+			-webkit-user-select: none;
+			overscroll-behavior: none;
+		}
+		#viewer.open { display: block; }
+		#stage { position: absolute; inset: 0; overflow: hidden; contain: strict; }
+		#track { position: absolute; top: 0; left: 0; height: 100%; will-change: transform; }
+		.slot { position: absolute; top: 0; height: 100%; overflow: hidden; }
+		.canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+		/* Promoted only while a finger is down - see decision 3 in the header
+		   comment. This one line is the difference between sharp and soft. */
+		.canvas.moving { will-change: transform; }
+		.canvas img {
+			display: block;
+			width: 100%;
+			height: 100%;
+			-webkit-user-drag: none;
+			user-select: none;
+			pointer-events: none;
+		}
+		#vtop, #vbot {
+			position: absolute;
+			left: 0; right: 0;
+			display: flex;
+			align-items: center;
+			gap: 12px;
+			padding: 12px 14px;
+			color: #fff;
+			transition: opacity .2s ease;
+			pointer-events: none;
+		}
+		#vtop { top: 0; padding-top: calc(12px + env(safe-area-inset-top, 0px)); background: linear-gradient(rgba(0,0,0,.66), rgba(0,0,0,0)); }
+		#vbot { bottom: 0; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); justify-content: center; background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.6)); }
+		#vtop *, #vbot * { pointer-events: auto; }
+		#viewer.chrome-off #vtop, #viewer.chrome-off #vbot { opacity: 0; }
+		.vbtn {
+			background: rgba(255,255,255,.14);
+			border: 0;
+			color: #fff;
+			width: 38px; height: 38px;
+			border-radius: 50%;
+			font-size: 18px;
+			line-height: 1;
+			cursor: pointer;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			text-decoration: none;
+			flex: none;
+		}
+		#vtitle { flex: 1; font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		#counter { font-size: 13px; background: rgba(0,0,0,.45); padding: 5px 12px; border-radius: 999px; }
+		#hint {
+			position: absolute;
+			left: 50%;
+			top: 50%;
+			transform: translate(-50%, -50%);
+			background: rgba(0,0,0,.62);
+			color: #fff;
+			padding: 10px 16px;
+			border-radius: 999px;
+			font-size: 14px;
+			opacity: 0;
+			transition: opacity .35s ease;
+			pointer-events: none;
+		}
+		#hint.show { opacity: 1; }
+	</style>
+</head>
+<body>
+	<header>
+		<div class="brand">Jarz</div>
+		<div class="greeting" id="greeting"></div>
+	</header>
+
+	<main id="feed">
+		<div class="skel"></div>
+		<div class="skel"></div>
+	</main>
+
+	<footer id="foot"></footer>
+
+	<div id="viewer" role="dialog" aria-modal="true" aria-label="viewer">
+		<div id="stage"><div id="track"></div></div>
+		<div id="vtop">
+			<button class="vbtn" id="close" aria-label="close">&#10005;</button>
+			<div id="vtitle"></div>
+			<a class="vbtn" id="vdl" href="#" download aria-label="download">&#8681;</a>
+		</div>
+		<div id="vbot"><span id="counter"></span></div>
+		<div id="hint">&#9757; قرّب بإصبعك للتكبير</div>
+	</div>
+
+	<script>
+	(function () {
+		"use strict";
+
+		var ENDPOINT = "{{ share_endpoint or '/api/method/jarz_pos.api.materials.get_public_share' }}";
+
+		var feed = document.getElementById("feed");
+		var viewer = document.getElementById("viewer");
+		var stage = document.getElementById("stage");
+		var track = document.getElementById("track");
+		var vtitle = document.getElementById("vtitle");
+		var vdl = document.getElementById("vdl");
+		var counter = document.getElementById("counter");
+		var hint = document.getElementById("hint");
+
+		/* Flat list of every page across every material: the viewer pages
+		   through a price list straight into the product photos, which is how
+		   somebody actually reads this. */
+		var PAGES = [];
+		var slots = [];
+		var cur = 0;
+		var vw = 0, vh = 0;
+		var dpr = Math.min(window.devicePixelRatio || 1, 3);
+
+		/* The one source of truth for what is on screen. Gesture handlers
+		   write here and nowhere else; render() is the only DOM writer. */
+		var st = { scale: 1, x: 0, y: 0 };
+
+		var frame = null;
+		var trackX = 0;
+		var settleTimer = null;
+
+		// ── data ──────────────────────────────────────────────────────────
+
+		function token() {
+			var parts = window.location.pathname.split("/").filter(Boolean);
+			return parts.length ? decodeURIComponent(parts[parts.length - 1]) : "";
+		}
+
+		/* Escapes for BOTH text and attribute position: a text node's innerHTML
+		   leaves quotes alone, which is fine between tags and an attribute
+		   break-out inside one. Titles here are staff-authored, but "the
+		   attacker is inside the building" is not a security model. */
+		function esc(text) {
+			return String(text == null ? "" : text)
+				.replace(/&/g, "&amp;")
+				.replace(/</g, "&lt;")
+				.replace(/>/g, "&gt;")
+				.replace(/"/g, "&quot;")
+				.replace(/'/g, "&#39;");
+		}
+
+		function fail(title, detail) {
+			feed.innerHTML =
+				'<div class="state"><h2>' + esc(title) + "</h2><p>" + esc(detail) + "</p></div>";
+		}
+
+		function load() {
+			var tok = token();
+			if (!tok) { return fail("الرابط غير صحيح", "افتح الرابط اللي وصلك من غير تعديل."); }
+			fetch(ENDPOINT + "?token=" + encodeURIComponent(tok), {
+				headers: { Accept: "application/json" },
+				credentials: "omit"
+			})
+				.then(function (response) { return response.json(); })
+				.then(function (payload) {
+					var data = (payload && payload.message) || payload || {};
+					if (!data.ok) {
+						return fail(
+							"الرابط ده مش شغال",
+							"يمكن يكون انتهى أو اتغير. كلّم اللي بعتهولك وهيبعتلك واحد جديد."
+						);
+					}
+					render(data);
+				})
+				.catch(function () {
+					fail("مش قادرين نحمّل المحتوى", "اتأكد إن النت شغال وجرّب تاني.");
+				});
+		}
+
+		function render(data) {
+			if (data.greeting_name) {
+				document.getElementById("greeting").textContent = "أهلاً " + data.greeting_name;
+			}
+			PAGES = [];
+			var html = "";
+			(data.items || []).forEach(function (item) {
+				var start = PAGES.length;
+				(item.pages || []).forEach(function (page, pageIndex) {
+					PAGES.push({
+						thumb: page.thumb,
+						screen: page.screen,
+						full: page.full,
+						w: page.w,
+						h: page.h,
+						title: item.title,
+						pageIndex: pageIndex,
+						pageCount: (item.pages || []).length,
+						download: item.download_url
+					});
+				});
+				var count = PAGES.length - start;
+				/* A material we could not rasterise (a .docx price list, a PDF
+				   uploaded before the renderer existed) still gets a card, with
+				   the download as its only action. Dropping it would make the
+				   rep's send silently incomplete. */
+				if (!count && !item.download_url) { return; }
+				html +=
+					'<article class="card">' +
+					(count
+						? '<button class="shot" data-start="' + start + '">' +
+						  '<img loading="lazy" decoding="async" src="' + esc(PAGES[start].thumb) + '" alt="">' +
+						  (count > 1 ? '<span class="badge">' + count + " صفحات</span>" : "") +
+						  "</button>"
+						: "") +
+					'<div class="meta"><h2>' + esc(item.title) +
+					'<span class="kind">' + esc(item.type || "") + "</span></h2>" +
+					(item.download_url
+						? '<a class="dl" href="' + esc(item.download_url) + '" download>&#8681; تحميل</a>'
+						: "") +
+					"</div></article>";
+			});
+
+			if (!html) {
+				return fail("مفيش حاجة هنا", "كلّم اللي بعتلك الرابط.");
+			}
+
+			feed.innerHTML =
+				(PAGES.length ? '<p class="hintbar">دوس على أي صورة عشان تكبّرها</p>' : "") + html;
+			Array.prototype.forEach.call(feed.querySelectorAll(".shot"), function (button) {
+				button.addEventListener("click", function () {
+					open(parseInt(button.getAttribute("data-start"), 10) || 0);
+				});
+			});
+			document.getElementById("foot").textContent = "Jarz";
+		}
+
+		// ── geometry ──────────────────────────────────────────────────────
+
+		function measure() {
+			vw = stage.clientWidth;
+			vh = stage.clientHeight;
+			dpr = Math.min(window.devicePixelRatio || 1, 3);
+		}
+
+		/* Size the page at "fit": the largest it can be while fully visible.
+		   scale === 1 always means this, on every page and every device, which
+		   is what lets clamping and the zoom ceiling be expressed in one
+		   number. */
+		function baseSize(page) {
+			var ratio = Math.min(vw / page.w, vh / page.h);
+			return { w: Math.max(1, page.w * ratio), h: Math.max(1, page.h * ratio) };
+		}
+
+		/* The zoom ceiling, per page. `native` is the scale at which one source
+		   pixel lands on one device pixel - past it you are magnifying, not
+		   revealing. 1.5x of that is allowed on purpose: somebody squinting at
+		   a price list wants it BIG more than they want it perfect. */
+		function maxScale(index) {
+			var slot = slots[index];
+			if (!slot) { return 4; }
+			var native = PAGES[index].w / Math.max(1, slot.base.w * dpr);
+			return Math.min(10, Math.max(3, native * 1.5));
+		}
+
+		function layout() {
+			measure();
+			track.style.width = (PAGES.length * vw) + "px";
+			slots.forEach(function (slot, index) {
+				slot.el.style.left = (index * vw) + "px";
+				slot.el.style.width = vw + "px";
+				slot.base = baseSize(PAGES[index]);
+				slot.canvas.style.width = slot.base.w + "px";
+				slot.canvas.style.height = slot.base.h + "px";
+				if (index !== cur) { resetSlot(index); }
+			});
+			if (slots[cur]) { reset(cur, false); }
+			trackX = -cur * vw;
+			renderTrack();
+		}
+
+		function resetSlot(index) {
+			var slot = slots[index];
+			if (!slot) { return; }
+			slot.canvas.style.transform =
+				"translate3d(" + ((vw - slot.base.w) / 2) + "px," +
+				((vh - slot.base.h) / 2) + "px,0) scale(1)";
+		}
+
+		function reset(index, animate) {
+			var slot = slots[index];
+			if (!slot) { return; }
+			var target = { scale: 1, x: (vw - slot.base.w) / 2, y: (vh - slot.base.h) / 2 };
+			/* Written synchronously, not scheduled. A page opened or paged to
+			   must be centred on the frame it becomes visible; deferring to
+			   rAF shows it once at the top-left corner first. */
+			if (animate) { tween(target); } else { st = target; write(); }
+		}
+
+		// ── rendering ─────────────────────────────────────────────────────
+
+		/* The ONLY function that writes a transform. Everything else mutates
+		   `st` and asks for a frame - see decision 2 in the header comment. */
+		function write() {
+			var slot = slots[cur];
+			if (slot) {
+				slot.canvas.style.transform =
+					"translate3d(" + st.x + "px," + st.y + "px,0) scale(" + st.scale + ")";
+			}
+			renderTrack();
+		}
+
+		function schedule() {
+			if (frame) { return; }
+			frame = requestAnimationFrame(function () {
+				frame = null;
+				write();
+			});
+		}
+
+		function renderTrack() {
+			track.style.transform = "translate3d(" + trackX + "px,0,0)";
+		}
+
+		function clamp(state, slack) {
+			var slot = slots[cur];
+			if (!slot) { return state; }
+			var width = slot.base.w * state.scale;
+			var height = slot.base.h * state.scale;
+			var give = slack || 0;
+			if (width <= vw) {
+				state.x = (vw - width) / 2;
+			} else {
+				state.x = Math.min(give, Math.max(vw - width - give, state.x));
+			}
+			if (height <= vh) {
+				state.y = (vh - height) / 2;
+			} else {
+				state.y = Math.min(give, Math.max(vh - height - give, state.y));
+			}
+			return state;
+		}
+
+		// ── tiers ─────────────────────────────────────────────────────────
+
+		function ensureScreen(index) {
+			var slot = slots[index];
+			if (!slot || slot.tier) { return; }
+			slot.tier = "screen";
+			slot.img.src = PAGES[index].screen;
+		}
+
+		/* Swap in the 3200px render once the reader has zoomed past what the
+		   1600px one can show. Decoding happens off the main thread and the
+		   visible src is only replaced afterwards, so the sharper pixels
+		   appear without dropping a frame - and because the bytes are already
+		   in the HTTP cache by then, the assignment is effectively free. */
+		function ensureFull(index) {
+			var slot = slots[index];
+			var page = PAGES[index];
+			if (!slot || !page || !page.full || slot.tier === "full" || slot.loading) { return; }
+			if (st.scale * slot.base.w * dpr <= 1600 * 1.02) { return; }
+			slot.loading = true;
+			var probe = new Image();
+			probe.decoding = "async";
+			var done = false;
+			var commit = function () {
+				if (done) { return; }
+				done = true;
+				slot.loading = false;
+				if (slots[index] === slot) { slot.img.src = page.full; slot.tier = "full"; }
+			};
+			var giveUp = function () {
+				if (done) { return; }
+				done = true;
+				slot.loading = false;
+			};
+
+			/* `decode()` is the preferred path: it does the JPEG work off the
+			   main thread, so swapping the src afterwards cannot jank a frame.
+			   But its promise is only guaranteed to settle when the image is
+			   ready to be PAINTED, and a page that is backgrounded (or a
+			   browser that simply never fulfils it) would otherwise leave
+			   `loading` latched true and this page stuck on the blurrier tier
+			   forever. So `onload` arms a short grace period and then commits
+			   anyway - a possible single dropped frame, versus a zoom that
+			   silently never sharpens. */
+			probe.onload = function () {
+				if (!probe.decode) { return commit(); }
+				setTimeout(function () { commit(); }, 600);
+			};
+			probe.onerror = giveUp;
+			probe.src = page.full;
+			if (probe.decode) { probe.decode().then(commit).catch(giveUp); }
+		}
+
+		/* A decoded 3200x2400 JPEG is ~30MB of RAM. Exactly one page is allowed
+		   to hold one. */
+		function downgradeOthers() {
+			slots.forEach(function (slot, index) {
+				if (index !== cur && slot && slot.tier === "full") {
+					slot.img.src = PAGES[index].screen;
+					slot.tier = "screen";
+				}
+			});
+		}
+
+		function warm() {
+			[cur - 1, cur, cur + 1].forEach(function (index) {
+				if (index >= 0 && index < slots.length) { ensureScreen(index); }
+			});
+		}
+
+		// ── open / close ──────────────────────────────────────────────────
+
+		function build() {
+			track.innerHTML = "";
+			slots = PAGES.map(function (page) {
+				var el = document.createElement("div");
+				el.className = "slot";
+				var canvas = document.createElement("div");
+				canvas.className = "canvas";
+				var img = document.createElement("img");
+				img.alt = "";
+				img.decoding = "async";
+				canvas.appendChild(img);
+				el.appendChild(canvas);
+				track.appendChild(el);
+				return { el: el, canvas: canvas, img: img, base: { w: 1, h: 1 }, tier: null, loading: false };
+			});
+		}
+
+		function open(index) {
+			build();
+			cur = Math.max(0, Math.min(index, PAGES.length - 1));
+			viewer.classList.add("open");
+			document.body.classList.add("locked");
+			layout();
+			warm();
+			paint();
+			try { history.pushState({ viewer: true }, ""); } catch (error) { /* file:// */ }
+			var seenHint = false;
+			try { seenHint = !!localStorage.getItem("jz_hint"); } catch (error) { /* private mode throws on ACCESS, not just on write */ }
+			if (!seenHint) {
+				hint.classList.add("show");
+				setTimeout(function () { hint.classList.remove("show"); }, 2600);
+				try { localStorage.setItem("jz_hint", "1"); } catch (error) { /* nothing to do */ }
+			}
+		}
+
+		function close() {
+			viewer.classList.remove("open");
+			document.body.classList.remove("locked");
+			track.innerHTML = "";
+			slots = [];
+		}
+
+		function paint() {
+			var page = PAGES[cur];
+			vtitle.textContent =
+				page.pageCount > 1
+					? page.title + " (" + (page.pageIndex + 1) + "/" + page.pageCount + ")"
+					: page.title;
+			counter.textContent = (cur + 1) + " / " + PAGES.length;
+			if (page.download) { vdl.href = page.download; vdl.style.display = ""; }
+			else { vdl.style.display = "none"; }
+		}
+
+		function goto(index, animate) {
+			var next = Math.max(0, Math.min(index, PAGES.length - 1));
+			var from = trackX;
+			var to = -next * vw;
+			cur = next;
+			reset(next, false);
+			warm();
+			downgradeOthers();
+			paint();
+			if (!animate) { trackX = to; renderTrack(); return; }
+			animateValue(from, to, 260, function (value) { trackX = value; renderTrack(); });
+		}
+
+		// ── animation helpers ─────────────────────────────────────────────
+
+		function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+		function animateValue(from, to, duration, step, done) {
+			var start = performance.now();
+			(function tick(now) {
+				var t = Math.min(1, (now - start) / duration);
+				step(from + (to - from) * easeOut(t));
+				if (t < 1) { requestAnimationFrame(tick); } else if (done) { done(); }
+			})(start);
+		}
+
+		var tweening = false;
+
+		function tween(target) {
+			var from = { scale: st.scale, x: st.x, y: st.y };
+			var start = performance.now();
+			tweening = true;
+			(function tick(now) {
+				if (!tweening) { return; }
+				var t = Math.min(1, (now - start) / 240);
+				var e = easeOut(t);
+				st.scale = from.scale + (target.scale - from.scale) * e;
+				st.x = from.x + (target.x - from.x) * e;
+				st.y = from.y + (target.y - from.y) * e;
+				schedule();
+				if (t < 1) { requestAnimationFrame(tick); }
+				else { tweening = false; settle(); }
+			})(start);
+		}
+
+		function moving(on) {
+			var slot = slots[cur];
+			if (!slot) { return; }
+			slot.canvas.classList.toggle("moving", !!on);
+		}
+
+		/* Decision 3 in the header comment: drop the compositor hint a beat
+		   after the finger leaves, which forces a re-raster at the scale that
+		   is actually on screen. Then decide whether the bigger tier is worth
+		   fetching. */
+		function settle() {
+			clearTimeout(settleTimer);
+			settleTimer = setTimeout(function () {
+				moving(false);
+				ensureFull(cur);
+			}, 140);
+		}
+
+		// ── gestures ──────────────────────────────────────────────────────
+
+		var pointers = new Map();
+		var mode = null;        // "pan" | "pinch" | "page" | "dismiss" | null
+		var startState = null;
+		var startDist = 0;
+		var anchor = null;
+		var last = null;
+		var down = null;
+		var velocity = { x: 0, y: 0 };
+		var samples = [];
+
+		/* Fling speed is measured over a ~90ms window, never from the last pair of
+		   events. A finger produces a burst of pointermoves whose individual gaps
+		   are sometimes under a millisecond, so a single-pair reading turns a 20px
+		   nudge into a 20px/ms "fling" and pages the reader off the price list
+		   they were looking at. */
+		function sample(p) {
+			samples.push(p);
+			var cutoff = p.t - 90;
+			while (samples.length > 2 && samples[0].t < cutoff) { samples.shift(); }
+		}
+
+		function measuredVelocity() {
+			if (samples.length < 2) { return { x: 0, y: 0 }; }
+			var first = samples[0];
+			var last_ = samples[samples.length - 1];
+			var dt = last_.t - first.t;
+			if (dt < 8) { return { x: 0, y: 0 }; }
+			return { x: (last_.x - first.x) / dt, y: (last_.y - first.y) / dt };
+		}
+		var lastTap = 0;
+
+		function point(event) { return { x: event.clientX, y: event.clientY, t: performance.now() }; }
+
+		function centre() {
+			var values = Array.from(pointers.values());
+			if (values.length < 2) { return values[0] || { x: 0, y: 0 }; }
+			return { x: (values[0].x + values[1].x) / 2, y: (values[0].y + values[1].y) / 2 };
+		}
+
+		function spread() {
+			var values = Array.from(pointers.values());
+			if (values.length < 2) { return 0; }
+			return Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
+		}
+
+		function rect() { return stage.getBoundingClientRect(); }
+
+		function onDown(event) {
+			if (!viewer.classList.contains("open")) { return; }
+			tweening = false;
+			/* Capture keeps the gesture alive when a finger slides off the
+			   element. It throws for a pointer the browser no longer considers
+			   active (and for a synthesised one), and an exception here would
+			   abandon the whole gesture mid-pinch. */
+			try { stage.setPointerCapture(event.pointerId); } catch (error) { /* not capturable */ }
+			pointers.set(event.pointerId, point(event));
+			moving(true);
+			clearTimeout(settleTimer);
+
+			if (pointers.size === 2) {
+				mode = "pinch";
+				startDist = spread() || 1;
+				startState = { scale: st.scale, x: st.x, y: st.y };
+				var box = rect();
+				var mid = centre();
+				var local = { x: mid.x - box.left, y: mid.y - box.top };
+				anchor = {
+					local: local,
+					content: { x: (local.x - st.x) / st.scale, y: (local.y - st.y) / st.scale }
+				};
+				return;
+			}
+			mode = st.scale > 1.01 ? "pan" : null;
+			last = point(event);
+			down = point(event);
+			velocity = { x: 0, y: 0 };
+			samples = [last];
+		}
+
+		/* Straight-line distance since the finger landed. A zoomed page starts
+		   every touch in "pan" mode, so without this a tap ON a zoomed page is
+		   a zero-length pan and the double-tap that gets you back out never
+		   fires - which strands the reader at 5x with no way back short of
+		   pinching in. */
+		function travel(event) {
+			return down ? Math.hypot(event.clientX - down.x, event.clientY - down.y) : 0;
+		}
+
+		function onMove(event) {
+			if (!pointers.has(event.pointerId)) { return; }
+			pointers.set(event.pointerId, point(event));
+
+			/* One finger lifted out of a pinch. Without this the drag maths
+			   would resume against a `last` captured before the pinch began
+			   and the page would jump by however far the surviving finger
+			   travelled in between. */
+			if (mode === "pinch" && pointers.size < 2) {
+				mode = st.scale > 1.01 ? "pan" : null;
+				last = point(event);
+				velocity = { x: 0, y: 0 };
+				samples = [last];
+				return;
+			}
+
+			if (mode === "pinch") {
+				var ratio = (spread() || 1) / startDist;
+				var next = Math.max(0.85, Math.min(maxScale(cur), startState.scale * ratio));
+				var box = rect();
+				var mid = centre();
+				var local = { x: mid.x - box.left, y: mid.y - box.top };
+				st.scale = next;
+				st.x = local.x - anchor.content.x * next;
+				st.y = local.y - anchor.content.y * next;
+				clamp(st, 60);
+				schedule();
+				return;
+			}
+
+			var now = point(event);
+			var dx = now.x - last.x;
+			var dy = now.y - last.y;
+
+			if (!mode) {
+				/* Axis is decided once, on the first real movement, and then
+				   held. Re-deciding mid-drag is what makes a gallery feel like
+				   it is fighting you. */
+				if (Math.abs(dx) < 6 && Math.abs(dy) < 6) { return; }
+				mode = Math.abs(dx) > Math.abs(dy) ? "page" : "dismiss";
+			}
+
+			sample(now);
+			last = now;
+
+			if (mode === "pan") {
+				st.x += dx;
+				st.y += dy;
+				clamp(st, 80);
+				schedule();
+			} else if (mode === "page") {
+				var resist = (cur === 0 && dx > 0) || (cur === PAGES.length - 1 && dx < 0) ? 0.35 : 1;
+				trackX += dx * resist;
+				renderTrack();
+			} else if (mode === "dismiss") {
+				st.y += dy;
+				st.x += dx * 0.35;
+				schedule();
+			}
+		}
+
+		function onUp(event) {
+			velocity = measuredVelocity();
+			pointers.delete(event.pointerId);
+			try { stage.releasePointerCapture(event.pointerId); } catch (error) { /* already gone */ }
+
+			if (mode === "pinch") {
+				if (pointers.size > 0) { return; }
+				mode = null;
+				if (st.scale < 1.02) { reset(cur, true); } else { tween(clamp({ scale: st.scale, x: st.x, y: st.y }, 0)); }
+				return;
+			}
+
+			if (mode === "page") {
+				mode = null;
+				var offset = trackX + cur * vw;
+				var flung = Math.abs(velocity.x) > 0.45 && Math.abs(offset) > 12;
+				var moved = Math.abs(offset) > vw * 0.22;
+				var direction = offset > 0 ? -1 : 1;   // dragging right shows the previous page
+				if ((flung || moved) && PAGES[cur + direction]) {
+					var target = cur + direction;
+					var from = trackX;
+					animateValue(from, -target * vw, 240, function (value) { trackX = value; renderTrack(); },
+						function () { goto(target, false); });
+				} else {
+					animateValue(trackX, -cur * vw, 220, function (value) { trackX = value; renderTrack(); });
+				}
+				settle();
+				return;
+			}
+
+			if (mode === "dismiss") {
+				mode = null;
+				var slot = slots[cur];
+				var travelled = slot ? st.y - (vh - slot.base.h) / 2 : 0;
+				if (Math.abs(travelled) > vh * 0.18 || Math.abs(velocity.y) > 0.6) {
+					closeFromHistory();
+				} else {
+					reset(cur, true);
+				}
+				return;
+			}
+
+			if (mode === "pan") {
+				mode = null;
+				/* A pan that never moved is a tap on a zoomed page. */
+				if (travel(event) < 8) { tap(event); settle(); return; }
+				glide();
+				return;
+			}
+
+			mode = null;
+			tap(event);
+			settle();
+		}
+
+		/* Inertia after a pan. Deliberately short and heavily damped: this is a
+		   document being read, not a photo being flicked through, and a long
+		   glide past the line you were reading is irritating rather than
+		   delightful. */
+		function glide() {
+			var vx = velocity.x * 14;
+			var vy = velocity.y * 14;
+			(function tick() {
+				if (mode || tweening) { return; }
+				vx *= 0.92;
+				vy *= 0.92;
+				st.x += vx;
+				st.y += vy;
+				var before = { x: st.x, y: st.y };
+				clamp(st, 0);
+				if (st.x !== before.x) { vx = 0; }
+				if (st.y !== before.y) { vy = 0; }
+				schedule();
+				if (Math.abs(vx) > 0.15 || Math.abs(vy) > 0.15) { requestAnimationFrame(tick); }
+				else { settle(); }
+			})();
+		}
+
+		function tap(event) {
+			var now = performance.now();
+			var isDouble = now - lastTap < 300;
+			lastTap = now;
+			if (!isDouble) {
+				setTimeout(function () {
+					if (performance.now() - lastTap >= 290) { viewer.classList.toggle("chrome-off"); }
+				}, 300);
+				return;
+			}
+			lastTap = 0;
+			var slot = slots[cur];
+			if (!slot) { return; }
+			if (st.scale > 1.05) { return reset(cur, true); }
+
+			/* Double-tap on a portrait document goes to fit-WIDTH, which is the
+			   scale at which a price list is actually readable. A photo that
+			   already fills the width gets a plain 2.6x instead. */
+			var fitWidth = vw / slot.base.w;
+			var target = fitWidth > 1.15
+				? Math.min(fitWidth, maxScale(cur))
+				: Math.min(2.6, maxScale(cur));
+			var box = rect();
+			var local = { x: event.clientX - box.left, y: event.clientY - box.top };
+			var content = { x: (local.x - st.x) / st.scale, y: (local.y - st.y) / st.scale };
+			tween(clamp({
+				scale: target,
+				x: local.x - content.x * target,
+				y: local.y - content.y * target
+			}, 0));
+		}
+
+		function closeFromHistory() {
+			if (history.state && history.state.viewer) { history.back(); } else { close(); }
+		}
+
+		// ── wiring ────────────────────────────────────────────────────────
+
+		if (window.PointerEvent) {
+			stage.addEventListener("pointerdown", onDown, { passive: true });
+			stage.addEventListener("pointermove", onMove, { passive: true });
+			stage.addEventListener("pointerup", onUp, { passive: true });
+			stage.addEventListener("pointercancel", onUp, { passive: true });
+		} else {
+			/* No Pointer Events (pre-2019 Safari). Rather than ship a second
+			   gesture engine, hand the page back to the browser: native scroll
+			   and native pinch on a plain image is worse, but it works. */
+			stage.style.touchAction = "auto";
+			stage.style.overflow = "auto";
+		}
+
+		/* iOS Safari zooms the whole document on a pinch unless these are
+		   cancelled, and it does so *underneath* our transform - producing a
+		   page that is zoomed twice and cannot be reset. */
+		["gesturestart", "gesturechange", "gestureend"].forEach(function (name) {
+			viewer.addEventListener(name, function (event) {
+				if (viewer.classList.contains("open")) { event.preventDefault(); }
+			});
+		});
+		stage.addEventListener("touchmove", function (event) {
+			if (viewer.classList.contains("open")) { event.preventDefault(); }
+		}, { passive: false });
+		stage.addEventListener("contextmenu", function (event) { event.preventDefault(); });
+		stage.addEventListener("dblclick", function (event) { event.preventDefault(); });
+
+		document.getElementById("close").addEventListener("click", closeFromHistory);
+		window.addEventListener("popstate", function () {
+			if (viewer.classList.contains("open")) { close(); }
+		});
+		window.addEventListener("keydown", function (event) {
+			if (!viewer.classList.contains("open")) { return; }
+			if (event.key === "Escape") { closeFromHistory(); }
+			if (event.key === "ArrowRight") { goto(cur + 1, true); }
+			if (event.key === "ArrowLeft") { goto(cur - 1, true); }
+		});
+		window.addEventListener("resize", function () {
+			if (viewer.classList.contains("open")) { layout(); }
+		});
+		window.addEventListener("orientationchange", function () {
+			setTimeout(function () { if (viewer.classList.contains("open")) { layout(); } }, 250);
+		});
+
+		load();
+	})();
+	</script>
+</body>
+</html>

@@ -1,0 +1,191 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "MAT-.#####",
+ "creation": "2026-08-26 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "title_ar",
+  "material_type",
+  "column_break_meta",
+  "enabled",
+  "is_default",
+  "sort_order",
+  "section_break_file",
+  "attachment",
+  "description",
+  "section_break_render",
+  "render_status",
+  "page_count",
+  "column_break_render",
+  "source_hash",
+  "render_error",
+  "render_manifest"
+ ],
+ "fields": [
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title",
+   "reqd": 1
+  },
+  {
+   "description": "Shown to the customer on the shared page when set. The English title is the fallback.",
+   "fieldname": "title_ar",
+   "fieldtype": "Data",
+   "label": "Arabic Title"
+  },
+  {
+   "default": "Price List",
+   "fieldname": "material_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Type",
+   "options": "Price List\nProduct Photos\nCatalog\nCertificate\nOther",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "0",
+   "description": "Pre-selected in the app's send sheet.",
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "label": "Selected by Default"
+  },
+  {
+   "default": "0",
+   "description": "Lowest first, both in the picker and on the shared page.",
+   "fieldname": "sort_order",
+   "fieldtype": "Int",
+   "label": "Sort Order"
+  },
+  {
+   "fieldname": "section_break_file",
+   "fieldtype": "Section Break",
+   "label": "File"
+  },
+  {
+   "description": "PDF or image. The file is published (made non-private) on save, because a customer opening the link is an anonymous visitor.",
+   "fieldname": "attachment",
+   "fieldtype": "Attach",
+   "label": "File",
+   "reqd": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Internal Note"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_break_render",
+   "fieldtype": "Section Break",
+   "label": "Rendering"
+  },
+  {
+   "default": "Pending",
+   "fieldname": "render_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Render Status",
+   "options": "Pending\nReady\nFailed\nDownload Only",
+   "read_only": 1
+  },
+  {
+   "fieldname": "page_count",
+   "fieldtype": "Int",
+   "label": "Pages",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_render",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "source_hash",
+   "fieldtype": "Data",
+   "label": "Source Hash",
+   "read_only": 1
+  },
+  {
+   "fieldname": "render_error",
+   "fieldtype": "Small Text",
+   "label": "Render Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "render_manifest",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Render Manifest",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Sales Material",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "B2B Sales Rep",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "search_fields": "title,material_type",
+ "sort_field": "sort_order",
+ "sort_order": "ASC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 1
+}

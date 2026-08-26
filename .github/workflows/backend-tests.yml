@@ -201,6 +201,10 @@ jobs:
             # run without it is a run with no check on what leaks publicly.
             test_tracking_token
             test_tracking_public_status
+            # B2B sales-material sharing. The WhatsApp MSISDN cases are the
+            # reason this must be in CI: a wrong country code does not error,
+            # it opens a chat with a different real person.
+            test_materials_share
           )
           rc=0
           for m in "${MODULES[@]}"; do

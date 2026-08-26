@@ -80,3 +80,43 @@ def phone_search_terms(value: str | None) -> list[str]:
         if candidate and candidate not in terms:
             terms.append(candidate)
     return terms
+
+
+def whatsapp_msisdn(value: str | None) -> str:
+    """Return the digits-only international MSISDN wa.me needs (``201XXXXXXXXX``).
+
+    ``https://wa.me/<msisdn>`` is unforgiving in a way that matters here: it
+    wants the country code with **no** ``+``, **no** leading zero and **no**
+    separators, and it silently opens a "phone number is not on WhatsApp" dead
+    end for anything else. Our ``mobile_no`` column meanwhile holds four
+    spellings of the same subscriber (see :func:`normalize_phone`), plus the
+    occasional ten-digit ``1111034268`` typed without the trunk zero, so the
+    link cannot be built by string-concatenating whatever is stored.
+
+    Non-Egyptian numbers are passed through digit-stripped rather than guessed
+    at: a wrong country code is worse than an unformatted one, because it opens
+    a chat with a *different real person*.
+    """
+    canonical = normalize_phone(value)
+    digits = "".join(ch for ch in canonical if ch.isdigit())
+    if not digits:
+        return ""
+
+    # International prefix dialled the old way ("0020…").
+    if digits.startswith("00"):
+        digits = digits[2:]
+
+    # Local spelling: 0 + 10 national digits -> swap the trunk zero for "20".
+    if digits.startswith("0") and len(digits) == 11:
+        return "20" + digits[1:]
+
+    # Already international.
+    if digits.startswith("20") and len(digits) == 12:
+        return digits
+
+    # Trunk zero omitted at entry ("1111034268"). Egyptian mobiles are ten
+    # digits and always start with 1, which is what makes this safe to assume.
+    if len(digits) == 10 and digits.startswith("1"):
+        return "20" + digits
+
+    return digits

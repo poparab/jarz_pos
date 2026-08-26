@@ -1,0 +1,50 @@
+{
+ "actions": [],
+ "creation": "2026-08-26 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "material",
+  "title",
+  "material_type"
+ ],
+ "fields": [
+  {
+   "columns": 4,
+   "fieldname": "material",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Material",
+   "options": "Jarz Sales Material",
+   "reqd": 1
+  },
+  {
+   "columns": 5,
+   "description": "Snapshot of the title at send time, so the record still reads correctly after the library entry is renamed.",
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title"
+  },
+  {
+   "columns": 2,
+   "fieldname": "material_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Type"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Material Share Item",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "idx",
+ "sort_order": "ASC",
+ "states": []
+}

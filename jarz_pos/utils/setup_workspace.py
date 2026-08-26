@@ -160,6 +160,8 @@ CARDS = [
             {"label": "Lead", "link_type": "DocType", "link_to": "Lead"},
             {"label": "Opportunity", "link_type": "DocType", "link_to": "Opportunity"},
             {"label": "Jarz Lead Category", "link_type": "DocType", "link_to": "Jarz Lead Category"},
+            {"label": "Sales Material", "link_type": "DocType", "link_to": "Jarz Sales Material"},
+            {"label": "Material Share", "link_type": "DocType", "link_to": "Jarz Material Share"},
         ],
     },
     {
@@ -249,6 +251,8 @@ SIDEBAR_SECTIONS = [
             {"label": "Lead", "link_type": "DocType", "link_to": "Lead"},
             {"label": "Opportunity", "link_type": "DocType", "link_to": "Opportunity"},
             {"label": "Jarz Lead Category", "link_type": "DocType", "link_to": "Jarz Lead Category"},
+            {"label": "Sales Material", "link_type": "DocType", "link_to": "Jarz Sales Material"},
+            {"label": "Material Share", "link_type": "DocType", "link_to": "Jarz Material Share"},
         ],
     },
     {

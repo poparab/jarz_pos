@@ -195,6 +195,10 @@ doctype_js = {
 # which is what builds the absolute URL the Woo app and the POS both hand out.
 website_route_rules = [
     {"from_route": "/track/<token>", "to_route": "track"},
+    # B2B sales material, sent to a prospect on WhatsApp. Same shape as
+    # /track: the token segment is mapped away before TemplatePage sees it,
+    # which is exactly why www/m.py renders nothing per-token.
+    {"from_route": "/m/<token>", "to_route": "m"},
 ]
 
 # Generators

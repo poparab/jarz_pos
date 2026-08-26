@@ -1,3 +1,7 @@
 # Jarz POS Dependencies
 firebase-admin>=6.0.0
 pywebpush>=2.0.0
+# PDF -> image rasteriser for the B2B sales-material viewer. Keep in lockstep
+# with pyproject.toml: the deploy script only reinstalls when one of these two
+# files changes.
+pypdfium2>=4.30.0

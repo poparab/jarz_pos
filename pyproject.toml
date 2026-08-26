@@ -12,6 +12,11 @@ dependencies = [
     "firebase-admin>=6.0.0",
     "sentry-sdk>=2.0.0",
     "pywebpush>=2.0.0",
+    # Rasterises price-list PDFs into the JPEG ladder the customer-facing
+    # material viewer reads (jarz_pos.services.materials). pypdfium2 rather
+    # than pymupdf: Apache/BSD instead of AGPL, and self-contained wheels that
+    # need no system poppler in the container.
+    "pypdfium2>=4.30.0",
 ]
 
 [build-system]

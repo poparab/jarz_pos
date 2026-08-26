@@ -1,0 +1,203 @@
+{
+ "actions": [],
+ "autoname": "MSH-.YYYY.-.#####",
+ "creation": "2026-08-26 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "reference_doctype",
+  "reference_name",
+  "contact_name",
+  "contact_phone",
+  "column_break_meta",
+  "token",
+  "channel",
+  "sent_by",
+  "sent_on",
+  "expires_on",
+  "section_break_items",
+  "items",
+  "section_break_message",
+  "message",
+  "section_break_engagement",
+  "view_count",
+  "first_viewed_on",
+  "column_break_engagement",
+  "last_viewed_on"
+ ],
+ "fields": [
+  {
+   "default": "Lead",
+   "fieldname": "reference_doctype",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Reference Type",
+   "options": "Lead\nOpportunity\nCustomer",
+   "reqd": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Reference",
+   "options": "reference_doctype",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "contact_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Sent To"
+  },
+  {
+   "fieldname": "contact_phone",
+   "fieldtype": "Data",
+   "label": "Phone"
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The unguessable segment of the public link. Never reuse or hand-edit.",
+   "fieldname": "token",
+   "fieldtype": "Data",
+   "label": "Token",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "WhatsApp",
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Channel",
+   "options": "WhatsApp\nLink\nOther"
+  },
+  {
+   "fieldname": "sent_by",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Sent By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sent_on",
+   "fieldtype": "Datetime",
+   "label": "Sent On",
+   "read_only": 1
+  },
+  {
+   "description": "Blank means the link never expires.",
+   "fieldname": "expires_on",
+   "fieldtype": "Datetime",
+   "label": "Expires On"
+  },
+  {
+   "fieldname": "section_break_items",
+   "fieldtype": "Section Break",
+   "label": "Materials"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Materials",
+   "options": "Jarz Material Share Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_message",
+   "fieldtype": "Section Break",
+   "label": "Message"
+  },
+  {
+   "description": "What the rep actually sent, kept so a follow-up reads in context.",
+   "fieldname": "message",
+   "fieldtype": "Text",
+   "label": "Message"
+  },
+  {
+   "fieldname": "section_break_engagement",
+   "fieldtype": "Section Break",
+   "label": "Engagement"
+  },
+  {
+   "default": "0",
+   "fieldname": "view_count",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Views",
+   "read_only": 1
+  },
+  {
+   "fieldname": "first_viewed_on",
+   "fieldtype": "Datetime",
+   "label": "First Opened",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_engagement",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_viewed_on",
+   "fieldtype": "Datetime",
+   "label": "Last Opened",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Material Share",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 0,
+   "export": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "B2B Sales Rep",
+   "share": 0,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
