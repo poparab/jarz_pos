@@ -29,7 +29,23 @@ class DeliveryTrip(Document):
 
     def _compute_double_shipping(self):
         """Double shipping applies when ALL invoices resolve to the same
-        effective territory that has the ``double_shipping_single_trip`` flag."""
+        effective territory that has the ``double_shipping_single_trip`` flag.
+
+        ``Territory.double_shipping_single_trip`` is owned by
+        ``jarz_woocommerce_integration``: that app lists ``Territory`` in its
+        Custom Field fixture filter and ships the field definition, alongside the
+        rest of the territory shipping block (``delivery_income``,
+        ``delivery_expense``) that this flag sits under via ``insert_after``.
+        This app only *reads* it, and deliberately does not declare it — see the
+        ``Territory`` note in ``hooks.py``. Two apps shipping one field means the
+        last migrate to run decides its definition, so the row was dropped here
+        rather than duplicated.
+
+        Consequence to know about: nothing in ``jarz_woocommerce_integration``
+        reads this flag, so a grep there shows it unused. If it is ever removed
+        from that app's fixture, this read silently degrades to ``None`` and
+        double shipping just stops applying — it does not raise.
+        """
         self.is_double_shipping = 0
         self.double_shipping_territory = None
 
