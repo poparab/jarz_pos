@@ -28,6 +28,11 @@ import frappe
 
 DEFAULT_LEAD_CATEGORY = "Coffee"
 
+# The corpus stores the rating source lowercase; the Lead field is a Select whose
+# options are title-cased. An unknown value maps to "" rather than throwing, so a
+# future source name cannot fail a whole import.
+_RATING_SOURCE = {"talabat": "Talabat", "google_maps": "Google Maps"}
+
 # Child (Jarz Lead Branch) fields we accept from each JSON branch object,
 # excluding the special-cased branch_name / latitude / longitude / maps_url.
 _BRANCH_PASSTHROUGH_FIELDS = (
@@ -267,6 +272,12 @@ def _upsert_lead(lead):
     if _has_field("Lead", "custom_on_talabat"):
         doc.custom_on_talabat = 1 if lead.get("onTalabat") else 0
         doc.custom_talabat_areas = json.dumps(_as_list(lead.get("talabatAreas")))
+    if _has_field("Lead", "custom_talabat_rating"):
+        doc.custom_talabat_rating = _float(lead.get("talabatRating"))
+        doc.custom_talabat_reviews = _int(lead.get("talabatReviews"))
+        doc.custom_talabat_rating_source = _RATING_SOURCE.get(
+            (lead.get("talabatRatingSource") or "").lower(), ""
+        )
     doc.custom_primary_area = lead.get("primaryArea")
     doc.custom_areas = json.dumps(_as_list(lead.get("areas")))
     doc.custom_governorates = json.dumps(_as_list(lead.get("governorates")))
@@ -291,6 +302,9 @@ def _upsert_lead(lead):
             "longitude": _float(b.get("lng")),
             "maps_url": b.get("mapsUrl"),
             "on_talabat": 1 if b.get("onTalabat") else 0,
+            "talabat_rating": _float(b.get("talabatRating")),
+            "talabat_reviews": _int(b.get("talabatReviews")),
+            "talabat_rating_source": b.get("talabatRatingSource") or "",
         }
         for f in _BRANCH_PASSTHROUGH_FIELDS:
             if f in b:

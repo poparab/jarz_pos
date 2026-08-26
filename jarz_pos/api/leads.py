@@ -79,6 +79,9 @@ _LEAD_FLAT_FIELDS = [
     "custom_serves_dessert",
     "custom_on_talabat",
     "custom_talabat_areas",
+    "custom_talabat_rating",
+    "custom_talabat_reviews",
+    "custom_talabat_rating_source",
     "custom_primary_area",
     "custom_regions",
     "custom_governorates",
@@ -145,6 +148,9 @@ _TAKEAWAY_FIELDS = (
 _TALABAT_FIELDS = (
     "custom_on_talabat",
     "custom_talabat_areas",
+    "custom_talabat_rating",
+    "custom_talabat_reviews",
+    "custom_talabat_rating_source",
 )
 
 
@@ -220,6 +226,9 @@ _BRANCH_FIELDS = (
     "latitude",
     "longitude",
     "on_talabat",
+    "talabat_rating",
+    "talabat_reviews",
+    "talabat_rating_source",
 )
 
 
@@ -296,6 +305,15 @@ def _map_lead_row(row):
         # delivery zones the listing was seen in.
         "on_talabat": _bool(row.get("custom_on_talabat")),
         "talabat_areas": _json_list(row.get("custom_talabat_areas")),
+        # Rating on the Talabat listing. None means the brand is listed but
+        # unrated (the app showed "New"), which is different from not listed at
+        # all -- check on_talabat, not this. ``talabat_reviews`` is a LOWER
+        # BOUND: the app buckets big counts as "1k+"/"500+" and we store floors.
+        "talabat_rating": _float_or_none(row.get("custom_talabat_rating")),
+        "talabat_reviews": _int(row.get("custom_talabat_reviews")),
+        # "talabat" | "google_maps" | "". google_maps means Talabat is showing
+        # Google's score because the venue has none of its own yet.
+        "talabat_rating_source": row.get("custom_talabat_rating_source") or "",
         "primary_area": row.get("custom_primary_area"),
         "regions": _json_list(row.get("custom_regions")),
         "governorates": _json_list(row.get("custom_governorates")),
@@ -613,6 +631,9 @@ def get_lead(name):
                 # Coerced, not passed through: a Frappe Check column reads back
                 # as 0/1, and the client decodes this key as a real bool.
                 "on_talabat": _bool(row.get("on_talabat")),
+                "talabat_rating": _float_or_none(row.get("talabat_rating")),
+                "talabat_reviews": _int(row.get("talabat_reviews")),
+                "talabat_rating_source": row.get("talabat_rating_source") or "",
             }
         )
     result["branches"] = branches
@@ -749,6 +770,9 @@ _SCALAR_FIELD_MAP = {
     "primary_area": "custom_primary_area",
     "is_specialty": "custom_is_specialty",
     "on_talabat": "custom_on_talabat",
+    "talabat_rating": "custom_talabat_rating",
+    "talabat_reviews": "custom_talabat_reviews",
+    "talabat_rating_source": "custom_talabat_rating_source",
     "open_status": "custom_open_status",
     "confidence": "custom_confidence",
     "notes": "custom_notes",
