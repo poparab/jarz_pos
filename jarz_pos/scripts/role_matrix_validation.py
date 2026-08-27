@@ -1275,8 +1275,12 @@ def _matrix(env: Dict[str, Any]) -> List[Probe]:
               {"staff": DENY, "manager": ALLOW},
               note="ROLES.MANAGER - JARZ Manager added 2026-08-19"),
         Probe("ops.stock_transfer", "jarz_pos.api.transfer.list_pos_profiles",
-              {"staff": DENY, "manager": ALLOW},
-              note="ROLES.MANAGER"),
+              {"staff": DENY, "line_manager": ALLOW, "manager": ALLOW},
+              note="ROLES.STOCK_TRANSFER = MANAGER | LINE_MANAGER_TIER. The one "
+                   "operational screen the line manager reaches: moving stock "
+                   "between a branch and Finished Goods is floor work. Cash "
+                   "Transfer, Inventory Count and the Purchase Invoice below stay "
+                   "closed to them"),
         Probe("ops.inventory_count", "jarz_pos.api.inventory_count.list_warehouses",
               {"staff": DENY, "manager": ALLOW},
               note="ROLES.STOCK"),

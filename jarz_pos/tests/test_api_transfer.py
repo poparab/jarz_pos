@@ -55,7 +55,7 @@ class TestTransferAPI(unittest.TestCase):
 		"""Finished Goods warehouse should be selectable even without a POS Profile."""
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer, "_ensure_manager_access"), \
+		with patch.object(transfer, "_ensure_transfer_access"), \
 			 patch.object(
 				transfer.frappe,
 				"get_all",
@@ -81,7 +81,7 @@ class TestTransferAPI(unittest.TestCase):
 		"""Do not append a second option when a POS Profile already uses the FG warehouse."""
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer, "_ensure_manager_access"), \
+		with patch.object(transfer, "_ensure_transfer_access"), \
 			 patch.object(
 				transfer.frappe,
 				"get_all",

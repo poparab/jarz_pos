@@ -7,9 +7,17 @@ from frappe import _
 from jarz_pos.constants import DEFAULT_UOM, ROLES
 
 
-def _ensure_manager_access() -> None:
+def _ensure_transfer_access() -> None:
+    """Gate every stock-transfer endpoint on ``ROLES.STOCK_TRANSFER``.
+
+    That set is ``ROLES.MANAGER`` plus the line-manager tier: moving stock
+    between a branch and Finished Goods is floor-supervisor work, and gating it
+    on ``ROLES.MANAGER`` alone left the line manager with the drawer entry
+    hidden and a "Not permitted" on every call.  Cash Transfer and the Purchase
+    Invoice keep the narrower ``ROLES.MANAGER`` set — they commit money.
+    """
     roles = set(frappe.get_roles())
-    allowed = ROLES.MANAGER
+    allowed = ROLES.STOCK_TRANSFER
     if not roles.intersection(allowed):
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
@@ -54,7 +62,7 @@ def list_pos_profiles() -> List[Dict[str, Any]]:
     The stock transfer screen is centered on POS branches, but some warehouse-only
     destinations such as Finished Goods must also be selectable.
     """
-    _ensure_manager_access()
+    _ensure_transfer_access()
     rows = frappe.get_all(
         "POS Profile",
         filters={"disabled": 0},
@@ -80,7 +88,7 @@ def list_pos_profiles() -> List[Dict[str, Any]]:
 
 @frappe.whitelist()
 def list_item_groups(search: Optional[str] = None, only_leaf: int = 1, limit: int = 200) -> List[Dict[str, Any]]:
-    _ensure_manager_access()
+    _ensure_transfer_access()
     filters: Dict[str, Any] = {}
     if int(only_leaf or 0):
         filters["is_group"] = 0
@@ -149,7 +157,7 @@ def search_items_with_stock(
     item_group: Optional[str] = None,
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    _ensure_manager_access()
+    _ensure_transfer_access()
     if not source_warehouse or not target_warehouse:
         frappe.throw(_("Both source_warehouse and target_warehouse are required"))
     if source_warehouse == target_warehouse:
@@ -210,7 +218,7 @@ def submit_transfer(
 
     lines: list[{item_code, qty}]
     """
-    _ensure_manager_access()
+    _ensure_transfer_access()
     try:
         if isinstance(lines, str):
             import json

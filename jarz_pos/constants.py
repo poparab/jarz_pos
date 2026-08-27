@@ -78,6 +78,15 @@ class ROLES:
     #: Same membership, lowercased — for the gates that compare case-folded
     #: role names.  Keep the two in lockstep.
     LINE_MANAGER_TIER_LOWER = {role.lower() for role in LINE_MANAGER_TIER}
+    # Move stock between warehouses (``api/transfer.py``).  Deliberately WIDER
+    # than MANAGER: moving jars from the branch to Finished Goods (or between
+    # branches) is floor-supervisor work, and gating it on MANAGER alone left a
+    # line manager with no way to do it — the drawer entry was hidden and the
+    # API answered "Not permitted" if they reached it another way.  Kept as its
+    # own name rather than widening MANAGER, because MANAGER also guards Cash
+    # Transfer and the Purchase Invoice, which commit money and stay closed to
+    # the line manager.
+    STOCK_TRANSFER = MANAGER | LINE_MANAGER_TIER
     # Read-only access to the Production Board.  Deliberately WIDER than
     # MANUFACTURING: the mobile screen has always been gated client-side on
     # "JARZ Manager", which MANUFACTURING does not contain — so a

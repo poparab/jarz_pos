@@ -112,3 +112,45 @@ class TestCancelGate(unittest.TestCase):
         result = self._run(["POS User", "Sales User", "Moderator"])
         self.assertFalse(result.get("success"))
         self.assertIn(self.REFUSAL, result.get("error", ""))
+
+
+class TestStockTransferGate(unittest.TestCase):
+    """``transfer._ensure_transfer_access`` accepts the whole tier.
+
+    Stock Transfer used to sit on the bare ``ROLES.MANAGER`` set, so a line
+    manager could neither see the drawer entry nor call the API. Moving jars
+    between a branch and Finished Goods is floor-supervisor work; Cash Transfer
+    and the Purchase Invoice stay on ``ROLES.MANAGER`` because they commit money.
+    """
+
+    def _run(self, roles):
+        from jarz_pos.api import transfer
+
+        with patch.object(transfer, "frappe") as mock_frappe:
+            mock_frappe.PermissionError = PermissionError
+            mock_frappe.throw.side_effect = PermissionError
+            mock_frappe.get_roles.return_value = roles
+            transfer._ensure_transfer_access()
+
+    def test_every_tier_member_is_allowed(self):
+        for role in TIER_MEMBERS:
+            with self.subTest(role=role):
+                self._run([role])
+
+    def test_the_manager_set_keeps_its_access(self):
+        for role in sorted(ROLES.MANAGER):
+            with self.subTest(role=role):
+                self._run([role])
+
+    def test_plain_pos_user_is_refused(self):
+        with self.assertRaises(PermissionError):
+            self._run(["POS User", "Sales User", "Moderator"])
+
+    def test_cash_transfer_stays_narrower(self):
+        """The line manager is widened into Stock Transfer only."""
+        for role in (ROLES.JARZ_LINE_MANAGER, ROLES.JARZ_LINE_MANAGER_ALT):
+            with self.subTest(role=role):
+                self.assertIn(role, ROLES.STOCK_TRANSFER)
+                self.assertNotIn(role, ROLES.MANAGER)
+                self.assertNotIn(role, ROLES.STOCK)
+                self.assertNotIn(role, ROLES.PURCHASE)
