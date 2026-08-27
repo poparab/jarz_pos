@@ -37,9 +37,11 @@ What is checked
 3. Every DocType shipped as JSON under ``jarz_pos/doctype/`` exists, and each of
    its storable fields is present in meta. Layout fieldtypes (breaks, HTML,
    headings) and virtual fields carry no storage and are skipped.
-4. For non-Single doctypes, storable fields also have a real column. Meta can be
-   satisfied while the ``ALTER TABLE`` never ran; a Single keeps its values as
-   rows in ``tabSingles`` and legitimately has no column of its own.
+4. For non-Single doctypes, column-backed fields also have a real column. Meta
+   can be satisfied while the ``ALTER TABLE`` never ran. Three kinds of field
+   legitimately have no column and are exempt: a Single keeps its values as rows
+   in ``tabSingles``; ``Table``/``Table MultiSelect`` keep theirs as rows in the
+   child doctype's own table; and virtual fields are computed, never stored.
 
 Read-only. Nothing here writes, and it is safe to run on production.
 
@@ -73,6 +75,29 @@ _NON_STORAGE_FIELDTYPES = {
     "Button",
     "Fold",
     "Image",
+}
+
+#: Fieldtypes that DO belong in meta but own no column on the parent table.
+#:
+#: Derived from Frappe's own ``no_value_fields`` rather than hand-listed,
+#: because getting it wrong fails every deploy: the first run of this check
+#: reported 14 false positives -- Jarz Bundle.items, Jarz SOP.steps,
+#: Lead.custom_contacts and friends -- purely because ``Table`` and
+#: ``Table MultiSelect`` were absent from it. Child rows live in the child
+#: doctype's own table, so the parent legitimately has no column.
+#:
+#: These are still checked for meta presence above; only the column assertion
+#: is skipped. The fallback keeps the module importable if the constant ever
+#: moves, and the union means a Frappe upgrade that adds a no-column fieldtype
+#: cannot turn into a phantom deploy failure.
+try:
+    from frappe.model import no_value_fields as _FRAPPE_NO_VALUE_FIELDS
+except Exception:  # pragma: no cover - defensive against an upstream move
+    _FRAPPE_NO_VALUE_FIELDS = ()
+
+_NO_COLUMN_FIELDTYPES = _NON_STORAGE_FIELDTYPES | set(_FRAPPE_NO_VALUE_FIELDS) | {
+    "Table",
+    "Table MultiSelect",
 }
 
 
@@ -253,6 +278,8 @@ def _check_custom_fields(findings: Dict[str, List[Dict[str, str]]]) -> int:
             continue
         if _is_single(doctype):
             continue
+        if str(row.get("fieldtype") or "") in _NO_COLUMN_FIELDTYPES:
+            continue
         if _has_column(doctype, fieldname) is False:
             findings["missing_column"].append(
                 {
@@ -317,6 +344,8 @@ def _check_app_doctypes(findings: Dict[str, List[Dict[str, str]]]) -> int:
                 continue
 
             if single:
+                continue
+            if str(field.get("fieldtype") or "") in _NO_COLUMN_FIELDTYPES:
                 continue
             if _has_column(doctype, fieldname) is False:
                 findings["missing_column"].append(
