@@ -20,7 +20,20 @@ fixtures = [
         # Purchasing: idempotency key on the invoice, requester/branch/note on
         # the item request. Omitting a dt here means its fields silently never
         # migrate, so this list must track the fixture file.
-        "Purchase Invoice", "Material Request"
+        "Purchase Invoice", "Material Request",
+        # POS Profile carries custom_allow_delivery_partner, which api/pos.py and
+        # api/couriers.py both read behind a get_meta() existence check. It was
+        # in the fixture FILE but not in this filter, so it was exported from the
+        # site it was created on and never imported onto any other — the guarded
+        # reads then degraded silently and the flag simply did not exist on a
+        # fresh site. Found by scripts/verify_schema_landed, which is exactly the
+        # class of drift that check exists for.
+        #
+        # Territory is deliberately NOT added: jarz_woocommerce_integration owns
+        # it in its own fixture filter and already imports the Territory fields
+        # this app reads. Listing it here too would make two apps import the same
+        # fields on every migrate, with last-writer-wins deciding the definition.
+        "POS Profile"
     ]]]},
     # "Jarz POS Settings" is deliberately NOT a fixture. Frappe imports a Single
     # fixture with force=True + delete_old_doc, i.e. it REBUILDS the document from
@@ -544,7 +557,12 @@ except Exception:
 
 # Request Events
 # ----------------
-before_request = ["jarz_pos.observability.sentry_bootstrap.before_request"]
+before_request = [
+	"jarz_pos.observability.sentry_bootstrap.before_request",
+	# Must run after Sentry's bootstrap: the 426 refusal it can raise is a
+	# deliberate outcome, and Sentry needs to be listening to record it.
+	"jarz_pos.api.app_release.before_request",
+]
 after_request = ["jarz_pos.observability.sentry_bootstrap.after_request"]
 
 # Job Events
