@@ -156,6 +156,31 @@ def courier_delivery_enabled() -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Diagnostics — logging must never change an outcome
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _log(*args: Any, **kwargs: Any) -> None:
+    """``frappe.log_error`` that cannot itself raise.
+
+    Not defensive padding: ``frappe.log_error`` really can throw. It calls
+    ``sentry.capture_exception``, whose very first statement —
+    ``frappe.get_system_settings("enable_telemetry")`` — sits *outside* its own
+    ``try`` and reaches ``frappe.client_cache.get_doc("System Settings")``. A
+    cache outage there turns a diagnostic into the caller's exception.
+
+    Every call site in this module logs to explain something that already
+    happened; none of them is the operation. Letting one of them raise inverts
+    that: a courier standing on a doorstep loses the transition because the app
+    could not write a note about a different order. Route them all through here
+    so the failure mode of logging is a lost log line and nothing else.
+    """
+    try:
+        frappe.log_error(*args, **kwargs)
+    except Exception:  # pragma: no cover - the logger of last resort
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Schema assertions
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -275,7 +300,7 @@ def _replay_store(
     except Exception:
         # A replay-guard write failure must not undo a completed delivery; the
         # deterministic token still protects the two success paths.
-        frappe.log_error(
+        _log(
             frappe.get_traceback(), f"courier_delivery: replay store failed for {invoice_id}"
         )
 
@@ -353,7 +378,7 @@ def _publish(event: str, inv: Any, payload: Dict[str, Any]) -> None:
     try:
         publish_invoice_event(event, payload, inv)
     except Exception:
-        frappe.log_error(
+        _log(
             frappe.get_traceback(), f"courier_delivery: realtime publish failed ({event})"
         )
 
@@ -444,7 +469,7 @@ def mark_invoice_arrived(
     except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
         raise
     except Exception as exc:
-        frappe.log_error(frappe.get_traceback(), f"mark_invoice_arrived failed: {invoice_id}")
+        _log(frappe.get_traceback(), f"mark_invoice_arrived failed: {invoice_id}")
         return {"success": False, "error": str(exc)}
 
 
@@ -542,7 +567,7 @@ def mark_invoice_delivered(
         for field in state_fields:
             updates[field] = DELIVERED_STATE
         if not state_fields:
-            frappe.log_error(
+            _log(
                 title="Courier: board state field missing",
                 message=(
                     f"Sales Invoice carries none of {_STATE_FIELD_ALIASES}, so "
@@ -564,7 +589,7 @@ def mark_invoice_delivered(
         )
 
         if is_mocked:
-            frappe.log_error(
+            _log(
                 title="Courier: mocked location at delivery",
                 message=(
                     f"Invoice {invoice_id} was marked delivered with a mocked "
@@ -594,7 +619,7 @@ def mark_invoice_delivered(
     except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
         raise
     except Exception as exc:
-        frappe.log_error(frappe.get_traceback(), f"mark_invoice_delivered failed: {invoice_id}")
+        _log(frappe.get_traceback(), f"mark_invoice_delivered failed: {invoice_id}")
         return {"success": False, "error": str(exc)}
 
 
@@ -713,7 +738,7 @@ def mark_invoice_failed(
     except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
         raise
     except Exception as exc:
-        frappe.log_error(frappe.get_traceback(), f"mark_invoice_failed failed: {invoice_id}")
+        _log(frappe.get_traceback(), f"mark_invoice_failed failed: {invoice_id}")
         return {"success": False, "error": str(exc)}
 
 
@@ -803,7 +828,7 @@ def mark_invoice_leg_started(
     except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
         raise
     except Exception as exc:
-        frappe.log_error(frappe.get_traceback(), f"mark_invoice_leg_started failed: {invoice_id}")
+        _log(frappe.get_traceback(), f"mark_invoice_leg_started failed: {invoice_id}")
         return {"success": False, "error": str(exc)}
 
 
@@ -871,7 +896,7 @@ def mark_invoice_leg_ended(
     except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
         raise
     except Exception as exc:
-        frappe.log_error(frappe.get_traceback(), f"mark_invoice_leg_ended failed: {invoice_id}")
+        _log(frappe.get_traceback(), f"mark_invoice_leg_ended failed: {invoice_id}")
         return {"success": False, "error": str(exc)}
 
 
@@ -910,12 +935,12 @@ def _close_other_open_legs(inv: Any, *, at: Any) -> List[str]:
                 )
                 closed.append(name)
             except Exception:
-                frappe.log_error(
+                _log(
                     frappe.get_traceback(),
                     f"delivery_leg: could not close superseded leg {name}",
                 )
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "delivery_leg: superseding sweep failed")
+        _log(frappe.get_traceback(), "delivery_leg: superseding sweep failed")
     return closed
 
 
@@ -933,7 +958,7 @@ def _resolve_failure_reason(code: str) -> Optional[Dict[str, Any]]:
             as_dict=True,
         )
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "Failed to resolve Delivery Failure Reason")
+        _log(frappe.get_traceback(), "Failed to resolve Delivery Failure Reason")
         return None
 
     if not row or not int(row.get("is_active") or 0):
@@ -959,7 +984,7 @@ def list_failure_reasons() -> List[Dict[str, Any]]:
             or []
         )
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "list_failure_reasons failed")
+        _log(frappe.get_traceback(), "list_failure_reasons failed")
         return []
 
 
@@ -976,7 +1001,7 @@ def _add_comment(inv: Any, content: str) -> None:
             }
         ).insert(ignore_permissions=True)
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "courier_delivery: comment insert failed")
+        _log(frappe.get_traceback(), "courier_delivery: comment insert failed")
 
 
 def _record_delivery_note_comment(
