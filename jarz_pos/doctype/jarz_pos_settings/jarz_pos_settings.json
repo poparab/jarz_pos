@@ -50,6 +50,7 @@
   "production_allow_over_production",
   "production_mix_item",
   "production_mixer_run_sizes",
+  "production_waste_weight",
   "purchase_section",
   "default_purchase_warehouse",
   "purchase_warehouse_routes",
@@ -75,6 +76,10 @@
   "column_break_label_acct",
   "label_printing_item",
   "label_post_cogs_journal",
+  "recurring_expenses_section",
+  "recurring_expense_detection_lookback_months",
+  "column_break_recurring",
+  "recurring_expense_detection_min_months",
   "visit_planning_section",
   "visit_route_engine",
   "visit_osrm_base_url",
@@ -87,7 +92,13 @@
   "visit_day_minutes",
   "visit_default_start_time",
   "visit_days",
-  "visit_stale_days"
+  "visit_stale_days",
+  "mobile_release_section",
+  "mobile_minimum_android_build",
+  "mobile_latest_android_build",
+  "column_break_mobile_release",
+  "mobile_apk_download_url",
+  "mobile_force_update_message"
  ],
  "fields": [
   {
@@ -396,6 +407,13 @@
    "label": "Mixer Run Sizes"
   },
   {
+   "description": "What one wasted batch of mix costs the plan, in the same units as the run qualities above. The mix is never stored, so spare mix is thrown away or forces jars nobody ordered. At the default of 4 a full wasted batch outweighs any run quality, while half a batch will not by itself justify a poor mix. Raise it when waste is expensive, lower it when a poor mix hurts more than throwing mix away. Leave blank for 4; 0 means waste is free.",
+   "fieldname": "production_waste_weight",
+   "fieldtype": "Float",
+   "label": "Mix Waste Weight",
+   "precision": "2"
+  },
+  {
    "fieldname": "purchase_section",
    "fieldtype": "Section Break",
    "label": "Purchasing"
@@ -489,6 +507,20 @@
    "non_negative": 1
   },
   {
+   "default": "1",
+   "description": "Draw labels down automatically when a Sales Invoice is submitted for a customer that has a tracked label. Leave on: with it off the ledger only moves when somebody records a count by hand.",
+   "fieldname": "label_auto_consume_on_invoice",
+   "fieldtype": "Check",
+   "label": "Auto-Consume Labels On Invoice"
+  },
+  {
+   "default": "1",
+   "description": "Send the daily 'labels running low' alert to managers and B2B reps.",
+   "fieldname": "label_alerts_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Label Reorder Alerts"
+  },
+  {
    "default": "21",
    "description": "Labels on one printed sheet for Medium jars.",
    "fieldname": "labels_per_sheet_medium",
@@ -511,20 +543,6 @@
    "fieldtype": "Int",
    "label": "Default Print Batch (Sheets)",
    "non_negative": 1
-  },
-  {
-   "default": "1",
-   "description": "Draw labels down automatically when a Sales Invoice is submitted for a customer that has a tracked label. Leave on: with it off the ledger only moves when somebody records a count by hand.",
-   "fieldname": "label_auto_consume_on_invoice",
-   "fieldtype": "Check",
-   "label": "Auto-Consume Labels On Invoice"
-  },
-  {
-   "default": "1",
-   "description": "Send the daily 'labels running low' alert to managers and B2B reps.",
-   "fieldname": "label_alerts_enabled",
-   "fieldtype": "Check",
-   "label": "Enable Label Reorder Alerts"
   },
   {
    "fieldname": "label_accounting_section",
@@ -562,6 +580,27 @@
    "fieldname": "label_post_cogs_journal",
    "fieldtype": "Check",
    "label": "Post Label COGS Journal Entries"
+  },
+  {
+   "fieldname": "recurring_expenses_section",
+   "fieldtype": "Section Break",
+   "label": "Recurring Expenses"
+  },
+  {
+   "description": "How far back the Recurring Expenses screen mines GL history when suggesting unregistered recurring spend. Leave blank for 12 months. Shorten it for a young company whose older months say nothing useful.",
+   "fieldname": "recurring_expense_detection_lookback_months",
+   "fieldtype": "Int",
+   "label": "Detection Lookback (Months)"
+  },
+  {
+   "fieldname": "column_break_recurring",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "How many distinct months an expense account must post in, inside the lookback window, before it is suggested as recurring. Leave blank for 3. Raise it to cut noise, lower it to catch quarterly costs sooner.",
+   "fieldname": "recurring_expense_detection_min_months",
+   "fieldtype": "Int",
+   "label": "Detection Minimum Active Months"
   },
   {
    "fieldname": "visit_planning_section",
@@ -646,12 +685,47 @@
    "label": "Stale After (days)",
    "non_negative": 1,
    "description": "A door not visited in this long is flagged as due. Feeds the auto-planner's priority and the leads filter."
+  },
+  {
+   "fieldname": "mobile_release_section",
+   "fieldtype": "Section Break",
+   "label": "Mobile App Releases"
+  },
+  {
+   "fieldname": "mobile_minimum_android_build",
+   "fieldtype": "Int",
+   "label": "Minimum Android Build",
+   "non_negative": 1,
+   "description": "Android builds below this number are blocked with a non-dismissible update screen. 0 disables the gate. The build number is the revision count CI stamps into the APK - read it off the About screen or the Firebase release notes. Never set it above a build that predates the update gate itself, or those devices are locked out with no way to show the prompt."
+  },
+  {
+   "fieldname": "mobile_latest_android_build",
+   "fieldtype": "Int",
+   "label": "Latest Android Build",
+   "non_negative": 1,
+   "description": "Newest published APK build. Devices below it see a dismissible 'update available' nudge. 0 hides the nudge."
+  },
+  {
+   "fieldname": "column_break_mobile_release",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "mobile_apk_download_url",
+   "fieldtype": "Data",
+   "label": "APK Download URL",
+   "description": "Where the update button sends the user. Empty falls back to <site>/pos/download/, which publish_apk.ps1 keeps pointed at the newest APK."
+  },
+  {
+   "fieldname": "mobile_force_update_message",
+   "fieldtype": "Small Text",
+   "label": "Force Update Message",
+   "description": "Shown on the blocking screen instead of the default text. Optional."
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-26 00:00:00.000000",
+ "modified": "2026-08-27 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Settings",

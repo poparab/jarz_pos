@@ -234,7 +234,11 @@ def preview_plan(
     required = planning.batches_needed(
         total_mix_qty=demand["total_mix_qty"], batch_qty=batch_qty
     )
-    split = planning.plan_mixer_runs(required, run_quality=planning._resolve_run_quality())
+    split = planning.plan_mixer_runs(
+        required,
+        run_quality=planning._resolve_run_quality(),
+        waste_weight=planning._resolve_waste_weight(),
+    )
 
     payload: Dict[str, Any] = {
         "company": company,

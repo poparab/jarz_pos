@@ -24,6 +24,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import frappe
 
+from jarz_pos.utils.settings_utils import raw_single_value
+
 # The sub-assembly whose BOM defines one batch.  Held as a setting rather than a
 # constant because the item can be renamed, but defaulted so a site that never
 # touches Jarz POS Settings still works.
@@ -109,7 +111,11 @@ def plan_mixer_runs(
     Returns ``runs: []`` for a zero requirement, which is different from a
     requirement that cannot be met.
     """
-    quality = dict(run_quality or DEFAULT_RUN_QUALITY)
+    # `is None`, not `or`: an explicitly empty mapping means "no mixer sizes are
+    # configured", which must fall through to the capped branch below and
+    # surface a setup problem. `or` swallowed that into the defaults and
+    # invented run sizes for a site that had declared none.
+    quality = dict(DEFAULT_RUN_QUALITY if run_quality is None else run_quality)
     sizes = sorted({float(s) for s in quality if float(s) > 0})
     batches = float(batches or 0)
     waste_weight = float(waste_weight if waste_weight is not None else DEFAULT_WASTE_WEIGHT)
@@ -393,6 +399,36 @@ def _resolve_run_quality() -> Dict[float, str]:
         parsed[size] = quality
 
     return parsed or dict(DEFAULT_RUN_QUALITY)
+
+
+def _resolve_waste_weight() -> float:
+    """What a wasted batch of mix costs the plan, from Settings.
+
+    The run sizes and their qualities have been operator-tunable since this
+    module shipped; the weight they are traded against was not, so the one
+    number that decides *whether* a poor mix beats throwing mix away could only
+    be changed by a deploy. It is the same kind of floor judgement as the run
+    qualities and belongs next to them.
+
+    Read through ``raw_single_value`` rather than ``get_single_value``: this is
+    a Float, and an unwritten Single field casts to 0.0, which would be read as
+    the deliberate and very different "waste is free" — silently flipping the
+    plan to prefer perfect runs at any waste. ``None`` means never written and
+    takes the default; an explicit 0 is honoured.
+    """
+    try:
+        raw = raw_single_value("Jarz POS Settings", "production_waste_weight")
+    except Exception:
+        raw = None
+    if raw in (None, ""):
+        return DEFAULT_WASTE_WEIGHT
+    try:
+        weight = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_WASTE_WEIGHT
+    # A negative weight would pay the plan to waste mix. Nothing on the floor
+    # means that, so it degrades to the default rather than optimising for it.
+    return weight if weight >= 0 else DEFAULT_WASTE_WEIGHT
 
 
 def _resolve_mix_batch_qty(mix_item: str) -> Tuple[float, str, Optional[str]]:

@@ -137,7 +137,11 @@ class JarzProductionPlan(Document):
         required = planning.batches_needed(
             total_mix_qty=self.total_mix_qty, batch_qty=flt(self.mix_batch_qty)
         )
-        split = planning.plan_mixer_runs(required, run_quality=planning._resolve_run_quality())
+        split = planning.plan_mixer_runs(
+            required,
+            run_quality=planning._resolve_run_quality(),
+            waste_weight=planning._resolve_waste_weight(),
+        )
 
         self.required_batches = flt(split["required_batches"], 3)
         self.planned_batches = flt(split["planned_batches"], 2)

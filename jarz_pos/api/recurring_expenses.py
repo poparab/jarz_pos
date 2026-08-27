@@ -30,6 +30,9 @@ from frappe import _
 from frappe.utils import flt, getdate
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.settings_utils import raw_single_value
+
+SETTINGS_DOCTYPE = "Jarz POS Settings"
 
 # Months covered by one occurrence, mirroring the DocType's own mapping.
 FREQUENCY_MONTHS = {
@@ -51,9 +54,48 @@ EXCLUDED_ACCOUNT_TYPES = {
 }
 
 # A GL account needs activity in at least this many distinct months to be
-# treated as a recurring-expense candidate.
-DETECTION_MIN_MONTHS = 3
-DETECTION_LOOKBACK_MONTHS = 12
+# treated as a recurring-expense candidate. Defaults only — the live values come
+# from Jarz POS Settings via the resolvers below, because this is the pair an
+# accountant actually re-tunes: a young company wants a shorter lookback than a
+# year, and "3 of the last 12" is a judgement about this business's spend
+# pattern, not a fact about accounting. Held here so a site that never opens
+# Settings still detects sensibly.
+DEFAULT_DETECTION_MIN_MONTHS = 3
+DEFAULT_DETECTION_LOOKBACK_MONTHS = 12
+
+
+def _detection_setting(fieldname: str, default: int) -> int:
+    """A positive Int from Settings, or ``default``.
+
+    ``raw_single_value`` rather than ``get_single_value``: an unwritten Int on a
+    Single casts to 0, so the declared default would be unreachable and the
+    window would collapse — a 0-month lookback finds nothing, and a 0-month
+    minimum makes every expense account a candidate. Zero and negative values
+    are treated as unset for the same reason: neither is a window anyone means.
+    """
+    try:
+        raw = raw_single_value(SETTINGS_DOCTYPE, fieldname)
+    except Exception:
+        raw = None
+    if raw in (None, ""):
+        return default
+    try:
+        months = int(float(raw))
+    except (TypeError, ValueError):
+        return default
+    return months if months > 0 else default
+
+
+def _detection_min_months() -> int:
+    return _detection_setting(
+        "recurring_expense_detection_min_months", DEFAULT_DETECTION_MIN_MONTHS
+    )
+
+
+def _detection_lookback_months() -> int:
+    return _detection_setting(
+        "recurring_expense_detection_lookback_months", DEFAULT_DETECTION_LOOKBACK_MONTHS
+    )
 
 
 # ── access control ────────────────────────────────────────────────────────
@@ -306,7 +348,7 @@ def _detect_unregistered(
 ) -> List[Dict[str, Any]]:
     """Expense accounts posting on a monthly cadence but absent from the registry."""
     lookback_year = month_end.year
-    lookback_month = month_end.month - DETECTION_LOOKBACK_MONTHS
+    lookback_month = month_end.month - _detection_lookback_months()
     while lookback_month <= 0:
         lookback_month += 12
         lookback_year -= 1
@@ -355,7 +397,7 @@ def _detect_unregistered(
     detected: List[Dict[str, Any]] = []
     for account, data in by_account.items():
         active_months = [m for m, amt in data["months"].items() if abs(amt) > 0.005]
-        if len(active_months) < DETECTION_MIN_MONTHS or data["total"] <= 0:
+        if len(active_months) < _detection_min_months() or data["total"] <= 0:
             continue
         detected.append(
             {
