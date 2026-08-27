@@ -158,6 +158,10 @@ jobs:
             test_accounting_guards
             test_api_manufacturing_precheck
             test_production_planning
+            # The mixer-run split. Was absent from this list, which is why a red
+            # test here (empty run_quality falling back to the defaults instead
+            # of reporting an unconfigured mixer) survived on main unnoticed.
+            test_daily_production_plan
             test_api_production
             test_api_manufacturing_start_finish
             test_production_permissions
@@ -210,6 +214,11 @@ jobs:
             # wrong screenshot" from "erase a confirmed one" is the status
             # guard, and nothing else in the suite exercises it.
             test_api_payment_receipts
+            # Mobile release floor. The reason this must be in CI: every branch
+            # here fails open on purpose, and a regression that inverts one
+            # bricks every POS device in the field with no way to recover
+            # short of reinstalling the APK by hand.
+            test_api_app_release
           )
           rc=0
           for m in "${MODULES[@]}"; do
