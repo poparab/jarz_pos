@@ -7,6 +7,7 @@ import os
 from typing import List, Dict, Any
 from frappe import _
 from frappe.exceptions import PermissionError as FrappePermissionError
+from frappe.exceptions import ValidationError as FrappeValidationError
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
@@ -114,6 +115,50 @@ def ensure_uploaded_payment_receipt(
         "status": str(getattr(receipt, "status", "") or "").strip(),
         "receipt_image_url": image_url,
     }
+
+
+def _ensure_receipt_image_editable(receipt) -> None:
+    """Allow image changes only while the receipt is still Unconfirmed."""
+    status = str(getattr(receipt, "status", "") or "").strip()
+    if status == RECEIPT_STATUS_CONFIRMED:
+        frappe.throw(_("Confirmed payment receipts cannot be changed."))
+    if status == RECEIPT_STATUS_CHANGED:
+        frappe.throw(_("Changed payment receipts cannot be edited."))
+
+
+def _receipt_image_file_names(receipt_name: str, *image_urls: str | None) -> list[str]:
+    """File docs holding the receipt image, matched by attachment or by URL."""
+    urls = {
+        str(url or "").strip()
+        for url in image_urls
+        if str(url or "").strip()
+    }
+    rows = frappe.get_all(
+        "File",
+        filters={
+            "attached_to_doctype": "POS Payment Receipt",
+            "attached_to_name": str(receipt_name or "").strip(),
+        },
+        fields=["name", "file_url", "attached_to_field"],
+    )
+    names = []
+    for row in rows:
+        field = str(row.get("attached_to_field") or "").strip()
+        file_url = str(row.get("file_url") or "").strip()
+        if field == "receipt_image" or (file_url and file_url in urls):
+            names.append(row.get("name"))
+    return names
+
+
+def _delete_receipt_image_files(file_names: list[str]) -> None:
+    """Best-effort removal of superseded receipt image files."""
+    for file_name in file_names:
+        try:
+            frappe.delete_doc("File", file_name, ignore_permissions=True, force=True)
+        except Exception as exc:  # pragma: no cover - storage cleanup must never block
+            frappe.logger().error(
+                f"Failed to delete receipt image file {file_name}: {exc}"
+            )
 
 
 def _current_user_roles() -> set[str]:
@@ -311,13 +356,16 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
 
 @frappe.whitelist()
 def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
-    """Upload receipt image for a payment receipt.
-    
+    """Upload (or replace) the receipt image for a payment receipt.
+
+    Re-uploading is allowed while the receipt is still Unconfirmed; the
+    superseded image file is deleted so only the current screenshot is kept.
+
     Args:
         receipt_name: POS Payment Receipt name
         image_data: Base64 encoded image data
         filename: Original filename
-    
+
     Returns:
         dict: Upload result with file URL
     """
@@ -326,7 +374,15 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
         
         # Get the receipt document
         receipt = frappe.get_doc('POS Payment Receipt', receipt_name)
-        
+        _ensure_receipt_image_editable(receipt)
+
+        # Remember the previous image so it can be cleaned up after the swap.
+        previous_files = _receipt_image_file_names(
+            receipt.name,
+            getattr(receipt, 'receipt_image', None),
+            getattr(receipt, 'receipt_image_url', None),
+        )
+
         # Decode base64 image
         if ',' in image_data:
             # Remove data:image/...;base64, prefix if present
@@ -352,7 +408,12 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
         receipt.upload_date = frappe.utils.now()
         receipt.uploaded_by = frappe.session.user
         receipt.save()
-        
+
+        # The receipt no longer points at the old file, so it is safe to drop.
+        _delete_receipt_image_files(
+            [name for name in previous_files if name != file_doc.name]
+        )
+
         frappe.db.commit()
         
         frappe.logger().info(f"Receipt image uploaded: {file_doc.file_url}")
@@ -360,12 +421,70 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
         return {
             'success': True,
             'file_url': file_doc.file_url,
+            'replaced': bool(previous_files),
             'message': 'Image uploaded successfully'
         }
     
+    except FrappeValidationError:
+        raise
     except Exception as e:
         frappe.logger().error(f"Failed to upload receipt image: {str(e)}")
         frappe.throw(f"Failed to upload receipt image: {str(e)}")
+
+
+@frappe.whitelist()
+def remove_receipt_image(receipt_name: str):
+    """Remove the uploaded image from a payment receipt.
+
+    Only allowed while the receipt is Unconfirmed — once a manager has
+    confirmed it, the screenshot is evidence and stays put. The receipt record
+    itself is kept so the same row can be re-used for a fresh upload.
+
+    Args:
+        receipt_name: POS Payment Receipt name
+
+    Returns:
+        dict: Removal result
+    """
+    try:
+        normalized_name = str(receipt_name or '').strip()
+        if not normalized_name:
+            frappe.throw(_('Payment receipt is required'))
+        if not frappe.db.exists('POS Payment Receipt', normalized_name):
+            frappe.throw(_('Payment receipt was not found'))
+
+        receipt = frappe.get_doc('POS Payment Receipt', normalized_name)
+        _ensure_receipt_image_editable(receipt)
+
+        file_names = _receipt_image_file_names(
+            receipt.name,
+            getattr(receipt, 'receipt_image', None),
+            getattr(receipt, 'receipt_image_url', None),
+        )
+
+        # Clear the doc first so nothing still links to the file being deleted.
+        receipt.receipt_image = None
+        receipt.receipt_image_url = None
+        receipt.upload_date = None
+        receipt.save()
+
+        _delete_receipt_image_files(file_names)
+
+        frappe.db.commit()
+
+        frappe.logger().info(f"Receipt image removed: {normalized_name}")
+
+        return {
+            'success': True,
+            'receipt_name': normalized_name,
+            'message': 'Image removed successfully'
+        }
+
+    except FrappeValidationError:
+        raise
+    except Exception as e:
+        frappe.logger().error(f"Failed to remove receipt image: {str(e)}")
+        frappe.throw(f"Failed to remove receipt image: {str(e)}")
 
 
 @frappe.whitelist()

@@ -205,6 +205,11 @@ jobs:
             # reason this must be in CI: a wrong country code does not error,
             # it opens a chat with a different real person.
             test_materials_share
+            # Payment receipt screenshots. The re-upload/remove cases are the
+            # reason this must be in CI: the only thing separating "swap the
+            # wrong screenshot" from "erase a confirmed one" is the status
+            # guard, and nothing else in the suite exercises it.
+            test_api_payment_receipts
           )
           rc=0
           for m in "${MODULES[@]}"; do

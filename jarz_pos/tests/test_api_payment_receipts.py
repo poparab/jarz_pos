@@ -5,13 +5,18 @@ from unittest.mock import MagicMock, patch
 
 try:
 	from frappe.exceptions import PermissionError as FrappePermissionError
+	from frappe.exceptions import ValidationError as FrappeValidationError
 except ModuleNotFoundError:
 	class FrappePermissionError(Exception):
+		pass
+
+	class FrappeValidationError(Exception):
 		pass
 
 	frappe_module = types.ModuleType("frappe")
 	exceptions_module = types.ModuleType("frappe.exceptions")
 	exceptions_module.PermissionError = FrappePermissionError
+	exceptions_module.ValidationError = FrappeValidationError
 	frappe_module.exceptions = exceptions_module
 	frappe_module._ = lambda message: message
 	frappe_module.whitelist = lambda *args, **kwargs: (lambda fn: fn)
@@ -41,9 +46,14 @@ class _FakeReceiptDoc:
 
 
 class _FakeInvoiceDoc:
-	def __init__(self, name="ACC-SINV-0001", customer_name="Jarz Test Customer"):
+	def __init__(self, name="ACC-SINV-0001", customer_name="Jarz Test Customer", woo_order_id=None):
 		self.name = name
 		self.customer_name = customer_name
+		self.woo_order_id = woo_order_id
+
+	# list_payment_receipts reads woo_order_id through Document.get().
+	def get(self, fieldname, default=None):
+		return getattr(self, fieldname, default)
 
 
 class TestPaymentReceiptsAPI(unittest.TestCase):
@@ -182,6 +192,112 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 				)
 
 		self.assertIn("uploaded image", str(exc.exception))
+
+	def test_upload_receipt_image_replaces_previous_file(self):
+		from jarz_pos.api.payment_receipts import upload_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.throw.side_effect = _raise_frappe
+		receipt = _FakeReceiptDoc(receipt_image_url="/files/old.png")
+		new_file = MagicMock()
+		new_file.name = "FILE-NEW"
+		new_file.file_url = "/files/new.png"
+
+		def _get_doc(*args, **kwargs):
+			if args and args[0] == "POS Payment Receipt":
+				return receipt
+			return new_file
+
+		mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe.get_all.return_value = [
+			{"name": "FILE-OLD", "file_url": "/files/old.png", "attached_to_field": "receipt_image"},
+		]
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			result = upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
+
+		self.assertTrue(result["success"])
+		self.assertTrue(result["replaced"])
+		self.assertEqual(result["file_url"], "/files/new.png")
+		self.assertEqual(receipt.receipt_image, "/files/new.png")
+		self.assertEqual(receipt.receipt_image_url, "/files/new.png")
+		mock_frappe.delete_doc.assert_called_once_with(
+			"File", "FILE-OLD", ignore_permissions=True, force=True
+		)
+
+	def test_upload_receipt_image_rejects_confirmed_receipt(self):
+		from jarz_pos.api.payment_receipts import upload_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_doc.return_value = _FakeReceiptDoc(status="Confirmed")
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			with self.assertRaises(Exception) as exc:
+				upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
+
+		self.assertIn("Confirmed payment receipts cannot be changed", str(exc.exception))
+		mock_frappe.delete_doc.assert_not_called()
+
+	def test_remove_receipt_image_clears_unconfirmed_receipt(self):
+		from jarz_pos.api.payment_receipts import remove_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.throw.side_effect = _raise_frappe
+		receipt = _FakeReceiptDoc(receipt_image_url="/files/old.png")
+		receipt.upload_date = "2026-08-27 10:00:00"
+		mock_frappe.get_doc.return_value = receipt
+		mock_frappe.get_all.return_value = [
+			{"name": "FILE-OLD", "file_url": "/files/old.png", "attached_to_field": "receipt_image"},
+		]
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			result = remove_receipt_image("PPR-0001")
+
+		self.assertTrue(result["success"])
+		self.assertIsNone(receipt.receipt_image)
+		self.assertIsNone(receipt.receipt_image_url)
+		self.assertIsNone(receipt.upload_date)
+		# The record itself survives so the next upload reuses the same row.
+		self.assertEqual(receipt.status, "Unconfirmed")
+		receipt.save.assert_called_once()
+		mock_frappe.delete_doc.assert_called_once_with(
+			"File", "FILE-OLD", ignore_permissions=True, force=True
+		)
+
+	def test_remove_receipt_image_rejects_confirmed_receipt(self):
+		from jarz_pos.api.payment_receipts import remove_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.throw.side_effect = _raise_frappe
+		receipt = _FakeReceiptDoc(status="Confirmed")
+		mock_frappe.get_doc.return_value = receipt
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			with self.assertRaises(Exception) as exc:
+				remove_receipt_image("PPR-0001")
+
+		self.assertIn("Confirmed payment receipts cannot be changed", str(exc.exception))
+		self.assertEqual(receipt.receipt_image_url, "/files/receipt.png")
+		receipt.save.assert_not_called()
+		mock_frappe.delete_doc.assert_not_called()
+
+	def test_remove_receipt_image_rejects_changed_receipt(self):
+		from jarz_pos.api.payment_receipts import remove_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_doc.return_value = _FakeReceiptDoc(status="Changed")
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			with self.assertRaises(Exception) as exc:
+				remove_receipt_image("PPR-0001")
+
+		self.assertIn("Changed payment receipts cannot be edited", str(exc.exception))
 
 
 class TestConfirmOnlinePaymentGate(unittest.TestCase):
