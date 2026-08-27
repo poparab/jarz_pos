@@ -156,9 +156,18 @@ def _ensure_reference(reference_doctype: str, reference_name: str) -> None:
 
 
 def _display_title(row: Any) -> str:
-    """Arabic title when the library has one, English otherwise."""
-    arabic = (row.get("title_ar") or "").strip() if hasattr(row, "get") else ""
-    return arabic or (row.get("title") or row.get("name") or "").strip()
+    """English title, falling back to the Arabic one.
+
+    The customer-facing page is English (see ``www/m.html``), so the English
+    title leads; ``title_ar`` remains the fallback for a material that only has
+    one, rather than showing the reader a bare record id.
+    """
+    if not hasattr(row, "get"):
+        return ""
+    english = (row.get("title") or "").strip()
+    if english:
+        return english
+    return (row.get("title_ar") or row.get("name") or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -402,23 +411,37 @@ def get_material_shares(
         except Exception:
             _logger().warning("share item titles failed", exc_info=True)
 
-    shares = [
-        {
-            "name": row.name,
-            "url": materials_service.share_url(row.token),
-            "contact_name": row.contact_name,
-            "contact_phone": row.contact_phone,
-            "channel": row.channel,
-            "sent_by": row.sent_by,
-            "sent_on": row.sent_on,
-            "view_count": cint(row.view_count),
-            "first_viewed_on": row.first_viewed_on,
-            "last_viewed_on": row.last_viewed_on,
-            "message": row.message,
-            "titles": titles.get(row.name, []),
-        }
-        for row in rows
-    ]
+    # What the reader's device and attention looked like on their latest visit.
+    # Guarded: a site that has not migrated the view DocType yet still returns a
+    # perfectly good history, just without this.
+    views = materials_service.latest_view_summary([row.name for row in rows])
+
+    shares = []
+    for row in rows:
+        view = views.get(row.name) or {}
+        shares.append(
+            {
+                "name": row.name,
+                "url": materials_service.share_url(row.token),
+                "contact_name": row.contact_name,
+                "contact_phone": row.contact_phone,
+                "channel": row.channel,
+                "sent_by": row.sent_by,
+                "sent_on": row.sent_on,
+                "view_count": cint(row.view_count),
+                "first_viewed_on": row.first_viewed_on,
+                "last_viewed_on": row.last_viewed_on,
+                "message": row.message,
+                "titles": titles.get(row.name, []),
+                "device_type": view.get("device_type") or "",
+                "os": view.get("os") or "",
+                "browser": view.get("browser") or "",
+                "seconds": cint(view.get("seconds")),
+                "pages_viewed": cint(view.get("pages_viewed")),
+                "max_zoom": float(view.get("max_zoom") or 0),
+                "downloaded": bool(cint(view.get("downloaded"))),
+            }
+        )
     return {"shares": shares, "count": len(shares)}
 
 
@@ -447,16 +470,36 @@ def rebuild_material(name: str) -> dict[str, Any]:
 
 @frappe.whitelist(allow_guest=True)
 @_rate_limited
-def get_public_share(token: str | None = None) -> dict[str, Any]:
+def get_public_share(
+    token: str | None = None,
+    screen: str | None = None,
+    viewport: str | None = None,
+    language: str | None = None,
+    timezone: str | None = None,
+) -> dict[str, Any]:
     """Everything the customer's page renders, addressed by its share token.
 
     The parameter name ``token`` is load-bearing twice over: Frappe binds form
     keys to parameter names and silently discards anything the signature does
     not declare, and :func:`_rate_limited` keys its bucket off the same name.
+
+    ``screen`` / ``viewport`` / ``language`` / ``timezone`` are the four things
+    only the browser knows and none of which require a permission prompt. They
+    ride along on this request rather than a second one, because a reader on
+    mobile data should pay one round trip, not two. Everything else about the
+    device is read server-side from the User-Agent.
     """
     _ensure_public_share_permission()
     try:
-        return _resolve_public_share(token)
+        return _resolve_public_share(
+            token,
+            client={
+                "screen": screen,
+                "viewport": viewport,
+                "language": language,
+                "timezone": timezone,
+            },
+        )
     except frappe.PermissionError:
         raise
     except Exception:
@@ -467,7 +510,9 @@ def get_public_share(token: str | None = None) -> dict[str, Any]:
         return not_found()
 
 
-def _resolve_public_share(token: str | None) -> dict[str, Any]:
+def _resolve_public_share(
+    token: str | None, client: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Token -> payload. Every refusal collapses to :func:`not_found`."""
     cleaned = (token or "").strip()
     if not cleaned or len(cleaned) > 64:
@@ -527,38 +572,115 @@ def _resolve_public_share(token: str | None) -> dict[str, Any]:
     if not items:
         return not_found()
 
-    _record_view(share)
+    view_name = _record_view(share, client or {})
 
     return {
         "ok": True,
         "greeting_name": (share.contact_name or "").strip() or None,
         "items": items,
+        # Handed back so the page's end-of-session beacon can update the row it
+        # created rather than guessing at one. Useless on its own: the beacon
+        # also has to present the token, and the row must belong to it.
+        "view": view_name,
     }
 
 
-def _record_view(share) -> None:
-    """Count this opening unless the same viewer counted recently.
+def _record_view(share, client: dict[str, Any]) -> str | None:
+    """Count this opening, unless the same viewer already counted recently.
 
-    Best effort in both directions: a Redis outage must neither double-count
-    nor blank the customer's page, so a cache failure falls through to counting
-    (an over-count is a worse rep signal than a miss, but a crash is worse than
+    Returns the ``Jarz Material View`` row this session belongs to, so the
+    page's end-of-session beacon updates that row rather than opening a new one.
+
+    The throttle key now HOLDS the view name instead of a bare "1". That is what
+    makes a refresh behave correctly: the reader is not counted twice, and their
+    reading time still lands on the row the first load created. Without it, a
+    reader who reloads would either fork a second row or lose the beacon.
+
+    Best effort in both directions: a Redis outage must neither double-count nor
+    blank the customer's page, so a cache failure falls through to counting (an
+    over-count is a worse rep signal than a miss, but a crash is worse than
     both).
     """
+    fingerprint = _viewer_fingerprint()
+    cache = None
+    key = None
     try:
         cache = frappe.cache()
-        fingerprint = _viewer_fingerprint()
         key = cache.make_key(f"{_VIEW_KEY_PREFIX}{share.token}:{fingerprint}")
-        if cache.get_value(key):
-            return
-        cache.set_value(key, "1", expires_in_sec=VIEW_THROTTLE_SEC)
+        existing = cache.get_value(key)
+        if existing:
+            # Same reader, same window: reuse the row, count nothing new.
+            return str(existing)
     except Exception:
         _logger().warning("view throttle unavailable", exc_info=True)
+        cache = None
+
+    view_name = materials_service.record_view(share, client, fingerprint)
+
+    if cache is not None and key is not None:
+        try:
+            cache.set_value(key, view_name or "1", expires_in_sec=VIEW_THROTTLE_SEC)
+        except Exception:
+            pass
 
     try:
         share.record_view()
         frappe.db.commit()
     except Exception:
         _logger().error(f"record_view failed for {share.name}", exc_info=True)
+
+    return view_name
+
+
+@frappe.whitelist(allow_guest=True)
+@_rate_limited
+def record_material_engagement(
+    token: str | None = None,
+    view: str | None = None,
+    seconds: Any = None,
+    pages: Any = None,
+    zoom: Any = None,
+    downloaded: Any = None,
+) -> dict[str, Any]:
+    """End-of-session beacon from the customer's page. Guest-callable.
+
+    Answers the question a rep actually has after "did they open it?" — did they
+    *read* it. Seconds visible, how many pages they reached, how far they zoomed
+    (anything above 1 means they were reading detail rather than glancing), and
+    whether they took the file away.
+
+    Everything here is observable without asking the reader for any permission:
+    no geolocation, no cookies beyond the session, no fingerprinting library.
+
+    Authorised by the same token as the page, and the view row must belong to
+    that token — see :func:`materials.update_view_engagement`. Values only ever
+    move up, so a replayed or duplicated beacon is harmless.
+
+    Always returns ``{"ok": True}``. A beacon is fire-and-forget by nature
+    (``navigator.sendBeacon`` discards the response), so reporting a failure
+    would be shouting into a void; genuine errors go to the log instead.
+    """
+    _ensure_public_share_permission()
+    try:
+        cleaned = (token or "").strip()
+        view_name = (view or "").strip()
+        if not cleaned or not view_name or len(cleaned) > 64 or len(view_name) > 64:
+            return {"ok": True}
+        share_name = frappe.db.get_value(SHARE_DOCTYPE, {"token": cleaned}, "name")
+        if not share_name:
+            return {"ok": True}
+        materials_service.update_view_engagement(
+            view_name,
+            share_name,
+            seconds=seconds,
+            pages_viewed=pages,
+            max_zoom=zoom,
+            downloaded=downloaded,
+        )
+        frappe.db.commit()
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "record_material_engagement failed")
+    return {"ok": True}
 
 
 def _viewer_fingerprint() -> str:

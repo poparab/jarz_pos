@@ -585,3 +585,218 @@ def render_message(template: str | None, url: str, contact_name: str | None = No
     if url and url not in text:
         return f"{text}\n{url}"
     return text
+
+
+# ---------------------------------------------------------------------------
+# Who opened it
+# ---------------------------------------------------------------------------
+
+VIEW_DOCTYPE = "Jarz Material View"
+
+#: Upper bound on a single reading session, in seconds. The page reports its own
+#: visible-time, and a tab left open for a week must not land in the diary as
+#: "read the price list for six days".
+MAX_SESSION_SECONDS = 2 * 3600
+
+
+def parse_user_agent(ua: str | None) -> dict[str, str]:
+    """Device / OS / browser from a User-Agent string.
+
+    Hand-rolled rather than a dependency, because the question this answers is
+    narrow: was the prospect on a phone, and did they read it inside WhatsApp's
+    in-app browser or in a real one. It is deliberately coarse — a wrong minor
+    version costs nothing here, and a new dependency on every deploy costs more
+    than the precision is worth.
+
+    Order matters throughout. Every in-app browser also claims to be Safari or
+    Chrome, and Edge/Samsung/Opera all claim to be Chrome, so the specific
+    tokens have to be tested before the generic ones.
+    """
+    text = (ua or "").strip()
+    if not text:
+        return {"device_type": "", "os": "", "browser": ""}
+    low = text.lower()
+
+    if "ipad" in low or ("android" in low and "mobile" not in low):
+        device = "Tablet"
+    elif any(token in low for token in ("iphone", "ipod", "android", "mobile", "windows phone")):
+        device = "Phone"
+    else:
+        device = "Desktop"
+
+    if "iphone" in low or "ipad" in low or "ipod" in low or "cpu os" in low:
+        os_name = "iOS"
+    elif "android" in low:
+        os_name = "Android"
+    elif "windows" in low:
+        os_name = "Windows"
+    elif "mac os" in low or "macintosh" in low:
+        os_name = "macOS"
+    elif "cros" in low:
+        os_name = "ChromeOS"
+    elif "linux" in low:
+        os_name = "Linux"
+    else:
+        os_name = ""
+
+    # In-app browsers first: the whole point is telling "opened it straight from
+    # the WhatsApp message" apart from "moved it to a real browser", which is a
+    # meaningfully warmer signal for a rep.
+    if "wv)" in low or "; wv" in low:
+        browser = "In-app browser"
+    elif "fban" in low or "fbav" in low:
+        browser = "Facebook in-app"
+    elif "instagram" in low:
+        browser = "Instagram in-app"
+    elif "edg/" in low or "edga/" in low or "edgios/" in low:
+        browser = "Edge"
+    elif "samsungbrowser" in low:
+        browser = "Samsung Internet"
+    elif "opr/" in low or "opera" in low:
+        browser = "Opera"
+    elif "firefox" in low or "fxios" in low:
+        browser = "Firefox"
+    elif "crios" in low or "chrome" in low:
+        browser = "Chrome"
+    elif "safari" in low:
+        browser = "Safari"
+    else:
+        browser = ""
+
+    return {"device_type": device, "os": os_name, "browser": browser}
+
+
+def _clean_client_value(value: Any, limit: int = 60) -> str:
+    """Client-supplied strings are untrusted; keep them short and printable."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = "".join(ch for ch in text if ch.isprintable())
+    return text[:limit]
+
+
+def record_view(share, client: dict[str, Any] | None = None, fingerprint: str = "") -> str | None:
+    """Insert one :data:`VIEW_DOCTYPE` row. Returns its name, or None.
+
+    Best effort by construction: a customer looking at a price list must never
+    see an error because the analytics row could not be written.
+    """
+    from frappe.utils import now_datetime
+
+    client = client or {}
+    try:
+        doc = frappe.get_doc(
+            {
+                "doctype": VIEW_DOCTYPE,
+                "share": share.name,
+                "reference_name": share.reference_name,
+                "viewed_on": now_datetime(),
+                "fingerprint": fingerprint or None,
+                "screen": _clean_client_value(client.get("screen")),
+                "viewport": _clean_client_value(client.get("viewport")),
+                "language": _clean_client_value(client.get("language"), 20),
+                "timezone": _clean_client_value(client.get("timezone"), 60),
+                **parse_user_agent(_request_user_agent()),
+            }
+        )
+        doc.insert(ignore_permissions=True)
+        return doc.name
+    except Exception:
+        _logger().error(f"record_view failed for {share.name}", exc_info=True)
+        return None
+
+
+def _request_user_agent() -> str:
+    try:
+        return frappe.get_request_header("User-Agent") or ""
+    except Exception:
+        return ""
+
+
+def update_view_engagement(
+    view_name: str,
+    share_name: str,
+    seconds: Any = None,
+    pages_viewed: Any = None,
+    max_zoom: Any = None,
+    downloaded: Any = None,
+) -> bool:
+    """Fold a beacon's numbers into one view row. Monotonic, clamped, guarded.
+
+    Only ever raises a value, never lowers it: the page sends cumulative totals
+    and beacons can arrive out of order (or twice), so ``max`` is the only
+    combination that is stable under both. The row must belong to ``share_name``
+    — the token is the credential, and without that check any token holder could
+    rewrite any view row by guessing its hash.
+    """
+    from frappe.utils import cint, flt
+
+    try:
+        row = frappe.db.get_value(
+            VIEW_DOCTYPE,
+            view_name,
+            ["name", "share", "seconds", "pages_viewed", "max_zoom", "downloaded"],
+            as_dict=True,
+        )
+    except Exception:
+        return False
+    if not row or row.share != share_name:
+        return False
+
+    values: dict[str, Any] = {}
+    if seconds is not None:
+        capped = max(0, min(cint(seconds), MAX_SESSION_SECONDS))
+        if capped > cint(row.seconds):
+            values["seconds"] = capped
+    if pages_viewed is not None:
+        pages = max(0, min(cint(pages_viewed), MAX_PAGES))
+        if pages > cint(row.pages_viewed):
+            values["pages_viewed"] = pages
+    if max_zoom is not None:
+        zoom = max(0.0, min(flt(max_zoom), 20.0))
+        if zoom > flt(row.max_zoom):
+            values["max_zoom"] = zoom
+    if downloaded is not None and cint(downloaded) and not cint(row.downloaded):
+        values["downloaded"] = 1
+
+    if not values:
+        return True
+    try:
+        frappe.db.set_value(VIEW_DOCTYPE, view_name, values, update_modified=False)
+        return True
+    except Exception:
+        _logger().error(f"update_view_engagement failed for {view_name}", exc_info=True)
+        return False
+
+
+def latest_view_summary(share_names: list[str]) -> dict[str, dict[str, Any]]:
+    """Newest view per share, for the rep's history list. Guarded -> {}."""
+    if not share_names:
+        return {}
+    try:
+        rows = frappe.get_all(
+            VIEW_DOCTYPE,
+            filters={"share": ["in", share_names]},
+            fields=[
+                "share",
+                "viewed_on",
+                "device_type",
+                "os",
+                "browser",
+                "seconds",
+                "pages_viewed",
+                "max_zoom",
+                "downloaded",
+            ],
+            order_by="viewed_on desc",
+            limit_page_length=0,
+        )
+    except Exception:
+        _logger().warning("latest_view_summary failed", exc_info=True)
+        return {}
+
+    summary: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        # Ordered newest first, so the first row seen for a share is its latest.
+        summary.setdefault(row.share, dict(row))
+    return summary

@@ -1,0 +1,200 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-08-27 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "share",
+  "reference_name",
+  "viewed_on",
+  "column_break_who",
+  "device_type",
+  "os",
+  "browser",
+  "section_break_engagement",
+  "seconds",
+  "pages_viewed",
+  "column_break_engagement",
+  "max_zoom",
+  "downloaded",
+  "section_break_client",
+  "screen",
+  "viewport",
+  "column_break_client",
+  "language",
+  "timezone",
+  "fingerprint"
+ ],
+ "fields": [
+  {
+   "fieldname": "share",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Share",
+   "options": "Jarz Material Share",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Copied from the share so views can be reported per lead without a join.",
+   "fieldname": "reference_name",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Reference",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "viewed_on",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Opened On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_who",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "device_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Device",
+   "read_only": 1
+  },
+  {
+   "fieldname": "os",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "OS",
+   "read_only": 1
+  },
+  {
+   "fieldname": "browser",
+   "fieldtype": "Data",
+   "label": "Browser",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_engagement",
+   "fieldtype": "Section Break",
+   "label": "Engagement"
+  },
+  {
+   "description": "Seconds the page was actually visible, not merely open in a background tab.",
+   "fieldname": "seconds",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Seconds Reading",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pages_viewed",
+   "fieldtype": "Int",
+   "label": "Pages Viewed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_engagement",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Highest zoom reached. Anything above 1 means they were reading detail, not glancing.",
+   "fieldname": "max_zoom",
+   "fieldtype": "Float",
+   "label": "Max Zoom",
+   "precision": "2",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "downloaded",
+   "fieldtype": "Check",
+   "label": "Downloaded A File",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_break_client",
+   "fieldtype": "Section Break",
+   "label": "Client"
+  },
+  {
+   "fieldname": "screen",
+   "fieldtype": "Data",
+   "label": "Screen",
+   "read_only": 1
+  },
+  {
+   "fieldname": "viewport",
+   "fieldtype": "Data",
+   "label": "Viewport",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_client",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "language",
+   "fieldtype": "Data",
+   "label": "Language",
+   "read_only": 1
+  },
+  {
+   "fieldname": "timezone",
+   "fieldtype": "Data",
+   "label": "Timezone",
+   "read_only": 1
+  },
+  {
+   "description": "Salted hash of IP + user agent. Distinguishes repeat opens by the same reader without storing their address.",
+   "fieldname": "fingerprint",
+   "fieldtype": "Data",
+   "label": "Viewer Key",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-27 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Material View",
+ "naming_rule": "Hash",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  },
+  {
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "B2B Sales Rep"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

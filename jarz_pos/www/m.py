@@ -46,6 +46,11 @@ def get_context(context: Any) -> Any:
     context.no_cache = 1
     context.no_sitemap = 1
     context.share_endpoint = "/api/method/jarz_pos.api.materials.get_public_share"
+    # The end-of-session beacon. Named here rather than hard-coded in the
+    # template so the route and the endpoint cannot drift apart.
+    context.engagement_endpoint = (
+        "/api/method/jarz_pos.api.materials.record_material_engagement"
+    )
     context.route_prefix = _materials.SHARE_ROUTE_PREFIX
     context.title = "Jarz"
     return context

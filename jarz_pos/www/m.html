@@ -62,68 +62,127 @@
 	genuinely more than opening the same file from the gallery, where the
 	system viewer shows a downscaled copy.
 -->
-<html lang="ar" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 	<meta name="referrer" content="no-referrer">
 	<meta name="robots" content="noindex, nofollow, noarchive">
-	<meta name="theme-color" content="#0f172a">
+	<meta name="theme-color" content="#434057">
 	<title>Jarz</title>
 	<style>
+		/* The Jarz palette, straight from LeadsTheme (lib/src/features/leads/
+		   presentation/leads_theme.dart) — the one place in this codebase that
+		   actually documents brand colours. Kept in sync by hand because a public
+		   page cannot import Dart; if the app's palette moves, move these too. */
 		:root {
-			--bg: #f4f5f7;
-			--card: #ffffff;
-			--ink: #111827;
-			--muted: #6b7280;
-			--line: #e5e7eb;
-			--brand: #0f172a;
-			--accent: #16a34a;
-			--radius: 18px;
+			--plum: #434057;        /* primary ink, header */
+			--plum-deep: #322F42;
+			--berry: #EF6B7A;       /* accent */
+			--gold: #C4A265;        /* secondary accent, rules */
+			--blush: #F1CBE1;
+			--canvas: #FDFCFA;
+			--card: #FFFFFF;
+			--line: #E8E6E1;
+			--muted: #78746D;
+			--ink: #2A2833;
+			--shadow: 0 1px 2px rgba(67, 64, 87, .04), 0 8px 24px rgba(67, 64, 87, .07);
+			--radius: 20px;
 		}
+
+		/* Served from our own origin, so the page still makes ZERO external
+		   requests. `swap` so the wordmark never blocks first paint on 3G. */
+		@font-face {
+			font-family: "DM Serif Display";
+			src: url("/assets/jarz_pos/fonts/DMSerifDisplay-Regular.ttf") format("truetype");
+			font-weight: 400;
+			font-display: swap;
+		}
+
 		* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 		html, body { margin: 0; padding: 0; }
 		body {
 			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-				"Noto Sans Arabic", "Noto Kufi Arabic", Tahoma, Arial, sans-serif;
-			background: var(--bg);
+				"Helvetica Neue", Arial, sans-serif;
+			background: var(--canvas);
 			color: var(--ink);
 			-webkit-text-size-adjust: 100%;
 			overflow-wrap: anywhere;
+			line-height: 1.5;
 		}
 		body.locked { overflow: hidden; }
+		.serif { font-family: "DM Serif Display", Georgia, "Times New Roman", serif; font-weight: 400; }
 
 		header {
-			background: var(--brand);
+			background: linear-gradient(160deg, var(--plum) 0%, var(--plum-deep) 100%);
 			color: #fff;
-			padding: 18px 18px calc(18px + env(safe-area-inset-top, 0px));
-			padding-top: calc(18px + env(safe-area-inset-top, 0px));
-			display: flex;
-			align-items: baseline;
-			gap: 10px;
+			padding: calc(26px + env(safe-area-inset-top, 0px)) 22px 30px;
+			border-bottom: 3px solid var(--gold);
+			position: relative;
+			overflow: hidden;
 		}
-		.brand { font-size: 22px; font-weight: 800; letter-spacing: .5px; }
-		.greeting { font-size: 14px; opacity: .82; }
+		/* A soft berry bloom, so the header reads as designed rather than as a
+		   flat block of brand colour. */
+		header::after {
+			content: "";
+			position: absolute;
+			inset-inline-end: -70px;
+			top: -90px;
+			width: 240px;
+			height: 240px;
+			border-radius: 50%;
+			background: radial-gradient(circle, rgba(239, 107, 122, .38), rgba(239, 107, 122, 0) 68%);
+			pointer-events: none;
+		}
+		.brand {
+			font-size: 30px;
+			letter-spacing: .5px;
+			line-height: 1;
+		}
+		.tagline {
+			font-size: 11px;
+			text-transform: uppercase;
+			letter-spacing: 2.4px;
+			color: var(--blush);
+			margin-top: 7px;
+		}
+		.greeting { font-size: 15px; opacity: .9; margin-top: 18px; }
+		.greeting strong { font-weight: 600; }
 
-		main { padding: 14px 14px 28px; max-width: 720px; margin: 0 auto; }
+		main { padding: 22px 16px 34px; max-width: 760px; margin: 0 auto; }
+
+		.hintbar {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			color: var(--muted);
+			font-size: 12.5px;
+			margin: 0 2px 18px;
+		}
+		.hintbar::before, .hintbar::after {
+			content: "";
+			height: 1px;
+			flex: 1;
+			background: var(--line);
+		}
 
 		.card {
 			background: var(--card);
 			border: 1px solid var(--line);
 			border-radius: var(--radius);
 			overflow: hidden;
-			margin-bottom: 14px;
-			box-shadow: 0 1px 2px rgba(16, 24, 40, .05);
+			margin-bottom: 18px;
+			box-shadow: var(--shadow);
 		}
 		.shot {
 			display: block;
+			position: relative;
 			width: 100%;
 			border: 0;
 			padding: 0;
 			margin: 0;
-			background: #eef0f3;
+			background: #F3F1EE;
 			cursor: pointer;
-			position: relative;
 			/* Reserve the box before the thumbnail decodes so the list does not
 			   jump under the reader's thumb as images arrive. */
 			aspect-ratio: 4 / 3;
@@ -135,51 +194,99 @@
 			object-position: top center;
 			display: block;
 		}
+		.shot::after {
+			content: "";
+			position: absolute;
+			inset: auto 0 0 0;
+			height: 96px;
+			background: linear-gradient(rgba(255, 255, 255, 0), rgba(255, 255, 255, .92));
+			pointer-events: none;
+		}
 		.badge {
 			position: absolute;
-			inset-inline-end: 10px;
-			top: 10px;
-			background: rgba(15, 23, 42, .78);
+			inset-inline-end: 12px;
+			top: 12px;
+			background: rgba(50, 47, 66, .82);
 			color: #fff;
-			font-size: 12px;
-			padding: 4px 9px;
+			font-size: 11.5px;
+			font-weight: 600;
+			letter-spacing: .3px;
+			padding: 5px 11px;
+			border-radius: 999px;
+			backdrop-filter: blur(6px);
+		}
+		.zoomcue {
+			position: absolute;
+			inset-inline-start: 12px;
+			bottom: 12px;
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			background: rgba(255, 255, 255, .94);
+			color: var(--plum);
+			font-size: 11.5px;
+			font-weight: 600;
+			padding: 6px 11px;
+			border-radius: 999px;
+			border: 1px solid var(--line);
+		}
+		.meta { padding: 16px 18px 18px; display: flex; align-items: flex-start; gap: 14px; }
+		.meta h2 { margin: 0; font-size: 19px; flex: 1; color: var(--ink); line-height: 1.25; }
+		.kind {
+			display: inline-block;
+			margin-top: 8px;
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+			font-size: 11px;
+			font-weight: 700;
+			text-transform: uppercase;
+			letter-spacing: 1.1px;
+			color: var(--plum);
+			background: var(--blush);
+			padding: 4px 10px;
 			border-radius: 999px;
 		}
-		.meta { padding: 12px 14px 14px; display: flex; align-items: center; gap: 12px; }
-		.meta h2 { margin: 0; font-size: 16px; font-weight: 700; flex: 1; }
-		.meta .kind { display: block; font-size: 12.5px; color: var(--muted); font-weight: 500; margin-top: 3px; }
 		.dl {
 			flex: none;
 			display: inline-flex;
 			align-items: center;
-			gap: 6px;
+			gap: 7px;
 			font-size: 13px;
+			font-weight: 600;
 			text-decoration: none;
-			color: var(--ink);
-			border: 1px solid var(--line);
+			color: var(--plum);
+			border: 1px solid var(--gold);
 			border-radius: 999px;
-			padding: 8px 12px;
+			padding: 9px 15px;
 			background: #fff;
+			transition: background .15s ease;
 		}
-		.hintbar {
-			text-align: center;
-			color: var(--muted);
-			font-size: 13px;
-			margin: 2px 0 16px;
-		}
+		.dl:active { background: #FBF7EF; }
 
-		.state { text-align: center; padding: 60px 24px; color: var(--muted); }
-		.state h2 { color: var(--ink); font-size: 18px; margin: 0 0 8px; }
-		.skel { height: 190px; border-radius: var(--radius); background: linear-gradient(90deg, #e9ebef 25%, #f3f4f6 37%, #e9ebef 63%); background-size: 400% 100%; animation: sh 1.3s ease infinite; margin-bottom: 14px; }
+		.state { text-align: center; padding: 70px 26px; color: var(--muted); }
+		.state h2 { color: var(--ink); font-size: 22px; margin: 0 0 10px; }
+		.skel {
+			height: 230px;
+			border-radius: var(--radius);
+			background: linear-gradient(90deg, #EFEDE9 25%, #F7F5F2 37%, #EFEDE9 63%);
+			background-size: 400% 100%;
+			animation: sh 1.3s ease infinite;
+			margin-bottom: 18px;
+		}
 		@keyframes sh { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 
-		footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 20px 30px; }
+		footer {
+			text-align: center;
+			color: var(--muted);
+			font-size: 12px;
+			padding: 0 20px 40px;
+		}
+		footer .mark { font-size: 19px; color: var(--plum); display: block; margin-bottom: 5px; }
 
 		/* ── viewer ───────────────────────────────────────────────────── */
 		#viewer {
 			position: fixed;
 			inset: 0;
-			background: #000;
+			background: #17161C;
 			z-index: 50;
 			display: none;
 			/* The stage owns every touch. Without this the browser scrolls the
@@ -211,20 +318,20 @@
 			display: flex;
 			align-items: center;
 			gap: 12px;
-			padding: 12px 14px;
+			padding: 14px 16px;
 			color: #fff;
 			transition: opacity .2s ease;
 			pointer-events: none;
 		}
-		#vtop { top: 0; padding-top: calc(12px + env(safe-area-inset-top, 0px)); background: linear-gradient(rgba(0,0,0,.66), rgba(0,0,0,0)); }
-		#vbot { bottom: 0; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); justify-content: center; background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.6)); }
+		#vtop { top: 0; padding-top: calc(14px + env(safe-area-inset-top, 0px)); background: linear-gradient(rgba(23, 22, 28, .78), rgba(23, 22, 28, 0)); }
+		#vbot { bottom: 0; padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); justify-content: center; background: linear-gradient(rgba(23, 22, 28, 0), rgba(23, 22, 28, .7)); }
 		#vtop *, #vbot * { pointer-events: auto; }
 		#viewer.chrome-off #vtop, #viewer.chrome-off #vbot { opacity: 0; }
 		.vbtn {
-			background: rgba(255,255,255,.14);
+			background: rgba(255, 255, 255, .15);
 			border: 0;
 			color: #fff;
-			width: 38px; height: 38px;
+			width: 40px; height: 40px;
 			border-radius: 50%;
 			font-size: 18px;
 			line-height: 1;
@@ -234,29 +341,39 @@
 			justify-content: center;
 			text-decoration: none;
 			flex: none;
+			backdrop-filter: blur(8px);
 		}
-		#vtitle { flex: 1; font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-		#counter { font-size: 13px; background: rgba(0,0,0,.45); padding: 5px 12px; border-radius: 999px; }
+		#vtitle { flex: 1; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		#counter {
+			font-size: 12.5px;
+			font-weight: 600;
+			letter-spacing: .4px;
+			background: rgba(239, 107, 122, .92);
+			padding: 6px 14px;
+			border-radius: 999px;
+		}
 		#hint {
 			position: absolute;
 			left: 50%;
 			top: 50%;
 			transform: translate(-50%, -50%);
-			background: rgba(0,0,0,.62);
+			background: rgba(23, 22, 28, .82);
 			color: #fff;
-			padding: 10px 16px;
+			padding: 12px 20px;
 			border-radius: 999px;
 			font-size: 14px;
 			opacity: 0;
 			transition: opacity .35s ease;
 			pointer-events: none;
+			backdrop-filter: blur(8px);
 		}
 		#hint.show { opacity: 1; }
 	</style>
 </head>
 <body>
 	<header>
-		<div class="brand">Jarz</div>
+		<div class="brand serif">Jarz</div>
+		<div class="tagline">Speciality Coffee</div>
 		<div class="greeting" id="greeting"></div>
 	</header>
 
@@ -265,7 +382,10 @@
 		<div class="skel"></div>
 	</main>
 
-	<footer id="foot"></footer>
+	<footer id="foot" hidden>
+		<span class="mark serif">Jarz</span>
+		Shared with you by the Jarz sales team.
+	</footer>
 
 	<div id="viewer" role="dialog" aria-modal="true" aria-label="viewer">
 		<div id="stage"><div id="track"></div></div>
@@ -275,7 +395,7 @@
 			<a class="vbtn" id="vdl" href="#" download aria-label="download">&#8681;</a>
 		</div>
 		<div id="vbot"><span id="counter"></span></div>
-		<div id="hint">&#9757; قرّب بإصبعك للتكبير</div>
+		<div id="hint">Pinch to zoom in</div>
 	</div>
 
 	<script>
@@ -283,6 +403,21 @@
 		"use strict";
 
 		var ENDPOINT = "{{ share_endpoint or '/api/method/jarz_pos.api.materials.get_public_share' }}";
+		var BEACON = "{{ engagement_endpoint or '/api/method/jarz_pos.api.materials.record_material_engagement' }}";
+
+		/* What the rep learns about this reading, beyond "they opened it".
+		   Everything here is observable WITHOUT asking the reader for a single
+		   permission: no geolocation prompt, no camera, no notifications, no
+		   third-party script. Screen and timezone come from the browser itself;
+		   device, OS and browser are read server-side from the User-Agent. */
+		var TRACK = {
+			view: null,          // the server's row for this session
+			seconds: 0,          // visible time only, not tab-left-open time
+			since: Date.now(),
+			pages: {},           // set of page indices actually opened
+			zoom: 1,             // deepest zoom reached
+			downloaded: 0
+		};
 
 		var feed = document.getElementById("feed");
 		var viewer = document.getElementById("viewer");
@@ -337,8 +472,24 @@
 
 		function load() {
 			var tok = token();
-			if (!tok) { return fail("الرابط غير صحيح", "افتح الرابط اللي وصلك من غير تعديل."); }
-			fetch(ENDPOINT + "?token=" + encodeURIComponent(tok), {
+			if (!tok) { return fail("This link looks incomplete", "Open the link exactly as you received it."); }
+			/* Sent on the SAME request rather than a second one: a reader on
+			   mobile data should pay one round trip. Each of these is known only
+			   to the browser and none of them prompts. */
+			var probe = "";
+			try {
+				probe =
+					"&screen=" + encodeURIComponent(
+						screen.width + "x" + screen.height + "@" +
+						(window.devicePixelRatio || 1) + "x") +
+					"&viewport=" + encodeURIComponent(
+						window.innerWidth + "x" + window.innerHeight) +
+					"&language=" + encodeURIComponent(navigator.language || "") +
+					"&timezone=" + encodeURIComponent(
+						(Intl.DateTimeFormat().resolvedOptions().timeZone) || "");
+			} catch (error) { probe = ""; }
+
+			fetch(ENDPOINT + "?token=" + encodeURIComponent(tok) + probe, {
 				headers: { Accept: "application/json" },
 				credentials: "omit"
 			})
@@ -347,20 +498,22 @@
 					var data = (payload && payload.message) || payload || {};
 					if (!data.ok) {
 						return fail(
-							"الرابط ده مش شغال",
-							"يمكن يكون انتهى أو اتغير. كلّم اللي بعتهولك وهيبعتلك واحد جديد."
+							"This link is no longer available",
+							"It may have expired or been replaced. Ask the person who sent it for a new one."
 						);
 					}
+					TRACK.view = data.view || null;
 					render(data);
 				})
 				.catch(function () {
-					fail("مش قادرين نحمّل المحتوى", "اتأكد إن النت شغال وجرّب تاني.");
+					fail("We could not load this", "Check your connection and try again.");
 				});
 		}
 
 		function render(data) {
 			if (data.greeting_name) {
-				document.getElementById("greeting").textContent = "أهلاً " + data.greeting_name;
+				document.getElementById("greeting").innerHTML =
+					"Hello <strong>" + esc(data.greeting_name) + "</strong>";
 			}
 			PAGES = [];
 			var html = "";
@@ -390,29 +543,30 @@
 					(count
 						? '<button class="shot" data-start="' + start + '">' +
 						  '<img loading="lazy" decoding="async" src="' + esc(PAGES[start].thumb) + '" alt="">' +
-						  (count > 1 ? '<span class="badge">' + count + " صفحات</span>" : "") +
+						  (count > 1 ? '<span class="badge">' + count + " pages</span>" : "") +
+						  '<span class="zoomcue">Tap to open</span>' +
 						  "</button>"
 						: "") +
 					'<div class="meta"><h2>' + esc(item.title) +
 					'<span class="kind">' + esc(item.type || "") + "</span></h2>" +
 					(item.download_url
-						? '<a class="dl" href="' + esc(item.download_url) + '" download>&#8681; تحميل</a>'
+						? '<a class="dl" href="' + esc(item.download_url) + '" download>&#8681; Download</a>'
 						: "") +
 					"</div></article>";
 			});
 
 			if (!html) {
-				return fail("مفيش حاجة هنا", "كلّم اللي بعتلك الرابط.");
+				return fail("Nothing to show here", "Ask the person who sent you this link.");
 			}
 
 			feed.innerHTML =
-				(PAGES.length ? '<p class="hintbar">دوس على أي صورة عشان تكبّرها</p>' : "") + html;
+				(PAGES.length ? '<p class="hintbar">Tap any page to open it full screen</p>' : "") + html;
 			Array.prototype.forEach.call(feed.querySelectorAll(".shot"), function (button) {
 				button.addEventListener("click", function () {
 					open(parseInt(button.getAttribute("data-start"), 10) || 0);
 				});
 			});
-			document.getElementById("foot").textContent = "Jarz";
+			document.getElementById("foot").hidden = false;
 		}
 
 		// ── geometry ──────────────────────────────────────────────────────
@@ -482,6 +636,7 @@
 		/* The ONLY function that writes a transform. Everything else mutates
 		   `st` and asks for a frame - see decision 2 in the header comment. */
 		function write() {
+			if (st.scale > TRACK.zoom) { TRACK.zoom = st.scale; }
 			var slot = slots[cur];
 			if (slot) {
 				slot.canvas.style.transform =
@@ -637,6 +792,7 @@
 
 		function paint() {
 			var page = PAGES[cur];
+			TRACK.pages[cur] = 1;
 			vtitle.textContent =
 				page.pageCount > 1
 					? page.title + " (" + (page.pageIndex + 1) + "/" + page.pageCount + ")"
@@ -1003,6 +1159,11 @@
 		stage.addEventListener("contextmenu", function (event) { event.preventDefault(); });
 		stage.addEventListener("dblclick", function (event) { event.preventDefault(); });
 
+		document.addEventListener("click", function (event) {
+			var link = event.target && event.target.closest ? event.target.closest("a[download]") : null;
+			if (link) { TRACK.downloaded = 1; report(); }
+		}, true);
+
 		document.getElementById("close").addEventListener("click", closeFromHistory);
 		window.addEventListener("popstate", function () {
 			if (viewer.classList.contains("open")) { close(); }
@@ -1019,6 +1180,46 @@
 		window.addEventListener("orientationchange", function () {
 			setTimeout(function () { if (viewer.classList.contains("open")) { layout(); } }, 250);
 		});
+
+		/* Visible time, not elapsed time. A tab left open in the background for
+		   an hour is not an hour of reading, and reporting it that way would
+		   turn the one number a rep should trust into noise. */
+		function settleClock() {
+			var now = Date.now();
+			if (document.visibilityState !== "hidden") {
+				TRACK.seconds += Math.round((now - TRACK.since) / 1000);
+			}
+			TRACK.since = now;
+		}
+
+		/* sendBeacon survives the page being closed, which is exactly when this
+		   fires; fetch would be cancelled. FormData because Frappe reads form
+		   fields, and the response is discarded either way. */
+		function report() {
+			if (!TRACK.view) { return; }
+			settleClock();
+			var tok = token();
+			if (!tok) { return; }
+			try {
+				var body = new FormData();
+				body.append("token", tok);
+				body.append("view", TRACK.view);
+				body.append("seconds", String(TRACK.seconds));
+				body.append("pages", String(Object.keys(TRACK.pages).length));
+				body.append("zoom", TRACK.zoom.toFixed(2));
+				body.append("downloaded", String(TRACK.downloaded));
+				if (navigator.sendBeacon) { navigator.sendBeacon(BEACON, body); }
+				else { fetch(BEACON, { method: "POST", body: body, keepalive: true, credentials: "omit" }); }
+			} catch (error) {
+				// Never let analytics break the page the customer came to read.
+			}
+		}
+
+		document.addEventListener("visibilitychange", function () {
+			settleClock();
+			if (document.visibilityState === "hidden") { report(); }
+		});
+		window.addEventListener("pagehide", report);
 
 		load();
 	})();

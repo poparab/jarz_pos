@@ -219,5 +219,107 @@ class TestTierLadder(unittest.TestCase):
         self.assertLessEqual(largest, 3200)
 
 
+class TestUserAgentParsing(unittest.TestCase):
+    """Device / OS / browser, coarse on purpose.
+
+    The one distinction that carries real sales meaning is whether the prospect
+    read it inside WhatsApp's in-app browser or moved it to a real one, so the
+    in-app cases are pinned hardest. Order is the whole game: every in-app
+    browser also claims to be Safari or Chrome, and Edge/Samsung/Opera all
+    claim to be Chrome.
+    """
+
+    def setUp(self):
+        from jarz_pos.services.materials import parse_user_agent
+
+        self.parse = parse_user_agent
+
+    def test_iphone_safari(self):
+        got = self.parse(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+        )
+        self.assertEqual(got["device_type"], "Phone")
+        self.assertEqual(got["os"], "iOS")
+        self.assertEqual(got["browser"], "Safari")
+
+    def test_android_chrome(self):
+        got = self.parse(
+            "Mozilla/5.0 (Linux; Android 14; SM-A536E) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Mobile Safari/537.36"
+        )
+        self.assertEqual(got["device_type"], "Phone")
+        self.assertEqual(got["os"], "Android")
+        self.assertEqual(got["browser"], "Chrome")
+
+    def test_whatsapp_in_app_browser_is_not_reported_as_chrome(self):
+        """The signal a rep actually wants: read straight from the message."""
+        got = self.parse(
+            "Mozilla/5.0 (Linux; Android 13; wv) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36"
+        )
+        self.assertEqual(got["browser"], "In-app browser")
+        self.assertEqual(got["device_type"], "Phone")
+
+    def test_samsung_internet_is_not_chrome(self):
+        got = self.parse(
+            "Mozilla/5.0 (Linux; Android 13; SAMSUNG SM-G991B) AppleWebKit/537.36 "
+            "SamsungBrowser/23.0 Chrome/115.0.0.0 Mobile Safari/537.36"
+        )
+        self.assertEqual(got["browser"], "Samsung Internet")
+
+    def test_ipad_is_a_tablet(self):
+        got = self.parse(
+            "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1"
+        )
+        self.assertEqual(got["device_type"], "Tablet")
+
+    def test_android_without_mobile_token_is_a_tablet(self):
+        got = self.parse(
+            "Mozilla/5.0 (Linux; Android 13; SM-X200) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        )
+        self.assertEqual(got["device_type"], "Tablet")
+
+    def test_desktop(self):
+        got = self.parse(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        )
+        self.assertEqual(got["device_type"], "Desktop")
+        self.assertEqual(got["os"], "Windows")
+
+    def test_blank_is_blank_not_a_guess(self):
+        self.assertEqual(
+            self.parse(""), {"device_type": "", "os": "", "browser": ""}
+        )
+        self.assertEqual(
+            self.parse(None), {"device_type": "", "os": "", "browser": ""}
+        )
+
+
+class TestClientValueSanitising(unittest.TestCase):
+    """Screen/timezone/language come from the page, so they are untrusted."""
+
+    def setUp(self):
+        from jarz_pos.services.materials import _clean_client_value
+
+        self.clean = _clean_client_value
+
+    def test_normal_values_survive(self):
+        self.assertEqual(self.clean("412x915@3x"), "412x915@3x")
+        self.assertEqual(self.clean("Africa/Cairo"), "Africa/Cairo")
+
+    def test_length_is_capped(self):
+        self.assertEqual(len(self.clean("x" * 500)), 60)
+        self.assertEqual(len(self.clean("y" * 500, 20)), 20)
+
+    def test_control_characters_are_stripped(self):
+        self.assertEqual(self.clean("Africa/" + chr(0) + "Cairo" + chr(10)), "Africa/Cairo")
+
+    def test_empty_and_none(self):
+        self.assertEqual(self.clean(None), "")
+        self.assertEqual(self.clean("   "), "")
+
+
 if __name__ == "__main__":
     unittest.main()
