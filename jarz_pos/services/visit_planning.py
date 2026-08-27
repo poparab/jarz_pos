@@ -624,6 +624,156 @@ def _customer_pins(names: Sequence[str]) -> Dict[str, Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def targets_for_record(reference_doctype: str, reference_name: str) -> List[VisitTarget]:
+    """Every routable door belonging to ONE record.
+
+    This is what lets any screen offer "add to a visit" without knowing
+    anything about how doors are stored. A brand with six branches answers with
+    six targets and the caller shows a picker; a brand with one answers with one
+    and the caller can skip straight to the plan.
+
+    An Opportunity has no geography of its own, so it resolves back to the Lead
+    it came from — the same hop ``journey._contacts_lead`` makes, and for the
+    same reason: the Lead is where this app actually keeps the addresses.
+
+    Returns ``[]`` for a record with nothing routable. That is a normal answer,
+    not an error: a lead nobody has geocoded simply cannot be put on a route,
+    and the caller says so rather than offering a stop that goes nowhere.
+    """
+    doctype = (reference_doctype or "").strip()
+    name = (reference_name or "").strip()
+    if not doctype or not name:
+        return []
+
+    if doctype == "Opportunity":
+        lead = _opportunity_lead(name)
+        return targets_for_record("Lead", lead) if lead else []
+
+    if doctype == "Customer":
+        return _customer_targets_for(name)
+
+    if doctype != "Lead":
+        return []
+
+    try:
+        row = frappe.db.get_value(
+            "Lead",
+            name,
+            ["name", "lead_name", "company_name", "phone", "mobile_no"],
+            as_dict=True,
+        )
+    except Exception:
+        row = None
+    if not row:
+        return []
+
+    optional = {}
+    for field in ("custom_fit_score", "custom_b2b_stage", "custom_fit_tier",
+                  "custom_lead_category", "custom_primary_area",
+                  "custom_is_specialty", "custom_latitude", "custom_longitude",
+                  "custom_maps_url", "custom_next_followup_date",
+                  "custom_followup_done"):
+        if _has_field("Lead", field):
+            try:
+                optional[field] = frappe.db.get_value("Lead", name, field)
+            except Exception:
+                optional[field] = None
+
+    doors = (_lead_branches([name]) or {}).get(name) or []
+    if not doors:
+        lat = _coord(optional.get("custom_latitude"))
+        lng = _coord(optional.get("custom_longitude"))
+        if lat is None or lng is None:
+            return []
+        doors = [{
+            "branch_name": "",
+            "area": optional.get("custom_primary_area") or "",
+            "latitude": lat,
+            "longitude": lng,
+            "address": "",
+            "phone": row.get("phone") or row.get("mobile_no") or "",
+            "maps_url": optional.get("custom_maps_url") or "",
+        }]
+
+    visits = last_visit_map("Lead", [name])
+    today = getdate(nowdate())
+    targets = []
+    for door in doors:
+        target = VisitTarget(
+            reference_doctype="Lead",
+            reference_name=name,
+            title=row.get("company_name") or row.get("lead_name") or name,
+            branch_name=door.get("branch_name") or "",
+            area=door.get("area") or optional.get("custom_primary_area") or "",
+            latitude=door["latitude"],
+            longitude=door["longitude"],
+            address=door.get("address") or "",
+            phone=door.get("phone") or row.get("phone") or row.get("mobile_no") or "",
+            maps_url=door.get("maps_url") or "",
+            fit_score=float(optional.get("custom_fit_score") or 0),
+            stage=optional.get("custom_b2b_stage") or "",
+            tier=optional.get("custom_fit_tier") or "",
+            category=optional.get("custom_lead_category") or "",
+            is_specialty=bool(optional.get("custom_is_specialty")),
+            last_visit_date=visits.get(name),
+            next_followup_date=(
+                str(optional.get("custom_next_followup_date"))
+                if optional.get("custom_next_followup_date")
+                and not optional.get("custom_followup_done")
+                else None
+            ),
+        )
+        _score(target, today)
+        targets.append(target)
+    return targets
+
+
+def _opportunity_lead(name: str) -> Optional[str]:
+    """The Lead an Opportunity came from, or ``None``. Guarded."""
+    try:
+        row = frappe.db.get_value(
+            "Opportunity", name, ["opportunity_from", "party_name"], as_dict=True
+        )
+    except Exception:
+        return None
+    if not row or row.get("opportunity_from") != "Lead":
+        return None
+    return row.get("party_name") or None
+
+
+def _customer_targets_for(name: str) -> List[VisitTarget]:
+    """One customer's located address, as a target. Guarded -> []."""
+    if not _has_field("Address", "custom_latitude"):
+        return []
+    try:
+        row = frappe.db.get_value(
+            "Customer", name, ["name", "customer_name", "mobile_no", "territory"],
+            as_dict=True,
+        )
+    except Exception:
+        row = None
+    if not row:
+        return []
+    pin = (_customer_pins([name]) or {}).get(name)
+    if not pin:
+        return []
+    target = VisitTarget(
+        reference_doctype="Customer",
+        reference_name=name,
+        title=row.get("customer_name") or name,
+        branch_name=pin.get("branch_name") or "",
+        area=pin.get("area") or row.get("territory") or "",
+        latitude=pin["latitude"],
+        longitude=pin["longitude"],
+        address=pin.get("address") or "",
+        phone=pin.get("phone") or row.get("mobile_no") or "",
+        stage="Active",
+        last_visit_date=last_visit_map("Customer", [name]).get(name),
+    )
+    _score(target, getdate(nowdate()))
+    return [target]
+
+
 def _score(target: VisitTarget, today) -> None:
     """Rank a door by how much it is worth a slot in the day.
 

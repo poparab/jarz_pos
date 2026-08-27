@@ -607,6 +607,184 @@ class TestVisitTargets(VisitTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Adding from other screens
+# ---------------------------------------------------------------------------
+class TestRecordTargets(VisitTestCase):
+    """`get_record_visit_targets` - what the kanban / leads / lead page call."""
+
+    def test_a_lead_answers_with_one_target_per_located_branch(self):
+        lead = _make_lead(
+            "_TEST Visit Record Doors",
+            branches=[_branch("Maadi", _MAADI), _branch("Zamalek", _ZAMALEK)],
+        )
+        payload = visits_api.get_record_visit_targets("Lead", lead)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(
+            sorted(t["branch_name"] for t in payload["targets"]),
+            ["Maadi", "Zamalek"],
+        )
+
+    def test_a_lead_with_no_branches_falls_back_to_its_brand_pin(self):
+        lead = _make_lead("_TEST Visit Record Brand Pin")
+        frappe.db.set_value("Lead", lead, "custom_latitude", _MAADI[0])
+        frappe.db.set_value("Lead", lead, "custom_longitude", _MAADI[1])
+        payload = visits_api.get_record_visit_targets("Lead", lead)
+        self.assertEqual(payload["count"], 1)
+        self.assertAlmostEqual(payload["targets"][0]["latitude"], _MAADI[0], places=4)
+
+    def test_an_unlocatable_lead_answers_empty_rather_than_raising(self):
+        """A lead nobody geocoded cannot be routed. That is an answer, not an error."""
+        lead = _make_lead("_TEST Visit Record Nowhere")
+        payload = visits_api.get_record_visit_targets("Lead", lead)
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["targets"], [])
+
+    def test_an_unknown_record_answers_empty(self):
+        payload = visits_api.get_record_visit_targets("Lead", "does-not-exist")
+        self.assertEqual(payload["count"], 0)
+
+    def test_a_blank_reference_answers_empty(self):
+        self.assertEqual(visits_api.get_record_visit_targets("", "")["count"], 0)
+
+    def test_targets_carry_what_the_picker_needs_to_draw_a_row(self):
+        lead = _make_lead(
+            "_TEST Visit Record Fields",
+            branches=[_branch("Maadi", _MAADI, area="Maadi")],
+            fit_score=77,
+        )
+        target = visits_api.get_record_visit_targets("Lead", lead)["targets"][0]
+        self.assertEqual(target["area"], "Maadi")
+        self.assertEqual(target["fit_score"], 77)
+        self.assertTrue(target["title"])
+        self.assertTrue(target["reasons"])
+
+
+class TestAddablePlans(VisitTestCase):
+    def test_upcoming_plans_are_offered(self):
+        lead = _make_lead("_TEST Visit Addable")
+        plan = visits_api.create_visit_plan(
+            visit_date=_days(2), title="Saturday", stops=[_stop(lead, _MAADI)]
+        )
+        names = [p["name"] for p in visits_api.get_addable_visit_plans()["plans"]]
+        self.assertIn(plan["name"], names)
+
+    def test_a_finished_day_is_not_offered(self):
+        """You do not add a stop to a day that is already over."""
+        lead = _make_lead("_TEST Visit Addable Done")
+        plan = visits_api.create_visit_plan(
+            visit_date=_days(1), stops=[_stop(lead, _MAADI)]
+        )
+        visits_api.update_visit_plan(plan["name"], status="Completed")
+        names = [p["name"] for p in visits_api.get_addable_visit_plans()["plans"]]
+        self.assertNotIn(plan["name"], names)
+
+    def test_a_far_future_day_is_outside_the_window(self):
+        lead = _make_lead("_TEST Visit Addable Far")
+        plan = visits_api.create_visit_plan(
+            visit_date=_days(300), stops=[_stop(lead, _MAADI)]
+        )
+        names = [
+            p["name"]
+            for p in visits_api.get_addable_visit_plans(days_ahead=30)["plans"]
+        ]
+        self.assertNotIn(plan["name"], names)
+
+    def test_plans_come_back_soonest_first(self):
+        lead = _make_lead("_TEST Visit Addable Order")
+        later = visits_api.create_visit_plan(
+            visit_date=_days(9), stops=[_stop(lead, _ZAMALEK, branch_name="Z")]
+        )
+        sooner = visits_api.create_visit_plan(
+            visit_date=_days(3), stops=[_stop(lead, _MAADI, branch_name="M")]
+        )
+        names = [p["name"] for p in visits_api.get_addable_visit_plans()["plans"]]
+        self.assertLess(names.index(sooner["name"]), names.index(later["name"]))
+
+
+class TestRoutePreview(VisitTestCase):
+    """The live preview behind the builder. Must never write."""
+
+    def _rows(self):
+        return [
+            {"key": "a", "title": "Heliopolis",
+             "latitude": _HELIOPOLIS[0], "longitude": _HELIOPOLIS[1]},
+            {"key": "b", "title": "Maadi",
+             "latitude": _MAADI[0], "longitude": _MAADI[1]},
+            {"key": "c", "title": "Zamalek",
+             "latitude": _ZAMALEK[0], "longitude": _ZAMALEK[1]},
+        ]
+
+    def test_preview_orders_and_costs_without_saving(self):
+        before = frappe.db.count(visits_api.PLAN_DOCTYPE)
+        out = visits_api.preview_visit_route(
+            self._rows(),
+            start_latitude=_MAADI[0],
+            start_longitude=_MAADI[1],
+        )
+        self.assertEqual(len(out["stops"]), 3)
+        self.assertGreater(out["total_distance_km"], 0)
+        self.assertEqual(out["stops"][0]["title"], "Maadi")
+        self.assertEqual(frappe.db.count(visits_api.PLAN_DOCTYPE), before)
+
+    def test_positions_are_one_based_and_contiguous(self):
+        out = visits_api.preview_visit_route(self._rows())
+        self.assertEqual([s["position"] for s in out["stops"]], [1, 2, 3])
+
+    def test_legs_sum_to_the_total(self):
+        out = visits_api.preview_visit_route(
+            self._rows(), start_latitude=_MAADI[0], start_longitude=_MAADI[1]
+        )
+        legs = sum(s["leg_km"] for s in out["stops"])
+        self.assertAlmostEqual(out["total_distance_km"], legs, places=1)
+
+    def test_optimise_off_preserves_the_order_given(self):
+        """A rep who dragged a stop has overruled the optimiser."""
+        out = visits_api.preview_visit_route(
+            self._rows(),
+            start_latitude=_MAADI[0],
+            start_longitude=_MAADI[1],
+            optimize=0,
+        )
+        self.assertEqual(
+            [s["title"] for s in out["stops"]],
+            ["Heliopolis", "Maadi", "Zamalek"],
+        )
+
+    def test_a_pinless_row_is_skipped_not_refused(self):
+        rows = self._rows() + [
+            {"key": "d", "title": "Nowhere", "latitude": 0, "longitude": 0}
+        ]
+        out = visits_api.preview_visit_route(rows)
+        self.assertEqual(len(out["stops"]), 3)
+        self.assertEqual(out["skipped"], 1)
+
+    def test_an_empty_selection_previews_an_empty_day(self):
+        out = visits_api.preview_visit_route([])
+        self.assertEqual(out["stops"], [])
+        self.assertEqual(out["total_distance_km"], 0.0)
+
+    def test_a_json_string_payload_is_accepted(self):
+        """Frappe delivers list args as JSON strings; the client encodes them."""
+        import json as _json
+
+        out = visits_api.preview_visit_route(_json.dumps(self._rows()))
+        self.assertEqual(len(out["stops"]), 3)
+
+    def test_too_many_stops_is_refused(self):
+        rows = [
+            {"key": f"k{i}", "latitude": 30.0 + i * 0.001,
+             "longitude": 31.0 + i * 0.001}
+            for i in range(visits_api.MAX_STOPS + 1)
+        ]
+        with self.assertRaises(frappe.ValidationError):
+            visits_api.preview_visit_route(rows)
+
+    def test_preview_reports_its_engine(self):
+        out = visits_api.preview_visit_route(self._rows())
+        self.assertIn(out["engine"], ("osrm", "haversine"))
+
+
+# ---------------------------------------------------------------------------
 # Catalog enrichment
 # ---------------------------------------------------------------------------
 class TestLeadLocations(VisitTestCase):

@@ -25,11 +25,16 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import getdate, now_datetime, nowdate
+from frappe.utils import add_days, getdate, now_datetime, nowdate
 
 from jarz_pos.api.crm import _ensure_b2b_access, _manager_roles
 from jarz_pos.services import osrm_client, visit_planning
-from jarz_pos.services.route_planner import MAX_STOPS, RoutePoint
+from jarz_pos.services.route_planner import (
+    MAX_STOPS,
+    RoutePoint,
+    cost_fixed_order,
+    plan_route,
+)
 
 PLAN_DOCTYPE = "Jarz Visit Plan"
 
@@ -376,6 +381,190 @@ def get_visit_targets(category=None, tier=None, area=None, specialty_only=0,
         "targets": [target.as_dict() for target in capped],
         "count": len(capped),
         "total_matching": len(targets),
+    }
+
+
+@frappe.whitelist()
+def get_record_visit_targets(reference_doctype, reference_name):
+    """The routable doors belonging to ONE record.
+
+    This is what lets the kanban card, the lead list, the map callout and the
+    lead page all offer "add to a visit" without knowing how doors are stored.
+    A brand with six branches answers with six and the caller shows a picker; a
+    brand with one answers with one and the caller skips straight to choosing a
+    plan.
+
+    An empty list is a normal answer — a lead nobody has geocoded cannot be put
+    on a route — and the caller is expected to say so plainly rather than offer
+    a stop that leads nowhere.
+    """
+    _ensure_b2b_access()
+    targets = visit_planning.targets_for_record(reference_doctype, reference_name)
+    return {
+        "reference_doctype": reference_doctype,
+        "reference_name": reference_name,
+        "targets": [target.as_dict() for target in targets],
+        "count": len(targets),
+    }
+
+
+@frappe.whitelist()
+def get_addable_visit_plans(days_ahead=60, include_past=0):
+    """Plans the caller may add a stop to, soonest first.
+
+    Deliberately narrower than :func:`get_visit_plans`: this answers "where can
+    I put this door", so it excludes days that are finished or cancelled and
+    days belonging to someone else, and it looks forward rather than at a
+    calendar month. A rep standing in front of a café wants a short list they
+    can hit with a thumb, not a month grid.
+    """
+    _ensure_b2b_access()
+    if not planner_enabled():
+        return {"plans": [], "count": 0}
+
+    try:
+        ahead = max(1, min(int(days_ahead or 60), 365))
+    except (TypeError, ValueError):
+        ahead = 60
+
+    today = nowdate()
+    start = add_days(today, -14) if _bool(include_past) else today
+    filters = {
+        "visit_date": ["between", [start, add_days(today, ahead)]],
+        "status": ["not in", ["Completed", "Cancelled"]],
+    }
+    if not _is_manager():
+        filters["rep"] = frappe.session.user
+
+    rows = frappe.get_all(
+        PLAN_DOCTYPE,
+        filters=filters,
+        fields=["name", "visit_date", "rep", "rep_name", "title", "status",
+                "total_stops", "total_distance_km", "total_duration_minutes"],
+        order_by="visit_date asc, name asc",
+        limit_page_length=100,
+    ) or []
+
+    plans = [{
+        "name": row["name"],
+        "visit_date": str(row["visit_date"]) if row.get("visit_date") else None,
+        "rep": row.get("rep"),
+        "rep_name": row.get("rep_name"),
+        "title": row.get("title"),
+        "status": row.get("status"),
+        "total_stops": int(row.get("total_stops") or 0),
+        "total_distance_km": float(row.get("total_distance_km") or 0),
+        "total_duration_minutes": int(row.get("total_duration_minutes") or 0),
+        "can_edit": True,
+    } for row in rows]
+    return {"plans": plans, "count": len(plans)}
+
+
+@frappe.whitelist()
+def preview_visit_route(stops, start_latitude=None, start_longitude=None,
+                        return_to_start=0, default_visit_minutes=None,
+                        optimize=1):
+    """Order and cost a stop list WITHOUT saving anything.
+
+    The builder needs to show a real route — the map line, the sequence, the
+    day's length — while the rep is still choosing doors. Doing that on the
+    client would mean a second, drifting implementation of the solver in Dart,
+    and it could never use OSRM. So the same server code answers, and the
+    preview a rep approves is the route they get.
+
+    Writes nothing and touches no document, so it is safe to call on every tick
+    of a checkbox.
+    """
+    _ensure_b2b_access()
+
+    rows = _parse_rows(stops)
+    if len(rows) > MAX_STOPS:
+        frappe.throw(
+            _("A route may hold at most {0} stops; {1} were sent.").format(MAX_STOPS, len(rows))
+        )
+
+    config = visit_planning.route_config()
+    minutes = int(default_visit_minutes or 0) or config.visit_minutes
+
+    points = []
+    usable = []
+    for index, payload in enumerate(rows):
+        lat = _float_or_none(payload.get("latitude"))
+        lng = _float_or_none(payload.get("longitude"))
+        if not lat or not lng:
+            # Skipped rather than refused: a rep ticking a door with no pin
+            # should see the rest of their day, not an error dialog.
+            continue
+        points.append(
+            RoutePoint(
+                key=str(payload.get("key") or f"row-{index}"),
+                lat=lat,
+                lng=lng,
+                locked=_bool(payload.get("locked")),
+                service_minutes=int(payload.get("visit_minutes") or 0) or minutes,
+                label=str(payload.get("title") or ""),
+            )
+        )
+        usable.append(payload)
+
+    if not points:
+        return {
+            "order": [], "stops": [], "legs": [],
+            "engine": "haversine", "total_distance_km": 0.0,
+            "total_drive_minutes": 0, "total_duration_minutes": 0,
+            "skipped": len(rows),
+        }
+
+    lat = _float_or_none(start_latitude)
+    lng = _float_or_none(start_longitude)
+    start = (
+        RoutePoint(key="__start__", lat=lat, lng=lng, label="Start")
+        if lat and lng
+        else None
+    )
+
+    solver = plan_route if _bool(optimize) else cost_fixed_order
+    result = solver(
+        points,
+        start=start,
+        return_to_start=_bool(return_to_start),
+        road_factor=config.road_factor,
+        speed_kmh=config.speed_kmh,
+        default_visit_minutes=minutes,
+        osrm_provider=config.osrm_provider(),
+    )
+
+    legs_by_to = {}
+    for leg in result.legs:
+        legs_by_to.setdefault(leg.to_key, leg)
+
+    ordered = []
+    for position, index in enumerate(result.order, start=1):
+        payload = dict(usable[index])
+        leg = legs_by_to.get(points[index].key)
+        payload["position"] = position
+        payload["leg_km"] = round(leg.distance_m / 1000.0, 2) if leg else 0.0
+        payload["leg_minutes"] = int(round(leg.duration_s / 60.0)) if leg else 0
+        ordered.append(payload)
+
+    return {
+        "order": result.order,
+        "stops": ordered,
+        "legs": [
+            {
+                "from": leg.from_key,
+                "to": leg.to_key,
+                "km": round(leg.distance_m / 1000.0, 2),
+                "minutes": int(round(leg.duration_s / 60.0)),
+            }
+            for leg in result.legs
+        ],
+        "engine": result.engine,
+        "engine_note": result.note,
+        "total_distance_km": round(result.total_distance_m / 1000.0, 2),
+        "total_drive_minutes": int(round(result.total_drive_s / 60.0)),
+        "total_duration_minutes": int(round(result.total_duration_s / 60.0)),
+        "skipped": len(rows) - len(points),
     }
 
 
