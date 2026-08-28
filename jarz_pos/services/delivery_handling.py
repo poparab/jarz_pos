@@ -2664,7 +2664,8 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
             if ct.status == "Settled":
                 # Cash handed over at dispatch: stamp the shift that took it, so
                 # a same-shift settlement reads the same as a carried one.
-                ct.update(courier_settlement_stamp(pos_profile))
+                for _field, _value in courier_settlement_stamp(pos_profile).items():
+                    ct.set(_field, _value)
             # Normalize payment_mode values for consistency (legacy used settlement values)
             ct.payment_mode = "cash_now" if settlement == "cash_now" else "later"
             ct.notes = "Out For Delivery transition - courier expense settlement" if shipping_exp else "Out For Delivery transition"
@@ -3133,7 +3134,8 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             ct.amount = 0
             ct.shipping_amount = shipping_exp
             ct.status = "Settled"
-            ct.update(courier_settlement_stamp(pos_profile))
+            for _field, _value in courier_settlement_stamp(pos_profile).items():
+                ct.set(_field, _value)
             ct.payment_mode = "Cash"
             ct.notes = "Single courier shipping payment"
             ct.insert(ignore_permissions=True)

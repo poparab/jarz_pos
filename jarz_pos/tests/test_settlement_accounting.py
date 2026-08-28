@@ -324,6 +324,10 @@ class TestOFDPaidJournalEntry(unittest.TestCase):
         self.assertEqual(ct.status, "Settled")
         self.assertEqual(ct.amount, 500.0)
         self.assertEqual(ct.shipping_amount, 30.0)
+        # Born settled, so it carries the same settlement stamps as one settled
+        # days later — otherwise a shift's "collected" figure has a blind spot.
+        self.assertIsNotNone(ct.get("settled_at"))
+        self.assertIsNotNone(ct.get("settled_by"))
 
     def test_cash_now_zero_shipping_no_je(self):
         """cash_now with zero shipping: No JE lines should be created."""
