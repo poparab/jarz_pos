@@ -214,6 +214,17 @@ def rebuild_mix_bom(apply: bool) -> Dict[str, Any]:
     new.rm_cost_as_per = COST_BASIS
     new.is_active = 1
     new.is_default = 1
+    # The mix is a *planning* quantity, never a stocked one.  A phantom BOM is
+    # expanded into its own components at Work Order time — `get_bom_items_as_dict`
+    # recurses through an `is_phantom_item` row whatever `fetch_exploded` says —
+    # so a jar batch relieves the raw cheese and cream directly and no mix stock
+    # is ever required.  Without this, every jar carrying the new sub-assembly
+    # line would refuse to start against a permanent zero.
+    #
+    # The old comment here claimed `do_not_explode = 0` achieved the same thing.
+    # It does not: that flag only shapes `tabBOM Explosion Item`, which the Work
+    # Order never reads on this site.  See [[bom-precheck-vs-workorder-mismatch]].
+    new.is_phantom_bom = 1
     for row in new.items:
         if row.item_code == "kamina vanilla":
             row.qty = MIX_VANILLA_KG
@@ -420,6 +431,21 @@ def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
                 "bom_no": mix_bom,
                 # Never stored, so it must keep exploding to raw cheese.
                 "do_not_explode": 0,
+                # `do_not_explode = 0` alone does NOT achieve that. It shapes
+                # `tabBOM Explosion Item`, and a Work Order on this site reads
+                # the one-level `tabBOM Item` rows instead, so it would demand
+                # the mix as stock and refuse against a permanent zero.
+                #
+                # `is_phantom_item` is what actually makes the line expand:
+                # `get_bom_items_as_dict` recurses into `bom_no` for a phantom
+                # row regardless of `fetch_exploded` (bom.py:1429), so the Work
+                # Order and the app's precheck agree and both see raw cheese.
+                #
+                # ERPNext normally copies this from the sub-BOM's
+                # `is_phantom_bom` inside `get_bom_material_detail`, but this
+                # row is built by hand and never goes through that helper — so
+                # it is stated here, mirroring what `rebuild_mix_bom` set.
+                "is_phantom_item": 1,
             },
         )
 
