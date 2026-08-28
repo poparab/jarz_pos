@@ -19,7 +19,16 @@
   "delivery_partner",
   "is_partner_order",
   "partner_invoice_ref",
-  "notes"
+  "notes",
+  "shift_carry_section",
+  "carried_from_shift",
+  "carried_at",
+  "carried_by",
+  "carry_count",
+  "column_break_shift_carry",
+  "settled_in_shift",
+  "settled_at",
+  "settled_by"
  ],
  "fields": [
   {
@@ -124,12 +133,74 @@
    "in_standard_filter": 1,
    "label": "Party",
    "options": "party_type"
+  },
+  {
+   "fieldname": "shift_carry_section",
+   "fieldtype": "Section Break",
+   "label": "Shift Carry-Over",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "carried_from_shift",
+   "fieldtype": "Link",
+   "label": "Carried From Shift",
+   "options": "POS Opening Entry",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "First shift that closed while this money was still out with the courier."
+  },
+  {
+   "fieldname": "carried_at",
+   "fieldtype": "Datetime",
+   "label": "Carried At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "carried_by",
+   "fieldtype": "Link",
+   "label": "Carried By",
+   "options": "User",
+   "read_only": 1,
+   "description": "User who acknowledged at shift close that this money was still with the courier."
+  },
+  {
+   "default": "0",
+   "fieldname": "carry_count",
+   "fieldtype": "Int",
+   "label": "Shifts Carried",
+   "read_only": 1,
+   "description": "How many shift closes this transaction has survived unsettled."
+  },
+  {
+   "fieldname": "column_break_shift_carry",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "settled_in_shift",
+   "fieldtype": "Link",
+   "label": "Settled In Shift",
+   "options": "POS Opening Entry",
+   "read_only": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "settled_at",
+   "fieldtype": "Datetime",
+   "label": "Settled At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "settled_by",
+   "fieldtype": "Link",
+   "label": "Settled By",
+   "options": "User",
+   "read_only": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-09-10 20:41:36.629974",
+ "modified": "2026-08-28 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Courier Transaction",

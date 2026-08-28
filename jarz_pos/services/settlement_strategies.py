@@ -242,9 +242,10 @@ def _create_partner_courier_transaction(
     status: str = "Unsettled",
     payment_mode: str = "Cash",
     journal_entry: Optional[str] = None,
+    pos_profile: Optional[str] = None,
 ) -> str:
     """Create a Courier Transaction flagged as partner order."""
-    ct = frappe.get_doc({
+    payload = {
         "doctype": "Courier Transaction",
         "party_type": party_type,
         "party": party,
@@ -257,7 +258,14 @@ def _create_partner_courier_transaction(
         "is_partner_order": 1,
         "journal_entry": journal_entry,
         "date": frappe.utils.now_datetime(),
-    })
+    }
+    if status == "Settled":
+        # Born settled — stamp it like any other settlement so the shift
+        # dashboard's "collected in this shift" figure is complete.
+        from jarz_pos.services.courier_carry import settlement_stamp
+
+        payload.update(settlement_stamp(pos_profile))
+    ct = frappe.get_doc(payload)
     ct.insert(ignore_permissions=True)
     return ct.name
 
@@ -310,6 +318,7 @@ def handle_partner_unpaid_settle_now(inv, *, pos_profile: str, payment_type: Opt
 
     ct_name = _create_partner_courier_transaction(
         inv,
+        pos_profile=pos_profile,
         party_type=party_type,
         party=party,
         delivery_partner=delivery_partner,
@@ -358,6 +367,7 @@ def handle_partner_unpaid_settle_later(inv, *, pos_profile: str, payment_type: O
 
     ct_name = _create_partner_courier_transaction(
         inv,
+        pos_profile=pos_profile,
         party_type=party_type,
         party=party,
         delivery_partner=delivery_partner,
@@ -418,6 +428,7 @@ def handle_partner_paid_settle_now(inv, *, pos_profile: str, payment_type: Optio
 
     ct_name = _create_partner_courier_transaction(
         inv,
+        pos_profile=pos_profile,
         party_type=party_type,
         party=party,
         delivery_partner=delivery_partner,
@@ -464,6 +475,7 @@ def handle_partner_paid_settle_later(inv, *, pos_profile: str, payment_type: Opt
 
     ct_name = _create_partner_courier_transaction(
         inv,
+        pos_profile=pos_profile,
         party_type=party_type,
         party=party,
         delivery_partner=delivery_partner,

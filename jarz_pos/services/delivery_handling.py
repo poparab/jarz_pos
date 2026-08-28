@@ -19,6 +19,10 @@ from jarz_pos.api.payment_receipts import (
     _has_payment_receipt_confirm_access,
 )
 from jarz_pos.constants import ACCOUNTS, WS_EVENTS
+from jarz_pos.services.courier_carry import (
+    mark_settled as mark_courier_transactions_settled,
+    settlement_stamp as courier_settlement_stamp,
+)
 from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
     get_courier_outstanding_account,
@@ -2258,8 +2262,9 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
             party=party,
         )
 
-    for r in cts:
-        frappe.db.set_value("Courier Transaction", r.name, "status", "Settled")
+    mark_courier_transactions_settled(
+        [r.name for r in cts], pos_profile=pos_profile
+    )
     frappe.db.commit()
 
     # Party-level settlement spans many invoices, so there is no single order to
@@ -2638,6 +2643,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
                                 "shipping_amount": shipping_exp,
                                 "status": "Settled",
                                 "payment_mode": "cash_now",
+                                **courier_settlement_stamp(pos_profile),
                             },
                             update_modified=False,
                         )
@@ -2655,6 +2661,10 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
             ct.amount = desired_amount
             ct.shipping_amount = shipping_exp
             ct.status = "Settled" if settlement == "cash_now" else "Unsettled"
+            if ct.status == "Settled":
+                # Cash handed over at dispatch: stamp the shift that took it, so
+                # a same-shift settlement reads the same as a carried one.
+                ct.update(courier_settlement_stamp(pos_profile))
             # Normalize payment_mode values for consistency (legacy used settlement values)
             ct.payment_mode = "cash_now" if settlement == "cash_now" else "later"
             ct.notes = "Out For Delivery transition - courier expense settlement" if shipping_exp else "Out For Delivery transition"
@@ -2927,11 +2937,11 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
     # released the liability and the trip fee was either reversed or already
     # accounted for. Close the rows so they stop showing on the courier's list.
     if ct_rows_exist and abs(order_amount) <= 0.005 and abs(ct_shipping) <= 0.005:
-        for row in open_cts:
-            frappe.db.set_value(
-                "Courier Transaction", row["name"], {"status": "Settled"},
-                update_modified=False,
-            )
+        mark_courier_transactions_settled(
+            [row["name"] for row in open_cts],
+            pos_profile=pos_profile,
+            update_modified=False,
+        )
         frappe.db.commit()
         return {
             "success": True,
@@ -3059,8 +3069,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             },
             pluck="name",
         )
-        for name in cts:
-            frappe.db.set_value("Courier Transaction", name, "status", "Settled")
+        mark_courier_transactions_settled(cts, pos_profile=pos_profile)
 
         payload = {
             "invoice": inv.name,
@@ -3124,13 +3133,13 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             ct.amount = 0
             ct.shipping_amount = shipping_exp
             ct.status = "Settled"
+            ct.update(courier_settlement_stamp(pos_profile))
             ct.payment_mode = "Cash"
             ct.notes = "Single courier shipping payment"
             ct.insert(ignore_permissions=True)
             cts = [ct.name]
         else:
-            for name in cts:
-                frappe.db.set_value("Courier Transaction", name, "status", "Settled")
+            mark_courier_transactions_settled(cts, pos_profile=pos_profile)
 
         payload = {
             "invoice": inv.name,
@@ -3292,8 +3301,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         },
         pluck="name",
     )
-    for name in cts:
-        frappe.db.set_value("Courier Transaction", name, "status", "Settled")
+    mark_courier_transactions_settled(cts, pos_profile=pos_profile)
 
     payload = {
         "invoice": inv.name,

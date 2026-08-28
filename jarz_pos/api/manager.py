@@ -219,6 +219,7 @@ def _build_shift_monitor_row(
     opening: Any,
     *,
     user_cache: Dict[str, Dict[str, Optional[str]]],
+    carry: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from jarz_pos.api.shift import _resolve_pos_profile_account
 
@@ -277,6 +278,13 @@ def _build_shift_monitor_row(
         )
 
     shift_status = "closed" if closing else "open"
+    # Courier money this shift handed forward, and money a previous shift handed
+    # to it. Read from the Courier Transaction stamps rather than from the till,
+    # because none of it ever passed through the drawer on the night it was
+    # carried. Computed in bulk by the caller — see get_shift_carry_stats_bulk.
+    from jarz_pos.services.courier_carry import EMPTY_CARRY_STATS
+
+    carry = carry or EMPTY_CARRY_STATS
     return {
         "pos_profile": getattr(opening, "pos_profile", None),
         "company": getattr(opening, "company", None),
@@ -300,6 +308,10 @@ def _build_shift_monitor_row(
         "difference_amount": difference_amount,
         "difference_kind": difference_kind,
         "journal_entry": journal_entry,
+        "carried_out_count": carry["carried_out_count"],
+        "carried_out_amount": carry["carried_out_amount"],
+        "settled_in_count": carry["settled_in_count"],
+        "settled_in_amount": carry["settled_in_amount"],
     }
 
 
@@ -1944,6 +1956,15 @@ def get_pos_shift_monitor(
                     "closed_count": 0,
                     "discrepancy_count": 0,
                     "discrepancy_total": 0.0,
+                    "carried_out_count": 0,
+                    "carried_out_total": 0.0,
+                },
+                "courier_outstanding": {
+                    "couriers": [],
+                    "total_net_balance": 0.0,
+                    "transaction_count": 0,
+                    "carried_count": 0,
+                    "oldest_days_outstanding": 0,
                 },
                 "profiles": [{"name": profile, "title": profile} for profile in accessible_profiles],
                 "shifts": [],
@@ -1958,6 +1979,15 @@ def get_pos_shift_monitor(
                 "closed_count": 0,
                 "discrepancy_count": 0,
                 "discrepancy_total": 0.0,
+                "carried_out_count": 0,
+                "carried_out_total": 0.0,
+            },
+            "courier_outstanding": {
+                "couriers": [],
+                "total_net_balance": 0.0,
+                "transaction_count": 0,
+                "carried_count": 0,
+                "oldest_days_outstanding": 0,
             },
             "profiles": [],
             "shifts": [],
@@ -1978,7 +2008,7 @@ def get_pos_shift_monitor(
                 [f"{start_date} 00:00:00", f"{end_date} 23:59:59"],
             ],
         },
-        fields=["name"],
+        fields=["name", "period_start_date", "period_end_date"],
         order_by="period_start_date desc, modified desc",
         limit=1000,
     )
@@ -1989,10 +2019,26 @@ def get_pos_shift_monitor(
     discrepancy_count = 0
     open_count = 0
     closed_count = 0
+    carried_out_total = 0.0
+    carried_out_count = 0
+
+    from jarz_pos.services.courier_carry import (
+        get_carried_balances,
+        get_shift_carry_stats_bulk,
+    )
+
+    courier_outstanding = get_carried_balances(profiles)
+    carry_stats = get_shift_carry_stats_bulk(
+        [dict(row) for row in openings]
+    )
 
     for row in openings:
         opening = frappe.get_doc("POS Opening Entry", row["name"])
-        payload = _build_shift_monitor_row(opening, user_cache=user_cache)
+        payload = _build_shift_monitor_row(
+            opening,
+            user_cache=user_cache,
+            carry=carry_stats.get(row["name"]),
+        )
         if status_filter != "all" and payload["shift_status"] != status_filter:
             continue
 
@@ -2006,6 +2052,10 @@ def get_pos_shift_monitor(
             discrepancy_count += 1
             discrepancy_total += difference_amount
 
+        if int(payload.get("carried_out_count") or 0):
+            carried_out_count += int(payload["carried_out_count"])
+            carried_out_total += flt(payload.get("carried_out_amount") or 0)
+
         rows.append(payload)
 
     return {
@@ -2015,7 +2065,13 @@ def get_pos_shift_monitor(
             "closed_count": closed_count,
             "discrepancy_count": discrepancy_count,
             "discrepancy_total": flt(discrepancy_total, 2),
+            "carried_out_count": carried_out_count,
+            "carried_out_total": flt(carried_out_total, 2),
         },
+        # Money still with couriers RIGHT NOW, across every branch this user
+        # monitors — deliberately not filtered by the date range, because the
+        # question "who is holding our cash" is never about last week.
+        "courier_outstanding": courier_outstanding,
         "filters": {
             "from_date": str(start_date),
             "to_date": str(end_date),

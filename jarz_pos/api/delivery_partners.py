@@ -175,13 +175,16 @@ def settle_delivery_partner(delivery_partner: str, bank_account: str | None = No
         human=f"Delivery Partner settlement: {delivery_partner} ({len(unsettled)} orders). Invoices: {invoice_refs}",
     )
 
-    # Mark all swept CTs Settled and link the JE.
-    for ct in unsettled:
-        frappe.db.set_value(
-            "Courier Transaction", ct["name"],
-            {"status": "Settled", "journal_entry": je_name},
-            update_modified=False,
-        )
+    # Mark all swept CTs Settled and link the JE. No POS profile: a partner
+    # settles to the bank, not to a branch till, so the settlement carries a
+    # timestamp and a user but no receiving shift.
+    from jarz_pos.services.courier_carry import mark_settled as _mark_courier_settled
+
+    _mark_courier_settled(
+        [ct["name"] for ct in unsettled],
+        extra={"journal_entry": je_name},
+        update_modified=False,
+    )
 
     frappe.db.commit()
 

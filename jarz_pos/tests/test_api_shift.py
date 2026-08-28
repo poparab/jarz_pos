@@ -136,7 +136,14 @@ class TestShiftAPI(unittest.TestCase):
 			MagicMock(mode_of_payment="Cash", opening_amount=500),
 		]
 
+		# The courier block is built in the carry service off its own frappe
+		# handle; an empty sweep is what "nothing is out with a courier" looks
+		# like, and it keeps the real builder in the path.
+		carry_frappe = _make_mock_frappe()
+		carry_frappe.db.sql.return_value = []
+
 		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
+				 patch("jarz_pos.services.courier_carry.frappe", carry_frappe), \
 				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft), \
 				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
 				 patch(
@@ -369,7 +376,9 @@ class TestShiftAPI(unittest.TestCase):
 
 		mock_frappe.db.get_value.side_effect = _db_get_value
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe):
+		# The builder moved into the carry service; the shift module now delegates,
+		# so the mock has to land where the query is actually issued.
+		with patch("jarz_pos.services.courier_carry.frappe", mock_frappe):
 			result = _get_shift_courier_close_block("Nasr city")
 
 		query = mock_frappe.db.sql.call_args.args[0]
@@ -380,6 +389,65 @@ class TestShiftAPI(unittest.TestCase):
 		self.assertEqual(result["party_count"], 1)
 		self.assertEqual(result["net_balance"], 160)
 		self.assertEqual(result["parties"][0]["display_name"], "Ali Courier")
+		# Per-transaction rows are what the closing checklist ticks.
+		self.assertTrue(result["requires_acknowledgement"])
+		self.assertEqual(
+			[row["courier_transaction"] for row in result["transactions"]],
+			["CT-0001", "CT-0002"],
+		)
+		self.assertEqual(result["transactions"][0]["net_balance"], 90)
+
+	def test_acknowledgement_passes_when_every_transaction_is_confirmed(self):
+		from jarz_pos.api.shift import _assert_courier_acknowledgement
+
+		mock_frappe = _make_mock_frappe()
+		block = {
+			"transactions": [
+				{"courier_transaction": "CT-0001", "reference_invoice": "ACC-SINV-0001"},
+				{"courier_transaction": "CT-0002", "reference_invoice": "ACC-SINV-0002"},
+			]
+		}
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe), 				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block):
+			result = _assert_courier_acknowledgement("Dokki", ["CT-0001", "CT-0002"])
+
+		self.assertIs(result, block)
+		mock_frappe.throw.assert_not_called()
+
+	def test_acknowledgement_rejects_a_transaction_the_closer_skipped(self):
+		from jarz_pos.api.shift import _assert_courier_acknowledgement
+
+		mock_frappe = _make_mock_frappe()
+		block = {
+			"transactions": [
+				{"courier_transaction": "CT-0001", "reference_invoice": "ACC-SINV-0001"},
+				{"courier_transaction": "CT-0002", "reference_invoice": "ACC-SINV-0002"},
+			]
+		}
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe), 				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block):
+			with self.assertRaises(Exception):
+				_assert_courier_acknowledgement("Dokki", ["CT-0001"])
+
+	def test_acknowledgement_catches_a_transaction_created_mid_close(self):
+		"""The set is compared against the database, not against what was shown.
+
+		A dispatch that happens while the closing screen is open would otherwise be
+		carried without anybody confirming it.
+		"""
+		from jarz_pos.api.shift import _assert_courier_acknowledgement
+
+		mock_frappe = _make_mock_frappe()
+		block = {
+			"transactions": [
+				{"courier_transaction": "CT-0001", "reference_invoice": "ACC-SINV-0001"},
+				{"courier_transaction": "CT-9999", "reference_invoice": "ACC-SINV-9999"},
+			]
+		}
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe), 				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block):
+			with self.assertRaises(Exception):
+				_assert_courier_acknowledgement("Dokki", ["CT-0001"])
 
 	def test_end_shift_blocks_when_unsettled_courier_transactions_exist(self):
 		from jarz_pos.api.shift import end_shift

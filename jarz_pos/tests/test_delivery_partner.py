@@ -406,9 +406,15 @@ class TestDeliveryPartnerBalancesAPI(unittest.TestCase):
 		self.assertEqual(result["order_count"], 0)
 		self.assertIn("message", result)
 
+	# Settling now routes the status flip through the carry service, so its own
+	# frappe handle has to be mocked too or the sweep reaches for a real database.
+	@patch("jarz_pos.services.courier_carry.now_datetime")
+	@patch("jarz_pos.services.courier_carry.frappe")
 	@patch("jarz_pos.api.delivery_partners.create_partner_settlement_je")
 	@patch("jarz_pos.api.delivery_partners.frappe")
-	def test_settle_creates_journal_entry(self, mock_frappe, mock_settle_je):
+	def test_settle_creates_journal_entry(
+		self, mock_frappe, mock_settle_je, mock_carry_frappe, mock_carry_now
+	):
 		from jarz_pos.api.delivery_partners import settle_delivery_partner
 
 		mock_dp = MagicMock()
@@ -444,6 +450,15 @@ class TestDeliveryPartnerBalancesAPI(unittest.TestCase):
 		self.assertEqual(je_kwargs["online_ship_total"], 0)
 		self.assertEqual(je_kwargs["company"], "Test Co")
 		self.assertEqual(je_kwargs["bank_account"], "Bank Account - T")
+
+		# Both swept transactions are stamped Settled and linked to the JE.
+		settled = [
+			call.args[1] for call in mock_carry_frappe.db.set_value.call_args_list
+		]
+		self.assertEqual(settled, ["CT-001", "CT-002"])
+		values = mock_carry_frappe.db.set_value.call_args.args[2]
+		self.assertEqual(values["status"], "Settled")
+		self.assertEqual(values["journal_entry"], "JE-001")
 
 
 if __name__ == "__main__":

@@ -744,127 +744,81 @@ def get_shift_summary(pos_opening_entry: str):
 
 
 def _get_shift_courier_profile_expr() -> str:
-    try:
-        if frappe.db.has_column("Sales Invoice", "custom_kanban_profile"):
-            return "COALESCE(NULLIF(si.custom_kanban_profile, ''), si.pos_profile)"
-    except Exception:
-        pass
-    return "si.pos_profile"
+    """Deprecated shim — the expression now lives with the carry service."""
+    from jarz_pos.services.courier_carry import _courier_profile_expr
+
+    return _courier_profile_expr()
 
 
 def _get_shift_close_party_label(party_type: str, party: str) -> str:
-    if not party:
-        return _("Unknown courier")
+    from jarz_pos.services.courier_carry import party_label
 
-    try:
-        if party_type == "Employee":
-            return frappe.db.get_value("Employee", party, "employee_name") or party
-        if party_type == "Supplier":
-            return frappe.db.get_value("Supplier", party, "supplier_name") or party
-    except Exception:
-        pass
-    return party
+    return party_label(party_type, party)
 
 
 def _get_shift_courier_close_block(pos_profile: str, detail_limit: int = 5) -> dict[str, Any]:
-    payload = {
-        "blocked": False,
-        "pos_profile": pos_profile,
-        "transaction_count": 0,
-        "invoice_count": 0,
-        "party_count": 0,
-        "net_balance": 0.0,
-        "parties": [],
-    }
-    pos_profile = (pos_profile or "").strip()
-    if not pos_profile:
-        return payload
+    """Money still out with couriers on *pos_profile*, invoice by invoice.
 
-    profile_expr = _get_shift_courier_profile_expr()
-    rows = frappe.db.sql(
-        f"""
-        SELECT
-            ct.name AS courier_transaction,
-            ct.reference_invoice,
-            COALESCE(ct.amount, 0) AS amount,
-            COALESCE(ct.shipping_amount, 0) AS shipping_amount,
-            COALESCE(ct.party_type, '') AS party_type,
-            COALESCE(ct.party, '') AS party
-        FROM `tabCourier Transaction` ct
-        INNER JOIN `tabSales Invoice` si ON si.name = ct.reference_invoice
-        WHERE ct.status != %s
-          AND ct.reference_invoice IS NOT NULL
-          AND COALESCE({profile_expr}, '') = %s
-        ORDER BY ct.modified DESC, ct.creation DESC
-        """,
-        ("Settled", pos_profile),
-        as_dict=True,
+    The closing screen renders this as a checklist: the operator confirms each
+    line is genuinely still with its courier before the till can be counted out.
+    """
+    from jarz_pos.services.courier_carry import build_close_block
+
+    return build_close_block(pos_profile, detail_limit=detail_limit)
+
+
+def _assert_courier_acknowledgement(
+    pos_profile: str, acknowledged: list[str] | None
+) -> dict[str, Any]:
+    """Require an explicit per-transaction confirmation before closing.
+
+    A courier who delivers the last order and drives home is a normal night, not
+    an incident, so the close no longer refuses — but it does not wave the money
+    through either.  Every unsettled transaction on the branch must be ticked;
+    anything the operator leaves unticked is money they have NOT vouched for, and
+    the close stops so they can settle it or look again.
+
+    The check is a set comparison against what is unsettled *right now*, not
+    against what the client was shown: a transaction settled by a colleague
+    mid-close simply drops out, and one created mid-close is caught rather than
+    silently carried.
+    """
+    block = _get_shift_courier_close_block(pos_profile)
+    rows = block.get("transactions") or []
+    if not rows:
+        return block
+
+    acknowledged_set = set(acknowledged or [])
+    missing = [
+        row for row in rows if row.get("courier_transaction") not in acknowledged_set
+    ]
+    if not missing:
+        return block
+
+    preview = ", ".join(
+        str(row.get("reference_invoice") or row.get("courier_transaction"))
+        for row in missing[:5]
     )
+    if len(missing) > 5:
+        preview = f"{preview}, +{len(missing) - 5}"
 
-    if not isinstance(rows, list) or not rows:
-        return payload
-
-    parties: dict[tuple[str, str], dict[str, Any]] = {}
-    invoice_names: set[str] = set()
-    net_balance = 0.0
-
-    for row in rows:
-        party_type = str(row.get("party_type") or "").strip()
-        party = str(row.get("party") or "").strip()
-        invoice_name = str(row.get("reference_invoice") or "").strip()
-        amount = flt(row.get("amount"))
-        shipping_amount = flt(row.get("shipping_amount"))
-        net_amount = flt(amount - shipping_amount)
-        key = (party_type, party)
-
-        if invoice_name:
-            invoice_names.add(invoice_name)
-        net_balance += net_amount
-
-        if key not in parties:
-            parties[key] = {
-                "party_type": party_type,
-                "party": party,
-                "display_name": _get_shift_close_party_label(party_type, party),
-                "transaction_count": 0,
-                "invoice_count": 0,
-                "net_balance": 0.0,
-                "invoices": [],
-            }
-
-        group = parties[key]
-        group["transaction_count"] = int(group["transaction_count"]) + 1
-        group["net_balance"] = flt(group["net_balance"] + net_amount)
-
-        invoices = group["invoices"]
-        if invoice_name and invoice_name not in invoices:
-            if len(invoices) < detail_limit:
-                invoices.append(invoice_name)
-            group["invoice_count"] = int(group["invoice_count"]) + 1
-
-    sorted_parties = sorted(
-        parties.values(),
-        key=lambda row: (
-            -abs(flt(row.get("net_balance"))),
-            -(int(row.get("transaction_count") or 0)),
-            str(row.get("display_name") or ""),
-        ),
+    frappe.throw(
+        _(
+            "{0} courier transaction(s) on {1} have not been confirmed: {2}. "
+            "Settle them, or confirm on the closing screen that the money is "
+            "still with the courier."
+        ).format(len(missing), pos_profile, preview),
+        title=_("Unconfirmed Courier Money"),
     )
-
-    payload.update(
-        {
-            "blocked": True,
-            "transaction_count": len(rows),
-            "invoice_count": len(invoice_names),
-            "party_count": len(sorted_parties),
-            "net_balance": flt(net_balance),
-            "parties": sorted_parties[:detail_limit],
-        }
-    )
-    return payload
+    return block
 
 
 def _throw_if_shift_has_unsettled_courier_transactions(pos_profile: str) -> dict[str, Any]:
+    """Legacy hard block, kept for callers that cannot acknowledge.
+
+    Retained so a client too old to send an acknowledgement list still gets the
+    old refusal rather than an accidental silent carry.
+    """
     block = _get_shift_courier_close_block(pos_profile)
     if not block.get("blocked"):
         return block
@@ -1009,6 +963,7 @@ def _close_shift(
     forced_by: str | None = None,
     reason: str | None = None,
     acknowledge_unsettled: bool = False,
+    acknowledged_courier_transactions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Close *opening* and post any Cash Over/Short difference.
 
@@ -1017,6 +972,17 @@ def _close_shift(
     amount is whatever the closer typed, and any variance books the same
     discrepancy Journal Entry. ``forced_by`` only adds an audit trail — it never
     changes the numbers.
+
+    Money still out with couriers takes one of three paths:
+
+    * ``acknowledged_courier_transactions`` — the closer ticked each line on the
+      closing screen. Every unsettled transaction must appear, and each one is
+      stamped as carried out of this shift.
+    * ``forced_by`` + ``acknowledge_unsettled`` — a manager closing somebody
+      else's shift, who cannot vouch line by line for cash they never handled.
+      The balances are recorded and carried wholesale.
+    * neither — the legacy hard refusal, so an old client cannot carry money by
+      omission.
     """
     closing_balances = _normalize_closing_balances_payload(closing_balances)
     if not closing_balances:
@@ -1029,7 +995,15 @@ def _close_shift(
     if forced_by and acknowledge_unsettled:
         # The manager has seen the outstanding courier balances and is closing
         # anyway — record exactly what was left open rather than dropping it.
+        # Checked before the per-line path because a manager closing somebody
+        # else's till cannot vouch for cash they never handled; requiring them
+        # to tick each line would only teach them to tick without reading.
         courier_block = _get_shift_courier_close_block(opening.pos_profile)
+    elif acknowledged_courier_transactions is not None:
+        # The closer confirmed, line by line, that this money is still out.
+        courier_block = _assert_courier_acknowledgement(
+            opening.pos_profile, acknowledged_courier_transactions
+        )
     else:
         _throw_if_shift_has_unsettled_courier_transactions(opening.pos_profile)
 
@@ -1081,6 +1055,26 @@ def _close_shift(
             forced_by=forced_by,
             reason=reason,
             courier_block=courier_block,
+        )
+
+    # --- Carry the acknowledged courier money into the next shift ---
+    # Stamped only once the closing entry is submitted: a close that fails
+    # validation must not leave transactions marked as carried by a shift that
+    # is in fact still open.
+    carried_courier: dict[str, Any] = {"count": 0, "net_balance": 0.0, "transactions": []}
+    if courier_block.get("transactions"):
+        from jarz_pos.services.courier_carry import stamp_carried
+
+        carried_courier = stamp_carried(
+            courier_block["transactions"],
+            opening_entry=opening.name,
+            user=frappe.session.user,
+        )
+        _add_carry_audit_comment(
+            opening=opening,
+            closing=closing,
+            courier_block=courier_block,
+            forced_by=forced_by,
         )
 
     # --- Create discrepancy journal entry if closing differs from expected ---
@@ -1152,6 +1146,12 @@ def _close_shift(
         "sales_invoices": [],
         "forced_by": forced_by,
         "shift_user": opening.user,
+        # What this close handed forward: the closer sees it on the summary
+        # screen, so "money is still out with a courier" is the last thing they
+        # read before they log out.
+        "carried_courier_count": int(carried_courier.get("count") or 0),
+        "carried_courier_amount": flt(carried_courier.get("net_balance")),
+        "carried_courier_parties": courier_block.get("parties") or [],
     }
 
     # Notify all users on this POS profile about shift end. The shift's owner is
@@ -1165,6 +1165,48 @@ def _close_shift(
     )
 
     return result
+
+
+def _add_carry_audit_comment(
+    *,
+    opening,
+    closing,
+    courier_block: dict[str, Any],
+    forced_by: str | None,
+) -> None:
+    """Write who let which courier money walk, onto both shift entries.
+
+    The stamps on the Courier Transactions are the queryable record; this is the
+    human one, readable from the shift itself without knowing that Courier
+    Transactions exist.
+    """
+    try:
+        rows = courier_block.get("transactions") or []
+        if not rows:
+            return
+        actor = forced_by or frappe.session.user
+        actor_name = frappe.db.get_value("User", actor, "full_name") or actor
+        total = flt(sum(flt(row.get("net_balance")) for row in rows))
+        lines = [
+            f"{actor_name} ({actor}) confirmed at close that {len(rows)} courier "
+            f"transaction(s) worth {total:.2f} are still out with couriers."
+        ]
+        for party in (courier_block.get("parties") or [])[:5]:
+            lines.append(
+                "- {0}: {1} transaction(s), {2:.2f}".format(
+                    party.get("display_name") or party.get("party"),
+                    party.get("transaction_count"),
+                    flt(party.get("net_balance")),
+                )
+            )
+        message = "<br>".join(lines)
+        for doc in (opening, closing):
+            try:
+                doc.add_comment("Comment", message)
+            except Exception:
+                continue
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "jarz_pos.shift.carry_audit")
 
 
 def _record_force_close_audit(
@@ -1208,7 +1250,20 @@ def _record_force_close_audit(
 
 
 @frappe.whitelist(allow_guest=False)
-def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | None = None):
+def end_shift(
+    pos_opening_entry: str,
+    closing_balances: list[dict[str, Any]] | None = None,
+    acknowledged_courier_transactions: Any = None,
+):
+    """Close your own shift.
+
+    ``acknowledged_courier_transactions`` is the list of Courier Transaction
+    names the closer ticked to confirm the money is still with the courier.
+    Omitting it entirely keeps the old behaviour — the close refuses while
+    anything is unsettled — so an un-upgraded client cannot carry money by
+    accident. Sending an empty list is a valid answer meaning "nothing is out",
+    and it is verified against the database rather than trusted.
+    """
     if not pos_opening_entry:
         frappe.throw(_("POS Opening Entry is required"))
 
@@ -1217,7 +1272,19 @@ def end_shift(pos_opening_entry: str, closing_balances: list[dict[str, Any]] | N
     if opening.user != frappe.session.user:
         frappe.throw(_("You are not allowed to close this shift"), frappe.PermissionError)
 
-    return _close_shift(opening, closing_balances)
+    from jarz_pos.services.courier_carry import normalize_acknowledgement
+
+    acknowledged = (
+        normalize_acknowledgement(acknowledged_courier_transactions)
+        if acknowledged_courier_transactions is not None
+        else None
+    )
+
+    return _close_shift(
+        opening,
+        closing_balances,
+        acknowledged_courier_transactions=acknowledged,
+    )
 
 
 @frappe.whitelist(allow_guest=False)
@@ -1226,6 +1293,7 @@ def force_close_shift(
     closing_balances: list[dict[str, Any]] | None = None,
     reason: str | None = None,
     acknowledge_unsettled: bool | int | str = False,
+    acknowledged_courier_transactions: Any = None,
 ):
     """Close a shift opened by somebody else.
 
@@ -1262,10 +1330,22 @@ def force_close_shift(
         action_label="closing a shift on this branch",
     )
 
+    from jarz_pos.services.courier_carry import normalize_acknowledgement
+
+    acknowledged = (
+        normalize_acknowledgement(acknowledged_courier_transactions)
+        if acknowledged_courier_transactions is not None
+        else None
+    )
+
     if opening.user == frappe.session.user:
         # Nothing forced about closing your own shift — take the normal path so
         # the audit trail stays meaningful.
-        return _close_shift(opening, closing_balances)
+        return _close_shift(
+            opening,
+            closing_balances,
+            acknowledged_courier_transactions=acknowledged,
+        )
 
     acknowledge = str(acknowledge_unsettled or "").strip().lower() in {
         "1", "true", "yes", "y", "on",
@@ -1277,6 +1357,7 @@ def force_close_shift(
         forced_by=frappe.session.user,
         reason=reason,
         acknowledge_unsettled=acknowledge,
+        acknowledged_courier_transactions=acknowledged,
     )
 
 
