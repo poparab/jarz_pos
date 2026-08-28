@@ -301,6 +301,86 @@ def _find_advance_account(company: str) -> str:
     return ""
 
 
+def _type_unused_advance_account(company: str, log: Dict[str, List[str]]) -> None:
+    """Set ``account_type = Receivable`` on an advance account that has none.
+
+    ERPNext creates "Employee Advances" under Loans and Advances with NO
+    ``account_type`` on some charts — which is what staging turned out to have on
+    2026-08-29: the node existed, correctly parented, right company, right
+    currency, and HRMS still refused every approval, because
+    ``validate_advance_account_type`` compares against ``"Receivable"`` exactly
+    and an empty type fails it.
+
+    Repointing the Company default at some other Receivable ledger is NOT an
+    option: on this chart the only one is ``Debtors``, and putting staff advances
+    there merges them into customer AR.
+
+    So the account is typed in place, but ONLY when every one of these holds:
+      * it is a leaf (``is_group = 0``) under the right company,
+      * its ``root_type`` is already ``Asset``,
+      * its ``account_type`` is genuinely empty -- never overwritten,
+      * it has NO GL entries.
+
+    That last guard is the important one. Typing an empty account is a
+    classification, not a reclassification; doing the same to an account that has
+    already posted would silently change how existing entries are reported. If it
+    has entries, this warns and leaves it alone for an accountant.
+    """
+    try:
+        rows = (
+            frappe.get_all(
+                "Account",
+                filters={
+                    "company": company,
+                    "is_group": 0,
+                    "account_name": ADVANCE_ACCOUNT_NAME,
+                },
+                fields=["name", "account_type", "root_type"],
+                limit_page_length=0,
+            )
+            or []
+        )
+    except Exception:
+        _logger().error(
+            f"Failed looking for an untyped advance account in {company}", exc_info=True
+        )
+        return
+
+    for row in rows:
+        account = str(row["name"])
+        if str(row.get("account_type") or "").strip():
+            continue  # already typed, whatever the type — not ours to change
+        if str(row.get("root_type") or "").strip() != "Asset":
+            log.setdefault("warnings", []).append(
+                f"{company}: {account} is untyped but its root_type is "
+                f"{row.get('root_type')!r}, not 'Asset' — left alone"
+            )
+            continue
+        try:
+            posted = frappe.db.count("GL Entry", {"account": account, "is_cancelled": 0})
+        except Exception:
+            _logger().error(f"Failed counting GL entries for {account}", exc_info=True)
+            continue
+        if posted:
+            log.setdefault("warnings", []).append(
+                f"{company}: {account} is untyped and has {posted} GL entries — "
+                f"NOT typed automatically; an accountant must set it to "
+                f"{ADVANCE_ACCOUNT_TYPE!r}"
+            )
+            continue
+        try:
+            frappe.db.set_value(
+                "Account", account, "account_type", ADVANCE_ACCOUNT_TYPE,
+                update_modified=False,
+            )
+            log["created"].append(
+                f"{company}: {account} account_type -> {ADVANCE_ACCOUNT_TYPE} "
+                f"(was unset, no GL entries)"
+            )
+        except Exception:
+            _logger().error(f"Failed typing {account} as {ADVANCE_ACCOUNT_TYPE}", exc_info=True)
+
+
 def _verify_advance_accounts(log: Dict[str, List[str]]) -> None:
     """Report — and only where it is unambiguous, repair — the advance account.
 
@@ -341,6 +421,13 @@ def _verify_advance_accounts(log: Dict[str, List[str]]) -> None:
 
     for company in companies:
         try:
+            # Runs FIRST, and before the `configured` read below, because the
+            # common broken shape is a Company default already pointing at an
+            # untyped "Employee Advances" node. Typing it here turns the warning
+            # branch below into the success branch on the same migrate, instead
+            # of reporting a gap that nothing ever closes.
+            _type_unused_advance_account(company, log)
+
             configured = str(
                 frappe.db.get_value("Company", company, COMPANY_ADVANCE_FIELD) or ""
             ).strip()

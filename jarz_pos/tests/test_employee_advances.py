@@ -746,5 +746,84 @@ class TestAdvanceSerializer(unittest.TestCase):
         self.assertEqual(out["requested_by"], "legacy@example.com")
 
 
+class TestAdvanceAccountTyping(unittest.TestCase):
+    """``_type_unused_advance_account`` — the staging blocker of 2026-08-29.
+
+    ERPNext had created "Employee Advances" under Loans and Advances with NO
+    ``account_type``. The node looked right in every other respect, and HRMS
+    still refused every approval, because ``validate_advance_account_type``
+    compares against ``"Receivable"`` exactly. Repointing at the only other
+    Receivable ledger was not an option — that is ``Debtors``, i.e. customer AR.
+
+    The guards below are the whole point: typing an EMPTY account classifies it,
+    but doing the same to one that has already posted would silently change how
+    existing entries report. Hence the GL-entry check.
+    """
+
+    SETUP_MODULE = "jarz_pos.setup.employee_link_setup"
+
+    def _run(self, account_row, gl_count=0):
+        from jarz_pos.setup import employee_link_setup as els
+
+        log = {"created": [], "existing": [], "skipped": [], "warnings": []}
+        mock = MagicMock()
+        mock.get_all.return_value = [account_row] if account_row else []
+        mock.db.count.return_value = gl_count
+        with patch(f"{self.SETUP_MODULE}.frappe", mock):
+            els._type_unused_advance_account("JARZ", log)
+        return log, mock
+
+    def _row(self, **over):
+        row = {
+            "name": "Employee Advances - J",
+            "account_type": "",
+            "root_type": "Asset",
+        }
+        row.update(over)
+        return row
+
+    def test_untyped_asset_leaf_with_no_entries_is_typed(self):
+        log, mock = self._run(self._row())
+        mock.db.set_value.assert_called_once_with(
+            "Account", "Employee Advances - J", "account_type", "Receivable",
+            update_modified=False,
+        )
+        self.assertTrue(any("account_type -> Receivable" in c for c in log["created"]))
+
+    def test_an_account_with_gl_entries_is_never_typed(self):
+        log, mock = self._run(self._row(), gl_count=3)
+        mock.db.set_value.assert_not_called()
+        self.assertTrue(any("3 GL entries" in w for w in log["warnings"]))
+
+    def test_an_already_typed_account_is_left_alone(self):
+        # Even a WRONG type is not ours to overwrite — that is a decision to
+        # revisit, not a typo to patch.
+        log, mock = self._run(self._row(account_type="Payable"))
+        mock.db.set_value.assert_not_called()
+        self.assertEqual(log["created"], [])
+        self.assertEqual(log["warnings"], [])
+
+    def test_a_non_asset_account_is_reported_not_typed(self):
+        log, mock = self._run(self._row(root_type="Expense"))
+        mock.db.set_value.assert_not_called()
+        self.assertTrue(any("not 'Asset'" in w for w in log["warnings"]))
+
+    def test_no_matching_account_is_a_quiet_no_op(self):
+        log, mock = self._run(None)
+        mock.db.set_value.assert_not_called()
+        self.assertEqual(log["created"], [])
+        self.assertEqual(log["warnings"], [])
+
+    def test_a_lookup_failure_never_raises(self):
+        from jarz_pos.setup import employee_link_setup as els
+
+        log = {"created": [], "existing": [], "skipped": [], "warnings": []}
+        mock = MagicMock()
+        mock.get_all.side_effect = RuntimeError("db gone")
+        with patch(f"{self.SETUP_MODULE}.frappe", mock):
+            els._type_unused_advance_account("JARZ", log)  # must not raise
+        mock.db.set_value.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
