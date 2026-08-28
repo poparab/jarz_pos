@@ -324,10 +324,35 @@ class TestOFDPaidJournalEntry(unittest.TestCase):
         self.assertEqual(ct.status, "Settled")
         self.assertEqual(ct.amount, 500.0)
         self.assertEqual(ct.shipping_amount, 30.0)
-        # Born settled, so it carries the same settlement stamps as one settled
-        # days later — otherwise a shift's "collected" figure has a blind spot.
-        self.assertIsNotNone(ct.get("settled_at"))
-        self.assertIsNotNone(ct.get("settled_by"))
+
+    def test_cash_now_ct_carries_the_settlement_stamp(self):
+        """Born settled, so it is attributed like one settled days later.
+
+        Stubbing the stamp rather than reading the columns back keeps this
+        honest before a migrate has run — the wiring is what is under test, not
+        whether the database has caught up with the DocType yet.
+        """
+        stamp = {"settled_in_shift": "POS-OPE-0001", "settled_by": "cashier@example.com"}
+        with patch(
+            "jarz_pos.services.delivery_handling.courier_settlement_stamp",
+            return_value=stamp,
+        ):
+            _, _, ct = self._run_ofd_paid("cash_now", 30.0, grand_total=500.0)
+
+        self.assertEqual(ct.status, "Settled")
+        self.assertEqual(ct.get("settled_in_shift"), "POS-OPE-0001")
+        self.assertEqual(ct.get("settled_by"), "cashier@example.com")
+
+    def test_later_ct_carries_no_settlement_stamp(self):
+        """Money still with the courier is not settled by anyone yet."""
+        with patch(
+            "jarz_pos.services.delivery_handling.courier_settlement_stamp",
+            return_value={"settled_in_shift": "POS-OPE-0001"},
+        ):
+            _, _, ct = self._run_ofd_paid("later", 30.0, grand_total=500.0)
+
+        self.assertEqual(ct.status, "Unsettled")
+        self.assertIsNone(ct.get("settled_in_shift"))
 
     def test_cash_now_zero_shipping_no_je(self):
         """cash_now with zero shipping: No JE lines should be created."""
