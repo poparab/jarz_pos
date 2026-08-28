@@ -14,6 +14,7 @@ from jarz_pos.constants import ROLES
 from jarz_pos.services import delivery_promotions as _delivery_promotions
 from jarz_pos.services import promo_codes as _promo_codes
 from jarz_pos.services import commercial_policy as _commercial_policy
+from jarz_pos.services import branch_fulfilment as _branch_fulfilment
 from jarz_pos.utils.validation_utils import (
     validate_cart_data, 
     validate_customer, 
@@ -1379,6 +1380,37 @@ def create_pos_invoice(
             except Exception:
                 pass
 
+        # STEP 11.5: Deliver-at-Branch auto-fulfilment.
+        #
+        # An "Employee" order is collected at the counter as it is rung in: there
+        # is no courier and no delivery run, so the card must not sit in Recieved
+        # waiting for a dispatch that will never happen.
+        #
+        # This runs HERE, after submit, because everything it does needs a
+        # submitted invoice: the Delivery Note that actually moves the stock
+        # refuses a draft, and the state writes go through the
+        # update-after-submit path. It is deliberately OFF the critical path —
+        # `fulfil_at_branch` never raises and never rolls back, and a failure
+        # only means the card stays in Recieved for staff to drag normally. The
+        # cashier gets their invoice either way.
+        branch_fulfilment_result = None
+        try:
+            if getattr(policy_decision, "deliver_at_branch", False):
+                print("\n🏪 DELIVER AT BRANCH: auto-fulfilling at the counter")
+                branch_fulfilment_result = _branch_fulfilment.fulfil_at_branch(
+                    invoice_doc.name, logger=logger
+                )
+        except Exception as _branch_err:
+            # Belt and braces: fulfil_at_branch is documented not to raise, but a
+            # submitted invoice must never be lost to a bookkeeping convenience.
+            branch_fulfilment_result = {
+                "success": False,
+                "delivery_note": None,
+                "state": None,
+                "error": str(_branch_err),
+            }
+            print(f"   ❌ Deliver-at-Branch fulfilment failed: {_branch_err}")
+
         # STEP 12: Prepare Response
         print("\n🎯 PREPARING RESPONSE:")
         result = _prepare_response(invoice_doc, delivery_datetime, logger)
@@ -1386,6 +1418,24 @@ def create_pos_invoice(
             result["pickup"] = bool(pickup)
         except Exception:
             pass
+
+        # Surface the auto-fulfilment outcome to the POS. `_prepare_response` has
+        # no warnings convention of its own, so the key is created on demand and
+        # only when there is something to say — a Standard order's response stays
+        # byte-identical.
+        if branch_fulfilment_result is not None:
+            try:
+                result["branch_fulfilment"] = branch_fulfilment_result
+                if not branch_fulfilment_result.get("success"):
+                    _bf_error = str(branch_fulfilment_result.get("error") or "").strip()
+                    result.setdefault("warnings", []).append(
+                        "Order could not be auto-delivered at the branch"
+                        + (f": {_bf_error}" if _bf_error else "")
+                        + ". It is still in the Recieved column and has to be moved "
+                        "through the board manually."
+                    )
+            except Exception:
+                pass
 
         print("\n🎉 SUCCESS! Invoice creation completed!")
         print("=" * 100)

@@ -2191,6 +2191,901 @@ def get_manager_states() -> Dict[str, Any]:
         return {"success": False, "error": str(e), "states": []}
 
 
+# ---------------------------------------------------------------------------
+# Employee ledger — cash advances + unpaid Employee-purpose orders
+# ---------------------------------------------------------------------------
+# Two unrelated things are "money one employee owes the company":
+#
+#   1. an HRMS ``Employee Advance`` — party is the Employee, and
+#   2. an Employee-purpose POS order — party is the Customer.
+#
+# Employee orders are settled ON THE EMPLOYEE'S ACCOUNT: the invoice is
+# submitted and deliberately left as an unpaid receivable instead of being paid
+# at the till. So the two live in different party spaces yet add up to a single
+# per-person balance, and a manager chasing somebody needs that one number.
+# ``jarz_pos.utils.employee_link`` owns the Customer <-> Employee join; this
+# section owns the money.
+
+#: How far back the ledger looks when the caller passes no dates.
+#:
+#: The shift monitor defaults to *today* because a shift IS a one-day object. A
+#: balance is not. An advance taken six weeks ago and still unsettled is exactly
+#: the row a manager opens this screen to find, and a one-day default would hide
+#: it behind a reassuringly empty table. 90 days spans the month-end settlement
+#: cycle roughly three times, so nothing routine falls out of the window.
+_EMPLOYEE_LEDGER_DEFAULT_DAYS = 90
+
+#: Advance statuses that can still carry a balance. Mirrors HRMS's own
+#: ``get_employee_advance_balance`` (hrms/api/__init__.py): "Claimed" and
+#: "Returned" advances are fully settled and would only add noise.
+_EMPLOYEE_ADVANCE_OPEN_STATUSES = ["Paid", "Partially Paid", "Unpaid"]
+
+
+def _log_employee_ledger_error(summary: str) -> None:
+    """Log a ledger failure without ever *becoming* the failure.
+
+    ``frappe.log_error`` writes an Error Log row, so it can itself raise (read-only
+    replica, disk full, the DocType missing mid-migrate). Called from an ``except``
+    block that would turn a degraded section into a 500, so it is wrapped.
+    """
+    try:
+        frappe.log_error(frappe.get_traceback(), summary)
+    except Exception:
+        pass
+
+
+def _employee_ledger_currency() -> str:
+    """Presentation currency for the ledger totals.
+
+    Every amount summed here is company-currency (advances and invoices are both
+    posted in it), so one currency label for the whole payload is honest. Falls
+    back to EGP the way ``setup/b2b_master_data._default_currency`` does.
+    """
+    try:
+        company = frappe.defaults.get_global_default("company")
+        if company:
+            currency = frappe.get_cached_value("Company", company, "default_currency")
+            if currency:
+                return str(currency)
+    except Exception:
+        pass
+    return "EGP"
+
+
+def _employee_ledger_branch_field() -> str:
+    """Sales Invoice field that carries the operational branch.
+
+    Same resolution ``get_manager_orders`` uses: ``custom_kanban_profile`` is the
+    branch an order currently belongs to (it moves on transfer), ``pos_profile``
+    is where it was created and is read-only after submit.
+    """
+    try:
+        meta = frappe.get_meta("Sales Invoice")
+        return "custom_kanban_profile" if meta.get_field("custom_kanban_profile") else "pos_profile"
+    except Exception:
+        return "pos_profile"
+
+
+def _employee_ledger_state_field() -> Optional[str]:
+    """Sales Invoice field holding the Kanban state, or None when absent."""
+    try:
+        meta = frappe.get_meta("Sales Invoice")
+        if meta.get_field("custom_sales_invoice_state"):
+            return "custom_sales_invoice_state"
+        if meta.get_field("sales_invoice_state"):
+            return "sales_invoice_state"
+    except Exception:
+        pass
+    return None
+
+
+def _employee_ledger_employee_meta(employee_ids: List[str]) -> Dict[str, Dict[str, str]]:
+    """``employee -> {employee_name, branch, user}`` for the ids in play.
+
+    One bulk read rather than a lookup per row. Deliberately NOT filtered on
+    ``status="Active"``: a resigned employee who still owes money must keep
+    appearing, otherwise the balance silently leaves the report the day HR marks
+    them left — which is the day chasing it actually matters.
+    """
+    wanted = sorted({str(e or "").strip() for e in employee_ids if str(e or "").strip()})
+    if not wanted:
+        return {}
+    try:
+        rows = frappe.get_all(
+            "Employee",
+            filters={"name": ["in", wanted]},
+            fields=["name", "employee_name", "branch", "user_id"],
+            limit_page_length=0,
+        ) or []
+        return {
+            row["name"]: {
+                "employee_name": str(row.get("employee_name") or row["name"]),
+                "branch": str(row.get("branch") or ""),
+                "user": str(row.get("user_id") or ""),
+            }
+            for row in rows
+        }
+    except Exception:
+        _log_employee_ledger_error("Employee ledger: bulk Employee read failed")
+
+    # Degraded path: at least label the rows, so the money stays attributable.
+    try:
+        from jarz_pos.utils.employee_link import employee_display_names
+
+        return {
+            emp: {"employee_name": name, "branch": "", "user": ""}
+            for emp, name in (employee_display_names(wanted) or {}).items()
+        }
+    except Exception:
+        return {}
+
+
+def _employee_ledger_delivery_notes(invoice_names: List[str]) -> Dict[str, str]:
+    """``invoice -> submitted Delivery Note`` in one query.
+
+    ``_find_submitted_delivery_notes`` answers for a single invoice; the ledger
+    lists hundreds, so it would be that many round trips. When an invoice has
+    several notes the first by name is reported — the column is a "was it
+    dispatched" hint, not an exhaustive list.
+    """
+    wanted = [n for n in invoice_names if n]
+    if not wanted:
+        return {}
+    try:
+        rows = frappe.get_all(
+            "Delivery Note Item",
+            filters={"against_sales_invoice": ["in", wanted], "docstatus": 1},
+            fields=["parent", "against_sales_invoice"],
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        _log_employee_ledger_error("Employee ledger: Delivery Note lookup failed")
+        return {}
+    mapping: Dict[str, str] = {}
+    for row in rows:
+        invoice = str(row.get("against_sales_invoice") or "")
+        note = str(row.get("parent") or "")
+        if not invoice or not note:
+            continue
+        current = mapping.get(invoice)
+        if current is None or note < current:
+            mapping[invoice] = note
+    return mapping
+
+
+def _employee_ledger_bucket(
+    people: Dict[str, Dict[str, Any]],
+    *,
+    key: str,
+    employee: str = "",
+    employee_name: str = "",
+    customer: str = "",
+    user: str = "",
+    branch: str = "",
+) -> Dict[str, Any]:
+    """Get-or-create the per-person rollup row addressed by ``key``.
+
+    The two passes know different things — the advances pass knows the employee's
+    branch and login, the orders pass knows their Customer — so later passes fill
+    blanks but never overwrite a value that is already known.
+    """
+    row = people.get(key)
+    if row is None:
+        row = {
+            "employee": employee,
+            "employee_name": employee_name,
+            "user": user,
+            "branch": branch,
+            "customer": customer,
+            "advance_outstanding": 0.0,
+            "order_outstanding": 0.0,
+            "total_outstanding": 0.0,
+            "advance_count": 0,
+            "order_count": 0,
+        }
+        people[key] = row
+        return row
+    for field, value in (
+        ("employee", employee),
+        ("employee_name", employee_name),
+        ("user", user),
+        ("branch", branch),
+        ("customer", customer),
+    ):
+        if value and not row.get(field):
+            row[field] = value
+    return row
+
+
+def _empty_employee_ledger(
+    *,
+    filters: Dict[str, Any],
+    currency: str,
+    hrms: bool,
+    notice_code: Optional[str] = None,
+    notice: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The ledger payload with every section empty and every total zeroed.
+
+    Same keys as a populated response so the client never branches on shape —
+    only ``notice_code`` tells it *why* it is empty.
+    """
+    payload: Dict[str, Any] = {
+        "success": True,
+        "hrms_available": hrms,
+        "filters": filters,
+        "summary": {
+            "advance_outstanding": 0.0,
+            "order_outstanding": 0.0,
+            "total_outstanding": 0.0,
+            "advance_count": 0,
+            "order_count": 0,
+            "employee_count": 0,
+            "currency": currency,
+            # Always present, even here, so the client can label the figure the
+            # same way on every response instead of special-casing empty states.
+            "outstanding_is_all_time": True,
+        },
+        "employees": [],
+        "advances": [],
+        "orders": [],
+    }
+    if notice_code:
+        payload["notice_code"] = notice_code
+        payload["notice"] = notice
+    return payload
+
+
+def _employee_ledger_advance_rows(
+    start_date: Any,
+    end_date: Any,
+    selected_employee: str,
+    limit: int,
+) -> tuple:
+    """Submitted, not-yet-settled Employee Advances in the window.
+
+    Returns ``(rows, truncated)``. Every failure degrades to ``([], False)``:
+    HRMS is not a ``required_app`` of this bench, so an absent or half-migrated
+    Employee Advance table must leave the orders half of the ledger working.
+    """
+    filters: Dict[str, Any] = {
+        "docstatus": 1,
+        # Fully claimed / returned advances carry no balance and are history.
+        "status": ["in", _EMPLOYEE_ADVANCE_OPEN_STATUSES],
+        "posting_date": ["between", [f"{start_date} 00:00:00", f"{end_date} 23:59:59"]],
+    }
+    if selected_employee:
+        filters["employee"] = selected_employee
+    try:
+        rows = frappe.get_all(
+            "Employee Advance",
+            filters=filters,
+            fields=[
+                "name",
+                "employee",
+                "employee_name",
+                "posting_date",
+                "advance_amount",
+                "paid_amount",
+                "claimed_amount",
+                "return_amount",
+                "status",
+                "purpose",
+                "advance_account",
+                "currency",
+            ],
+            order_by="posting_date desc, modified desc",
+            # +1 so truncation is detectable instead of guessed from a full page.
+            limit_page_length=limit + 1,
+        ) or []
+    except Exception:
+        _log_employee_ledger_error("Employee ledger: Employee Advance query failed")
+        return [], False
+    return rows[:limit], len(rows) > limit
+
+
+def _employee_ledger_order_rows(
+    start_date: Any,
+    end_date: Any,
+    profiles: List[str],
+    customers: Optional[List[str]],
+    limit: int,
+    branch_field: str,
+    state_field: Optional[str],
+) -> tuple:
+    """Submitted Employee-purpose Sales Invoices in the window, branch-scoped.
+
+    Returns ``(rows, truncated)``. ``customers`` is ``None`` when no employee
+    filter is active; an empty list means "the requested employee maps to no
+    Customer", which is a real empty result rather than an unfiltered query.
+
+    Credit notes (``is_return``) are deliberately NOT excluded: a returned staff
+    order carries a negative grand total and a negative outstanding, so leaving it
+    in is what makes the balance drop when the goods come back.
+    """
+    from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
+
+    if customers is not None and not customers:
+        return [], False
+    try:
+        if not frappe.get_meta("Sales Invoice").get_field("custom_order_purpose"):
+            # Pre-fixture bench: the purpose field is not there yet, so no order
+            # can be flagged as staff. Empty is correct; filtering would raise.
+            return [], False
+    except Exception:
+        return [], False
+
+    filters: Dict[str, Any] = {
+        "docstatus": 1,
+        "custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
+        "posting_date": ["between", [f"{start_date} 00:00:00", f"{end_date} 23:59:59"]],
+        branch_field: ["in", profiles],
+    }
+    if customers is not None:
+        filters["customer"] = ["in", customers]
+
+    fields = [
+        "name",
+        "customer",
+        "customer_name",
+        "posting_date",
+        "grand_total",
+        "outstanding_amount",
+        "status",
+        branch_field,
+    ]
+    if state_field:
+        fields.append(state_field)
+
+    try:
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            fields=fields,
+            order_by="posting_date desc, modified desc",
+            limit_page_length=limit + 1,
+        ) or []
+    except Exception:
+        _log_employee_ledger_error("Employee ledger: Sales Invoice query failed")
+        return [], False
+    return rows[:limit], len(rows) > limit
+
+
+def _employee_ledger_advance_out_of_branch(
+    employee_branch: str,
+    known_pos_profiles: set,
+    allowed_profiles: set,
+) -> bool:
+    """True when an advance belongs to a branch this user does not manage.
+
+    ``Employee Advance`` carries no POS Profile, so the employee's own HR branch
+    is the only attribution available — and it is blank for most staff here. An
+    advance is therefore excluded ONLY when its branch actually names a POS
+    Profile the caller does not run; blank or non-POS branches stay visible.
+
+    Shared by the listing pass and the balance pass on purpose: two copies of
+    this rule would eventually disagree about whose money a manager can see.
+    """
+    if not employee_branch:
+        return False
+    if employee_branch not in known_pos_profiles:
+        return False
+    return employee_branch not in allowed_profiles
+
+
+def _employee_ledger_open_advance_rows(selected_employee: str) -> List[Dict[str, Any]]:
+    """EVERY unsettled Employee Advance. No date filter, no row cap.
+
+    This feeds the *balance*, and a balance has no window. An advance taken in
+    January and never settled is precisely the row a manager opens this screen
+    to find; filtering it by ``posting_date`` would drop it from a figure the
+    client labels "total outstanding" — and the older and more delinquent the
+    debt, the more certainly it would vanish.
+
+    Uncapped for the same reason: truncating a list loses rows, truncating a
+    balance states the wrong amount of money. The set is inherently small (only
+    advances still in an open status) and only the fields the rollup needs are
+    selected — the sum itself is done in Python, because ERPNext v16 rejects SQL
+    functions in ``SELECT``.
+    """
+    filters: Dict[str, Any] = {
+        "docstatus": 1,
+        "status": ["in", _EMPLOYEE_ADVANCE_OPEN_STATUSES],
+    }
+    if selected_employee:
+        filters["employee"] = selected_employee
+    try:
+        return frappe.get_all(
+            "Employee Advance",
+            filters=filters,
+            fields=[
+                "employee",
+                "employee_name",
+                "paid_amount",
+                "claimed_amount",
+                "return_amount",
+            ],
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        _log_employee_ledger_error("Employee ledger: open Employee Advance query failed")
+        return []
+
+
+def _employee_ledger_open_order_rows(
+    profiles: List[str],
+    customers: Optional[List[str]],
+    branch_field: str,
+) -> List[Dict[str, Any]]:
+    """EVERY employee-purpose invoice still carrying an outstanding amount.
+
+    All-time, uncapped, for the reasons in :func:`_employee_ledger_open_advance_rows`.
+    A staff order unpaid since March is the whole point of the screen.
+
+    Branch scoping still applies: "all-time" widens the DATE range, never the set
+    of people whose money this user may see. Credit notes are included — their
+    negative outstanding is what makes a returned order reduce the balance.
+    """
+    from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
+
+    if customers is not None and not customers:
+        return []
+    try:
+        if not frappe.get_meta("Sales Invoice").get_field("custom_order_purpose"):
+            return []
+    except Exception:
+        return []
+
+    filters: Dict[str, Any] = {
+        "docstatus": 1,
+        "custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
+        branch_field: ["in", profiles],
+        # Paid staff orders are history, not debt. Excluding them in SQL keeps
+        # this query proportional to what is actually owed.
+        "outstanding_amount": ["!=", 0],
+    }
+    if customers is not None:
+        filters["customer"] = ["in", customers]
+
+    try:
+        return frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            fields=["customer", "customer_name", "outstanding_amount"],
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        _log_employee_ledger_error("Employee ledger: open Sales Invoice query failed")
+        return []
+
+
+@frappe.whitelist(allow_guest=False)
+def get_employee_ledger(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    branch: Optional[str] = None,
+    employee: Optional[str] = None,
+    limit: Union[int, str, None] = 200,
+) -> Dict[str, Any]:
+    """What each employee owes the company, advances and staff orders together.
+
+    **THE DATE WINDOW DESCRIBES ACTIVITY. IT NEVER LIMITS THE BALANCE.**
+
+    Read that twice before changing anything here, because collapsing the two
+    back into one filtered query is a very natural "simplification" and it
+    silently breaks the only number on the screen that matters:
+
+    * ``advances`` and ``orders`` are the ROWS LISTED, and they honour
+      ``from_date`` / ``to_date``. This is the activity feed.
+    * ``summary.*_outstanding`` and ``employees[].*_outstanding`` are the
+      BALANCE, computed over EVERY open item regardless of date. An advance
+      taken in January, or a staff order unpaid since March, is exactly the debt
+      a manager is hunting for — and under a windowed total it would contribute
+      nothing while the client still labelled the figure "total outstanding".
+      The older and more delinquent the debt, the more certainly it would
+      disappear. ``summary.outstanding_is_all_time`` is always ``True`` so the
+      client can say so out loud.
+
+    A consequence, and it is correct: somebody can appear in ``employees`` with a
+    real balance and an EMPTY advances/orders list, because all their activity
+    predates the window. The rollup is driven by what is owed, not by what is
+    listed. The reverse also holds — somebody whose only activity in the window
+    was a paid order appears with a zero balance.
+
+    Two sources, one balance per person:
+
+    * **Advances** — submitted ``Employee Advance`` rows whose status still allows
+      a balance. ``balance = paid_amount - (claimed_amount + return_amount)``,
+      exactly as HRMS computes it in ``get_employee_advance_balance``. An advance
+      that was approved but not yet disbursed (``Unpaid``, ``paid_amount`` 0) is
+      listed for visibility and contributes 0 — nothing has left the company yet.
+    * **Orders** — submitted Sales Invoices with ``custom_order_purpose =
+      "Employee"``. Only ``outstanding_amount`` feeds the balance, which is the
+      whole point of the design: a staff order settled at the till contributes 0
+      while still appearing in ``orders`` as history, and one settled *on the
+      employee's account* stays an unpaid receivable and shows up as debt.
+
+    Dates default to the **last 90 days**, NOT to today like the shift monitor.
+    A shift is a one-day object; an activity feed is not. Both listed sections
+    are capped at ``limit`` rows (200 by default, 500 max); if either is
+    truncated the payload says so via ``notice_code = "results_truncated"``
+    rather than dropping rows quietly. The all-time balance queries are
+    deliberately UNCAPPED — truncating a list loses rows, truncating a balance
+    states the wrong amount of money.
+
+    Branch scoping is not symmetric, because the two sources are not:
+
+    * Orders carry the POS Profile and are hard-filtered to the branches this
+      user is assigned to (managers included — only Administrator sees all).
+    * ``Employee Advance`` has no POS Profile at all. It is attributed to the HR
+      ``Employee.branch``, which is frequently blank on this site. So an advance
+      is dropped only when its employee's branch names a POS Profile the caller
+      does NOT manage; an advance nobody can attribute is shown to everybody who
+      can open the ledger, because an advance nobody can see is one nobody
+      chases.
+
+    An order whose Customer resolves to no Employee is still listed and still
+    counted, with ``employee = ""`` and the customer name standing in for the
+    employee name. Dropping it would quietly shrink the amount owed.
+
+    HRMS is optional on this bench: when ``Employee Advance`` does not exist the
+    response carries ``hrms_available: False``, an empty ``advances`` list and a
+    zeroed advance summary. It never throws.
+
+    Args:
+        from_date: Start of the ACTIVITY window (default: 89 days before today).
+            Does not affect any outstanding figure.
+        to_date: End of the ACTIVITY window (default: today). Likewise.
+        branch: POS Profile to narrow to; omitted or "all" means every assigned
+            branch. A branch the user is not assigned to returns an empty ledger
+            with ``notice_code = "branch_not_permitted"``. Applies to the
+            all-time balance queries too — "all-time" widens the date range,
+            never the set of people whose money this user may see.
+        employee: Restrict to one Employee (advances directly, orders through the
+            Customer that Employee is linked to).
+        limit: Max rows PER LISTED SECTION (advances, orders). Capped at 500.
+            The balance is never capped.
+
+    Returns:
+        Flat dict: ``success``, ``hrms_available``, ``filters``, ``summary``,
+        ``employees`` (per-person rollup, highest ``total_outstanding`` first),
+        ``advances``, ``orders``, plus optional ``notice_code`` / ``notice``.
+
+        ``summary.advance_count`` / ``order_count`` and
+        ``employees[].advance_count`` / ``order_count`` count the ROWS LISTED IN
+        THE WINDOW — they are activity counts, not balance counts, and a person
+        with an out-of-window debt legitimately shows 0 against a non-zero
+        amount. ``summary.employee_count`` is the other way round: the number of
+        people who actually owe something all-time, so it can be smaller than
+        ``len(employees)``.
+    """
+    _ensure_manager_dashboard_access()
+
+    # Imported inside the endpoint, matching the local-import style used by
+    # _build_shift_monitor_row / get_pos_shift_monitor for cross-module helpers.
+    from jarz_pos.utils.employee_link import customers_for_employees, employees_for_customers, hrms_available
+
+    try:
+        limit = max(1, min(int(limit or 200), 500))
+    except Exception:
+        limit = 200
+
+    end_date = _coerce_shift_monitor_date(to_date, nowdate())
+    start_date = _coerce_shift_monitor_date(
+        from_date, add_days(nowdate(), -(_EMPLOYEE_LEDGER_DEFAULT_DAYS - 1))
+    )
+    if start_date > end_date:
+        frappe.throw(_("From date cannot be later than To date"))
+
+    selected_branch = str(branch or "").strip()
+    selected_employee = str(employee or "").strip()
+    hrms = bool(hrms_available())
+    currency = _employee_ledger_currency()
+    filters_echo: Dict[str, Any] = {
+        "from_date": str(start_date),
+        "to_date": str(end_date),
+        "branch": selected_branch or None,
+        "employee": selected_employee or None,
+    }
+
+    allowed = _current_user_allowed_profiles()
+    if not allowed:
+        # Passing the role gate while owning no branch is a setup problem, not an
+        # empty ledger — say which, exactly as the other dashboard endpoints do.
+        return _empty_employee_ledger(
+            filters=filters_echo,
+            currency=currency,
+            hrms=hrms,
+            notice_code="no_branch_assigned",
+            notice=_(
+                "You are not assigned to any branch (POS Profile). Ask an "
+                "administrator to add you to the branches you manage."
+            ),
+        )
+
+    profiles = list(allowed)
+    if selected_branch and selected_branch.lower() != "all":
+        if selected_branch not in allowed:
+            return _empty_employee_ledger(
+                filters=filters_echo,
+                currency=currency,
+                hrms=hrms,
+                notice_code="branch_not_permitted",
+                notice=_("You are not assigned to branch {0}.").format(selected_branch),
+            )
+        profiles = [selected_branch]
+
+    branch_field = _employee_ledger_branch_field()
+    state_field = _employee_ledger_state_field()
+    customer_filter: Optional[List[str]] = None
+    if selected_employee:
+        # One employee -> the Customer they order as. No Customer means no staff
+        # orders exist for them, which is an empty list, not an unfiltered query.
+        customer_filter = [
+            c for c in (customers_for_employees([selected_employee]) or {}).values() if c
+        ]
+
+    # --- What is LISTED: the activity window --------------------------------
+    advance_rows: List[Dict[str, Any]] = []
+    advances_truncated = False
+    if hrms:
+        advance_rows, advances_truncated = _employee_ledger_advance_rows(
+            start_date, end_date, selected_employee, limit
+        )
+    order_rows, orders_truncated = _employee_ledger_order_rows(
+        start_date, end_date, profiles, customer_filter, limit, branch_field, state_field
+    )
+
+    # --- What is OWED: every open item, all time ----------------------------
+    # Deliberately NOT date-filtered. See the docstring: the window says which
+    # rows are listed, never how much is owed. These two queries are the entire
+    # reason the ledger can be trusted as a balance.
+    open_advance_rows = _employee_ledger_open_advance_rows(selected_employee) if hrms else []
+    open_order_rows = _employee_ledger_open_order_rows(profiles, customer_filter, branch_field)
+
+    # --- Join: Customer -> Employee, once across BOTH row sets --------------
+    order_customers = sorted({
+        str(r.get("customer") or "")
+        for r in (list(order_rows) + list(open_order_rows))
+        if r.get("customer")
+    })
+    customer_to_employee = employees_for_customers(order_customers) if order_customers else {}
+
+    employee_ids = {
+        str(r.get("employee") or "")
+        for r in (list(advance_rows) + list(open_advance_rows))
+        if r.get("employee")
+    }
+    employee_ids.update(str(e) for e in customer_to_employee.values() if e)
+    emp_meta = _employee_ledger_employee_meta(sorted(employee_ids))
+
+    # Customer per employee, so an employee with advances but no orders in the
+    # window still shows the account their staff orders would land on.
+    employee_to_customer = customers_for_employees(sorted(employee_ids)) if employee_ids else {}
+
+    # POS Profiles that exist at all — used to tell "this employee belongs to a
+    # branch I do not manage" apart from "this employee's branch is not a POS
+    # branch (or is blank)", which must NOT be filtered away.
+    known_pos_profiles = set(_get_all_active_pos_profiles())
+    allowed_profiles = set(profiles)
+
+    # ``_shift_monitor_user_details`` resolves a login the same way the shift
+    # monitor does, so the same person is labelled identically on both screens.
+    user_cache: Dict[str, Dict[str, Optional[str]]] = {}
+
+    people: Dict[str, Dict[str, Any]] = {}
+
+    def _person(employee_id: str, customer: str, display_name: str) -> Dict[str, Any]:
+        """The rollup row for one person, keyed identically from every pass.
+
+        Four passes write here — two balance, two listing — and they must land on
+        the same row or a person's debt and their activity end up on separate
+        lines. An order whose Customer resolves to no Employee keeps its own
+        customer-keyed bucket rather than collapsing onto one anonymous row.
+        """
+        if employee_id:
+            key = f"EMP:{employee_id}"
+        elif customer:
+            key = f"CUST:{customer}"
+        else:
+            key = "UNATTRIBUTED"
+        meta = emp_meta.get(employee_id, {}) if employee_id else {}
+        return _employee_ledger_bucket(
+            people,
+            key=key,
+            employee=employee_id,
+            employee_name=display_name,
+            customer=customer or (str(employee_to_customer.get(employee_id) or "") if employee_id else ""),
+            user=str(meta.get("user") or ""),
+            branch=str(meta.get("branch") or ""),
+        )
+
+    # --- Balance pass 1: advances (money only, all time) --------------------
+    advance_total = 0.0
+    for row in open_advance_rows:
+        emp = str(row.get("employee") or "")
+        meta = emp_meta.get(emp, {})
+        if _employee_ledger_advance_out_of_branch(
+            str(meta.get("branch") or ""), known_pos_profiles, allowed_profiles
+        ):
+            continue
+        # HRMS's own arithmetic. A negative balance (claimed beyond what was
+        # paid) is left signed on purpose: it nets against the person's other
+        # advances, which is the truthful "what do they owe overall".
+        balance = flt(row.get("paid_amount")) - (
+            flt(row.get("claimed_amount")) + flt(row.get("return_amount"))
+        )
+        if not balance:
+            # Approved-but-undisbursed (nothing has left the company) and
+            # exactly-settled advances owe nothing.
+            continue
+        advance_total += balance
+        # The rollup names the PERSON, so the live Employee record wins here.
+        # The listed advance row below keeps the name stored on the document,
+        # which is what HRMS shows when you open it.
+        _person(
+            emp, "", str(meta.get("employee_name") or row.get("employee_name") or emp)
+        )["advance_outstanding"] += balance
+
+    # --- Balance pass 2: orders (money only, all time) ----------------------
+    order_total = 0.0
+    for row in open_order_rows:
+        customer = str(row.get("customer") or "")
+        customer_name = str(row.get("customer_name") or customer)
+        emp = str(customer_to_employee.get(customer) or "")
+        outstanding = flt(row.get("outstanding_amount"))
+        if not outstanding:
+            continue
+        order_total += outstanding
+        display = str(emp_meta.get(emp, {}).get("employee_name") or "") if emp else ""
+        _person(emp, customer, display or customer_name)["order_outstanding"] += outstanding
+
+    # --- Listing pass 1: advances in the window -----------------------------
+    advances_payload: List[Dict[str, Any]] = []
+    advance_count = 0
+
+    for row in advance_rows:
+        emp = str(row.get("employee") or "")
+        meta = emp_meta.get(emp, {})
+        emp_branch = str(meta.get("branch") or "")
+        if _employee_ledger_advance_out_of_branch(
+            emp_branch, known_pos_profiles, allowed_profiles
+        ):
+            continue
+
+        emp_name = str(row.get("employee_name") or meta.get("employee_name") or emp)
+        emp_user = str(meta.get("user") or "")
+        if emp_user:
+            details = _shift_monitor_user_details(emp_user, user_cache)
+            emp_name = str(details.get("employee_name") or emp_name)
+
+        paid = flt(row.get("paid_amount"))
+        claimed = flt(row.get("claimed_amount"))
+        returned = flt(row.get("return_amount"))
+        # Per-row balance, for the feed. The person's TOTAL came from the
+        # all-time pass above and is not touched here.
+        balance = paid - (claimed + returned)
+
+        advances_payload.append({
+            "name": row.get("name"),
+            "employee": emp,
+            "employee_name": emp_name,
+            "posting_date": str(row.get("posting_date") or ""),
+            "amount": flt(row.get("advance_amount"), 2),
+            "paid_amount": flt(paid, 2),
+            "claimed_amount": flt(claimed, 2),
+            "return_amount": flt(returned, 2),
+            "balance": flt(balance, 2),
+            "status": row.get("status"),
+            "purpose": row.get("purpose"),
+            "branch": emp_branch,
+            # Employee Advance names the account the money was paid FROM; there
+            # is no "paying_account" field on the DocType.
+            "paying_account": row.get("advance_account"),
+            "currency": str(row.get("currency") or currency),
+        })
+
+        advance_count += 1
+        # Counts only. The money was already taken from the all-time pass, and
+        # adding it again here would double it for anything inside the window.
+        _person(emp, "", emp_name)["advance_count"] += 1
+
+    # --- Listing pass 2: orders in the window -------------------------------
+    delivery_notes = _employee_ledger_delivery_notes([str(r.get("name") or "") for r in order_rows])
+    orders_payload: List[Dict[str, Any]] = []
+    order_count = 0
+
+    for row in order_rows:
+        invoice = str(row.get("name") or "")
+        customer = str(row.get("customer") or "")
+        customer_name = str(row.get("customer_name") or customer)
+        emp = str(customer_to_employee.get(customer) or "")
+        meta = emp_meta.get(emp, {}) if emp else {}
+        # An unlinked customer keeps its own bucket instead of collapsing every
+        # unlinked order onto one anonymous row — the money stays chaseable.
+        emp_name = str(meta.get("employee_name") or "") if emp else ""
+        if not emp_name:
+            emp_name = customer_name
+        outstanding = flt(row.get("outstanding_amount"))
+
+        orders_payload.append({
+            "invoice": invoice,
+            "employee": emp,
+            "employee_name": emp_name,
+            "customer": customer,
+            "customer_name": customer_name,
+            "branch": str(row.get(branch_field) or ""),
+            "posting_date": str(row.get("posting_date") or ""),
+            "grand_total": flt(row.get("grand_total"), 2),
+            "outstanding_amount": flt(outstanding, 2),
+            "status": row.get("status"),
+            "state": row.get(state_field) if state_field else None,
+            "delivery_note": delivery_notes.get(invoice),
+        })
+
+        order_count += 1
+        # Counts only — same reason as the advances pass above.
+        _person(emp, customer, emp_name)["order_count"] += 1
+
+    employees_payload: List[Dict[str, Any]] = []
+    for row in people.values():
+        row["advance_outstanding"] = flt(row["advance_outstanding"], 2)
+        row["order_outstanding"] = flt(row["order_outstanding"], 2)
+        row["total_outstanding"] = flt(row["advance_outstanding"] + row["order_outstanding"], 2)
+        employees_payload.append(row)
+    # Biggest debt first; the name breaks ties so the order is stable between
+    # requests (a jumping table reads as data changing when it has not).
+    employees_payload.sort(key=lambda r: (-r["total_outstanding"], str(r.get("employee_name") or "")))
+
+    # "How many people owe us money" — a balance question, so it counts balances,
+    # not listed rows. Somebody whose only activity in the window was a paid
+    # order is still IN `employees` (at zero) but is not one of these.
+    employee_count = sum(1 for row in employees_payload if row["total_outstanding"])
+
+    payload: Dict[str, Any] = {
+        "success": True,
+        "hrms_available": hrms,
+        "filters": filters_echo,
+        "summary": {
+            # All-time, by design. See the docstring.
+            "advance_outstanding": flt(advance_total, 2),
+            "order_outstanding": flt(order_total, 2),
+            "total_outstanding": flt(advance_total + order_total, 2),
+            # Activity counts: rows listed inside the window.
+            "advance_count": advance_count,
+            "order_count": order_count,
+            "employee_count": employee_count,
+            "currency": currency,
+            # Lets the client label the figure honestly instead of implying the
+            # date filter applies to it.
+            "outstanding_is_all_time": True,
+        },
+        "employees": employees_payload,
+        "advances": advances_payload,
+        "orders": orders_payload,
+    }
+
+    if not hrms:
+        payload["notice_code"] = "hrms_unavailable"
+        payload["notice"] = _(
+            "HR module is not installed, so cash advances are not included. "
+            "Only employee orders are shown."
+        )
+    elif advances_truncated or orders_truncated:
+        # Truncation is reported, never silent. The wording is careful: only the
+        # LIST is cut. The outstanding totals are all-time and uncapped, so they
+        # remain correct — saying otherwise would send a manager chasing a
+        # shortfall that does not exist.
+        payload["notice_code"] = "results_truncated"
+        payload["notice"] = _(
+            "Showing the first {0} rows per section. The outstanding totals are "
+            "complete; only this list is cut short. Narrow the date range, a "
+            "branch or an employee to see the rest."
+        ).format(limit)
+
+    return payload
+
+
 @frappe.whitelist(allow_guest=False)
 def get_invoice_warehouse_alignment_report(
     company: Optional[str] = None,

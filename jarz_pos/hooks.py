@@ -101,6 +101,18 @@ after_migrate = [
     "jarz_pos.utils.setup_workspace.ensure_jarz_desk",
     # Seed B2B master data (idempotent, create-only)
     "jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
+    # Enforce the staff rates on the "Employee" price list (Large 92 / Medium 77)
+    # in BOTH pricing layers — the Jarz Price List Category Rate rows and the
+    # per-item Item Price rows — so precedence between them cannot matter. Must
+    # run AFTER b2b_master_data, which creates that price list. Unlike every
+    # other seeder here this one deliberately CORRECTS drift rather than being
+    # create-only, and reports each correction; see the module docstring.
+    "jarz_pos.setup.employee_pricing.ensure_employee_price_list_rates",
+    # Employee-advance schema: Customer.custom_employee plus the six custom_jarz_*
+    # columns on Employee Advance. Guarded on HRMS being installed, never raises.
+    # After b2b_master_data because the name-matching fallback in
+    # utils/employee_link.py is scoped to the "Employee" Customer Group it seeds.
+    "jarz_pos.setup.employee_link_setup.ensure_employee_link_fields",
     # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
     "jarz_pos.setup.crm_setup.ensure_crm_setup",
     # Create the Production Operator role + role profile + doc perms (idempotent)

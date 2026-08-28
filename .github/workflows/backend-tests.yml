@@ -118,6 +118,14 @@ jobs:
           # the live clone. Verified locally: Item Price count is unchanged by this run.
           MODULES=(
             test_commercial_policy
+            # Employee order purpose: the "Deliver at Branch" auto-fulfilment
+            # (Delivery Note -> OFD -> Delivered), the line-manager advance
+            # request/approve flow, the manager employee ledger, and the
+            # Employee price-list rate enforcement.
+            test_branch_fulfilment
+            test_employee_advances
+            test_employee_ledger
+            test_employee_pricing
             test_pricing_manager_gate
             test_settlement_accounting
             test_settlement_strategies

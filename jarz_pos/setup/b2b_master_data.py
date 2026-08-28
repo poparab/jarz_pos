@@ -231,6 +231,11 @@ def _ensure_commercial_policies(log):
 			"shipping_income_behavior": "Zero",
 			"shipping_expense_behavior": "Zero",
 			"courier_behavior": "No Courier",
+			# An employee collects the jars at the counter as the order is rung in,
+			# so the order is fulfilled at creation (Delivery Note + consumables)
+			# and lands in Delivered instead of waiting in Recieved for a dispatch
+			# that never comes.
+			"fulfilment_behavior": "Deliver at Branch",
 		},
 		{
 			"policy_name": "Sample (Courier)",
@@ -280,6 +285,25 @@ def _ensure_commercial_policies(log):
 					log["created"].append(
 						"Jarz Commercial Policy: B2B Supply (cleared fixed price list → customer-group driven)"
 					)
+				# One-time normalization: "Employee Order" predates the
+				# fulfilment_behavior field, so every existing site has it sitting
+				# at the "Normal" default (or NULL, on rows written before the
+				# field was migrated in). Employee orders are collected at the
+				# counter, so flip it — but ONLY from that old default, so any
+				# value an admin has deliberately chosen is left alone.
+				if name == "Employee Order":
+					current_behavior = frappe.db.get_value(
+						"Jarz Commercial Policy", name, "fulfilment_behavior"
+					)
+					if not current_behavior or current_behavior == "Normal":
+						frappe.db.set_value(
+							"Jarz Commercial Policy", name, "fulfilment_behavior",
+							"Deliver at Branch",
+							update_modified=False,
+						)
+						log["created"].append(
+							"Jarz Commercial Policy: Employee Order (fulfilment_behavior → Deliver at Branch)"
+						)
 				log["existing"].append(f"Jarz Commercial Policy: {name}")
 				continue
 

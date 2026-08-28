@@ -38,6 +38,12 @@ class CommercialPolicyDecision:
     suppress_shipping_income: bool = False
     suppress_legacy_delivery_charges: bool = False
     no_courier: bool = False
+    #: The goods are handed over at the counter at order time (employee pickup).
+    #: The caller runs the real fulfilment side effects immediately after submit —
+    #: see ``jarz_pos.services.branch_fulfilment.fulfil_at_branch``. This is NOT the
+    #: same as ``no_courier``: no_courier only says nobody is paid to drive, while
+    #: this says the order never travels the dispatch kanban at all.
+    deliver_at_branch: bool = False
     reason: str | None = None
 
 
@@ -100,17 +106,24 @@ def resolve_commercial_policy(
     # delivery-charge injection path (same coupling pickup/promotions use).
     decision.suppress_legacy_delivery_charges = decision.suppress_shipping_income
     decision.no_courier = getattr(policy, "courier_behavior", "Courier") == "No Courier"
+    # ``getattr`` default keeps a site that has not migrated the new Select yet
+    # resolving to Normal rather than raising — same staged-rollout tolerance the
+    # DocType-existence guard above applies.
+    decision.deliver_at_branch = (
+        getattr(policy, "fulfilment_behavior", "Normal") == "Deliver at Branch"
+    )
 
     if logger:
         logger.info(
             "commercial_policy resolved: name=%s purpose=%s price_list=%s "
-            "suppress_income=%s no_courier=%s discount=%s"
+            "suppress_income=%s no_courier=%s deliver_at_branch=%s discount=%s"
             % (
                 decision.policy_name,
                 decision.order_purpose,
                 decision.price_list or "",
                 decision.suppress_shipping_income,
                 decision.no_courier,
+                decision.deliver_at_branch,
                 decision.discount_percentage,
             )
         )

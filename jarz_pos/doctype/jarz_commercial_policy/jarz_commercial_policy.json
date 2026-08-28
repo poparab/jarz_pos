@@ -17,6 +17,7 @@
   "shipping_income_behavior",
   "shipping_expense_behavior",
   "courier_behavior",
+  "fulfilment_behavior",
   "section_break_scope",
   "require_role",
   "company",
@@ -107,6 +108,14 @@
    "reqd": 1
   },
   {
+   "default": "Normal",
+   "description": "Deliver at Branch: the goods are handed over at the counter at order time. The order is auto-fulfilled on creation (Delivery Note + consumables) and lands directly in the Delivered column instead of Recieved.",
+   "fieldname": "fulfilment_behavior",
+   "fieldtype": "Select",
+   "label": "Fulfilment Behavior",
+   "options": "Normal\nDeliver at Branch"
+  },
+  {
    "fieldname": "section_break_scope",
    "fieldtype": "Section Break",
    "label": "Gating & Scope"
@@ -135,7 +144,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-06-12 00:00:00.000000",
+ "modified": "2026-08-28 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Commercial Policy",
