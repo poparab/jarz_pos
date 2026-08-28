@@ -18,7 +18,7 @@ accessor for the same reason.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import frappe
 
@@ -44,6 +44,35 @@ STATUS_NO_VELOCITY = "no_velocity"
 
 # ── Pure arithmetic ─────────────────────────────────────────────────────
 # No frappe below this line until the resolver block.
+
+
+def component_uom(row: Mapping[str, Any]) -> str:
+    """``stock_uom`` -> ``uom`` -> ``DEFAULT_UOM``, in that order.
+
+    THE single implementation of the component-unit label, shared by
+    ``api/manufacturing``, ``api/subassembly`` and the basket rollup below.  It
+    lives in this frappe-free layer precisely so all three can import it
+    downwards without a cycle; two copies of this chain is how the two screens
+    drifted apart in the first place.
+
+    ``stock_uom`` leads because it is the unit the number is actually **in**,
+    not a preference.  ERPNext defaults ``get_bom_items_as_dict`` to
+    ``fetch_qty_in_stock_uom=True``, so both the one-level and the exploded
+    branch select ``stock_qty`` — the quantity is already converted, while
+    ``bom_item.uom`` is only the unit somebody happened to type the BOM line in.
+    Labelling a converted quantity with the typed unit is exactly the defect
+    this chain exists to avoid.
+
+    ``uom`` stays as the fallback for the exploded branch, which never selects
+    ``bom_item.uom`` at all — that omission is how a Kg item came to tell an
+    operator it was "short by 2.083 Nos" (``DEFAULT_UOM`` substituted upstream).
+    ``DEFAULT_UOM`` is the last resort, and only when neither unit is known.
+    """
+    stock_uom = str(row.get("stock_uom") or "").strip()
+    if stock_uom:
+        return stock_uom
+    uom = str(row.get("uom") or "").strip()
+    return uom or DEFAULT_UOM
 
 
 def suggested_batches(
@@ -194,7 +223,10 @@ def aggregate_basket_materials(
                 bucket = {
                     "item_code": item_code,
                     "item_name": row.get("item_name") or item_code,
-                    "uom": row.get("uom") or DEFAULT_UOM,
+                    # Same chain the reader applied, so a row that arrives from
+                    # anywhere else still gets labelled in the unit its quantity
+                    # is actually in.
+                    "uom": component_uom(row),
                     "source_warehouse": warehouse or None,
                     # available_qty is a property of the (item, warehouse)
                     # pair, so it is set once and never accumulated.
@@ -466,39 +498,47 @@ def get_planning_context(company: str) -> Dict[str, Any]:
 def build_capacity_map(rows: Sequence[Dict[str, Any]], company: str) -> Dict[str, Dict[str, Any]]:
     """Per-item ``can_make_now`` for a whole page of producible items.
 
-    One BOM explosion per item, then a **single** batched ``Bin`` read for
-    every component of every BOM — the available quantities that come back on
-    the explosion rows are discarded in favour of that batched read.
+    One BOM read per item, then a **single** batched ``Bin`` read for every
+    component of every BOM — the available quantities that come back on the
+    BOM rows are discarded in favour of that batched read.
+
+    ``fetch_exploded=0``: "can make now" has to mean "can start this Work Order
+    now", and the Work Order draws the one-level bill from stock.  Counting a
+    freezer full of Cheesecake Mix as the flour it was made from answers a
+    question nobody on the floor is asking.
     """
-    exploded: Dict[str, List[Dict[str, Any]]] = {}
+    # Named for what it now holds: the one-level components of each BOM, not an
+    # explosion.  The old name outlived the behaviour it described.
+    components_by_item: Dict[str, List[Dict[str, Any]]] = {}
     required_rows = _resolve_required_material_rows()
 
     for row in rows:
         item_code = row["item_code"]
         try:
-            exploded[item_code] = required_rows(
+            components_by_item[item_code] = required_rows(
                 row["default_bom"],
                 row.get("company") or company,
                 float(row.get("bom_qty") or 1),
+                fetch_exploded=0,
             )
         except Exception:
-            # A single unexplodable BOM must not blank the whole board.
+            # A single unreadable BOM must not blank the whole board.
             frappe.log_error(
-                title="JARZ Production – BOM explosion failed",
+                title="JARZ Production – BOM read failed",
                 message=f"item={item_code} bom={row.get('default_bom')}",
             )
-            exploded[item_code] = []
+            components_by_item[item_code] = []
 
     pairs = [
         (c["item_code"], c["source_warehouse"])
-        for comps in exploded.values()
+        for comps in components_by_item.values()
         for c in comps
         if c.get("source_warehouse")
     ]
     stock = _resolve_bin_stock_map(pairs)
 
     capacity: Dict[str, Dict[str, Any]] = {}
-    for item_code, comps in exploded.items():
+    for item_code, comps in components_by_item.items():
         priced = [
             dict(c, available_qty=stock.get((c["item_code"], c.get("source_warehouse")), 0.0))
             for c in comps
@@ -510,14 +550,23 @@ def build_capacity_map(rows: Sequence[Dict[str, Any]], company: str) -> Dict[str
 
 
 def build_basket_rollup(lines: Sequence[Dict[str, Any]], company: str) -> Dict[str, Any]:
-    """Aggregate the material demand of a whole basket of production lines."""
+    """Aggregate the material demand of a whole basket of production lines.
+
+    ``fetch_exploded=0``: this is the pick list and the shortage gate for a
+    basket that is about to become Work Orders, so it must roll up the exact
+    rows those Work Orders will consume — the one-level bill.  Rolling up raw
+    materials instead let a basket pass on flour it never touches and then fail
+    mid-submit on a sub-assembly bin that was already negative.
+    """
     required_rows = _resolve_required_material_rows()
     sets: List[Dict[str, Any]] = []
 
     for index, line in enumerate(lines or []):
         bom_name = line.get("bom_name")
         line_company = _resolve_bom_company(bom_name) or company
-        components = required_rows(bom_name, line_company, float(line.get("item_qty") or 0))
+        components = required_rows(
+            bom_name, line_company, float(line.get("item_qty") or 0), fetch_exploded=0
+        )
         sets.append(
             {
                 "line_index": index,

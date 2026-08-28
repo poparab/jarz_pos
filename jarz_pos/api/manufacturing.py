@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 import frappe
 from frappe import _
 from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
+# The one implementation of the component-unit chain (stock_uom -> uom ->
+# DEFAULT_UOM).  Module scope is safe and is the sanctioned direction:
+# ``production_planning`` is the shared layer and reaches back here only through
+# a deferred import inside a function body, so there is no cycle.
+from jarz_pos.services.production_planning import component_uom
 
 # Fallbacks for the Jarz POS Settings fields the floor flow reads.  The Single
 # row reads empty until somebody saves it after a migrate, so every read has to
@@ -485,8 +490,17 @@ def _assert_posting_date_allowed(scheduled_dt: Any) -> None:
 
 
 def _price_batch_components(line: Dict[str, Any], company: str) -> Dict[str, Any]:
-    """Explode the BOM once and value it at current valuation rates."""
-    rows = _get_required_material_rows(line["bom_name"], company, float(line["item_qty"]))
+    """Read the BOM once and value it at current valuation rates.
+
+    ``fetch_exploded=0``: the operator batch-value cap bounds what one person
+    can *issue from the store*, so it must price the rows the Work Order will
+    actually consume.  A frozen sub-assembly already carries the cost of its own
+    inputs in its valuation rate, so the one-level bill is also the complete
+    figure — pricing the explosion instead priced items that never move.
+    """
+    rows = _get_required_material_rows(
+        line["bom_name"], company, float(line["item_qty"]), fetch_exploded=0
+    )
     priced: List[Dict[str, Any]] = []
     total = 0.0
     for row in rows:
@@ -680,32 +694,39 @@ def _get_required_material_rows(
     bom_name: str,
     company: str,
     qty: float,
-    fetch_exploded: int = 1,
+    fetch_exploded: int = 0,
 ) -> List[Dict[str, Any]]:
     """Required-material rows for a BOM, at either level of the bill.
 
     ``fetch_exploded`` decides **which bill of materials this answers about**,
     and the two values are genuinely different questions — do not collapse them:
 
+    * ``0`` (**the default**) reads ``tabBOM Item``: the **one-level** bill,
+      where a sub-assembly appears as itself.  This is what a Work Order on this
+      site actually consumes.  ``_ensure_work_order`` states
+      ``use_multi_level_bom = 0`` outright, so ERPNext's ``set_required_items``
+      explodes nothing and requires exactly these rows.  That pairing is
+      load-bearing: flip one without the other and every capacity, shortage and
+      cost figure in the app describes a batch nobody is going to run.
     * ``1`` reads ``tabBOM Explosion Item``: the bill flattened all the way down
-      to raw materials, so a sub-assembly appears as flour and eggs.  This is
-      the long-standing default and every existing caller relies on it; changing
-      it is a separate, larger fix.
-    * ``0`` reads ``tabBOM Item``: the **one-level** bill, where a sub-assembly
-      appears as itself.  This is what a Work Order on this site actually
-      consumes — a Property Setter pins ``Work Order.use_multi_level_bom`` to
-      ``"0"`` and nothing in jarz_pos ever sets it, so ERPNext's
-      ``set_required_items`` explodes nothing.
+      to raw materials, so a sub-assembly appears as flour and eggs.  Correct
+      only for a question about ultimate raw-material consumption, which is
+      **not** what any current caller asks.
 
-    Anything whose purpose is "here is what this batch will consume" wants
-    ``0``.  Anything comparing against the historical precheck wants ``1``.
+    Correctness is the default and the explosion is the thing you opt into,
+    because the old default was the defect: the board checked Tiramisu Large
+    against eggs and flour while the Work Order went on to demand Cheesecake Mix
+    from a bin holding -14.64.  Neither list contained the other's items, so a
+    batch could pass the check and still fail — after ``submit_work_orders`` had
+    already committed earlier lines and consumed real stock.
 
-    One more asymmetry worth knowing: ERPNext's ``fetch_exploded=1`` branch does
-    not select ``bom_item.uom`` at all, so ``uom`` below falls back to
-    ``DEFAULT_UOM`` ("Nos") for every exploded row.  ``stock_uom`` is selected by
-    both branches and is carried on the row so a caller can recover the real
-    unit; the ``uom`` key itself is left exactly as it has always been so no
-    existing caller's output moves.
+    ``uom`` is the unit the ``required_qty`` is actually **in**.  ERPNext
+    defaults ``get_bom_items_as_dict`` to ``fetch_qty_in_stock_uom=True``, so
+    both branches return a stock-UOM quantity; ``component_uom`` therefore
+    prefers ``stock_uom`` and keeps ``bom_item.uom`` (the unit somebody typed
+    the line in) only as a fallback for the exploded branch, which does not
+    select it at all.  ``stock_uom`` is carried through raw and undefaulted so a
+    caller can still tell "no unit was stated" from "the unit really is Nos".
     """
     getter = _resolve_get_bom_items_as_dict()
     if not getter:
@@ -723,7 +744,7 @@ def _get_required_material_rows(
             {
                 "item_code": item_code,
                 "item_name": item.get("item_name") or item_code,
-                "uom": item.get("uom") or DEFAULT_UOM,
+                "uom": component_uom(item),
                 # Additive: never substituted, never defaulted, so a caller can
                 # tell "no unit was stated" from "the unit really is Nos".
                 "stock_uom": item.get("stock_uom") or None,
@@ -736,8 +757,16 @@ def _get_required_material_rows(
 
 
 def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Dict[str, Any]]:
+    """Per-line "will this batch's material transfer succeed" check.
+
+    ``fetch_exploded=0``: this check exists to predict the Stock Entry the
+    Work Order is about to post, and that entry moves the one-level bill.
+    Checking raw materials was checking a different document entirely.
+    """
     issues: List[Dict[str, Any]] = []
-    required_rows = _get_required_material_rows(line["bom_name"], company, float(line["item_qty"]))
+    required_rows = _get_required_material_rows(
+        line["bom_name"], company, float(line["item_qty"]), fetch_exploded=0
+    )
     for row in required_rows:
         source_warehouse = row.get("source_warehouse")
         if not source_warehouse:
@@ -954,7 +983,12 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
 
     item = frappe.db.get_value("Item", item_code, ["item_name", "stock_uom"], as_dict=True)
     company = (bom.get("company") if isinstance(bom, dict) else None) or _get_default_company()
-    comps = _get_required_material_rows(bom["name"], company, float(bom.get("quantity") or 1))
+    # fetch_exploded=0: the screen shows the components of THIS BOM, and the
+    # operator picks them off a shelf.  A "Tiramisu Large needs eggs and flour"
+    # list is not something anybody can act on when the recipe says Savoiardi.
+    comps = _get_required_material_rows(
+        bom["name"], company, float(bom.get("quantity") or 1), fetch_exploded=0
+    )
     return {
         "item_code": item_code,
         "item_name": item.get("item_name") if item else item_code,
@@ -996,6 +1030,20 @@ def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, s
         "bom_no": line["bom_name"],
         "planned_start_date": scheduled_dt,
         "transfer_material_against": "Work Order",
+        # STATED, not inherited.  ERPNext's ``set_required_items`` branches on
+        # this flag: 0 requires the one-level bill (``tabBOM Item``, so a
+        # sub-assembly is drawn from the freezer as itself), 1 requires the
+        # explosion (flour, eggs, raw cheese).  Production carries a Property
+        # Setter defaulting it to "0", which is what we want — but inheriting it
+        # meant one edit in Desk could invert every capacity, shortage and cost
+        # number the app reports, with no code change and no signal.
+        #
+        # LOAD-BEARING PAIRING: this must stay in step with
+        # ``_get_required_material_rows``'s ``fetch_exploded`` default (also 0).
+        # The app's numbers are only true because the two agree; change one and
+        # you must change the other, or the floor is checked against a bill of
+        # materials no Work Order will ever consume.
+        "use_multi_level_bom": 0,
         # Set defaults if present
         "wip_warehouse": wip_wh,
         "fg_warehouse": fg_wh,

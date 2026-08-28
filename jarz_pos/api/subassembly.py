@@ -474,11 +474,13 @@ def _resolve_required_material_rows(bom_name: str, company: str, qty: float) -> 
     computed any other way would be a preview of a different batch.
 
     ``fetch_exploded=0`` — the **one-level** bill — is the load-bearing part.
-    A Property Setter on this site pins ``Work Order.use_multi_level_bom`` to
-    ``"0"`` and nothing in jarz_pos ever sets it, so the Work Order consumes
-    ``tabBOM Item``: a sub-assembly is drawn from stock as itself, not exploded
-    into flour and eggs.  A screen whose entire job is "here is what this batch
-    will consume" has to show that, not the explosion.
+    ``manufacturing._ensure_work_order`` states ``use_multi_level_bom = 0`` on
+    every Work Order the app creates, so the Work Order consumes ``tabBOM
+    Item``: a sub-assembly is drawn from stock as itself, not exploded into
+    flour and eggs.  A screen whose entire job is "here is what this batch will
+    consume" has to show that, not the explosion.  Passed explicitly even though
+    it is now also the reader's default, because this module's answer would be
+    wrong rather than merely different if the default ever moved.
     """
     from jarz_pos.api.manufacturing import _get_required_material_rows
 
@@ -488,24 +490,12 @@ def _resolve_required_material_rows(bom_name: str, company: str, qty: float) -> 
 def _component_uom(row: Mapping[str, Any]) -> str:
     """``stock_uom`` -> ``uom`` -> ``DEFAULT_UOM``, in that order.
 
-    ``stock_uom`` leads because it is the unit the number is actually in, not a
-    preference.  ERPNext defaults ``get_bom_items_as_dict`` to
-    ``fetch_qty_in_stock_uom=True``, so both branches select ``stock_qty`` — the
-    quantity is converted, while ``bom_item.uom`` is only the unit somebody typed
-    the line in.  Labelling a converted quantity with the display unit is exactly
-    the defect this chain exists to avoid: Mango Large lists Mango mix in "Nos"
-    against a Kg stock figure, so preferring ``uom`` would print a Kg number and
-    call it Nos.
-
-    ``uom`` remains the fallback for the exploded branch, which never selects
-    ``bom_item.uom`` at all — that omission is how a Kg item came to tell an
-    operator it was "short by 2.083 Nos" (``DEFAULT_UOM`` substituted upstream).
+    Behaviour is unchanged; the chain now lives in ``production_planning`` as
+    the single implementation shared with ``api/manufacturing``'s row reader.
+    Two copies of it was how Mango Large came to list Mango mix in "Nos"
+    against a Kg stock figure on one screen and correctly in Kg on another.
     """
-    stock_uom = str(row.get("stock_uom") or "").strip()
-    if stock_uom:
-        return stock_uom
-    uom = str(row.get("uom") or "").strip()
-    return uom or DEFAULT_UOM
+    return planning.component_uom(row)
 
 
 def _resolve_valuation_rate(item_code: str, warehouse: Any) -> float:

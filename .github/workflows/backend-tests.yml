@@ -161,6 +161,13 @@ jobs:
             test_api_notifications_return_filters
             test_accounting_guards
             test_api_manufacturing_precheck
+            # The bill-of-materials level. The reader used to default to the
+            # EXPLODED bill while every Work Order it created consumed the
+            # ONE-LEVEL bill, so the board checked eggs and flour and the batch
+            # then demanded Cheesecake Mix from a bin holding -14.64. This pins
+            # both halves of that pairing (`fetch_exploded=0` by default and
+            # `use_multi_level_bom = 0` on the Work Order) plus every call site.
+            test_bom_material_rows
             test_production_planning
             # The mixer-run split. Was absent from this list, which is why a red
             # test here (empty run_quality falling back to the defaults instead

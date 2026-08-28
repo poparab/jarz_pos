@@ -303,7 +303,7 @@ class TestBatchValueThreshold(unittest.TestCase):
 
 
 class TestPriceBatchComponents(unittest.TestCase):
-    def test_values_the_exploded_bom_at_valuation_rates(self):
+    def test_values_the_one_level_bom_at_valuation_rates(self):
         from jarz_pos.api import manufacturing
 
         rows = [

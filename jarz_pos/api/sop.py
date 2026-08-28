@@ -234,9 +234,14 @@ def _build_component_maps(
     """Per-**batch** component quantities, keyed by item code.
 
     ``render_instruction`` multiplies by the batch count, so these rows are
-    always exploded for exactly one BOM quantity.  A BOM that will not explode
-    degrades to empty maps: the tokens then come back verbatim and land in
+    always read for exactly one BOM quantity.  A BOM that will not read degrades
+    to empty maps: the tokens then come back verbatim and land in
     ``unresolved_tokens``, which is visibly broken rather than quietly wrong.
+
+    ``fetch_exploded=0``: an SOP is a set of instructions somebody follows with
+    their hands.  "Weigh 4 Kg of Savoiardi" is a step; "weigh 0.768 Kg of flour"
+    is a step in a *different* SOP, the one for making Savoiardi.  The tokens
+    have to name what the operator takes out of the freezer.
     """
     qty_map: Dict[str, float] = {}
     uom_map: Dict[str, str] = {}
@@ -246,10 +251,12 @@ def _build_component_maps(
         return qty_map, uom_map, name_map
 
     try:
-        rows = _resolve_required_material_rows()(bom, company, bom_qty) or []
+        rows = _resolve_required_material_rows()(bom, company, bom_qty, fetch_exploded=0) or []
     except Exception:
         frappe.log_error(
-            title="JARZ SOP – BOM explosion failed",
+            # Distinct from the "BOM read failed" above, which is the BOM header
+            # read — two identical titles in the Error Log is one unreadable one.
+            title="JARZ SOP – BOM component read failed",
             message=f"bom={bom} company={company}\n{frappe.get_traceback()}",
         )
         return qty_map, uom_map, name_map
@@ -258,8 +265,9 @@ def _build_component_maps(
         code = str(_field(row, "item_code") or "").strip()
         if not code:
             continue
-        # An exploded BOM can list the same raw material twice; the instruction
-        # must quote the total, not whichever line happened to come last.
+        # A BOM can list the same component twice (a duplicated item group has
+        # done exactly that here); the instruction must quote the total, not
+        # whichever line happened to come last.
         qty_map[code] = qty_map.get(code, 0.0) + rendering.to_float(_field(row, "required_qty"), 0.0)
         uom_map[code] = _field(row, "uom") or ""
         name_map[code] = _field(row, "item_name") or code
