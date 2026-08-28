@@ -151,9 +151,55 @@ def _resolve_base_rows(company: str, search: Optional[str]) -> List[Dict[str, An
     of "items with a submitted default BOM": it already filters
     ``is_default = 1 AND docstatus = 1 AND Item.disabled = 0``, already honours
     the search term, and is not capped at an arbitrary 100 rows.
+
+    **Phantom BOMs are excluded, and that exclusion is a safety guard, not a
+    tidy-up.**  A phantom sub-assembly is expanded into its own components at
+    Work Order time (``bom.py`` recurses through an ``is_phantom_item`` row
+    whatever the exploded flag says), so a jar batch already relieves the raw
+    cheese and cream directly.  Offering that same item here would let somebody
+    *also* run it as a batch of its own -- consuming the identical raw materials
+    a second time, and minting stock that no Work Order will ever relieve.  The
+    freezer sub-assemblies are not phantom and stay listed, which is the whole
+    point of this screen; the mix is a planning quantity, not a stocked thing.
     """
     rows = planning._resolve_producible_rows(company, search)
-    return [row for row in rows if row.get("item_group") not in FINISHED_GOODS_GROUPS]
+    phantom = _resolve_phantom_boms([row.get("default_bom") for row in rows])
+    return [
+        row
+        for row in rows
+        if row.get("item_group") not in FINISHED_GOODS_GROUPS
+        and row.get("default_bom") not in phantom
+    ]
+
+
+def _resolve_phantom_boms(bom_names: Sequence[Any]) -> Set[str]:
+    """Which of these BOMs are phantom, in one query.
+
+    A read failure returns the empty set: degrading to "nothing is phantom"
+    shows the operator one item too many, while degrading the other way would
+    silently empty the screen and leave the floor unable to make anything.
+    """
+    names = sorted({_coerce_str(b) for b in (bom_names or []) if _coerce_str(b)})
+    if not names:
+        return set()
+
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT name FROM `tabBOM`
+            WHERE name IN %(names)s AND is_phantom_bom = 1
+            """,
+            {"names": names},
+            as_dict=True,
+        )
+    except Exception:
+        _log_failure(
+            "JARZ Bases – phantom BOM read failed",
+            f"boms={names}\n{frappe.get_traceback()}",
+        )
+        return set()
+
+    return {r["name"] for r in rows or []}
 
 
 def _resolve_mix_item() -> str:
