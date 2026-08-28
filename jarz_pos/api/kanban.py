@@ -9,7 +9,7 @@ import traceback
 import datetime
 from frappe.query_builder.functions import Count
 from typing import Dict, List, Any, Optional, Union, Tuple
-from jarz_pos.constants import PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
+from jarz_pos.constants import ACCOUNTS, PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
 from jarz_pos.utils.access_control import (
     ClosedShiftError,
     ShiftRequiredError,
@@ -488,67 +488,89 @@ def _resolve_customer_phone(customer: str) -> str:
 
 
 
-def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
-    """Resolve the payment method the customer ACTUALLY paid with, per invoice.
+#: Ledger classifications returned by :func:`_classify_collection_account`.
+#: ``None`` means "this ledger does not, on its own, say how the customer paid" --
+#: which is a real and common answer, not a failure.
+_COLLECTION_LEDGER_UNKNOWN = None
 
-    ``rows`` are dicts carrying ``name``, ``outstanding_amount`` and ``status``.
 
-    Two sources, in priority order:
-      1. The submitted Payment Entry's ``paid_to`` account (only meaningful once the
-         invoice is settled), mapped onto the three POS methods.
-      2. The ``payment_mode`` of an unsettled Courier Transaction whose notes record a
-         collection-method change — the only trace of a COD -> online switch, because
-         that flow posts a Journal Entry rather than a Payment Entry.
+def _classify_collection_account(account: str, meta: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Map a Payment Entry ``paid_to`` ledger onto a POS collection method.
 
-    Shared by the board (``get_kanban_invoices``) and the single-invoice details
-    endpoint so a card and its printed receipt can never disagree about the method.
+    Returns ``None`` when the ledger does not identify a customer collection.
+
+    This deliberately has no catch-all. It used to end in ``else: "Cash"``, i.e.
+    *every* unrecognised ledger was reported as cash -- and the ledger an ONLINE
+    Sales Partner order lands in is the partner AR subaccount ("Talabat - J"),
+    which matches neither the Mobile Wallet nor the Bank Account name test. So an
+    order paid online through a delivery partner displayed and printed "Cash", and
+    so did every Payment Gateway collection, because guessing was the fallback.
+    Ledgers we cannot read now fall through to the declared method on the invoice
+    instead of being asserted as cash.
     """
-    method_map: Dict[str, str] = {}
-    invoice_names = [str(r.get("name") or "").strip() for r in rows if str(r.get("name") or "").strip()]
+    name = str(account or "").strip().lower()
+    if not name:
+        return _COLLECTION_LEDGER_UNKNOWN
+
+    meta = meta or {}
+    account_type = str(meta.get("account_type") or "").strip().lower()
+    parent = str(meta.get("parent_account") or "").strip().lower()
+
+    # Name tests first: these two ledgers are named after the collection method
+    # that books into them (see delivery_handling._get_online_collection_account
+    # and api/invoices.pay_invoice, which must keep agreeing with this mapping).
+    if ACCOUNTS.MOBILE_WALLET.lower() in name:
+        return ACCOUNTS.MOBILE_WALLET
+    if "bank account" in name:
+        return ACCOUNTS.INSTAPAY
+
+    # The courier is holding the customer's cash until settlement. This is the one
+    # receivable-typed ledger that genuinely means "the customer paid cash".
+    if ACCOUNTS.COURIER_OUTSTANDING.lower() in name:
+        return PAYMENT_MODES.CASH
+
+    # A Sales Partner AR subaccount is an AR *reclass*, not a collection: the money
+    # sits with the partner. It says nothing about how the customer paid.
+    if account_type == "receivable":
+        return _COLLECTION_LEDGER_UNKNOWN
+
+    # A branch till. _get_cash_account only ever returns a Cash/Bank ledger under
+    # "Cash In Hand", so both signals are checked rather than the account name --
+    # a till is named after its POS profile ("Nasr City - J"), never "Cash".
+    if account_type == "cash" or ACCOUNTS.CASH_IN_HAND.lower() in parent:
+        return PAYMENT_MODES.CASH
+
+    # Any other Bank ledger (a payment gateway's, typically) is online money, but
+    # not necessarily InstaPay. Let the declared method name it.
+    return _COLLECTION_LEDGER_UNKNOWN
+
+
+def _get_collection_change_map(invoice_names: List[str]) -> Dict[str, str]:
+    """Per invoice, the collection method it was switched to after dispatch.
+
+    ``change_payment_collection_method`` posts a Journal Entry and rewrites the
+    Courier Transaction; it never touches the Payment Entry that settled the order
+    against Courier Outstanding at Out-for-Delivery. The Courier Transaction note is
+    therefore the ONLY trace of the switch, and it is newer than the Payment Entry,
+    so it outranks it. It used to be consulted last, behind a ``not in method_map``
+    guard that the Payment Entry had always already satisfied -- which made this
+    signal dead for exactly the dispatched COD orders it exists to describe.
+
+    Settled rows count too. The note is a permanent record of how the customer
+    paid, and settling the courier does not revise it -- while the stale Payment
+    Entry it outranks lives forever. Filtering to unsettled rows (as this did) meant
+    a switched order read correctly until the courier settled and then silently
+    reverted to "Cash". The note text is written by nothing but
+    ``_append_collection_change_note``, so matching it is specific enough.
+    """
+    change_map: Dict[str, str] = {}
     if not invoice_names:
-        return method_map
-
-    try:
-        paid_inv_names = [
-            str(r.get("name")).strip()
-            for r in rows
-            if float(r.get("outstanding_amount") or 0) < 0.01
-            and str(r.get("status") or "").strip().lower() in ("paid", "return", "credit note issued")
-        ]
-        if paid_inv_names:
-            pe_refs = frappe.get_all(
-                "Payment Entry Reference",
-                filters={
-                    "reference_doctype": "Sales Invoice",
-                    "reference_name": ["in", paid_inv_names],
-                },
-                fields=["reference_name", "parent"],
-            )
-            pe_names = list({r.parent for r in pe_refs})
-            if pe_names:
-                pes = frappe.get_all(
-                    "Payment Entry",
-                    filters={"name": ["in", pe_names], "docstatus": 1, "payment_type": "Receive"},
-                    fields=["name", "paid_to"],
-                )
-                pe_account_map = {pe.name: pe.paid_to or "" for pe in pes}
-                for ref in pe_refs:
-                    account = pe_account_map.get(ref.parent, "").lower()
-                    if "mobile wallet" in account:
-                        method_map[ref.reference_name] = "Mobile Wallet"
-                    elif "bank account" in account:
-                        method_map[ref.reference_name] = "Instapay"
-                    elif account:
-                        method_map[ref.reference_name] = "Cash"
-    except Exception:
-        pass
-
+        return change_map
     try:
         ct_rows = frappe.get_all(
             "Courier Transaction",
             filters={
                 "reference_invoice": ["in", invoice_names],
-                "status": ["!=", "Settled"],
                 "payment_mode": ["not in", [None, ""]],
                 "notes": ["like", "%Payment collection changed on%"],
             },
@@ -558,12 +580,129 @@ def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]
         )
         for row in ct_rows:
             invoice_name = row.get("reference_invoice")
-            if invoice_name and invoice_name not in method_map:
-                method_map[invoice_name] = sanitize_printable_text(row.get("payment_mode"))
+            # Rows arrive newest-first; the first one per invoice is the live method.
+            if invoice_name and invoice_name not in change_map:
+                change_map[invoice_name] = sanitize_printable_text(row.get("payment_mode"))
+    except Exception:
+        pass
+    return change_map
+
+
+def _get_payment_entry_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Per PAID invoice, the collection method its Payment Entry ledger implies.
+
+    Only invoices with nothing outstanding are considered: before that, a Payment
+    Entry either does not exist or does not stand for the whole order.
+    """
+    method_map: Dict[str, str] = {}
+    paid_inv_names = [
+        str(r.get("name")).strip()
+        for r in rows
+        if float(r.get("outstanding_amount") or 0) < 0.01
+        and str(r.get("status") or "").strip().lower() in ("paid", "return", "credit note issued")
+    ]
+    if not paid_inv_names:
+        return method_map
+
+    try:
+        pe_refs = frappe.get_all(
+            "Payment Entry Reference",
+            filters={
+                "reference_doctype": "Sales Invoice",
+                "reference_name": ["in", paid_inv_names],
+            },
+            fields=["reference_name", "parent"],
+        )
+        pe_names = list({r.parent for r in pe_refs})
+        if not pe_names:
+            return method_map
+
+        pes = frappe.get_all(
+            "Payment Entry",
+            filters={"name": ["in", pe_names], "docstatus": 1, "payment_type": "Receive"},
+            fields=["name", "paid_to"],
+        )
+        pe_account_map = {pe.name: pe.paid_to or "" for pe in pes}
+
+        # One query for every ledger involved, rather than one lookup per invoice.
+        account_names = sorted({acc for acc in pe_account_map.values() if acc})
+        account_meta: Dict[str, Dict[str, Any]] = {}
+        if account_names:
+            for acc in frappe.get_all(
+                "Account",
+                filters={"name": ["in", account_names]},
+                fields=["name", "account_type", "parent_account"],
+            ):
+                account_meta[acc.name] = acc
+
+        for ref in pe_refs:
+            account = pe_account_map.get(ref.parent)
+            if not account:
+                continue
+            method = _classify_collection_account(account, account_meta.get(account))
+            if method and ref.reference_name not in method_map:
+                method_map[ref.reference_name] = method
     except Exception:
         pass
 
     return method_map
+
+
+def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Resolve the payment method the customer ACTUALLY paid with, per invoice.
+
+    ``rows`` are dicts carrying ``name``, ``outstanding_amount``, ``status`` and --
+    for the fallback below to work -- ``custom_payment_method`` and ``sales_partner``.
+
+    Sources, in priority order:
+      1. An unsettled Courier Transaction whose notes record a collection-method
+         change. This is the newest evidence and the only trace of a post-dispatch
+         COD -> online switch, so it outranks the Payment Entry.
+      2. The submitted Payment Entry ``paid_to`` ledger, classified by
+         :func:`_classify_collection_account` -- which returns nothing rather than
+         guessing when the ledger is not a customer collection.
+      3. The method declared on the invoice (``custom_payment_method``). For a Sales
+         Partner order settled into the partner AR subaccount this is the only
+         honest answer, and ``change_payment_collection_method`` keeps it current.
+      4. ``Online`` for a Sales Partner order carrying no declared method -- the
+         partner collected, so it was certainly not our cash drawer.
+
+    An invoice matching none of these is simply absent from the map: the board then
+    shows its status badge and the receipt falls back to the requested method.
+    Answering "Cash" for an unknown is what produced the original defect (an online
+    Talabat order badged Cash on the Delivered column) and must not come back.
+
+    Shared by the board (``get_kanban_invoices``) and the single-invoice details
+    endpoint so a card and its printed receipt can never disagree about the method.
+    """
+    method_map: Dict[str, str] = {}
+    invoice_names = [str(r.get("name") or "").strip() for r in rows if str(r.get("name") or "").strip()]
+    if not invoice_names:
+        return method_map
+
+    # 1. Post-dispatch collection change (newest evidence wins).
+    for name, method in _get_collection_change_map(invoice_names).items():
+        if method:
+            method_map[name] = method
+
+    # 2. The ledger the money actually landed in.
+    for name, method in _get_payment_entry_method_map(rows).items():
+        if name not in method_map:
+            method_map[name] = method
+
+    # 3/4. The declared method, for the collections no ledger can name.
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        if not name or name in method_map:
+            continue
+        declared = sanitize_printable_text(row.get("custom_payment_method"))
+        if declared:
+            method_map[name] = declared
+        elif str(row.get("sales_partner") or "").strip():
+            method_map[name] = PAYMENT_MODES.ONLINE
+
+    return method_map
+
 
 
 def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, float]:
@@ -1380,6 +1519,10 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "name": inv.name,
                 "outstanding_amount": inv.get("outstanding_amount"),
                 "status": inv.status,
+                # Both are the fallback the resolver needs when the Payment Entry
+                # ledger cannot name the method - a Sales Partner AR reclass.
+                "custom_payment_method": inv.get("custom_payment_method"),
+                "sales_partner": inv.get("sales_partner"),
             }
             for inv in invoices
         ])
@@ -2494,6 +2637,8 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
                         "name": invoice.name,
                         "outstanding_amount": invoice.get("outstanding_amount"),
                         "status": invoice.get("status"),
+                        "custom_payment_method": invoice.get("custom_payment_method"),
+                        "sales_partner": invoice.get("sales_partner"),
                     }
                 ]
             ).get(invoice.name)

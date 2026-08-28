@@ -126,6 +126,10 @@ jobs:
             test_invoice_creation_accounting
             test_sales_partner_flow
             test_kanban_settlement
+            # The board/receipt payment-method resolver. Its pre-fix
+            # `else: "Cash"` catch-all badged an ONLINE Talabat order as
+            # Cash, and nothing in CI read that function at all.
+            test_kanban_payment_method
             test_invoice_cases_integration
             test_b2b_permission_gating
             test_b2b_customer_search_filter
