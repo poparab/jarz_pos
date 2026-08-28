@@ -494,7 +494,11 @@ def _resolve_customer_phone(customer: str) -> str:
 _COLLECTION_LEDGER_UNKNOWN = None
 
 
-def _classify_collection_account(account: str, meta: Optional[Dict[str, Any]]) -> Optional[str]:
+def _classify_collection_account(
+    account: str,
+    meta: Optional[Dict[str, Any]],
+    sales_partner: Optional[str] = None,
+) -> Optional[str]:
     """Map a Payment Entry ``paid_to`` ledger onto a POS collection method.
 
     Returns ``None`` when the ledger does not identify a customer collection.
@@ -529,16 +533,28 @@ def _classify_collection_account(account: str, meta: Optional[Dict[str, Any]]) -
     if ACCOUNTS.COURIER_OUTSTANDING.lower() in name:
         return PAYMENT_MODES.CASH
 
-    # A Sales Partner AR subaccount is an AR *reclass*, not a collection: the money
-    # sits with the partner. It says nothing about how the customer paid.
-    if account_type == "receivable":
-        return _COLLECTION_LEDGER_UNKNOWN
-
     # A branch till. _get_cash_account only ever returns a Cash/Bank ledger under
     # "Cash In Hand", so both signals are checked rather than the account name --
     # a till is named after its POS profile ("Nasr City - J"), never "Cash".
     if account_type == "cash" or ACCOUNTS.CASH_IN_HAND.lower() in parent:
         return PAYMENT_MODES.CASH
+
+    # A Sales Partner subaccount is an AR *reclass*, not a collection: the money
+    # sits with the partner. It says nothing about how the customer paid. Checked
+    # AFTER the till above, because a partner-attributed order really can be
+    # collected into a branch drawer (three such Talabat orders exist on staging)
+    # and the type-backed till signal must win over this name match.
+    #
+    # Matched by NAME against the invoice's own partner, not by account_type alone.
+    # ensure_partner_receivable_subaccount creates these with account_type
+    # "Receivable", but the ledgers that actually exist on staging/production do
+    # not all come from it: "Talabat - J" is typed "Current Asset". A type test on
+    # its own is therefore dead against the very data this fix was written for.
+    partner = str(sales_partner or "").strip().lower()
+    if partner and (name == partner or name.startswith(partner + " -")):
+        return _COLLECTION_LEDGER_UNKNOWN
+    if account_type == "receivable":
+        return _COLLECTION_LEDGER_UNKNOWN
 
     # Any other Bank ledger (a payment gateway's, typically) is online money, but
     # not necessarily InstaPay. Let the declared method name it.
@@ -635,11 +651,18 @@ def _get_payment_entry_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
             ):
                 account_meta[acc.name] = acc
 
+        partner_by_invoice = {
+            str(r.get("name") or "").strip(): r.get("sales_partner") for r in rows
+        }
         for ref in pe_refs:
             account = pe_account_map.get(ref.parent)
             if not account:
                 continue
-            method = _classify_collection_account(account, account_meta.get(account))
+            method = _classify_collection_account(
+                account,
+                account_meta.get(account),
+                partner_by_invoice.get(ref.reference_name),
+            )
             if method and ref.reference_name not in method_map:
                 method_map[ref.reference_name] = method
     except Exception:

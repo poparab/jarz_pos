@@ -40,8 +40,13 @@ ACCOUNT_ROWS = {
     f"Mobile Wallet - {COMPANY_ABBR}": {"account_type": "Bank", "parent_account": f"Bank Accounts - {COMPANY_ABBR}"},
     f"Courier Outstanding - {COMPANY_ABBR}": {"account_type": "Receivable", "parent_account": f"Accounts Receivable - {COMPANY_ABBR}"},
     # The ledger at the heart of the bug: resolve_online_partner_paid_to books an
-    # online partner order into an AR subaccount named after the partner.
-    f"Talabat - {COMPANY_ABBR}": {"account_type": "Receivable", "parent_account": f"Accounts Receivable - {COMPANY_ABBR}"},
+    # online partner order into a subaccount named after the partner. Typed as the
+    # REAL one on staging/production is -- "Current Asset", not "Receivable" -- so a
+    # test that assumed the creator's account_type would have passed while the
+    # branch it exercised was dead against live data.
+    f"Talabat - {COMPANY_ABBR}": {"account_type": "Current Asset", "parent_account": f"Accounts Receivable - {COMPANY_ABBR}"},
+    # A partner ledger that DOES carry the creator's account_type.
+    f"Breadfast - {COMPANY_ABBR}": {"account_type": "Receivable", "parent_account": f"Accounts Receivable - {COMPANY_ABBR}"},
     # A payment gateway ledger, which carries no method in its name at all.
     f"Kashier Collections - {COMPANY_ABBR}": {"account_type": "Bank", "parent_account": f"Bank Accounts - {COMPANY_ABBR}"},
 }
@@ -124,8 +129,10 @@ def _paid(name, **extra):
 class TestClassifyCollectionAccount(unittest.TestCase):
     """The ledger -> method mapping, in isolation."""
 
-    def _classify(self, account):
-        return kanban._classify_collection_account(account, ACCOUNT_ROWS.get(account))
+    def _classify(self, account, sales_partner=None):
+        return kanban._classify_collection_account(
+            account, ACCOUNT_ROWS.get(account), sales_partner
+        )
 
     def test_mobile_wallet_ledger(self):
         self.assertEqual(self._classify(f"Mobile Wallet - {COMPANY_ABBR}"), "Mobile Wallet")
@@ -143,9 +150,34 @@ class TestClassifyCollectionAccount(unittest.TestCase):
     def test_bank_typed_till_under_cash_in_hand_is_cash(self):
         self.assertEqual(self._classify(f"Dokki - {COMPANY_ABBR}"), "Cash")
 
-    def test_partner_receivable_is_not_a_collection(self):
+    def test_partner_ledger_is_not_a_collection(self):
         """The regression. This ledger used to fall through to "Cash"."""
-        self.assertIsNone(self._classify(f"Talabat - {COMPANY_ABBR}"))
+        self.assertIsNone(self._classify(f"Talabat - {COMPANY_ABBR}", "Talabat"))
+
+    def test_partner_ledger_matched_by_name_not_account_type(self):
+        """"Talabat - J" is typed "Current Asset" on the real sites, not Receivable.
+
+        Naming the partner is what identifies the reclass; the type test alone never
+        fires on this ledger.
+        """
+        self.assertEqual(ACCOUNT_ROWS[f"Talabat - {COMPANY_ABBR}"]["account_type"], "Current Asset")
+        self.assertIsNone(self._classify(f"Talabat - {COMPANY_ABBR}", "Talabat"))
+
+    def test_partner_ledger_typed_receivable_also_recognised(self):
+        self.assertIsNone(self._classify(f"Breadfast - {COMPANY_ABBR}", "Breadfast"))
+
+    def test_partner_order_collected_into_a_branch_till_is_still_cash(self):
+        """Naming a partner must not turn a real drawer collection into "not cash".
+
+        Observed on staging: three Talabat-attributed orders settled into Dokki and
+        Nasr city tills with no courier rows. That money is in our drawer.
+        """
+        self.assertEqual(self._classify(f"Dokki - {COMPANY_ABBR}", "Talabat"), "Cash")
+        self.assertEqual(self._classify(f"Nasr City - {COMPANY_ABBR}", "Talabat"), "Cash")
+
+    def test_a_partner_named_after_a_till_does_not_hide_the_drawer(self):
+        """The till test is type-backed and outranks the partner name match."""
+        self.assertEqual(self._classify(f"Nasr City - {COMPANY_ABBR}", "Nasr City"), "Cash")
 
     def test_gateway_ledger_is_not_guessed(self):
         self.assertIsNone(self._classify(f"Kashier Collections - {COMPANY_ABBR}"))
