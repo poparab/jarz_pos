@@ -166,6 +166,10 @@ jobs:
             # test here (empty run_quality falling back to the defaults instead
             # of reporting an unconfigured mixer) survived on main unnoticed.
             test_daily_production_plan
+            # Bases (sub-assembly) maths: demand derived from jar targets, batch
+            # conversions and run-size matching. Same reason as the line above —
+            # a module absent from this array is a module CI never runs.
+            test_subassembly_planning
             test_api_production
             test_api_manufacturing_start_finish
             test_production_permissions

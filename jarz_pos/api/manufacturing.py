@@ -676,12 +676,42 @@ def _get_live_stock_qty(item_code: str, warehouse: str) -> float:
         return 0.0
 
 
-def _get_required_material_rows(bom_name: str, company: str, qty: float) -> List[Dict[str, Any]]:
+def _get_required_material_rows(
+    bom_name: str,
+    company: str,
+    qty: float,
+    fetch_exploded: int = 1,
+) -> List[Dict[str, Any]]:
+    """Required-material rows for a BOM, at either level of the bill.
+
+    ``fetch_exploded`` decides **which bill of materials this answers about**,
+    and the two values are genuinely different questions — do not collapse them:
+
+    * ``1`` reads ``tabBOM Explosion Item``: the bill flattened all the way down
+      to raw materials, so a sub-assembly appears as flour and eggs.  This is
+      the long-standing default and every existing caller relies on it; changing
+      it is a separate, larger fix.
+    * ``0`` reads ``tabBOM Item``: the **one-level** bill, where a sub-assembly
+      appears as itself.  This is what a Work Order on this site actually
+      consumes — a Property Setter pins ``Work Order.use_multi_level_bom`` to
+      ``"0"`` and nothing in jarz_pos ever sets it, so ERPNext's
+      ``set_required_items`` explodes nothing.
+
+    Anything whose purpose is "here is what this batch will consume" wants
+    ``0``.  Anything comparing against the historical precheck wants ``1``.
+
+    One more asymmetry worth knowing: ERPNext's ``fetch_exploded=1`` branch does
+    not select ``bom_item.uom`` at all, so ``uom`` below falls back to
+    ``DEFAULT_UOM`` ("Nos") for every exploded row.  ``stock_uom`` is selected by
+    both branches and is carried on the row so a caller can recover the real
+    unit; the ``uom`` key itself is left exactly as it has always been so no
+    existing caller's output moves.
+    """
     getter = _resolve_get_bom_items_as_dict()
     if not getter:
         frappe.throw(_("Could not resolve ERPNext BOM items helper"))
 
-    item_dict = getter(bom_name, company, qty=qty, fetch_exploded=1)
+    item_dict = getter(bom_name, company, qty=qty, fetch_exploded=1 if fetch_exploded else 0)
     rows: List[Dict[str, Any]] = []
     for item in sorted(item_dict.values(), key=lambda row: row.get("idx") or float("inf")):
         if item.get("include_item_in_manufacturing") in (0, "0", False):
@@ -694,6 +724,9 @@ def _get_required_material_rows(bom_name: str, company: str, qty: float) -> List
                 "item_code": item_code,
                 "item_name": item.get("item_name") or item_code,
                 "uom": item.get("uom") or DEFAULT_UOM,
+                # Additive: never substituted, never defaulted, so a caller can
+                # tell "no unit was stated" from "the unit really is Nos".
+                "stock_uom": item.get("stock_uom") or None,
                 "required_qty": float(item.get("qty") or 0),
                 "source_warehouse": source_warehouse,
                 "available_qty": _get_live_stock_qty(item_code, source_warehouse) if source_warehouse else 0.0,
