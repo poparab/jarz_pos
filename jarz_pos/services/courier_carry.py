@@ -38,6 +38,24 @@ from frappe.utils import flt, now_datetime
 # Reading the outstanding set
 # ---------------------------------------------------------------------------
 
+def carry_columns_available() -> bool:
+    """Have this app's carry columns actually reached the database yet?
+
+    Code lands on a server BEFORE ``bench migrate`` runs, and the CI logic gate
+    runs pre-migrate by design — so between the two, every column added here is
+    still missing. Reading or writing one unguarded turns an ordinary settlement
+    into a 500 for the length of a deploy, which is exactly the window an
+    end-of-day settlement is most likely to land in.
+
+    Not cached: a migrate flips this mid-process, and the check is a metadata
+    lookup that Frappe already caches internally.
+    """
+    try:
+        return bool(frappe.db.has_column("Courier Transaction", "carried_at"))
+    except Exception:
+        return False
+
+
 def _courier_profile_expr() -> str:
     """SQL expression for the branch that owns an invoice.
 
@@ -77,6 +95,15 @@ def get_unsettled_transactions(pos_profile: str) -> List[Dict[str, Any]]:
     if not profile:
         return []
 
+    carry_select = (
+        """
+            ct.carried_from_shift,
+            ct.carried_at,
+            COALESCE(ct.carry_count, 0) AS carry_count,
+        """
+        if carry_columns_available()
+        else ""
+    )
     rows = frappe.db.sql(
         f"""
         SELECT
@@ -87,9 +114,7 @@ def get_unsettled_transactions(pos_profile: str) -> List[Dict[str, Any]]:
             COALESCE(ct.party_type, '') AS party_type,
             COALESCE(ct.party, '') AS party,
             ct.date AS dispatched_at,
-            ct.carried_from_shift,
-            ct.carried_at,
-            COALESCE(ct.carry_count, 0) AS carry_count,
+            {carry_select}
             COALESCE(ct.is_partner_order, 0) AS is_partner_order,
             si.customer_name,
             si.grand_total,
@@ -277,6 +302,11 @@ def stamp_carried(
     stamped_at = now_datetime()
     carried: List[str] = []
     total = 0.0
+    if not carry_columns_available():
+        # Mid-deploy: the close still succeeds and the money still shows as
+        # Unsettled, it just is not attributed to this shift. Losing the stamp
+        # is survivable; refusing the close is not.
+        return {"transactions": [], "count": 0, "net_balance": 0.0, "unstamped": True}
 
     for row in transactions or []:
         name = str(row.get("courier_transaction") or row.get("name") or "").strip()
@@ -334,13 +364,12 @@ def mark_settled(
         except Exception:
             settled_in_shift = None
 
-    values: Dict[str, Any] = {
-        "status": "Settled",
-        "settled_at": now_datetime(),
-        "settled_by": frappe.session.user,
-    }
-    if settled_in_shift:
-        values["settled_in_shift"] = settled_in_shift
+    values: Dict[str, Any] = {"status": "Settled"}
+    if carry_columns_available():
+        values["settled_at"] = now_datetime()
+        values["settled_by"] = frappe.session.user
+        if settled_in_shift:
+            values["settled_in_shift"] = settled_in_shift
     if extra:
         values.update(extra)
 
@@ -363,6 +392,9 @@ def settlement_stamp(pos_profile: Optional[str] = None) -> Dict[str, Any]:
     writing through :func:`mark_settled` — same stamps, applied in the caller's
     own transaction.
     """
+    if not carry_columns_available():
+        return {}
+
     stamp: Dict[str, Any] = {
         "settled_at": now_datetime(),
         "settled_by": frappe.session.user,
