@@ -18,6 +18,8 @@ import unittest
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
+from frappe.utils import getdate
+
 from jarz_pos.constants import ROLES
 from jarz_pos.services import roster as roster_service
 from jarz_pos.events import employee_checkin as checkin_guard
@@ -261,10 +263,12 @@ class TestCheckinGate(unittest.TestCase):
         assignment_today=None,
         assignment_yesterday=None,
         day_off=None,
+        at="2026-09-10 09:00:00",
+        within_tail=False,
     ):
         doc = MagicMock()
         doc.employee = "HR-EMP-00001"
-        doc.time = "2026-09-10 09:00:00"
+        doc.time = at
         doc.shift = shift
 
         thrown = {}
@@ -281,8 +285,10 @@ class TestCheckinGate(unittest.TestCase):
             checkin_guard,
             "_assignment_on",
             side_effect=lambda _e, d: assignment_today
-            if str(d) == "2026-09-10"
+            if str(d) == str(getdate(at))
             else assignment_yesterday,
+        ), patch.object(
+            checkin_guard, "_is_within_overnight_tail", return_value=within_tail
         ), patch.object(
             checkin_guard, "_enforce_location"
         ) as mock_location, patch.object(
@@ -317,10 +323,32 @@ class TestCheckinGate(unittest.TestCase):
         self.assertFalse(result["blocked"])
         self.assertTrue(result["location_checked"])
 
-    def test_yesterdays_shift_still_lets_you_clock_out(self):
+    def test_yesterdays_shift_still_lets_you_clock_out_inside_its_tail(self):
         """Branch shifts end after midnight; a late check-out must not be refused."""
-        result = self._run(shift=None, assignment_yesterday={"shift_location": "Dokki"})
+        result = self._run(
+            shift=None,
+            at="2026-09-10 00:40:00",
+            assignment_yesterday={"shift_type": "Branch Closing", "shift_location": "Dokki"},
+            within_tail=True,
+        )
         self.assertFalse(result["blocked"])
+
+    def test_yesterdays_shift_does_NOT_excuse_a_midday_checkin(self):
+        """The bug the staging end-to-end run caught, pinned.
+
+        Marking one day off carves it out of a longer assignment range and
+        leaves the day BEFORE it still rostered. Accepting "any assignment
+        dated yesterday" therefore waved through a 13:00 check-in on somebody's
+        day off — which silently disabled the entire gate, since a day off
+        almost always sits between two worked days.
+        """
+        result = self._run(
+            shift=None,
+            at="2026-09-10 13:00:00",
+            assignment_yesterday={"shift_type": "Branch Closing", "shift_location": "Dokki"},
+            within_tail=False,
+        )
+        self.assertTrue(result["blocked"])
 
     def test_enforcement_switched_off_lets_everyone_through(self):
         result = self._run(shift=None, enforcement=False)
@@ -335,6 +363,68 @@ class TestCheckinGate(unittest.TestCase):
         """Head office has logins and no rota; they must keep working."""
         result = self._run(shift=None, roster_managed=False)
         self.assertFalse(result["blocked"])
+
+
+class TestOvernightTail(unittest.TestCase):
+    """Exactly when yesterday's shift may still claim today's check-in.
+
+    This is the narrow allowance that keeps a late clock-out working. It must
+    stay narrow: widening it to "any assignment dated yesterday" is what
+    silently switched the whole gate off.
+    """
+
+    def _tail(self, start, end, at, grace=0, shift_type="Branch Closing"):
+        with patch.object(checkin_guard, "frappe") as mock_frappe:
+            mock_frappe.db.get_value.return_value = {
+                "start_time": start,
+                "end_time": end,
+                "allow_check_out_after_shift_end_time": grace,
+            }
+            return checkin_guard._is_within_overnight_tail(
+                {"shift_type": shift_type}, at
+            )
+
+    def test_inside_the_tail_of_a_closing_shift(self):
+        # 16:00 -> 01:00, checking out at 00:40.
+        self.assertTrue(
+            self._tail(timedelta(hours=16), timedelta(hours=1), "2026-09-10 00:40:00")
+        )
+
+    def test_exactly_at_the_shift_end_still_counts(self):
+        self.assertTrue(
+            self._tail(timedelta(hours=16), timedelta(hours=1), "2026-09-10 01:00:00")
+        )
+
+    def test_past_the_tail_does_not_count(self):
+        self.assertFalse(
+            self._tail(timedelta(hours=16), timedelta(hours=1), "2026-09-10 01:30:00")
+        )
+
+    def test_the_grace_period_extends_it(self):
+        self.assertTrue(
+            self._tail(
+                timedelta(hours=16), timedelta(hours=1), "2026-09-10 01:30:00", grace=60
+            )
+        )
+
+    def test_a_midday_checkin_is_never_a_tail(self):
+        self.assertFalse(
+            self._tail(timedelta(hours=16), timedelta(hours=1), "2026-09-10 13:00:00")
+        )
+
+    def test_a_daytime_shift_has_no_tail_at_all(self):
+        # The factory runs 10:00 -> 19:00 and can never claim the next morning.
+        self.assertFalse(
+            self._tail(timedelta(hours=10), timedelta(hours=19), "2026-09-10 09:00:00")
+        )
+
+    def test_a_shift_with_no_times_claims_nothing(self):
+        self.assertFalse(self._tail(None, None, "2026-09-10 00:10:00"))
+
+    def test_an_assignment_with_no_shift_type_claims_nothing(self):
+        self.assertFalse(
+            checkin_guard._is_within_overnight_tail({}, "2026-09-10 00:10:00")
+        )
 
 
 class TestCheckinExplanation(unittest.TestCase):

@@ -36,11 +36,12 @@ the roster puts that person at.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, getdate
+from frappe.utils import add_days, cint, get_datetime, getdate
 
 from jarz_pos.utils.settings_utils import single_flag
 
@@ -80,14 +81,30 @@ def enforce_roster_on_checkin(doc, method: Optional[str] = None) -> None:
         return
 
     day = getdate(doc.time)
-    previous = add_days(day, -1)
 
-    assignment = _assignment_on(doc.employee, day) or _assignment_on(doc.employee, previous)
+    assignment = _assignment_on(doc.employee, day)
     if assignment:
-        # Rostered, but outside the shift window. HRMS skipped the geofence
-        # because it had no shift to hang it on; apply it against the branch the
-        # roster does know about.
+        # Rostered today, but outside the shift window. HRMS skipped the
+        # geofence because it had no shift to hang it on; apply it against the
+        # branch the roster does know about.
         _enforce_location(doc, assignment.get("shift_location"))
+        return
+
+    # Yesterday's shift may still be running: every branch shift here ends after
+    # midnight, so a 00:40 check-out belongs to the previous day. This is a
+    # NARROW allowance, restricted to a shift that genuinely crosses midnight
+    # and only while its tail is still open.
+    #
+    # It was once "any assignment dated yesterday", which quietly disabled the
+    # whole gate. Marking a single day off carves that day out of a longer
+    # range and leaves the day BEFORE it still rostered -- so someone off on the
+    # 9th still had an assignment covering the 8th, and a 13:00 check-in on
+    # their day off was waved straight through. The end-to-end run on staging
+    # caught it; nothing in the unit tests could, because the bug lived in the
+    # shape of real assignment ranges.
+    previous = _assignment_on(doc.employee, add_days(day, -1))
+    if previous and _is_within_overnight_tail(previous, doc.time):
+        _enforce_location(doc, previous.get("shift_location"))
         return
 
     frappe.throw(
@@ -95,6 +112,50 @@ def enforce_roster_on_checkin(doc, method: Optional[str] = None) -> None:
         title=_("Not On Shift"),
         exc=RosterCheckinBlocked,
     )
+
+
+def _is_within_overnight_tail(assignment: dict, when: Any) -> bool:
+    """True while yesterday's cross-midnight shift is still running.
+
+    Two conditions, both required:
+
+    * the shift type actually wraps past midnight (``end_time <= start_time``),
+      so a daytime shift can never claim the following morning; and
+    * the check-in's time of day is still inside that tail, plus the Shift
+      Type's own ``allow_check_out_after_shift_end_time`` grace -- HRMS's number,
+      not one invented here, so somebody clocking out late is judged by the same
+      window the rest of the system uses.
+    """
+    shift_type = assignment.get("shift_type")
+    if not shift_type:
+        return False
+
+    row = frappe.db.get_value(
+        "Shift Type",
+        shift_type,
+        ["start_time", "end_time", "allow_check_out_after_shift_end_time"],
+        as_dict=True,
+    )
+    if not row:
+        return False
+
+    from jarz_pos.services.roster import _as_timedelta
+
+    start = _as_timedelta(row.get("start_time"))
+    end = _as_timedelta(row.get("end_time"))
+    if start is None or end is None:
+        return False
+    if end > start:
+        # A shift that ends after it starts finishes on its own day and has no
+        # tail to claim.
+        return False
+
+    moment = get_datetime(when)
+    time_of_day = timedelta(
+        hours=moment.hour, minutes=moment.minute, seconds=moment.second
+    )
+    grace = timedelta(minutes=cint(row.get("allow_check_out_after_shift_end_time")))
+    return time_of_day <= end + grace
 
 
 def _enforcement_enabled() -> bool:
