@@ -82,6 +82,15 @@ def enforce_roster_on_checkin(doc, method: Optional[str] = None) -> None:
 
     day = getdate(doc.time)
 
+    # An explicit day off is a decision somebody made, and it outranks
+    # everything below -- including the horizon escape hatch.
+    if _has_day_off(doc.employee, day):
+        frappe.throw(
+            _explanation(doc.employee, day),
+            title=_("Not On Shift"),
+            exc=RosterCheckinBlocked,
+        )
+
     assignment = _assignment_on(doc.employee, day)
     if assignment:
         # Rostered today, but outside the shift window. HRMS skipped the
@@ -107,11 +116,63 @@ def enforce_roster_on_checkin(doc, method: Optional[str] = None) -> None:
         _enforce_location(doc, previous.get("shift_location"))
         return
 
+    # The roster simply has not been drawn this far. Shift Schedules generate a
+    # finite horizon -- staging and production are currently written out to
+    # 2026-11-19 -- and the day after it lapses is not a decision anybody made
+    # about anybody. Blocking there would lock every employee in the company
+    # out of check-in on the same morning, over a housekeeping job nobody was
+    # watching. A genuine hole INSIDE the horizon still blocks, and an explicit
+    # day off was already refused above, so nothing real is let through here.
+    if not _is_within_rostered_horizon(doc.employee, day):
+        return
+
     frappe.throw(
         _explanation(doc.employee, day),
         title=_("Not On Shift"),
         exc=RosterCheckinBlocked,
     )
+
+
+def _has_day_off(employee: str, day: Any) -> bool:
+    try:
+        return bool(
+            frappe.db.exists("Jarz Roster Day Off", {"employee": employee, "off_date": day})
+        )
+    except Exception:
+        return False
+
+
+def _is_within_rostered_horizon(employee: str, day: Any) -> bool:
+    """Whether ``day`` falls inside the span the roster actually covers.
+
+    Outside that span the roster is silent rather than negative: a date before
+    somebody's first assignment (a new joiner) or after the last one the Shift
+    Schedule has generated says nothing about whether they are meant to work.
+
+    An assignment with no end date makes the horizon open-ended, so a site that
+    rosters that way keeps the strict behaviour.
+    """
+    try:
+        rows = frappe.get_all(
+            "Shift Assignment",
+            filters={"employee": employee, "docstatus": 1},
+            fields=["start_date", "end_date"],
+        )
+    except Exception:
+        # Cannot tell -- do not turn somebody away on a failed probe.
+        return False
+    if not rows:
+        return False
+
+    starts = [getdate(r["start_date"]) for r in rows if r.get("start_date")]
+    if not starts or getdate(day) < min(starts):
+        return False
+
+    if any(not r.get("end_date") for r in rows):
+        return True
+
+    ends = [getdate(r["end_date"]) for r in rows if r.get("end_date")]
+    return bool(ends) and getdate(day) <= max(ends)
 
 
 def _is_within_overnight_tail(assignment: dict, when: Any) -> bool:

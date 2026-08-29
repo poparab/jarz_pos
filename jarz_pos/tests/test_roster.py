@@ -265,6 +265,8 @@ class TestCheckinGate(unittest.TestCase):
         day_off=None,
         at="2026-09-10 09:00:00",
         within_tail=False,
+        has_day_off=False,
+        within_horizon=True,
     ):
         doc = MagicMock()
         doc.employee = "HR-EMP-00001"
@@ -289,6 +291,10 @@ class TestCheckinGate(unittest.TestCase):
             else assignment_yesterday,
         ), patch.object(
             checkin_guard, "_is_within_overnight_tail", return_value=within_tail
+        ), patch.object(
+            checkin_guard, "_has_day_off", return_value=has_day_off
+        ), patch.object(
+            checkin_guard, "_is_within_rostered_horizon", return_value=within_horizon
         ), patch.object(
             checkin_guard, "_enforce_location"
         ) as mock_location, patch.object(
@@ -364,6 +370,29 @@ class TestCheckinGate(unittest.TestCase):
         result = self._run(shift=None, roster_managed=False)
         self.assertFalse(result["blocked"])
 
+    def test_an_explicit_day_off_blocks(self):
+        result = self._run(shift=None, has_day_off=True)
+        self.assertTrue(result["blocked"])
+
+    def test_a_lapsed_roster_horizon_does_NOT_lock_the_company_out(self):
+        """Shift Schedules generate a finite horizon — currently to 2026-11-19.
+
+        The morning after it lapses is not a decision anybody made about
+        anybody, and blocking there would refuse every employee in the company
+        at once over a housekeeping job nobody was watching.
+        """
+        result = self._run(shift=None, within_horizon=False)
+        self.assertFalse(result["blocked"])
+
+    def test_a_hole_INSIDE_the_horizon_still_blocks(self):
+        result = self._run(shift=None, within_horizon=True)
+        self.assertTrue(result["blocked"])
+
+    def test_an_explicit_day_off_outranks_the_horizon_escape_hatch(self):
+        """A granted day off is a decision, so it blocks wherever it falls."""
+        result = self._run(shift=None, has_day_off=True, within_horizon=False)
+        self.assertTrue(result["blocked"])
+
 
 class TestOvernightTail(unittest.TestCase):
     """Exactly when yesterday's shift may still claim today's check-in.
@@ -425,6 +454,46 @@ class TestOvernightTail(unittest.TestCase):
         self.assertFalse(
             checkin_guard._is_within_overnight_tail({}, "2026-09-10 00:10:00")
         )
+
+
+class TestRosteredHorizon(unittest.TestCase):
+    """Where the roster is silent rather than negative."""
+
+    def _within(self, rows, day):
+        with patch.object(checkin_guard, "frappe") as mock_frappe:
+            mock_frappe.get_all.return_value = rows
+            return checkin_guard._is_within_rostered_horizon("HR-EMP-00001", day)
+
+    SPAN = [
+        {"start_date": "2026-08-21", "end_date": "2026-09-10"},
+        {"start_date": "2026-09-11", "end_date": "2026-11-19"},
+    ]
+
+    def test_a_date_inside_the_span_is_covered(self):
+        self.assertTrue(self._within(self.SPAN, "2026-09-15"))
+
+    def test_the_day_after_the_horizon_is_not_covered(self):
+        self.assertFalse(self._within(self.SPAN, "2026-11-20"))
+
+    def test_the_last_rostered_day_is_still_covered(self):
+        self.assertTrue(self._within(self.SPAN, "2026-11-19"))
+
+    def test_before_a_new_joiner_started_is_not_covered(self):
+        self.assertFalse(self._within(self.SPAN, "2026-08-01"))
+
+    def test_an_open_ended_assignment_keeps_the_strict_behaviour(self):
+        rows = [{"start_date": "2026-08-21", "end_date": None}]
+        self.assertTrue(self._within(rows, "2027-05-01"))
+
+    def test_an_employee_with_no_assignments_at_all_is_not_covered(self):
+        self.assertFalse(self._within([], "2026-09-15"))
+
+    def test_a_failed_probe_never_turns_somebody_away(self):
+        with patch.object(checkin_guard, "frappe") as mock_frappe:
+            mock_frappe.get_all.side_effect = Exception("db down")
+            self.assertFalse(
+                checkin_guard._is_within_rostered_horizon("HR-EMP-00001", "2026-09-15")
+            )
 
 
 class TestCheckinExplanation(unittest.TestCase):

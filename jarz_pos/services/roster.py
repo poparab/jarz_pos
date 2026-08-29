@@ -658,6 +658,7 @@ def set_shift_for_day(
     on_date: Any,
     shift_type: Optional[str],
     shift_location: Optional[str] = None,
+    clear_conflicting_day_off: bool = True,
 ) -> Dict[str, Any]:
     """Put one employee on one shift for exactly one day.
 
@@ -665,8 +666,17 @@ def set_shift_for_day(
     does underneath, and -- because an empty day now refuses check-ins -- it is
     the one operation here that can lock a real person out, so callers reach it
     through ``set_day_off`` (which records why) rather than by passing None.
+
+    Rostering somebody onto a day they are marked off DISCARDS that day-off
+    record. The two states contradict each other, and leaving both would be
+    read as "off" by the check-in gate while the calendar showed a shift --
+    the person would be refused at the door by a screen that said they were
+    working. ``clear_day_off`` passes ``False`` here because it deletes the
+    record itself once both people are restored.
     """
     day = getdate(on_date)
+    if clear_conflicting_day_off and shift_type:
+        _discard_day_off_record(employee, day)
     existing = _assignment_on(employee, day)
 
     resolved_location = (
@@ -702,6 +712,17 @@ def set_shift_for_day(
         "previous_shift_type": previous_shift_type,
         "previous_shift_location": previous_location,
     }
+
+
+def _discard_day_off_record(employee: str, day: Any) -> None:
+    """Delete a day-off row without touching any Shift Assignment.
+
+    Distinct from ``clear_day_off``, which also restores both people's shifts.
+    Here the caller is already writing the shift, so restoring would fight it.
+    """
+    name = frappe.db.exists(DAY_OFF_DOCTYPE, {"employee": employee, "off_date": getdate(day)})
+    if name:
+        frappe.delete_doc(DAY_OFF_DOCTYPE, name, ignore_permissions=True)
 
 
 def set_day_off(
@@ -787,7 +808,13 @@ def clear_day_off(employee: str, off_date: Any) -> Dict[str, Any]:
 
     restored_employee = None
     if doc.original_shift_type:
-        set_shift_for_day(employee, day, doc.original_shift_type, doc.original_shift_location)
+        set_shift_for_day(
+            employee,
+            day,
+            doc.original_shift_type,
+            doc.original_shift_location,
+            clear_conflicting_day_off=False,
+        )
         restored_employee = doc.original_shift_type
 
     restored_cover = None
@@ -800,6 +827,7 @@ def clear_day_off(employee: str, off_date: Any) -> Dict[str, Any]:
             day,
             doc.cover_previous_shift_type or None,
             doc.cover_shift_location,
+            clear_conflicting_day_off=False,
         )
         restored_cover = doc.cover_previous_shift_type
 
