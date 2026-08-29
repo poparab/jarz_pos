@@ -248,6 +248,13 @@ jobs:
             # bricks every POS device in the field with no way to recover
             # short of reinstalling the APK by hand.
             test_api_app_release
+            # Shift distribution. Two reasons this must be in CI: the hours
+            # arithmetic has to survive shifts that cross midnight (every branch
+            # shift here does, and a naive subtraction reports 12.5h as -11.5h
+            # straight into a payroll column), and the check-in gate is the one
+            # thing in this app that can stop a real person from clocking in --
+            # each of its allow-paths is pinned individually.
+            test_roster
           )
           rc=0
           for m in "${MODULES[@]}"; do

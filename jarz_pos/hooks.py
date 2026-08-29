@@ -131,6 +131,11 @@ after_migrate = [
     # Re-running every migrate is deliberate — it also reconciles returns whose
     # best-effort board move failed.
     "jarz_pos.setup.return_board_state.ensure_returned_board_state",
+    # Shift distribution: Employee roster fields, POS Profile -> Shift Location
+    # mapping, and the name-based auto-map that makes branch scoping work out of
+    # the box. Guarded on HRMS being installed, never raises. Deliberately last:
+    # it reads POS Profiles, which earlier seeders may create.
+    "jarz_pos.setup.roster_setup.ensure_roster_setup",
 ]
 
 # Apps
@@ -301,6 +306,15 @@ override_doctype_class = {
 # Hook on document methods and events
 
 doc_events = {
+    # Shift distribution gate. HRMS skips the geofence entirely when a check-in
+    # matches no shift, so an employee the roster leaves empty is the ONE person
+    # who can clock in from anywhere. This handler turns that inversion round:
+    # no shift on the roster, no check-in. Runs after HRMS's own validate (Frappe
+    # composes app hooks to run after the controller method), so doc.shift is
+    # already resolved and can be trusted.
+    "Employee Checkin": {
+        "validate": "jarz_pos.events.employee_checkin.enforce_roster_on_checkin",
+    },
     # Keep Address.custom_geo_confidence in step with custom_geo_source. This
     # fires on EVERY Address save site-wide, including the WooCommerce bulk
     # customer sync — so the handler makes zero DB queries, zero network calls,

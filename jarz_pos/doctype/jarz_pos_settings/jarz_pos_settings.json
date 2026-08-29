@@ -98,7 +98,14 @@
   "mobile_latest_android_build",
   "column_break_mobile_release",
   "mobile_apk_download_url",
-  "mobile_force_update_message"
+  "mobile_force_update_message",
+  "roster_section",
+  "roster_enforce_checkin",
+  "roster_default_standard_hours",
+  "column_break_roster",
+  "roster_courier_designations",
+  "roster_courier_overtime_multiplier",
+  "roster_default_overtime_multiplier"
  ],
  "fields": [
   {
@@ -720,6 +727,49 @@
    "fieldtype": "Small Text",
    "label": "Force Update Message",
    "description": "Shown on the blocking screen instead of the default text. Optional."
+  },
+  {
+   "fieldname": "roster_section",
+   "fieldtype": "Section Break",
+   "label": "Shift Distribution (Roster)"
+  },
+  {
+   "fieldname": "roster_enforce_checkin",
+   "fieldtype": "Check",
+   "label": "Block Check-in When Not Rostered",
+   "default": "1",
+   "description": "Refuse an HRMS check-in from an employee whose roster leaves the day empty, including a day marked off. Leaving this off restores the HRMS default, in which an unrostered employee can check in from ANY location because the geofence has no shift to measure against."
+  },
+  {
+   "fieldname": "roster_default_standard_hours",
+   "fieldtype": "Float",
+   "label": "Default Standard Hours",
+   "precision": "2",
+   "description": "Length of a normal working day when neither the employee override nor their shift schedule can answer. Used as the overtime baseline. Default 9."
+  },
+  {
+   "fieldname": "column_break_roster",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "roster_courier_designations",
+   "fieldtype": "Small Text",
+   "label": "Courier Designations",
+   "description": "Comma-separated designation fragments that mark somebody as a courier for overtime purposes. Matched as case-insensitive substrings, so 'courier' also matches 'Courier - Nasr City'. Default: courier,driver,delivery"
+  },
+  {
+   "fieldname": "roster_courier_overtime_multiplier",
+   "fieldtype": "Float",
+   "label": "Courier Overtime Multiplier",
+   "precision": "2",
+   "description": "Credit per overtime hour for couriers. Default 2 (an extra hour is paid as two)."
+  },
+  {
+   "fieldname": "roster_default_overtime_multiplier",
+   "fieldtype": "Float",
+   "label": "Default Overtime Multiplier",
+   "precision": "2",
+   "description": "Credit per overtime hour for everyone else, e.g. dispatchers. Default 1."
   }
  ],
  "index_web_pages_for_search": 0,

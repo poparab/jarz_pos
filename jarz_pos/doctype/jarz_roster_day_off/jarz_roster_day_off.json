@@ -1,0 +1,238 @@
+{
+ "actions": [],
+ "autoname": "JRDO-.YYYY.-.#####",
+ "creation": "2026-08-29 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "employee",
+  "employee_name",
+  "off_date",
+  "column_break_meta",
+  "off_type",
+  "shift_location",
+  "section_break_restore",
+  "original_shift_type",
+  "column_break_restore",
+  "original_shift_location",
+  "section_break_cover",
+  "covered_by",
+  "covered_by_name",
+  "column_break_cover",
+  "cover_shift_type",
+  "cover_previous_shift_type",
+  "cover_shift_location",
+  "section_break_note",
+  "notes",
+  "section_break_audit",
+  "created_by_user",
+  "column_break_audit",
+  "created_by_name"
+ ],
+ "fields": [
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Employee",
+   "options": "Employee",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fetch_from": "employee.employee_name",
+   "fieldname": "employee_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Employee Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "off_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Off Date",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Weekly Off",
+   "fieldname": "off_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Off Type",
+   "options": "Weekly Off\nVacation\nSick\nUnpaid\nOther",
+   "reqd": 1
+  },
+  {
+   "description": "Branch this person was rostered at when the day off was set. Recorded for scoping and reporting, not for enforcement.",
+   "fieldname": "shift_location",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Branch (Shift Location)",
+   "options": "Shift Location",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_restore",
+   "fieldtype": "Section Break",
+   "label": "Restore Data"
+  },
+  {
+   "description": "The shift this employee was rostered on before the day off was set. Used to put the roster back exactly as it was when the day off is cleared.",
+   "fieldname": "original_shift_type",
+   "fieldtype": "Link",
+   "label": "Original Shift Type",
+   "options": "Shift Type",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_restore",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "original_shift_location",
+   "fieldtype": "Link",
+   "label": "Original Shift Location",
+   "options": "Shift Location",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_cover",
+   "fieldtype": "Section Break",
+   "label": "Cover"
+  },
+  {
+   "description": "The colleague who absorbs this day, normally onto a longer full-day shift.",
+   "fieldname": "covered_by",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Covered By",
+   "options": "Employee",
+   "search_index": 1
+  },
+  {
+   "fetch_from": "covered_by.employee_name",
+   "fieldname": "covered_by_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Covered By Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_cover",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The shift the covering colleague was moved ONTO for this day.",
+   "fieldname": "cover_shift_type",
+   "fieldtype": "Link",
+   "label": "Cover Shift Type",
+   "options": "Shift Type",
+   "read_only": 1
+  },
+  {
+   "description": "The shift the covering colleague was on BEFORE cover. Used to restore them when the day off is cleared.",
+   "fieldname": "cover_previous_shift_type",
+   "fieldtype": "Link",
+   "label": "Cover Previous Shift Type",
+   "options": "Shift Type",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cover_shift_location",
+   "fieldtype": "Link",
+   "label": "Cover Shift Location",
+   "options": "Shift Location",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_note",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "section_break_audit",
+   "fieldtype": "Section Break",
+   "label": "Set By"
+  },
+  {
+   "fieldname": "created_by_user",
+   "fieldtype": "Link",
+   "label": "Set By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_audit",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "created_by_name",
+   "fieldtype": "Data",
+   "label": "Set By Name",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-29 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Roster Day Off",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ line manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "off_date",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -112,6 +112,21 @@ SEED_DEFAULTS: Dict[str, Any] = {
     "visit_day_minutes": 360,
     "visit_default_start_time": "10:00:00",
     "visit_stale_days": 60,
+    # Shift distribution. roster_enforce_checkin MUST be seeded rather than left
+    # to the doctype default: `get_single_value` casts a Check through cint(),
+    # so an unwritten field reads as 0 and the check-in gate would be silently
+    # off -- and "gate off" is indistinguishable from "everybody is correctly
+    # rostered" until somebody clocks in from home. The reader in
+    # events/employee_checkin defaults it ON for the same reason; seeding makes
+    # the Desk form agree with the behaviour instead of showing an empty box for
+    # something that is very much in effect.
+    "roster_enforce_checkin": 1,
+    "roster_default_standard_hours": 9.0,
+    "roster_courier_designations": "courier,driver,delivery",
+    # A courier's overtime hour is credited as two, a dispatcher's as one --
+    # the owner's rule, kept as settings so payroll can move it without a deploy.
+    "roster_courier_overtime_multiplier": 2.0,
+    "roster_default_overtime_multiplier": 1.0,
 }
 
 
