@@ -85,15 +85,24 @@ class TestShiftLengthHours(unittest.TestCase):
 class TestOvertimeCredit(unittest.TestCase):
     """Courier overtime counts double; everyone else's counts once."""
 
-    def _multiplier(self, designation, courier_mult=2.0, default_mult=1.0):
+    def _multiplier(
+        self,
+        designation,
+        scheduled=(),
+        employee="HR-EMP-00001",
+        courier_mult=2.0,
+        default_mult=1.0,
+    ):
         with patch.object(roster_service, "frappe") as mock_frappe, patch.object(
             roster_service, "single_float"
-        ) as mock_float:
+        ) as mock_float, patch.object(
+            roster_service, "_scheduled_shift_types", return_value=list(scheduled)
+        ):
             mock_frappe.db.get_single_value.return_value = "courier,driver,delivery"
             mock_float.side_effect = lambda _dt, field, default: (
                 courier_mult if "courier" in field else default_mult
             )
-            return roster_service.overtime_multiplier(designation)
+            return roster_service.overtime_multiplier(employee, designation)
 
     def test_courier_hour_is_credited_twice(self):
         self.assertEqual(self._multiplier("Courier"), 2.0)
@@ -109,7 +118,31 @@ class TestOvertimeCredit(unittest.TestCase):
     def test_match_is_case_insensitive(self):
         self.assertEqual(self._multiplier("COURIER"), 2.0)
 
-    def test_blank_designation_is_not_a_courier(self):
+    def test_shift_type_identifies_a_courier_when_designation_is_blank(self):
+        """The live case: every Employee record here has designation unset.
+
+        Classifying on designation alone paid all four couriers' overtime at
+        the dispatcher rate — half what they are owed — and nothing about the
+        result looked wrong.
+        """
+        self.assertEqual(
+            self._multiplier(None, scheduled=["Courier Nasr City"]), 2.0
+        )
+        self.assertEqual(
+            self._multiplier(None, scheduled=["Courier 6Oct-Dokki", "Courier 6Oct-Dokki - Friday"]),
+            2.0,
+        )
+
+    def test_branch_shift_types_stay_on_the_dispatcher_rate(self):
+        for scheduled in (
+            ["Branch Opening"],
+            ["Branch Closing", "Branch Closing - Friday"],
+            ["Branch Cover Full Day"],
+            ["Factory"],
+        ):
+            self.assertEqual(self._multiplier(None, scheduled=scheduled), 1.0, scheduled)
+
+    def test_no_designation_and_no_schedule_is_not_a_courier(self):
         self.assertEqual(self._multiplier(None), 1.0)
         self.assertEqual(self._multiplier(""), 1.0)
 
@@ -119,6 +152,33 @@ class TestOvertimeCredit(unittest.TestCase):
             self.assertFalse(roster_service.is_courier_designation("Cashier"))
             self.assertFalse(roster_service.is_courier_designation("Branch Manager"))
             self.assertTrue(roster_service.is_courier_designation("Driver"))
+
+
+class TestTimeTextKeepsMidnight(unittest.TestCase):
+    """A Time field of midnight is ``timedelta(0)``, which is FALSY.
+
+    ``str(value or "")`` therefore erases it. The Friday courier shift really
+    does end at 00:00, and it came back from staging with a blank end time
+    while its computed length stayed correct — so the picker would have shown
+    "14:30 → " with nothing after the arrow.
+    """
+
+    def test_midnight_survives(self):
+        self.assertEqual(roster_service._time_text(timedelta(0)), "0:00:00")
+
+    def test_a_real_time_is_unchanged(self):
+        self.assertEqual(
+            roster_service._time_text(timedelta(hours=16)), "16:00:00"
+        )
+
+    def test_only_none_means_absent(self):
+        self.assertEqual(roster_service._time_text(None), "")
+
+    def test_a_shift_ending_at_midnight_still_measures_correctly(self):
+        # 14:00 -> 00:00 is ten hours.
+        self.assertEqual(
+            roster_service.shift_length_hours(timedelta(hours=14), timedelta(0)), 10.0
+        )
 
 
 class TestRosterAccessGate(unittest.TestCase):
@@ -142,6 +202,33 @@ class TestRosterAccessGate(unittest.TestCase):
 
     def test_no_roles_is_refused(self):
         self.assertFalse(self._has_access([]))
+
+
+class TestHistoryStaysReadable(unittest.TestCase):
+    """A past month must still report the hours somebody worked.
+
+    HRMS runs ``mark_expired_shift_assignments_as_inactive`` daily, so every
+    assignment whose end date has passed flips to ``Inactive``. Reading with the
+    Active-only filter the WRITES use made all history disappear: last month's
+    calendar came back empty and its payroll hours read zero — for the one month
+    anybody actually needs to pay.
+    """
+
+    def test_read_filter_admits_expired_assignments(self):
+        self.assertIn("Inactive", roster_service.READABLE_ASSIGNMENT_STATUSES)
+        self.assertIn("Active", roster_service.READABLE_ASSIGNMENT_STATUSES)
+
+    def test_write_filter_stays_active_only(self):
+        # Breaking or extending an already-expired assignment is never right.
+        self.assertEqual(
+            roster_service.ACTIVE_ASSIGNMENT_FILTERS,
+            {"docstatus": 1, "status": "Active"},
+        )
+
+    def test_cancelled_assignments_are_excluded_from_both(self):
+        """Inactive means "already happened"; cancelled is docstatus 2."""
+        self.assertEqual(roster_service.ACTIVE_ASSIGNMENT_FILTERS["docstatus"], 1)
+        self.assertNotIn("Cancelled", roster_service.READABLE_ASSIGNMENT_STATUSES)
 
 
 class TestMonthBounds(unittest.TestCase):

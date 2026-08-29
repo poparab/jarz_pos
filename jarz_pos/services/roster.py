@@ -60,8 +60,19 @@ DAY_OFF_DOCTYPE = "Jarz Roster Day Off"
 #: Filters a Shift Assignment must match to count as "this person works today".
 #: Mirrors ``EmployeeCheckin.validate_distance_from_shift_location`` exactly --
 #: if these two disagree, the roster will show a shift the geofence does not
-#: honour, or refuse a check-in the roster says is fine.
+#: honour, or refuse a check-in the roster says is fine. Used for every WRITE:
+#: an expired assignment must never be broken or extended.
 ACTIVE_ASSIGNMENT_FILTERS = {"docstatus": 1, "status": "Active"}
+
+#: Statuses the month READ accepts. Deliberately wider than the write filter.
+#:
+#: HRMS runs ``mark_expired_shift_assignments_as_inactive`` daily, so every
+#: assignment whose end date has passed flips to ``Inactive``. Reading with the
+#: Active-only filter therefore makes all history vanish: last month's calendar
+#: comes back empty and the payroll hours for the month somebody actually wants
+#: to pay for read zero. ``Inactive`` here means "already happened", not
+#: "cancelled" -- cancelled is ``docstatus=2``, which is still excluded.
+READABLE_ASSIGNMENT_STATUSES = ("Active", "Inactive")
 
 #: Link on POS Profile that maps a POS branch to its HR Shift Location. Seeded
 #: by ``setup/roster_setup.py``; see ``allowed_shift_locations``.
@@ -226,6 +237,18 @@ def _as_timedelta(value: Any) -> Optional[timedelta]:
         return None
 
 
+def _time_text(value: Any) -> str:
+    """Render a Time field for the client, keeping midnight visible.
+
+    ``str(value or "")`` loses ``timedelta(0)`` because it is falsy -- the trap
+    that once shipped every midnight delivery slot as no slot at all. Only
+    ``None`` means "no time here".
+    """
+    if value is None:
+        return ""
+    return str(value)
+
+
 def shift_length_hours(start_time: Any, end_time: Any) -> float:
     """Length of a shift in hours, correct across midnight.
 
@@ -265,8 +288,13 @@ def shift_catalog() -> List[Dict[str, Any]]:
         catalog.append(
             {
                 "shift_type": row["name"],
-                "start_time": str(row.get("start_time") or ""),
-                "end_time": str(row.get("end_time") or ""),
+                # `or ""` would be wrong here: a Time field comes back as a
+                # timedelta, and midnight is timedelta(0), which is FALSY. The
+                # 6 Oct/Dokki Friday courier shift ends at 00:00 and would come
+                # out with a blank end time, rendering as "14:30 -> " in the
+                # picker while its computed length stayed correct.
+                "start_time": _time_text(row.get("start_time")),
+                "end_time": _time_text(row.get("end_time")),
                 "hours": shift_length_hours(row.get("start_time"), row.get("end_time")),
                 "color": row.get("color") or None,
                 "holiday_list": row.get("holiday_list") or None,
@@ -320,7 +348,33 @@ def is_courier_designation(designation: Optional[str]) -> bool:
     return any(token in text for token in _courier_designation_tokens())
 
 
-def overtime_multiplier(designation: Optional[str]) -> float:
+def is_courier(employee: Optional[str], designation: Optional[str] = None) -> bool:
+    """Whether this person's overtime is paid at the courier rate.
+
+    Designation alone is not enough, and on this site it answers nothing at all:
+    every Active Employee on staging and production has ``designation`` unset,
+    so a designation-only test classified all four couriers as dispatchers and
+    silently paid their overtime at half rate -- the exact number this feature
+    exists to get right.
+
+    The shift they are scheduled on is the signal that actually carries the
+    fact. The courier shift types are named for the job ("Courier Nasr City",
+    "Courier 6Oct-Dokki"), so the same token list matches them. Designation is
+    still checked first, so filling it in later takes precedence and needs no
+    code change.
+    """
+    if is_courier_designation(designation):
+        return True
+    if not employee:
+        return False
+    tokens = _courier_designation_tokens()
+    return any(
+        any(token in shift_type.lower() for token in tokens)
+        for shift_type in _scheduled_shift_types(employee)
+    )
+
+
+def overtime_multiplier(employee: Optional[str], designation: Optional[str] = None) -> float:
     """Credit per overtime hour: 2x for couriers, 1x for everyone else.
 
     The rule came from the owner directly -- a courier's extra hour is paid as
@@ -329,7 +383,7 @@ def overtime_multiplier(designation: Optional[str]) -> float:
     clock-derived hours. Auto-attendance is switched off on both servers, so
     check-in pairs are not a reliable source for a payroll number; the roster is.
     """
-    if is_courier_designation(designation):
+    if is_courier(employee, designation):
         return single_float(SETTINGS, "roster_courier_overtime_multiplier", DEFAULT_COURIER_OT_MULTIPLIER)
     return single_float(SETTINGS, "roster_default_overtime_multiplier", DEFAULT_STANDARD_OT_MULTIPLIER)
 
@@ -367,6 +421,38 @@ def _employee_standard_hours_field_exists() -> bool:
         return False
 
 
+def _scheduled_shift_types(employee: str) -> List[str]:
+    """Shift types behind this employee's enabled schedules.
+
+    Cached per request: it is read once for the overtime baseline and again for
+    the courier test, for every employee in the month, and the month read is
+    already the heaviest query on this screen.
+    """
+    cache = getattr(frappe.local, "_jarz_roster_sched_types", None)
+    if cache is None:
+        cache = {}
+        frappe.local._jarz_roster_sched_types = cache
+    if employee in cache:
+        return cache[employee]
+
+    shift_types: List[str] = []
+    try:
+        schedules = frappe.get_all(
+            "Shift Schedule Assignment",
+            filters={"employee": employee, "enabled": 1},
+            pluck="shift_schedule",
+        )
+        for schedule in schedules:
+            shift_type = frappe.db.get_value("Shift Schedule", schedule, "shift_type")
+            if shift_type:
+                shift_types.append(shift_type)
+    except Exception:
+        shift_types = []
+
+    cache[employee] = shift_types
+    return shift_types
+
+
 def _scheduled_shift_hours(employee: str) -> float:
     """Hours of the shift type behind this employee's enabled schedule.
 
@@ -374,23 +460,12 @@ def _scheduled_shift_hours(employee: str) -> float:
     weekday and a Friday schedule has two baselines, and taking the shorter one
     means a cover day is never accidentally scored as zero overtime.
     """
-    try:
-        schedules = frappe.get_all(
-            "Shift Schedule Assignment",
-            filters={"employee": employee, "enabled": 1},
-            pluck="shift_schedule",
-        )
-    except Exception:
-        return 0.0
-    if not schedules:
-        return 0.0
-
     hours_map = _shift_hours_map()
-    lengths: List[float] = []
-    for schedule in schedules:
-        shift_type = frappe.db.get_value("Shift Schedule", schedule, "shift_type")
-        if shift_type and hours_map.get(shift_type):
-            lengths.append(hours_map[shift_type])
+    lengths = [
+        hours_map[shift_type]
+        for shift_type in _scheduled_shift_types(employee)
+        if hours_map.get(shift_type)
+    ]
     return min(lengths) if lengths else 0.0
 
 
@@ -814,7 +889,11 @@ def get_month(
 
     assignments = frappe.get_all(
         "Shift Assignment",
-        filters=dict(ACTIVE_ASSIGNMENT_FILTERS, start_date=("<=", end)),
+        filters={
+            "docstatus": 1,
+            "status": ("in", READABLE_ASSIGNMENT_STATUSES),
+            "start_date": ("<=", end),
+        },
         or_filters=[["end_date", ">=", start], ["end_date", "is", "not set"]],
         fields=[
             "name",
@@ -923,7 +1002,7 @@ def get_month(
         row = employee_rows.get(employee, {})
         designation = row.get("designation")
         baseline = standard_hours(employee, row)
-        multiplier = overtime_multiplier(designation)
+        multiplier = overtime_multiplier(employee, designation)
         employee_holidays = holidays.get(employee, set())
 
         days: Dict[str, Any] = {}
@@ -958,7 +1037,7 @@ def get_month(
                 "department": row.get("department"),
                 "shift_locations": sorted(locations_by_employee.get(employee, set())),
                 "standard_hours": baseline,
-                "is_courier": is_courier_designation(designation),
+                "is_courier": is_courier(employee, designation),
                 "overtime_multiplier": multiplier,
                 "days": days,
             }
