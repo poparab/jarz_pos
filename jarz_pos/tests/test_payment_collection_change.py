@@ -128,7 +128,41 @@ def _build_stub_payment_receipts():
     return module
 
 
+_REAL_DEPENDENCIES_WARMED = False
+
+
+def _warm_real_dependencies():
+    """Import the real dependency graph once, before any stub is installed.
+
+    ``_import_delivery_handling`` re-imports ``delivery_handling`` under a stub
+    ``frappe`` that is a plain module, not a package. Any transitive
+    ``import frappe.<submodule>`` executed inside that window therefore blows up
+    with "No module named 'frappe.X'; 'frappe' is not a package" -- unless the
+    submodule is already cached in ``sys.modules``, in which case the import
+    system returns the cached entry without ever touching the stub parent.
+
+    ``delivery_handling`` imports ``erpnext.stock.stock_ledger``, which pulls in
+    ``erpnext/__init__`` -> ``frappe.utils.user`` -> ``import frappe.share``, so
+    whether this suite passed depended on what had happened to import erpnext
+    earlier in the same process. Importing the real module here caches every
+    real dependency up front, so the stubbed re-import below only re-executes
+    ``delivery_handling`` itself and resolves everything else from the cache.
+    """
+    global _REAL_DEPENDENCIES_WARMED
+    if _REAL_DEPENDENCIES_WARMED:
+        return
+    # Latch first: on an interpreter without a bench (no frappe/erpnext at all)
+    # this cannot succeed, and the stubbed import below fails loudly on its own
+    # rather than being retried once per test.
+    _REAL_DEPENDENCIES_WARMED = True
+    try:
+        importlib.import_module("jarz_pos.services.delivery_handling")
+    except ImportError:
+        pass
+
+
 def _import_delivery_handling(invoice=None):
+    _warm_real_dependencies()
     stub_frappe = _build_stub_frappe(invoice=invoice)
     stub_account_utils = _build_stub_account_utils()
     stub_payment_receipts = _build_stub_payment_receipts()
@@ -283,7 +317,12 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
         self.assertIn("real customer payment", str(exc.exception))
 
     def test_cash_flow_publishes_realtime_event(self):
-        module, stub_frappe = _import_delivery_handling(_FakeInvoice(name="INV-CASH-002"))
+        module, _ = _import_delivery_handling(_FakeInvoice(name="INV-CASH-002"))
+        # Assert on the module seam, not on ``stub_frappe.publish_realtime``:
+        # ``_publish_branch_event`` imports ``jarz_pos.utils.realtime`` lazily, at
+        # call time, which is outside the stub window -- so that helper binds the
+        # real ``frappe`` and the stub's mock would never see the call.
+        module._publish_branch_event = MagicMock(return_value=[])
         module._get_collection_change_source_ct = MagicMock(return_value={
             "name": "CT-002",
             "party_type": "Employee",
@@ -316,7 +355,7 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["mode"], "payment_collection_changed")
         self.assertEqual(result["new_method"], "Cash")
-        stub_frappe.publish_realtime.assert_called_once()
+        module._publish_branch_event.assert_called_once()
         module._apply_collection_change_to_cash.assert_called_once()
 
     def test_online_collection_requires_uploaded_receipt(self):
@@ -347,6 +386,7 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
     def test_replayed_token_returns_existing_result(self):
         invoice = _FakeInvoice(name="INV-ONLINE-REPLAY", custom_payment_method="Cash")
         module, stub_frappe = _import_delivery_handling(invoice)
+        module._publish_branch_event = MagicMock(return_value=[])
         module._get_collection_change_source_ct = MagicMock(return_value={
             "name": "CT-REPLAY-1",
             "party_type": "Employee",
@@ -372,7 +412,7 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
         self.assertEqual(result["journal_entry"], "JE-EXISTING")
         self.assertEqual(result["mode"], "cod_to_online")
         stub_frappe.db.savepoint.assert_not_called()
-        stub_frappe.publish_realtime.assert_not_called()
+        module._publish_branch_event.assert_not_called()
         self.assertEqual(invoice.custom_payment_method, "Instapay")
         self.assertTrue(invoice.flags.ignore_validate_update_after_submit)
         self.assertEqual(len(invoice._save_calls), 1)
