@@ -12,7 +12,7 @@ from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 # DEFAULT_UOM).  Module scope is safe and is the sanctioned direction:
 # ``production_planning`` is the shared layer and reaches back here only through
 # a deferred import inside a function body, so there is no cycle.
-from jarz_pos.services.production_planning import component_uom
+from jarz_pos.services.production_planning import attach_stock_elsewhere, component_uom
 
 # Fallbacks for the Jarz POS Settings fields the floor flow reads.  The Single
 # row reads empty until somebody saves it after a migrate, so every read has to
@@ -762,6 +762,12 @@ def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Di
     ``fetch_exploded=0``: this check exists to predict the Stock Entry the
     Work Order is about to post, and that entry moves the one-level bill.
     Checking raw materials was checking a different document entirely.
+
+    An ``insufficient_stock`` issue additionally carries ``available_elsewhere``
+    and ``alternatives``: short is measured in the recipe line's **source
+    warehouse only**, so an operator can be told they cannot start while the
+    company holds plenty of the item one branch away.  The block is unchanged —
+    the fix is a stock transfer, and the message now says so.
     """
     issues: List[Dict[str, Any]] = []
     required_rows = _get_required_material_rows(
@@ -811,6 +817,12 @@ def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Di
                 }
             )
 
+    # One batched lookup for every short item on the line, after the loop —
+    # never inside it.
+    attach_stock_elsewhere(
+        [issue for issue in issues if issue.get("type") == "insufficient_stock"], company
+    )
+
     return issues
 
 
@@ -818,6 +830,52 @@ def _format_precheck_issue(item_name: str, item_code: str) -> str:
     if item_name and item_name != item_code:
         return f"{item_name} ({item_code})"
     return item_code
+
+
+def _format_qty(value: Any) -> str:
+    """Trimmed quantity for prose: ``40.5``, not ``40.500``.
+
+    The existing shortage numbers stay at three fixed decimals — they are being
+    compared against each other and the alignment matters.  This one is read as
+    a sentence.
+    """
+    try:
+        text = f"{float(value or 0):.3f}"
+    except (TypeError, ValueError):
+        return "0"
+    text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _format_stock_elsewhere(issue: Dict[str, Any]) -> str:
+    """The "; 40.5 Kg is available in Nasr City - J" tail, or "" when there is none.
+
+    At most two warehouses are named and the rest collapse into "and N more":
+    this lands in a ``frappe.throw`` that already lists every short item, and a
+    message nobody finishes reading blocks just as hard while helping less.
+
+    ``alternatives`` absent means the lookup never ran; an empty list means it
+    ran and found nothing.  Both add nothing to the sentence, which is why the
+    distinction lives in the payload rather than here.
+    """
+    alternatives = issue.get("alternatives") or []
+    if not alternatives:
+        return ""
+
+    named = [str(alt.get("warehouse") or "") for alt in alternatives[:2]]
+    warehouses = ", ".join(name for name in named if name)
+    if not warehouses:
+        return ""
+
+    remaining = len(alternatives) - len(named)
+    if remaining > 0:
+        warehouses = _("{0} and {1} more").format(warehouses, remaining)
+
+    return _("; {0} {1} is available in {2}").format(
+        _format_qty(issue.get("available_elsewhere")),
+        issue.get("uom") or DEFAULT_UOM,
+        warehouses,
+    )
 
 
 def _assert_material_availability(line: Dict[str, Any], company: str) -> None:
@@ -847,6 +905,10 @@ def _assert_material_availability(line: Dict[str, Any], company: str) -> None:
                     f"{float(issue.get('required_qty') or 0):.3f}",
                     f"{float(issue.get('available_qty') or 0):.3f}",
                 )
+                # Appended, not substituted: the operator still needs the
+                # numbers, and now also needs to know a transfer — not a
+                # purchase — is what unblocks them.
+                + _format_stock_elsewhere(issue)
             )
 
     frappe.throw(
@@ -902,6 +964,11 @@ def _format_basket_shortage_message(shortages: List[Dict[str, Any]]) -> str:
                 f"{float(row.get('required_qty') or 0):.3f}",
                 f"{float(row.get('available_qty') or 0):.3f}",
             )
+            # The roll-up stamps the same two fields onto its shortage rows, so
+            # the basket message can point at the other store exactly the way the
+            # per-line one does.  Two shortage messages that answer "where is it"
+            # differently is how an operator learns to distrust both.
+            + _format_stock_elsewhere(row)
         )
     return _("Combined material shortage across the batch: {0}").format("; ".join(parts))
 

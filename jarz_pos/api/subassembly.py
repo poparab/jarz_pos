@@ -567,17 +567,27 @@ def _resolve_has_sop(item_code: str) -> bool:
 
 
 def _shape_limiting_component(row: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The board's capacity row, reduced to the five fields the card renders."""
+    """The board's capacity row, reduced to the fields the card renders."""
     if not row:
         return None
     item_code = str(row.get("item_code") or "")
-    return {
+    shaped = {
         "item_code": item_code,
         "item_name": row.get("item_name") or item_code,
         "available_qty": bases.to_float(row.get("available_qty"), 0.0),
         "required_qty": bases.to_float(row.get("required_qty"), 0.0),
         "is_missing_warehouse": row.get("reason") == "missing_source_warehouse",
     }
+
+    # Carried through only when ``build_capacity_map`` actually looked — which
+    # it does for a component that blocks the batch outright.  Defaulting them
+    # in would turn "nobody looked" into "there is none anywhere", which is a
+    # different and far more discouraging answer.
+    if "alternatives" in row:
+        shaped["available_elsewhere"] = bases.to_float(row.get("available_elsewhere"), 0.0)
+        shaped["alternatives"] = list(row.get("alternatives") or [])
+
+    return shaped
 
 
 def _resolve_demand(
@@ -808,6 +818,15 @@ def preview_base_batch(
                 "source_warehouse": row.get("source_warehouse") or None,
             }
         )
+
+    # "It's in another store", for the short components only, in one query after
+    # the loop.  Short is measured in the recipe line's source warehouse, so a
+    # component can read short here while the company holds plenty of it one
+    # branch away — and the fix for that is a transfer, not a purchase.  Rows
+    # with no shortfall keep both fields absent: nobody looked for them.
+    planning.attach_stock_elsewhere(
+        [row for row in components if row["shortfall"] > bases.QTY_EPSILON], company
+    )
 
     run_sizes = bases.run_sizes_for_item(
         item_code, mix_item=_resolve_mix_item(), mix_run_sizes=_resolve_mix_run_sizes()

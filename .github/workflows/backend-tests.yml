@@ -177,6 +177,12 @@ jobs:
             # `use_multi_level_bom = 0` on the Work Order) plus every call site.
             test_bom_material_rows
             test_production_planning
+            # "It's in another store". A shortage is measured in the recipe
+            # line's source warehouse only, so the floor was told to buy cheese
+            # the company already had one branch away. The load-bearing case is
+            # the last one: a failed lookup degrades to "no alternatives found"
+            # and the shortage must STILL block — there is no override here.
+            test_stock_elsewhere
             # The mixer-run split. Was absent from this list, which is why a red
             # test here (empty run_quality falling back to the defaults instead
             # of reporting an unconfigured mixer) survived on main unnoticed.

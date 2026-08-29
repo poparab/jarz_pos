@@ -35,6 +35,13 @@ DEFAULT_TARGET_DAYS = 7
 # suppress its own suggestion.
 NON_SELLABLE_WAREHOUSE_TYPES = ("Work In Progress", "Rejected")
 
+# The same idea applied to warehouses whose ``warehouse_type`` was never set —
+# on this site ``_find_company_warehouse`` resolves WIP by *name* hint precisely
+# because the type is unreliable.  Lower-cased substrings, matched against the
+# type and the name together, so a "WIP" type and a "Bakery WIP - J" name are
+# both caught by one rule instead of two conventions drifting apart.
+NON_SELLABLE_WAREHOUSE_NAME_HINTS = ("wip", "work in progress", "rejected")
+
 STATUS_CRITICAL = "critical"
 STATUS_LOW = "low"
 STATUS_OK = "ok"
@@ -73,6 +80,93 @@ def component_uom(row: Mapping[str, Any]) -> str:
         return stock_uom
     uom = str(row.get("uom") or "").strip()
     return uom or DEFAULT_UOM
+
+
+def is_non_sellable_warehouse(warehouse: Any, warehouse_type: Any = None) -> bool:
+    """Whether this warehouse's stock is NOT available to pick from.
+
+    THE single "is this a WIP/Rejected warehouse" rule, shared by the on-hand
+    roll-up's intent and by ``find_stock_elsewhere`` below.  Material that is
+    already inside a Work Order, or that quality rejected, is not stock another
+    branch can transfer — telling an operator to go fetch it would send them
+    after something that does not exist to be fetched.
+
+    The exact ``warehouse_type`` match comes first because that is the existing
+    convention (``NON_SELLABLE_WAREHOUSE_TYPES``).  The name hints are the
+    fallback for the sites where the type was never filled in — the same reason
+    ``manufacturing._find_company_warehouse`` resolves WIP by name hint.
+    """
+    wtype = str(warehouse_type or "").strip()
+    if wtype in NON_SELLABLE_WAREHOUSE_TYPES:
+        return True
+
+    haystack = f"{wtype} {warehouse or ''}".lower()
+    return any(hint in haystack for hint in NON_SELLABLE_WAREHOUSE_NAME_HINTS)
+
+
+def shape_stock_elsewhere(
+    item_codes: Sequence[str],
+    rows: Iterable[Mapping[str, Any]],
+    exclude_warehouse_by_item: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Pure half of ``find_stock_elsewhere`` — every rule, no database.
+
+    ``rows`` are ``{item_code, warehouse, warehouse_type, qty}`` as read by
+    ``_resolve_stock_elsewhere_rows``.  Everything the contract cares about is
+    decided here so it can be tested without a site:
+
+    * the item's own source warehouse is dropped — it is the one already
+      reported as short, and repeating it would answer "it is where you already
+      looked";
+    * WIP and Rejected warehouses are dropped (see ``is_non_sellable_warehouse``);
+    * quantities are floored at zero.  A negative Bin elsewhere is a counting
+      error, not a debt, and letting it subtract would hide real stock in a
+      third warehouse behind somebody else's miscount;
+    * ``alternatives`` is sorted by quantity descending, then warehouse name, so
+      the biggest pile is the one the message names and the order is stable
+      between two calls;
+    * every requested item gets an entry, ``0.0`` / ``[]`` when nothing was
+      found — "we looked and there is none anywhere" is a real answer here, and
+      a missing key would read as "we did not look".
+    """
+    codes = [str(c).strip() for c in (item_codes or []) if str(c or "").strip()]
+    result: Dict[str, Dict[str, Any]] = {
+        code: {"available_elsewhere": 0.0, "alternatives": []} for code in codes
+    }
+    if not result:
+        return result
+
+    excluded = {
+        str(key): str(value or "").strip()
+        for key, value in (exclude_warehouse_by_item or {}).items()
+    }
+
+    for row in rows or []:
+        item_code = str(row.get("item_code") or "").strip()
+        bucket = result.get(item_code)
+        if bucket is None:
+            continue
+
+        warehouse = str(row.get("warehouse") or "").strip()
+        if not warehouse or warehouse == excluded.get(item_code):
+            continue
+        if is_non_sellable_warehouse(warehouse, row.get("warehouse_type")):
+            continue
+
+        try:
+            qty = float(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+
+        bucket["alternatives"].append({"warehouse": warehouse, "available_qty": qty})
+        bucket["available_elsewhere"] += qty
+
+    for bucket in result.values():
+        bucket["alternatives"].sort(key=lambda alt: (-alt["available_qty"], alt["warehouse"]))
+
+    return result
 
 
 def suggested_batches(
@@ -470,11 +564,160 @@ def _resolve_bin_stock_map(pairs: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, 
     return {(r["item_code"], r["warehouse"]): float(r["qty"] or 0) for r in rows}
 
 
+def _resolve_stock_elsewhere_rows(item_codes: Sequence[str], company: str) -> List[Dict[str, Any]]:
+    """Every company Bin holding any of these items, in ONE query.
+
+    One query for the whole set, never one per item: the caller is a loop over
+    every shortage on a board that renders the entire catalogue, and an N+1 here
+    is exactly what made that screen slow before.
+
+    Only ``company`` and ``is_group = 0`` are pushed down — they are properties
+    of the warehouse row and cost nothing to join on.  The WIP/Rejected and
+    negative-quantity rules stay in ``shape_stock_elsewhere`` so they are pure,
+    testable, and stated once.
+
+    ``frappe.db.sql`` rather than the query builder because of the ``SUM``:
+    Frappe v16 rejects SQL functions inside a query-builder SELECT.
+
+    A read failure degrades to "no alternatives found".  The shortage message it
+    feeds must still be produced and must still block — losing the hint is a
+    worse message, losing the block would be a wrong batch.
+    """
+    codes = sorted({str(c).strip() for c in (item_codes or []) if str(c or "").strip()})
+    company = str(company or "").strip()
+    if not codes or not company:
+        return []
+
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT
+                b.item_code       AS item_code,
+                b.warehouse       AS warehouse,
+                w.warehouse_type  AS warehouse_type,
+                SUM(b.actual_qty) AS qty
+            FROM `tabBin` b
+            INNER JOIN `tabWarehouse` w ON w.name = b.warehouse
+            WHERE b.item_code IN %(codes)s
+              AND w.company = %(company)s
+              AND w.is_group = 0
+            GROUP BY b.item_code, b.warehouse, w.warehouse_type
+            """,
+            {"codes": codes, "company": company},
+            as_dict=True,
+        )
+    except Exception:
+        _log_failure(
+            "JARZ Production – stock-elsewhere read failed",
+            f"company={company} items={codes}\n{frappe.get_traceback()}",
+        )
+        return []
+
+    return [dict(r) for r in rows or []]
+
+
+def _log_failure(title: str, message: str) -> None:
+    """Log a degraded path without ever masking the failure that caused it.
+
+    ``frappe.log_error`` reads System Settings *outside* its own try block, so it
+    can raise from inside an ``except`` and replace the caller's real traceback
+    with its own.  Same guard as ``api/subassembly._log_failure``.
+    """
+    title = (title or "JARZ Production")[:140]
+    try:
+        frappe.log_error(title=title, message=message)
+        return
+    except Exception as logging_error:  # noqa: BLE001 — see docstring
+        fallback = f"{title}: {message} (log_error itself failed: {logging_error})"
+
+    try:
+        frappe.logger().error(fallback)
+    except Exception:  # noqa: BLE001
+        # Nothing left to log with.  Raising here would substitute a logging
+        # error for the real one, which is the trap this helper exists to avoid.
+        return
+
+
 def _resolve_cache():
     return frappe.cache()
 
 
 # ── Composition helpers used by api/production.py ───────────────────────
+
+
+def find_stock_elsewhere(
+    item_codes: Sequence[str],
+    company: str,
+    exclude_warehouse_by_item: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Where else in the company each of these items has pickable stock.
+
+    THE single implementation of the "it's in another store" lookup, shared by
+    the manufacturing precheck, the basket roll-up, the Bases preview and the
+    board's limiting component — the same reason ``component_uom`` lives here.
+
+    Returns ``{item_code: {"available_elsewhere": float, "alternatives":
+    [{"warehouse": str, "available_qty": float}]}}`` for **every** code asked
+    about.
+
+    This exists to change what a shortage *says*, never whether it blocks.  A
+    shortage is still a shortage: the fix for stock sitting in Nasr City is a
+    stock transfer, and an operator who is only told "you are short" goes
+    looking for a purchase order instead.
+
+    ``exclude_warehouse_by_item`` is the warehouse already named in the shortage
+    (the recipe line's source), which is dropped from the answer.  One item
+    listed twice with two different source warehouses collapses to one exclusion
+    — under-reporting an alternative, which is the safe direction.
+    """
+    codes = sorted({str(c).strip() for c in (item_codes or []) if str(c or "").strip()})
+    if not codes:
+        return {}
+
+    rows = _resolve_stock_elsewhere_rows(codes, company)
+    return shape_stock_elsewhere(codes, rows, exclude_warehouse_by_item)
+
+
+def attach_stock_elsewhere(
+    rows: Sequence[Dict[str, Any]],
+    company: str,
+    *,
+    item_key: str = "item_code",
+    warehouse_key: str = "source_warehouse",
+) -> None:
+    """Stamp ``available_elsewhere``/``alternatives`` onto shortage rows in place.
+
+    One lookup for the whole batch of rows, whatever the caller's row shape is.
+    Rows that were not passed keep the fields **absent**, which is deliberate:
+    absent means "nobody looked", ``0.0`` with an empty list means "we looked
+    and there is none anywhere else".  Those are different answers and the
+    client renders them differently.
+
+    Never raises.  The shortage that these rows describe must still be reported
+    and must still block even when the lookup is unavailable.
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict) and row.get(item_key)]
+    if not rows:
+        return
+
+    try:
+        found = find_stock_elsewhere(
+            [str(row.get(item_key)) for row in rows],
+            company,
+            {str(row.get(item_key)): row.get(warehouse_key) for row in rows},
+        )
+    except Exception:
+        _log_failure(
+            "JARZ Production – stock-elsewhere lookup failed",
+            f"company={company} items={[row.get(item_key) for row in rows]}\n"
+            f"{frappe.get_traceback()}",
+        )
+        found = {}
+
+    for row in rows:
+        entry = found.get(str(row.get(item_key))) or {}
+        row["available_elsewhere"] = float(entry.get("available_elsewhere") or 0.0)
+        row["alternatives"] = list(entry.get("alternatives") or [])
 
 
 def get_planning_context(company: str) -> Dict[str, Any]:
@@ -546,6 +789,18 @@ def build_capacity_map(rows: Sequence[Dict[str, Any]], company: str) -> Dict[str
         count, limiting = can_make_now(priced)
         capacity[item_code] = {"can_make_now_batches": count, "limiting_component": limiting}
 
+    # "It's in another store" for the components that actually block a batch —
+    # one extra query for the WHOLE board, not one per row.  Only the blocking
+    # rows (``can_make_now_batches`` of 0) are looked up: a limiting component
+    # that still allows three batches is not a shortage anybody needs redirecting
+    # about, and skipping those keeps the item list short.
+    blocking = [
+        entry["limiting_component"]
+        for entry in capacity.values()
+        if entry.get("limiting_component") and (entry.get("can_make_now_batches") or 0) <= 0
+    ]
+    attach_stock_elsewhere(blocking, company)
+
     return capacity
 
 
@@ -590,4 +845,10 @@ def build_basket_rollup(lines: Sequence[Dict[str, Any]], company: str) -> Dict[s
             for c in entry["components"]
         ]
 
-    return aggregate_basket_materials(sets)
+    rollup = aggregate_basket_materials(sets)
+    # Only the shortage rows: a component the basket can cover needs no
+    # redirection, and the pick list stays the pick list.  The rows are the same
+    # objects the ``components`` list holds, so a shortage carries the hint in
+    # both places without a second lookup.
+    attach_stock_elsewhere(rollup.get("shortages") or [], company)
+    return rollup
