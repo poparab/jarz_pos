@@ -106,7 +106,12 @@ class _CourierTransactionCapture:
         self.date = None
         self.reference_invoice = None
         self.amount = 0
+        # What the RIDER is owed out of the cash he carries. Zero on a partner row:
+        # his company bills us weekly instead, on partner_fee.
         self.shipping_amount = 0
+        self.partner_fee = 0
+        self.is_partner_order = 0
+        self.delivery_partner = None
         self.status = None
         self.payment_mode = None
         self.notes = None
@@ -237,7 +242,7 @@ class TestSubmittedInvoiceStateUpdates(unittest.TestCase):
 class TestOFDPaidJournalEntry(unittest.TestCase):
     """Verify handle_out_for_delivery_paid produces correct JE for both settlement modes."""
 
-    def _run_ofd_paid(self, settlement, shipping_exp, grand_total=500.0):
+    def _run_ofd_paid(self, settlement, shipping_exp, grand_total=500.0, delivery_partner=None):
         """Execute handle_out_for_delivery_paid with captured JE and CT."""
         je_capture = _JournalEntryCapture()
         ct_capture = _CourierTransactionCapture()
@@ -259,6 +264,9 @@ class TestOFDPaidJournalEntry(unittest.TestCase):
             mf.get_roles.return_value = ["Administrator"]
             mf.flags = MagicMock()
             mf.flags.in_test = True
+            # Without this frappe.throw is a silent MagicMock, so any guard under
+            # test "passes" by doing nothing.
+            mf.throw.side_effect = Exception
             mf.new_doc.side_effect = mock_new_doc
 
             # No existing JE or CT (idempotency check returns empty)
@@ -274,7 +282,7 @@ class TestOFDPaidJournalEntry(unittest.TestCase):
 
             with patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=shipping_exp), \
                   patch("jarz_pos.services.delivery_handling.resolve_assignment_pos_profile", return_value="POS-001"), \
-                  patch("jarz_pos.services.delivery_handling.assert_courier_matches_pos_profile", return_value={"branch": "POS-001", "delivery_partner": "DP-001"}), \
+                  patch("jarz_pos.services.delivery_handling.assert_courier_matches_pos_profile", return_value={"branch": "POS-001", "delivery_partner": delivery_partner}), \
                  patch("jarz_pos.services.delivery_handling.ensure_delivery_note_for_invoice", return_value={"delivery_note": "DN-001", "reused": False, "error": None}), \
                  patch("jarz_pos.services.delivery_handling.get_freight_expense_account", return_value=FREIGHT_ACC), \
                  patch("jarz_pos.services.delivery_handling.get_courier_outstanding_account", return_value=COURIER_OUTSTANDING_ACC), \
@@ -294,6 +302,15 @@ class TestOFDPaidJournalEntry(unittest.TestCase):
                 )
 
         return result, je_capture, ct_capture
+
+    def test_partner_courier_is_sent_to_the_settlement_flow(self):
+        """This path pays the RIDER his freight; a partner rider is owed nothing.
+
+        Letting a partner order through here would pay the wrong party a number
+        priced in the wrong map, so it is refused rather than guessed at.
+        """
+        with self.assertRaises(Exception):
+            self._run_ofd_paid("cash_now", 55.0, delivery_partner="Deliverk")
 
     # ── cash_now ──
 
@@ -695,7 +712,8 @@ class TestSettleCourierCollectedPayment(unittest.TestCase):
 class TestMarkCourierOutstanding(unittest.TestCase):
     """Verify mark_courier_outstanding creates correct PE, CT, and shipping JE."""
 
-    def _run_mark(self, outstanding=500.0, grand_total=500.0, shipping_exp=30.0):
+    def _run_mark(self, outstanding=500.0, grand_total=500.0, shipping_exp=30.0,
+                  delivery_partner=None, partner_fee=None):
         """Execute mark_courier_outstanding with captures."""
         je_capture = _JournalEntryCapture()
         ct_capture = _CourierTransactionCapture()
@@ -735,17 +753,19 @@ class TestMarkCourierOutstanding(unittest.TestCase):
 
             with patch("jarz_pos.services.delivery_handling._get_delivery_expense_amount", return_value=shipping_exp), \
                   patch("jarz_pos.services.delivery_handling.resolve_assignment_pos_profile", return_value="POS-001"), \
-                  patch("jarz_pos.services.delivery_handling.assert_courier_matches_pos_profile", return_value={"branch": "POS-001", "delivery_partner": "DP-001"}), \
+                  patch("jarz_pos.services.delivery_handling.assert_courier_matches_pos_profile", return_value={"branch": "POS-001", "delivery_partner": delivery_partner}), \
                  patch("jarz_pos.services.delivery_handling._get_courier_outstanding_account", return_value=COURIER_OUTSTANDING_ACC), \
                  patch("jarz_pos.services.delivery_handling._get_receivable_account", return_value=RECEIVABLE_ACC), \
                  patch("jarz_pos.services.delivery_handling.get_creditors_account", return_value=CREDITORS_ACC), \
                  patch("jarz_pos.services.delivery_handling.get_freight_expense_account", return_value=FREIGHT_ACC), \
                  patch("jarz_pos.services.delivery_handling._create_payment_entry") as mock_pe_fn, \
                  patch("jarz_pos.services.delivery_handling._create_shipping_expense_to_creditors_je") as mock_je_fn, \
+                 patch("jarz_pos.services.delivery_handling.create_partner_fee_accrual_je") as mock_partner_je_fn, \
                  patch("jarz_pos.services.delivery_handling.ensure_delivery_note_for_invoice", return_value={"delivery_note": "DN-001", "reused": False, "error": None}):
 
                 mock_pe_fn.return_value = pe_capture
                 mock_je_fn.return_value = "JE-SHIPPING"
+                mock_partner_je_fn.return_value = "JE-PARTNER-FEE"
 
                 from jarz_pos.services.delivery_handling import mark_courier_outstanding
 
@@ -754,35 +774,75 @@ class TestMarkCourierOutstanding(unittest.TestCase):
                     courier=None,
                     party_type="Employee",
                     party="EMP-001",
+                    shipping_override=partner_fee,
                 )
 
-        return result, ct_capture, mock_pe_fn, mock_je_fn
+        return result, ct_capture, mock_pe_fn, mock_je_fn, mock_partner_je_fn
+
+    # ── delivery partner ──
+    #
+    # Same function, same cash path — the ONLY difference is that a partner's rider
+    # is paid nothing out of what he carries, so the fee moves off the cash column
+    # and onto the partner's tab.
+
+    def test_partner_rider_owes_the_full_amount(self):
+        """Nothing is withheld from a partner rider, so the branch collects it all."""
+        _, ct, _, mock_je_fn, mock_partner_je_fn = self._run_mark(
+            grand_total=850.0, shipping_exp=55.0,
+            delivery_partner="Deliverk", partner_fee=55.0,
+        )
+        self.assertEqual(ct.amount, 850.0)
+        # Zero here is what makes every downstream `amount - shipping` yield 850.
+        self.assertEqual(ct.shipping_amount, 0.0)
+        self.assertEqual(ct.partner_fee, 55.0)
+        self.assertEqual(ct.is_partner_order, 1)
+        self.assertEqual(ct.delivery_partner, "Deliverk")
+        # The fee is NOT accrued to the rider on Creditors; it goes on the
+        # partner company's payable and is paid by bank transfer, weekly.
+        mock_je_fn.assert_not_called()
+        mock_partner_je_fn.assert_called_once()
+        self.assertEqual(mock_partner_je_fn.call_args.kwargs["fee"], 55.0)
+        self.assertEqual(mock_partner_je_fn.call_args.kwargs["delivery_partner"], "Deliverk")
+
+    def test_partner_dispatch_without_a_fee_is_refused(self):
+        """Our area rate is a different number for a different map — never a default."""
+        with self.assertRaises(Exception):
+            self._run_mark(delivery_partner="Deliverk", partner_fee=None)
+
+    def test_ordinary_courier_still_accrues_to_creditors(self):
+        """Regression: the partner path must not have changed the normal one."""
+        _, ct, _, mock_je_fn, mock_partner_je_fn = self._run_mark(grand_total=500.0, shipping_exp=30.0)
+        self.assertEqual(ct.amount, 500.0)
+        self.assertEqual(ct.shipping_amount, 30.0)
+        self.assertEqual(ct.partner_fee, 0)
+        mock_je_fn.assert_called_once()
+        mock_partner_je_fn.assert_not_called()
 
     def test_ct_amount_equals_grand_total(self):
         """CT.amount should be the invoice grand_total."""
-        _, ct, _, _ = self._run_mark(grand_total=500.0)
+        _, ct, _, _, _ = self._run_mark(grand_total=500.0)
         self.assertEqual(ct.amount, 500.0)
 
     def test_ct_shipping_amount_set(self):
         """CT.shipping_amount should match territory shipping expense."""
-        _, ct, _, _ = self._run_mark(shipping_exp=35.0)
+        _, ct, _, _, _ = self._run_mark(shipping_exp=35.0)
         self.assertEqual(ct.shipping_amount, 35.0)
 
     def test_ct_status_unsettled(self):
         """CT status should be Unsettled."""
-        _, ct, _, _ = self._run_mark()
+        _, ct, _, _, _ = self._run_mark()
         self.assertEqual(ct.status, "Unsettled")
 
     def test_ct_party_fields_set(self):
         """CT should have party_type and party."""
-        _, ct, _, _ = self._run_mark()
+        _, ct, _, _, _ = self._run_mark()
         self.assertEqual(ct.party_type, "Employee")
         self.assertEqual(ct.party, "EMP-001")
 
     def test_pe_called_with_outstanding(self):
         """PE should be created with the full outstanding amount."""
         outstanding = 450.0
-        _, _, pe_fn, _ = self._run_mark(outstanding=outstanding, grand_total=450.0)
+        _, _, pe_fn, _, _ = self._run_mark(outstanding=outstanding, grand_total=450.0)
         pe_fn.assert_called_once()
         args = pe_fn.call_args
         # Third positional arg is paid_to, fourth is outstanding
@@ -791,7 +851,7 @@ class TestMarkCourierOutstanding(unittest.TestCase):
     def test_shipping_je_called_with_expense(self):
         """Shipping JE should be created with the shipping expense amount."""
         shipping = 40.0
-        _, _, _, je_fn = self._run_mark(shipping_exp=shipping)
+        _, _, _, je_fn, _ = self._run_mark(shipping_exp=shipping)
         je_fn.assert_called_once()
         args = je_fn.call_args
         # Second positional arg is shipping_exp
@@ -829,12 +889,12 @@ class TestMarkCourierOutstanding(unittest.TestCase):
     def test_result_contains_net_to_collect(self):
         """Result should contain net_to_collect = order_amount - shipping."""
         gt, shipping = 500.0, 30.0
-        result, _, _, _ = self._run_mark(grand_total=gt, shipping_exp=shipping)
+        result, _, _, _, _ = self._run_mark(grand_total=gt, shipping_exp=shipping)
         self.assertAlmostEqual(result["net_to_collect"], gt - shipping, places=2)
 
     def test_no_pe_when_zero_outstanding(self):
         """No PE should be created when outstanding is 0 (already paid)."""
-        _, _, pe_fn, _ = self._run_mark(outstanding=0.0, grand_total=500.0)
+        _, _, pe_fn, _, _ = self._run_mark(outstanding=0.0, grand_total=500.0)
         pe_fn.assert_not_called()
 
     def test_uses_submitted_state_helper(self):
