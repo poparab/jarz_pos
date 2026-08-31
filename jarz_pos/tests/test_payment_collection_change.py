@@ -504,3 +504,109 @@ class TestConfirmOnlinePayment(unittest.TestCase):
         self.assertEqual(result["payment_confirmation_status"], "Payment Confirmed")
         module._create_payment_entry.assert_not_called()
         module.confirm_receipt.assert_not_called()
+
+
+class TestUnpaidOnlineCollectionChange(unittest.TestCase):
+    """The dispatch shape produced by handle_unpaid_online_deliver_unconfirmed.
+
+    Its Courier Transaction carries ``amount == 0`` (the courier collects nothing) while
+    the receivable is still on Debtors. Before 2026-09-01 that combination was refused
+    with "Courier transaction has no customer amount to change", which stranded every
+    unpaid-InstaPay order whose customer then wanted to pay cash.
+    """
+
+    FREIGHT_CT = {
+        "name": "CT-FREIGHT-1",
+        "party_type": "Employee",
+        "party": "EMP-010",
+        "amount": 0.0,
+        "shipping_amount": 35.0,
+        "payment_mode": "Deferred",
+        "notes": "Courier freight accrual (unpaid online delivery, awaiting payment)",
+        "idempotency_token": None,
+        "is_partner_order": 0,
+        "delivery_partner": None,
+        "partner_invoice_ref": None,
+    }
+
+    def _module(self, invoice, outstanding):
+        module, stub_frappe = _import_delivery_handling(invoice)
+        module._publish_branch_event = MagicMock(return_value=[])
+        module._get_collection_change_source_ct = MagicMock(return_value=dict(self.FREIGHT_CT))
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module._validate_collection_receipt = MagicMock()
+        stub_frappe.db.get_value = MagicMock(return_value=outstanding)
+        return module, stub_frappe
+
+    def test_switch_to_cash_moves_receivable_and_arms_the_existing_courier_row(self):
+        invoice = _FakeInvoice(name="INV-UO-1", grand_total=480.0,
+                               custom_payment_method="Instapay",
+                               custom_payment_confirmation_status="Awaiting Payment",
+                               outstanding_amount=480.0)
+        module, stub_frappe = self._module(invoice, 480.0)
+        module.mark_payment_receipts_changed_for_invoice = MagicMock(return_value=[])
+        module._get_receivable_account = MagicMock(return_value="Debtors - TC")
+        module._get_courier_outstanding_account = MagicMock(return_value="Courier Outstanding - TC")
+        module._create_payment_entry = MagicMock(return_value=SimpleNamespace(name="JV-UO-1"))
+
+        result = module.change_payment_collection_method(
+            invoice_name="INV-UO-1", new_method="Cash", pos_profile="Dokki")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["mode"], "payment_collection_changed")
+        # Debtors -> Courier Outstanding for the full outstanding amount.
+        module._create_payment_entry.assert_called_once()
+        args = module._create_payment_entry.call_args.args
+        self.assertEqual(args[1], "Debtors - TC")
+        self.assertEqual(args[2], "Courier Outstanding - TC")
+        self.assertEqual(args[3], 480.0)
+        # The EXISTING freight row is armed; a second row would double the freight.
+        values = stub_frappe.db.set_value.call_args.args[2]
+        self.assertEqual(values["amount"], 480.0)
+        self.assertEqual(values["payment_mode"], "Cash")
+        self.assertNotIn("shipping_amount", values)
+        self.assertEqual(invoice.custom_payment_method, "Cash")
+        self.assertEqual(invoice.custom_payment_confirmation_status, "Converted to Cash")
+
+    def test_switch_to_another_online_method_moves_no_money_and_needs_no_receipt(self):
+        invoice = _FakeInvoice(name="INV-UO-2", grand_total=810.0,
+                               custom_payment_method="Instapay",
+                               custom_payment_confirmation_status="Awaiting Payment",
+                               outstanding_amount=810.0)
+        module, stub_frappe = self._module(invoice, 810.0)
+        module.mark_payment_receipts_changed_for_invoice = MagicMock(return_value=[])
+        module._create_payment_entry = MagicMock()
+
+        result = module.change_payment_collection_method(
+            invoice_name="INV-UO-2", new_method="Mobile Wallet", pos_profile="Dokki")
+
+        self.assertTrue(result["success"])
+        module._create_payment_entry.assert_not_called()
+        module._validate_collection_receipt.assert_not_called()
+        values = stub_frappe.db.set_value.call_args.args[2]
+        self.assertNotIn("amount", values)          # nothing collected yet
+        self.assertEqual(values["payment_mode"], "Mobile Wallet")
+        self.assertEqual(invoice.custom_payment_method, "Mobile Wallet")
+        # Still waiting on a transfer -- confirm_online_payment books it.
+        self.assertEqual(invoice.custom_payment_confirmation_status, "Awaiting Payment")
+
+    def test_paid_order_with_zero_amount_row_reports_that_it_is_paid(self):
+        invoice = _FakeInvoice(name="INV-UO-3", grand_total=660.0, outstanding_amount=0.0)
+        module, _ = self._module(invoice, 0.0)
+        module._get_real_customer_payment_entry = MagicMock(return_value={"name": "PE-9"})
+
+        with self.assertRaises(Exception) as exc:
+            module.change_payment_collection_method(
+                invoice_name="INV-UO-3", new_method="Cash", pos_profile="Dokki")
+
+        self.assertIn("real customer payment", str(exc.exception))
+
+    def test_nothing_left_to_collect_says_so_plainly(self):
+        invoice = _FakeInvoice(name="INV-UO-4", grand_total=660.0, outstanding_amount=0.0)
+        module, _ = self._module(invoice, 0.0)
+
+        with self.assertRaises(Exception) as exc:
+            module.change_payment_collection_method(
+                invoice_name="INV-UO-4", new_method="Cash", pos_profile="Dokki")
+
+        self.assertIn("nothing left to collect", str(exc.exception))

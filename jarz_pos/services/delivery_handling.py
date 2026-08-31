@@ -1145,8 +1145,41 @@ def _mark_courier_outstanding_locked(
         pluck="name",
         limit_page_length=1,
     )
+    # A freight-only row may already exist for this same delivery: the unpaid-online and
+    # settle-later dispatches book one (amount 0, shipping = freight) so the courier is
+    # owed his fee even though he carries no customer money. When such an order is later
+    # converted to cash-on-delivery, upgrade THAT row instead of adding a second one —
+    # settlement sums ``shipping_amount`` across every unsettled row for the party, so two
+    # rows for one delivery pays the courier his fee twice. Partner rows are excluded: the
+    # fee lives on ``partner_fee`` there and the row is born Settled, so it never doubles.
+    adoptable_ct = []
+    if not existing_ct and not dp_link:
+        adoptable_ct = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": inv.name,
+                "party_type": party_type,
+                "party": party,
+                "status": ["!=", "Settled"],
+                "amount": ["<=", 0.0001],
+                "is_partner_order": 0,
+            },
+            fields=["name", "shipping_amount"],
+            order_by="creation asc",
+            limit_page_length=1,
+        )
+
     if existing_ct:
         ct_name = existing_ct[0]
+    elif adoptable_ct:
+        ct_name = adoptable_ct[0]["name"]
+        adopt_updates: dict[str, object] = {"amount": order_amount, "payment_mode": "Deferred"}
+        # Keep the freight the row already states; only fill it when it carries none.
+        if _safe_float(adoptable_ct[0].get("shipping_amount")) <= 0.0001:
+            adopt_updates["shipping_amount"] = float(shipping_exp or 0)
+        if delivery_trip:
+            adopt_updates["delivery_trip"] = delivery_trip
+        frappe.db.set_value("Courier Transaction", ct_name, adopt_updates)
     else:
         ct = frappe.new_doc("Courier Transaction")
         ct.party_type = party_type
@@ -3522,15 +3555,9 @@ def change_payment_collection_method(
             "idempotency_token": idempotency_token,
         }
 
-    order_amount = float(source_ct.get("amount") or 0)
-    if order_amount <= 0.0001:
-        frappe.throw("Courier transaction has no customer amount to change")
-
-    shipping_amount = float(source_ct.get("shipping_amount") or 0)
-    if shipping_amount <= 0.0001:
-        stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
-        shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
-
+    # Checked BEFORE the amount below on purpose: an order the customer has really
+    # paid also has a zero-amount courier row, and "no customer amount to change" is
+    # a baffling way to say "this one is already paid".
     existing_real_payment = _get_real_customer_payment_entry(inv.name, inv.company)
     if existing_real_payment:
         frappe.throw(
@@ -3539,15 +3566,62 @@ def change_payment_collection_method(
             )
         )
 
+    order_amount = float(source_ct.get("amount") or 0)
+
+    # An order dispatched through the UNPAID-ONLINE path carries no customer money on
+    # its Courier Transaction: the courier collects nothing (the customer was to transfer
+    # online), so ``amount`` is 0 and the row exists only to owe him his freight. The
+    # receivable is still on Debtors and Courier Outstanding was never debited — which is
+    # exactly why the two classic branches below do not fit here:
+    # ``_apply_collection_change_to_online`` would credit a Courier Outstanding balance
+    # that does not exist and drive it negative. Read the customer amount off the invoice
+    # instead, and route to the path that understands this shape.
+    unpaid_online = False
+    latest_outstanding = 0.0
+    if order_amount <= 0.0001:
+        # Read straight from the DB: the loaded document can be stale about payment.
+        latest_outstanding = _safe_float(
+            frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount"),
+            default=_safe_float(inv.get("outstanding_amount")),
+        )
+        if latest_outstanding > 0.0001:
+            unpaid_online = True
+            order_amount = float(inv.grand_total or 0) or latest_outstanding
+        else:
+            frappe.throw(
+                "This order has nothing left to collect from the customer, so there is "
+                "no collection method to change."
+            )
+
+    shipping_amount = float(source_ct.get("shipping_amount") or 0)
+    if shipping_amount <= 0.0001:
+        stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
+        shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+
     receipt_data = None
-    if _is_online_collection_method(new_method):
+    # An unpaid online-intent order has not been paid yet by definition, so there is no
+    # screenshot to demand — proof is collected later, by ``confirm_online_payment``.
+    if _is_online_collection_method(new_method) and not unpaid_online:
         if not receipt_name:
             frappe.throw("Online collection requires an uploaded payment receipt")
         receipt_data = _validate_collection_receipt(receipt_name, inv.name, new_method, order_amount)
 
     try:
         frappe.db.savepoint("change_payment_collection_method")
-        if _is_cash_collection_method(new_method):
+        if unpaid_online:
+            result = _apply_collection_change_for_unpaid_online(
+                inv=inv,
+                ct=source_ct,
+                new_method=new_method,
+                order_amount=order_amount,
+                shipping_amount=shipping_amount,
+                party_type=party_type,
+                party=party,
+                outstanding=latest_outstanding,
+                notes=notes,
+                idempotency_token=idempotency_token,
+            )
+        elif _is_cash_collection_method(new_method):
             result = _apply_collection_change_to_cash(
                 inv=inv,
                 ct=source_ct,
@@ -3879,6 +3953,81 @@ def _apply_collection_change_to_cash(*, inv, ct, new_method: str, order_amount: 
         "invoice": inv.name,
         "courier_transaction": ct_name,
         "journal_entry": None,
+        "order_amount": order_amount,
+        "shipping_amount": shipping_amount,
+        "changed_receipts": changed_receipts,
+        "idempotency_token": idempotency_token,
+    }
+
+
+def _apply_collection_change_for_unpaid_online(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, party_type: str, party: str, outstanding: float, notes: str | None, idempotency_token: str):
+    """Change how an UNPAID online-intent order will be collected.
+
+    These orders came through :func:`handle_unpaid_online_deliver_unconfirmed`: no
+    customer Payment Entry was made, the receivable is still on Debtors, and the Courier
+    Transaction holds only the courier's freight (``amount == 0``). Two different things
+    can be asked of that state:
+
+    * **switch to Cash** — the customer will now pay the courier at the door, so the order
+      becomes an ordinary COD: move the receivable to Courier Outstanding and put the
+      amount on the courier's EXISTING row. His freight was already accrued at dispatch,
+      so ``shipping_amount`` is deliberately left untouched — re-stating it, or adding a
+      second Courier Transaction, makes settlement pay him for one delivery twice.
+    * **switch to another online method** — nothing has been paid and no money moves; only
+      the ledger the transfer is expected in changes. ``confirm_online_payment`` still
+      books it when the transfer actually lands.
+    """
+    ct_name = ct.get("name")
+    to_cash = _is_cash_collection_method(new_method)
+    changed_receipts = mark_payment_receipts_changed_for_invoice(inv.name)
+
+    # Debtors -> Courier Outstanding. ``_create_payment_entry`` returns a Journal Entry
+    # rather than a Payment Entry when the destination ledger expects a party, so this
+    # holds whichever voucher was posted.
+    voucher_name = None
+    ct_updates: dict[str, object] = {
+        "payment_mode": new_method,
+        "idempotency_token": idempotency_token,
+    }
+    invoice_updates: dict[str, object] = {"custom_payment_method": new_method}
+
+    if to_cash:
+        if outstanding > 0.0001:
+            voucher = _create_payment_entry(
+                inv,
+                _get_receivable_account(inv.company),
+                _get_courier_outstanding_account(inv.company),
+                outstanding,
+                party_type,
+                party,
+            )
+            voucher_name = getattr(voucher, "name", None)
+        ct_updates["amount"] = order_amount
+        # No longer waiting on a bank transfer — this is the state the InstaPay
+        # reconciliation screen stamps for the same decision.
+        invoice_updates["custom_payment_confirmation_status"] = "Converted to Cash"
+
+    ct_updates["notes"] = _append_collection_change_note(
+        ct.get("notes"),
+        old_method=ct.get("payment_mode"),
+        new_method=new_method,
+        order_amount=order_amount,
+        shipping_amount=shipping_amount,
+        journal_entry=voucher_name,
+        receipt_name=None,
+        reference_no=None,
+        notes=notes,
+        idempotency_token=idempotency_token,
+        changed_receipts=changed_receipts,
+    )
+    frappe.db.set_value("Courier Transaction", ct_name, ct_updates)
+    update_submitted_sales_invoice_fields(inv, invoice_updates)
+
+    return {
+        "mode": "unpaid_online_to_cash" if to_cash else "unpaid_online_retarget",
+        "invoice": inv.name,
+        "courier_transaction": ct_name,
+        "journal_entry": voucher_name,
         "order_amount": order_amount,
         "shipping_amount": shipping_amount,
         "changed_receipts": changed_receipts,
