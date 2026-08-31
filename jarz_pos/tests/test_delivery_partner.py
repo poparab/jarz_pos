@@ -208,6 +208,37 @@ class TestPartnerFeeIsMandatory(unittest.TestCase):
 		mock_frappe.throw.assert_not_called()
 
 
+class TestPartnerLinkTyping(unittest.TestCase):
+	"""Only a real, non-empty string counts as "this rider works for a partner".
+
+	This gate decides whether an order is booked as partner-day money, so anything
+	that is merely *truthy* must not open it. The concrete failure: under a fully
+	mocked ``frappe`` the resolver returns a MagicMock, which is truthy and whose
+	``.strip()`` is truthy too — so an ORDINARY courier dispatch was refused for
+	missing a partner fee it had no business needing.
+	"""
+
+	def test_real_partner_name_is_accepted(self):
+		from jarz_pos.services.delivery_handling import _partner_link
+		self.assertEqual(_partner_link({"delivery_partner": "Deliverk"}), "Deliverk")
+		self.assertEqual(_partner_link({"delivery_partner": "  Deliverk  "}), "Deliverk")
+
+	def test_absent_or_empty_is_no_partner(self):
+		from jarz_pos.services.delivery_handling import _partner_link
+		self.assertIsNone(_partner_link({}))
+		self.assertIsNone(_partner_link(None))
+		self.assertIsNone(_partner_link({"delivery_partner": None}))
+		self.assertIsNone(_partner_link({"delivery_partner": "   "}))
+
+	def test_truthy_non_string_is_no_partner(self):
+		from jarz_pos.services.delivery_handling import _partner_link
+		# A MagicMock is truthy, and so is its .strip() — the exact shape that made
+		# an ordinary courier look like a partner rider.
+		self.assertIsNone(_partner_link({"delivery_partner": MagicMock()}))
+		self.assertIsNone(_partner_link({"delivery_partner": 1}))
+		self.assertIsNone(_partner_link({"delivery_partner": object()}))
+
+
 class TestPartnerCourierTransactionShape(unittest.TestCase):
 	"""Every partner row keeps the fee off the cash column."""
 

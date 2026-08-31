@@ -45,6 +45,25 @@ from jarz_pos.utils.invoice_utils import get_woo_order_ids, normalize_woo_order_
 
 DN_LOGIC_VERSION = "2026-05-04a"
 
+def _partner_link(courier_details) -> str | None:
+    """The Delivery Partner name on a resolved courier, or None.
+
+    Typed strictly on purpose. This value decides whether an order is booked as
+    partner-day money — full cash to the branch, fee owed to the partner company —
+    so anything that is not a real, non-empty string must read as "no partner"
+    rather than route real money down the partner path. Link fields come back as
+    strings or None; anything else here means the courier was never resolved.
+    """
+    try:
+        value = (courier_details or {}).get("delivery_partner")
+    except Exception:
+        return None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+
 # Constant VAT rate on partner fees
 PARTNER_FEES_VAT_RATE = 0.14  # 14%
 
@@ -1057,7 +1076,7 @@ def _mark_courier_outstanding_locked(
     # Is this rider working for a delivery partner? That changes WHO the delivery
     # fee is owed to (the partner company, weekly) and nothing else — the cash
     # side below is byte-for-byte the ordinary courier path.
-    dp_link = (courier_details.get("delivery_partner") or "").strip() or None
+    dp_link = _partner_link(courier_details)
 
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted before marking as courier outstanding.")
@@ -1401,7 +1420,7 @@ def handle_unpaid_online_deliver_unconfirmed(
     freight_ct = None
     freight_amount = 0.0
     if party_type and party:
-        _dp_probe = (courier_details.get("delivery_partner") or "").strip() or None
+        _dp_probe = _partner_link(courier_details)
         if _dp_probe:
             # Partner pricing never comes from our area rates — see
             # mark_courier_outstanding for the full reason.
@@ -1441,7 +1460,7 @@ def handle_unpaid_online_deliver_unconfirmed(
                 pluck="name",
                 limit_page_length=1,
             )
-            dp_link = (courier_details.get("delivery_partner") or "").strip() or None
+            dp_link = _partner_link(courier_details)
             if existing_freight_ct:
                 freight_ct = existing_freight_ct[0]
             else:
@@ -2601,7 +2620,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
     # is owed nothing, his company is, and its fee is priced in the partner's own
     # zones rather than ours. Routing a partner order through here would pay the
     # wrong party the wrong number, so send the caller to the flow that knows.
-    if (courier_details.get("delivery_partner") or "").strip():
+    if _partner_link(courier_details):
         frappe.throw(
             _(
                 "{0} works for a delivery partner. Dispatch this order through the "
