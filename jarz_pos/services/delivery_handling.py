@@ -1054,6 +1054,11 @@ def _mark_courier_outstanding_locked(
     courier_party_type = party_type
     courier_party = party
 
+    # Is this rider working for a delivery partner? That changes WHO the delivery
+    # fee is owed to (the partner company, weekly) and nothing else — the cash
+    # side below is byte-for-byte the ordinary courier path.
+    dp_link = (courier_details.get("delivery_partner") or "").strip() or None
+
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted before marking as courier outstanding.")
     # Re-check latest outstanding directly from DB to avoid stale cache
@@ -1069,9 +1074,24 @@ def _mark_courier_outstanding_locked(
     outstanding = latest_outstanding
     order_amount = float(inv.grand_total or (outstanding or 0))
 
+    # A delivery partner prices by its OWN zones, which are far finer than ours —
+    # they split one of our areas into dozens. Our territory rate is therefore never
+    # the right number for them, and falling back to it would book a cost that is
+    # quietly wrong on every partner order. The cost has to be the one their app
+    # quoted, entered by whoever requested the rider.
+    if dp_link and shipping_override is None:
+        frappe.throw(
+            _(
+                "This courier works for delivery partner {0}. Enter the partner's "
+                "delivery cost for this order before dispatching — our own area rate "
+                "does not apply to them."
+            ).format(dp_link)
+        )
+
     # Compute shipping first for CT and later JE
     # Priority: explicit override > stored SI value > territory calculation
-    if shipping_override is not None and shipping_override > 0:
+    # (A partner's typed cost wins even when it is zero — see the guard above.)
+    if shipping_override is not None and (shipping_override > 0 or dp_link):
         shipping_exp = float(shipping_override)
     else:
         stored = _safe_float(getattr(inv, "custom_shipping_expense", 0))
@@ -1080,11 +1100,14 @@ def _mark_courier_outstanding_locked(
         else:
             shipping_exp = _get_delivery_expense_amount(inv) or 0.0
 
-    # Only persist if the field was previously empty (avoid overwriting custom values)
-    if shipping_exp > 0:
+    # Only persist if the field was previously empty (avoid overwriting custom values).
+    # A partner's typed cost is the exception: it IS the truth for this order and has
+    # to overwrite whatever our territory table left there, or every delivery-cost
+    # report would show our own area rate instead of what the partner charged.
+    if shipping_exp > 0 or dp_link:
         try:
             current = _safe_float(getattr(inv, "custom_shipping_expense", 0))
-            if current <= 0:
+            if current <= 0 or dp_link:
                 inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
         except Exception:
             pass
@@ -1112,10 +1135,22 @@ def _mark_courier_outstanding_locked(
         ct.date = frappe.utils.now_datetime()
         ct.reference_invoice = inv.name
         ct.amount = order_amount
-        ct.shipping_amount = float(shipping_exp or 0)
+        # A delivery-partner rider is owed NOTHING out of the cash he carries: he
+        # hands over the full order amount and his company bills us weekly. So the
+        # fee goes on ``partner_fee`` and ``shipping_amount`` stays zero, which is
+        # what makes every downstream "amount - shipping" read the full amount
+        # without a single partner special case.
+        if dp_link:
+            ct.shipping_amount = 0.0
+            ct.partner_fee = float(shipping_exp or 0)
+            ct.is_partner_order = 1
+            ct.delivery_partner = dp_link
+            ct.notes = "Courier Outstanding (collect FULL order amount – partner rider takes no fee)"
+        else:
+            ct.shipping_amount = float(shipping_exp or 0)
+            ct.notes = "Courier Outstanding (collect order amount from courier)"
         ct.status = "Unsettled"
         ct.payment_mode = "Deferred"
-        ct.notes = "Courier Outstanding (collect order amount from courier)"
         if delivery_trip:
             ct.delivery_trip = delivery_trip
         ct.insert(ignore_permissions=True)
@@ -1157,11 +1192,16 @@ def _mark_courier_outstanding_locked(
             else:
                 raise
 
-    # Accrue courier shipping payable to Creditors (party line) if configured
+    # Accrue the delivery fee. An ordinary courier is owed it personally, so it
+    # lands on Creditors against him. A partner rider is owed nothing — his company
+    # is, and it bills us weekly — so it lands on the partner's payable instead.
     je_name = None
     if shipping_exp and shipping_exp > 0:
-        creditors_acc = get_creditors_account(company)
-        je_name = _create_shipping_expense_to_creditors_je(inv, shipping_exp, creditors_acc, party_type, party)
+        if dp_link:
+            je_name = create_partner_fee_accrual_je(inv, delivery_partner=dp_link, fee=shipping_exp)
+        else:
+            creditors_acc = get_creditors_account(company)
+            je_name = _create_shipping_expense_to_creditors_je(inv, shipping_exp, creditors_acc, party_type, party)
 
     # Update state (defer state commit to end of request)
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
@@ -1188,8 +1228,12 @@ def _mark_courier_outstanding_locked(
         "journal_entry": je_name,
         "courier_transaction": ct_name,
         "amount": order_amount,
-        "shipping_amount": shipping_exp or 0,
-        "net_to_collect": (order_amount - float(shipping_exp or 0)),
+        # A partner rider hands over the whole amount, so nothing is deducted from
+        # what the branch collects; his company's fee is reported separately.
+        "shipping_amount": 0 if dp_link else (shipping_exp or 0),
+        "partner_fee": (shipping_exp or 0) if dp_link else 0,
+        "delivery_partner": dp_link,
+        "net_to_collect": order_amount if dp_link else (order_amount - float(shipping_exp or 0)),
         "mode": "settle_later",
         "delivery_note": dn_result.get("delivery_note"),
         "delivery_note_reused": dn_result.get("reused"),
@@ -1284,6 +1328,7 @@ def handle_unpaid_online_deliver_unconfirmed(
     pos_profile: str | None = None,
     party_type: str | None = None,
     party: str | None = None,
+    partner_fee: float | None = None,
 ) -> dict:
     """Move an UNPAID online-intent order Out for Delivery WITHOUT touching accounting.
 
@@ -1356,12 +1401,30 @@ def handle_unpaid_online_deliver_unconfirmed(
     freight_ct = None
     freight_amount = 0.0
     if party_type and party:
-        stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
-        freight_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+        _dp_probe = (courier_details.get("delivery_partner") or "").strip() or None
+        if _dp_probe:
+            # Partner pricing never comes from our area rates — see
+            # mark_courier_outstanding for the full reason.
+            if partner_fee is None:
+                frappe.throw(
+                    _(
+                        "This courier works for delivery partner {0}. Enter the partner's "
+                        "delivery cost for this order before dispatching — our own area rate "
+                        "does not apply to them."
+                    ).format(_dp_probe)
+                )
+            freight_amount = float(partner_fee)
+            stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
+        else:
+            stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
+            freight_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
         if freight_amount and freight_amount > 0:
-            # Persist the resolved expense on the SI only when it was previously empty.
+            # Persist the resolved expense on the SI only when it was previously
+            # empty — except for a partner order, where the typed cost is the truth
+            # and must overwrite whatever our territory table had put there, or the
+            # delivery-cost reports would show our rate instead of what we paid.
             try:
-                if stored_ship <= 0:
+                if stored_ship <= 0 or _dp_probe:
                     inv.db_set("custom_shipping_expense", freight_amount, update_modified=False)
             except Exception:
                 pass
@@ -1378,6 +1441,7 @@ def handle_unpaid_online_deliver_unconfirmed(
                 pluck="name",
                 limit_page_length=1,
             )
+            dp_link = (courier_details.get("delivery_partner") or "").strip() or None
             if existing_freight_ct:
                 freight_ct = existing_freight_ct[0]
             else:
@@ -1387,18 +1451,41 @@ def handle_unpaid_online_deliver_unconfirmed(
                 ct.date = frappe.utils.now_datetime()
                 ct.reference_invoice = inv.name
                 ct.amount = 0  # courier collects nothing — the customer pays online
-                ct.shipping_amount = float(freight_amount)
-                ct.status = "Unsettled"
+                if dp_link:
+                    # A partner rider on a prepaid/online order carries no money AND
+                    # is owed nothing: there is no cash position for the branch to
+                    # settle in either direction, so this row is born Settled and
+                    # never appears in courier balances or at shift close. His
+                    # company's fee rides on ``partner_fee`` and is paid weekly,
+                    # tracked independently by ``partner_settled``.
+                    ct.shipping_amount = 0.0
+                    ct.partner_fee = float(freight_amount)
+                    ct.is_partner_order = 1
+                    ct.delivery_partner = dp_link
+                    ct.status = "Settled"
+                    ct.notes = (
+                        "Partner delivery fee accrual (unpaid online delivery, awaiting payment) "
+                        "- no cash position"
+                    )
+                else:
+                    ct.shipping_amount = float(freight_amount)
+                    ct.status = "Unsettled"
+                    ct.notes = "Courier freight accrual (unpaid online delivery, awaiting payment)"
                 ct.payment_mode = "Deferred"
-                ct.notes = "Courier freight accrual (unpaid online delivery, awaiting payment)"
                 ct.insert(ignore_permissions=True)
                 freight_ct = ct.name
 
-            # Freight-expense accrual JE (idempotent via user_remark tag — see FIX 3).
-            creditors_acc = get_creditors_account(inv.company)
-            freight_je = _create_shipping_expense_to_creditors_je(
-                inv, float(freight_amount), creditors_acc, party_type, party
-            )
+            # Fee accrual JE (idempotent via user_remark tag — see FIX 3). An ordinary
+            # courier is owed it personally; a partner rider's company is.
+            if dp_link:
+                freight_je = create_partner_fee_accrual_je(
+                    inv, delivery_partner=dp_link, fee=float(freight_amount)
+                )
+            else:
+                creditors_acc = get_creditors_account(inv.company)
+                freight_je = _create_shipping_expense_to_creditors_je(
+                    inv, float(freight_amount), creditors_acc, party_type, party
+                )
 
     # Mandatory Delivery Note (same enforcement as every other OFD path)
     dn_result = ensure_delivery_note_for_invoice(inv.name)
@@ -1431,6 +1518,7 @@ def deliver_online_unconfirmed(
     pos_profile: str,
     party_type: str | None = None,
     party: str | None = None,
+    partner_fee: float | None = None,
 ) -> dict:
     """Endpoint logic: move an unpaid online-intent invoice Out for Delivery (unconfirmed)."""
     invoice_name = (invoice_name or "").strip()
@@ -1446,6 +1534,7 @@ def deliver_online_unconfirmed(
         pos_profile=pos_profile,
         party_type=party_type,
         party=party,
+        partner_fee=partner_fee,
     )
     return {
         "success": True,
@@ -2206,11 +2295,12 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
         pos_profile, action_label="settling a delivery party"
     )
 
-    # §5-D: NEVER let the generic (non-partner) courier sweep pick up delivery-partner
-    # orders. Partner orders are booked with the hybrid money model and settle ONLY
-    # through settle_delivery_partner (they hit the partner's Payable settlement_account,
-    # not Courier Outstanding). Mixing them here mis-posts the batch settlement.
-    filters = {"status": ["!=", "Settled"], "is_partner_order": ["in", [0, None]]}
+    # Delivery-partner orders settle here like any other courier order. Their cash
+    # IS ordinary courier cash: the rider hands the branch the full amount and the
+    # branch keeps all of it, because ``shipping_amount`` is zero on a partner row.
+    # Only his company's fee is held back, on ``partner_fee``, and that is paid by
+    # bank transfer through ``settle_delivery_partner`` — never out of this drawer.
+    filters = {"status": ["!=", "Settled"]}
     if party_type and party:
         filters.update({"party_type": party_type, "party": party})
     else:
@@ -2505,6 +2595,19 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
     }
     if party_type and party and not derived_existing_party:
         courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
+
+    # This path pays the courier his freight out of the branch (cash_now) or accrues
+    # it to him personally (later). Neither is true of a delivery partner's rider: he
+    # is owed nothing, his company is, and its fee is priced in the partner's own
+    # zones rather than ours. Routing a partner order through here would pay the
+    # wrong party the wrong number, so send the caller to the flow that knows.
+    if (courier_details.get("delivery_partner") or "").strip():
+        frappe.throw(
+            _(
+                "{0} works for a delivery partner. Dispatch this order through the "
+                "settlement flow so the partner's own delivery cost is recorded."
+            ).format(_resolve_party_display_name(party_type, party) or party)
+        )
 
     company = inv.company
     shipping_exp = _get_delivery_expense_amount(inv) or 0.0
@@ -3375,9 +3478,11 @@ def change_payment_collection_method(
     if not (party_type and party):
         frappe.throw("Courier party is required for collection method change")
 
-    if source_ct.get("is_partner_order") or source_ct.get("delivery_partner") or source_ct.get("partner_invoice_ref"):
-        frappe.throw("Delivery partner orders are not supported for this collection method workflow yet")
-
+    # Delivery-partner orders go through here unchanged. Switching how the CUSTOMER
+    # pays says nothing about the partner's fee, which is owed either way and was
+    # already accrued at dispatch — so there is nothing partner-specific to do, and
+    # refusing (as this did until 2026-08-31) left partner day without a tool every
+    # other day has.
     if source_ct.get("idempotency_token") == idempotency_token:
         effective_method = _normalize_collection_method(source_ct.get("payment_mode") or new_method)
         update_submitted_sales_invoice_fields(inv, {"custom_payment_method": effective_method})
@@ -4099,12 +4204,11 @@ def get_courier_balances():
     if "courier" in cols:
         fields.append("courier")  # legacy label column, may not exist
 
-    # §5-D: exclude delivery-partner orders from the generic courier balances — they
-    # are shown/settled separately via get_delivery_partner_balances /
-    # settle_delivery_partner against the partner's Payable, not Courier Outstanding.
+    # Delivery-partner riders appear here like everyone else. They are holding real
+    # branch cash — the full order amount, since a partner rider is paid no fee out
+    # of it — so hiding them (as this did until 2026-08-31) meant the branch could
+    # not see, or collect, money someone was physically carrying.
     balance_filters = {"status": ["!=", "Settled"]}
-    if "is_partner_order" in cols:
-        balance_filters["is_partner_order"] = ["in", [0, None]]
 
     rows = frappe.get_all(
         "Courier Transaction",
@@ -4411,100 +4515,52 @@ def resolve_partner_bank_account(delivery_partner: str, company: str | None) -> 
     return None
 
 
-def create_partner_cod_dispatch_je(inv, *, delivery_partner: str, shipping_exp: float) -> str:
-    """COD partner dispatch JE — clears the customer receivable AND books delivery cost.
+def create_partner_fee_accrual_je(inv, *, delivery_partner: str, fee: float) -> str | None:
+    """Book what the delivery partner charges us for this trip.
 
-        DR  Partner settlement_account (GT - S_exp)   [Supplier party]
-        DR  Freight & Forwarding Charges (S_exp)
-        CR  Debtors (GT)                              [Customer party, ref = invoice]
+        DR  Freight & Forwarding Charges (fee)
+        CR  Partner settlement_account (fee)          [Supplier party]
 
-    The partner physically collects the customer's cash, so it now owes us the net
-    (order minus its own delivery fee). The Debtors credit references the Sales
-    Invoice, clearing its outstanding (invoice -> Paid) — no more stranded
-    receivable. Balanced for any sign of ``GT - S_exp`` (negative delivery margin
-    on free-shipping orders is handled). Idempotent per invoice.
+    This is the ONLY ledger movement a delivery partner causes at dispatch, and it
+    is deliberately identical for a cash order and a prepaid one.
+
+    The customer's money is not part of it. A partner's rider is a pure carrier: on
+    a cash order he hands over the FULL amount he collected, and on a prepaid order
+    he carries no money at all — in both cases exactly like our own courier, with
+    the single difference that he is never paid his fee out of that cash. The fee is
+    a debt to the partner COMPANY, cleared by one weekly bank transfer through
+    ``settle_delivery_partner``.
+
+    That is why the partner's ``settlement_account`` can only ever be credited here:
+    it is a pure payable. The old model debited it with collected cash and netted the
+    two directions, which is what put order money on a bank ledger while the branch
+    drawer — where the cash physically went — was never touched.
+
+    Returns None when there is no fee. Idempotent per invoice.
     """
     company = inv.company
-    existing = _find_existing_je_by_tag(company, inv.name, "PARTNER_COD_DISPATCH")
-    if existing:
-        return existing
-
-    gt = round(float(getattr(inv, "grand_total", 0) or 0), 2)
-    s = round(float(shipping_exp or 0), 2)
-    net = round(gt - s, 2)
-
-    partner_acc = _get_partner_settlement_account(delivery_partner)
-    supplier = get_delivery_partner_supplier(delivery_partner)
-    freight_acc = get_freight_expense_account(company)
-    debtors_acc = getattr(inv, "debit_to", None) or _get_receivable_account(company)
-
-    je = frappe.new_doc("Journal Entry")
-    je.voucher_type = "Journal Entry"
-    je.posting_date = frappe.utils.nowdate()
-    je.company = company
-    je.title = f"Partner COD Dispatch – {inv.name}"
-    je.user_remark = _je_user_remark(
-        inv.name, "PARTNER_COD_DISPATCH", f"Partner COD dispatch – {inv.name}"
-    )
-
-    if abs(net) > 0.005:
-        je.append("accounts", {
-            "account": partner_acc,
-            "party_type": "Supplier",
-            "party": supplier,
-            "debit_in_account_currency": net if net > 0 else 0,
-            "credit_in_account_currency": 0 if net > 0 else abs(net),
-        })
-    if s > 0.005:
-        je.append("accounts", {
-            "account": freight_acc,
-            "debit_in_account_currency": s,
-            "credit_in_account_currency": 0,
-        })
-    je.append("accounts", {
-        "account": debtors_acc,
-        "party_type": "Customer",
-        "party": inv.customer,
-        "reference_type": "Sales Invoice",
-        "reference_name": inv.name,
-        "debit_in_account_currency": 0,
-        "credit_in_account_currency": gt,
-    })
-
-    je.save(ignore_permissions=True)
-    je.submit()
-    return je.name
-
-
-def create_partner_online_dispatch_je(inv, *, delivery_partner: str, shipping_exp: float) -> str | None:
-    """Prepaid (online) partner dispatch JE — accrues the delivery payable to the partner.
-
-        DR  Freight & Forwarding Charges (S_exp)
-        CR  Partner settlement_account (S_exp)        [Supplier party]
-
-    The customer already paid us online (DR Bank / CR Debtors via pay_invoice), so
-    the receivable is already cleared. Here we only book the delivery cost and what
-    we owe the partner. Returns None when there is no delivery cost. Idempotent per invoice.
-    """
-    company = inv.company
-    s = round(float(shipping_exp or 0), 2)
+    s = round(float(fee or 0), 2)
     if s <= 0.005:
         return None
-    existing = _find_existing_je_by_tag(company, inv.name, "PARTNER_ONLINE_DISPATCH")
+    existing = _find_existing_je_by_tag(company, inv.name, "PARTNER_FEE_ACCRUAL")
     if existing:
         return existing
 
     partner_acc = _get_partner_settlement_account(delivery_partner)
     supplier = get_delivery_partner_supplier(delivery_partner)
     freight_acc = get_freight_expense_account(company)
+    for acc in (partner_acc, freight_acc):
+        validate_account_exists(acc)
 
     je = frappe.new_doc("Journal Entry")
     je.voucher_type = "Journal Entry"
     je.posting_date = frappe.utils.nowdate()
     je.company = company
-    je.title = f"Partner Online Dispatch – {inv.name}"
+    je.title = f"Partner Delivery Fee – {inv.name}"
     je.user_remark = _je_user_remark(
-        inv.name, "PARTNER_ONLINE_DISPATCH", f"Partner online dispatch – {inv.name}"
+        inv.name,
+        "PARTNER_FEE_ACCRUAL",
+        f"Delivery fee owed to {delivery_partner} – {inv.name}",
     )
 
     je.append("accounts", {
@@ -4546,35 +4602,55 @@ def create_partner_settlement_je(
     delivery_partner: str,
     company: str,
     bank_account: str,
-    cash_net_total: float,
-    online_ship_total: float,
+    order_fee_total: float,
+    extra_charges: list | None = None,
     token: str,
     human: str | None = None,
 ) -> str | None:
-    """Post ONE balanced Delivery-Partner settlement JE that clears the partner ledger.
+    """Post the weekly bank transfer that pays a Delivery Partner.
 
-      COD portion   (partner remits collected cash):  DR Bank / CR Partner (Σ order-ship) [Supplier]
-      Online portion (we pay the partner the fee):     DR Partner (Σ ship) [Supplier] / CR Bank
+        DR  Partner settlement_account (Σ per-order fees)  [Supplier party]
+        DR  Freight & Forwarding      (each fixed charge)
+        CR  Bank                       (total)
 
-    Both portions may coexist in one JE; the bank leg is netted. EVERY Partner line
-    carries the per-partner Supplier party (the v16 crash fix). Returns None when
-    there is nothing to settle. Idempotent via the ``token`` tag.
+    One direction only: we always owe the partner, never the other way round. The
+    per-order fees were already expensed at dispatch by
+    ``create_partner_fee_accrual_je``, so paying them only clears the payable. The
+    fixed charges on the partner's own invoice — a monthly subscription, waiting
+    time, a returned-trip charge — were never accrued, so they are expensed here.
+
+    ``extra_charges`` is a list of ``{"description": str, "amount": float,
+    "account": optional str}``. Each becomes its own JE line so the partner's
+    invoice can be read straight off the entry; ``account`` defaults to freight.
+
+    EVERY partner line carries the per-partner Supplier party (the v16 crash fix).
+    Returns None when there is nothing to pay. Idempotent via the ``token`` tag.
     """
     existing = _find_partner_settlement_je(company, delivery_partner, token)
     if existing:
         return existing
 
-    cash_net = round(float(cash_net_total or 0), 2)
-    online_ship = round(float(online_ship_total or 0), 2)
-    if abs(cash_net) < 0.005 and abs(online_ship) < 0.005:
+    fees = round(float(order_fee_total or 0), 2)
+    charges = []
+    for row in (extra_charges or []):
+        amt = round(float((row or {}).get("amount") or 0), 2)
+        if abs(amt) < 0.005:
+            continue
+        desc = str((row or {}).get("description") or "").strip() or "Fixed charge"
+        acc = str((row or {}).get("account") or "").strip() or None
+        charges.append({"description": desc, "amount": amt, "account": acc})
+
+    charges_total = round(sum(c["amount"] for c in charges), 2)
+    total = round(fees + charges_total, 2)
+    if abs(total) < 0.005:
         return None
 
     if not bank_account or not frappe.db.exists("Account", bank_account):
         frappe.throw("A valid bank account is required to settle the delivery partner.")
 
-    net_bank = round(cash_net - online_ship, 2)
     partner_acc = _get_partner_settlement_account(delivery_partner)
     supplier = get_delivery_partner_supplier(delivery_partner)
+    freight_acc = get_freight_expense_account(company)
     tag = _partner_settlement_dedup_tag(delivery_partner, token)
 
     je = frappe.new_doc("Journal Entry")
@@ -4582,38 +4658,41 @@ def create_partner_settlement_je(
     # JournalEntry.validate_cheque_info rejects any Bank Entry without cheque_no/
     # cheque_date, and this settlement has no cheque — the previous "Bank Entry"
     # crashed deterministically and nothing settled. A plain Journal Entry with a
-    # bank-account line is valid and matches the (working) dispatch JEs.
+    # bank-account line is valid and matches the (working) accrual JEs.
     je.voucher_type = "Journal Entry"
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Delivery Partner Settlement – {delivery_partner}"
     je.user_remark = f"{human or ('Delivery Partner settlement: ' + delivery_partner)} {tag}"
 
-    # COD remittance clears the DEBIT booked on the partner account at dispatch.
-    if abs(cash_net) > 0.005:
+    # Clear the payable the per-order accruals built up.
+    if abs(fees) > 0.005:
         je.append("accounts", {
             "account": partner_acc,
             "party_type": "Supplier",
             "party": supplier,
-            "debit_in_account_currency": 0 if cash_net > 0 else abs(cash_net),
-            "credit_in_account_currency": cash_net if cash_net > 0 else 0,
+            "debit_in_account_currency": fees if fees > 0 else 0,
+            "credit_in_account_currency": 0 if fees > 0 else abs(fees),
+            "user_remark": f"Delivery fees – {delivery_partner}",
         })
-    # Paying the partner clears the CREDIT booked on the partner account at dispatch.
-    if abs(online_ship) > 0.005:
+
+    # Fixed charges off the partner's invoice, expensed here because nothing
+    # accrued them earlier. One line each so the entry mirrors their invoice.
+    for c in charges:
+        acc = c["account"] or freight_acc
+        validate_account_exists(acc)
         je.append("accounts", {
-            "account": partner_acc,
-            "party_type": "Supplier",
-            "party": supplier,
-            "debit_in_account_currency": online_ship if online_ship > 0 else 0,
-            "credit_in_account_currency": 0 if online_ship > 0 else abs(online_ship),
+            "account": acc,
+            "debit_in_account_currency": c["amount"] if c["amount"] > 0 else 0,
+            "credit_in_account_currency": 0 if c["amount"] > 0 else abs(c["amount"]),
+            "user_remark": c["description"],
         })
-    # Netted bank leg.
-    if abs(net_bank) > 0.005:
-        je.append("accounts", {
-            "account": bank_account,
-            "debit_in_account_currency": net_bank if net_bank > 0 else 0,
-            "credit_in_account_currency": 0 if net_bank > 0 else abs(net_bank),
-        })
+
+    je.append("accounts", {
+        "account": bank_account,
+        "debit_in_account_currency": 0 if total > 0 else abs(total),
+        "credit_in_account_currency": total if total > 0 else 0,
+    })
 
     je.save(ignore_permissions=True)
     je.submit()
@@ -4690,15 +4769,14 @@ def _requires_settlement_entry(order_amount: float, shipping_amount: float) -> b
 def _summarize_courier_transactions(rows: list[dict]) -> dict:
     """Aggregate order/shipping totals from courier transactions.
 
-    §5-D: defensively skip any delivery-partner rows (``is_partner_order``) so this
-    generic (non-partner) courier summary never double-counts partner orders — those
-    settle exclusively through settle_delivery_partner against the partner's Payable.
+    Partner rows are included on purpose. They carry ``shipping_amount`` of zero —
+    a partner rider is paid nothing out of the cash he carries — so they contribute
+    their full amount to ``net_to_branch`` with no arithmetic special case. His
+    company's fee lives on ``partner_fee`` and is settled by bank, not from here.
     """
     order_total = 0.0
     shipping_total = 0.0
     for row in rows:
-        if row.get("is_partner_order"):
-            continue
         order_total += float(row.get("amount") or 0)
         shipping_total += float(row.get("shipping_amount") or 0)
 
@@ -4927,10 +5005,17 @@ def apply_shipping_override_to_courier_position(
         filters={"reference_invoice": invoice_name, "status": ["!=", "Settled"]},
         fields=[
             "name", "amount", "shipping_amount", "party_type", "party",
-            "is_partner_order", "delivery_partner",
+            "is_partner_order", "delivery_partner", "partner_fee",
         ],
         order_by="creation desc",
     )
+
+    # Which column actually holds the delivery cost depends on who is owed it. On a
+    # partner order ``shipping_amount`` is deliberately zero (the rider is owed
+    # nothing) and the cost sits on ``partner_fee``; correcting the wrong one would
+    # silently deduct the fee from the cash the branch collects.
+    def _fee_field(ct: dict) -> str:
+        return "partner_fee" if ct.get("is_partner_order") else "shipping_amount"
 
     if not cts:
         # Nothing dispatched yet is the happy path; everything already settled is
@@ -4944,7 +5029,7 @@ def apply_shipping_override_to_courier_position(
             )
         return {"courier_transaction": None, "journal_entry": None, "previous_amount": None}
 
-    with_shipping = [c for c in cts if float(c.get("shipping_amount") or 0) > 0.005]
+    with_shipping = [c for c in cts if float(c.get(_fee_field(c)) or 0) > 0.005]
     if len(with_shipping) > 1:
         frappe.throw(
             _(
@@ -4954,7 +5039,8 @@ def apply_shipping_override_to_courier_position(
         )
 
     target = with_shipping[0] if with_shipping else cts[0]
-    previous = round(float(target.get("shipping_amount") or 0), 2)
+    fee_field = _fee_field(target)
+    previous = round(float(target.get(fee_field) or 0), 2)
     if abs(previous - new_amount) <= 0.005:
         return {
             "courier_transaction": target["name"],
@@ -4967,7 +5053,7 @@ def apply_shipping_override_to_courier_position(
         frappe.throw(_("Sales Invoice {0} not found").format(invoice_name))
 
     frappe.db.set_value(
-        "Courier Transaction", target["name"], "shipping_amount", new_amount,
+        "Courier Transaction", target["name"], fee_field, new_amount,
         update_modified=True,
     )
 

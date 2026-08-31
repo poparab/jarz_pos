@@ -111,11 +111,18 @@ class ApprovedOverrideReachesSettlement(unittest.TestCase):
         self.assertEqual(payable["debit_in_account_currency"], 60.0)
 
     def test_partner_order_adjusts_the_partner_payable_not_creditors(self):
-        """A partner order was accrued against the partner's own settlement account."""
+        """A partner order was accrued against the partner's own settlement account.
+
+        Note the fixture's shape: a partner row carries ``shipping_amount`` of ZERO
+        and holds the trip fee on ``partner_fee``, because a partner's rider is paid
+        nothing out of the cash he carries. The override has to read and write that
+        column — correcting ``shipping_amount`` instead would start deducting the
+        partner's fee from the money the branch collects.
+        """
         from jarz_pos.services import delivery_handling as dh
 
         cts = [{
-            "name": "CT-P", "amount": 0.0, "shipping_amount": 50.0,
+            "name": "CT-P", "amount": 850.0, "shipping_amount": 0.0, "partner_fee": 50.0,
             "party_type": "Supplier", "party": "SUP-COURIER",
             "is_partner_order": 1, "delivery_partner": "Talabat", "status": "Unsettled",
         }]
@@ -136,6 +143,16 @@ class ApprovedOverrideReachesSettlement(unittest.TestCase):
         self.assertEqual(payable["credit_in_account_currency"], 40.0)
         self.assertEqual(payable["party"], "SUP-TALABAT")
         self.assertTrue(all(a["account"] != "Creditors - J" for a in je.accounts))
+
+        # The correction lands on the fee column, never on the cash column: the
+        # branch still collects the whole 850 from the rider.
+        written = {
+            call.args[2]: call.args[3]
+            for call in m.db.set_value.call_args_list
+            if call.args and call.args[0] == "Courier Transaction"
+        }
+        self.assertEqual(written.get("partner_fee"), 90.0)
+        self.assertNotIn("shipping_amount", written)
 
     def test_undispatched_order_is_a_no_op(self):
         """No CT yet: the override is picked up when the CT is born at dispatch."""

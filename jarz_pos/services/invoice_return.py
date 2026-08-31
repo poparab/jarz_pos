@@ -290,47 +290,24 @@ def _unsettled_courier_transactions(invoice_name: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _partner_context(inv: Any) -> Optional[Dict[str, Any]]:
-    """The partner ledger this order was dispatched against, if it is one.
+def _is_partner_order(inv: Any) -> bool:
+    """True when this order was delivered by a delivery partner's rider.
 
-    Delivery-partner orders never touch Courier Outstanding. Dispatch moves the
-    receivable to the partner's own ``settlement_account`` against a per-partner
-    Supplier (``settlement_strategies.handle_partner_*``), and the trip fee is
-    accrued there too. A return therefore has to unwind *that* account — crediting
-    Courier Outstanding instead leaves a permanent balance on an account this
-    order never debited, while the partner still shows as owing us for goods that
-    came back.
+    Two things follow, and they pull in opposite directions from the old model:
 
-    Returns ``None`` for ordinary courier orders, which keeps the generic path
-    exactly as it was.
+    * The CASH side needs no special handling at all. A partner rider carries the
+      branch's money exactly like our own courier does — dispatch moves the
+      receivable to Courier Outstanding against him, in full — so a return releases
+      it from Courier Outstanding like any other order.
+    * The FEE must NOT be reversed. The partner charges for the trip whether or not
+      the customer keeps the goods, so what we owe them stands after a return. The
+      Courier Transaction carries ``shipping_amount`` of zero and holds the fee on
+      ``partner_fee`` precisely so no freight-reversal path can reach it by accident.
     """
-    if not int(inv.get("custom_is_partner_order") or 0):
-        return None
-    partner = inv.get("custom_delivery_partner")
-    if not partner:
-        return None
     try:
-        from jarz_pos.services.delivery_handling import (
-            _get_partner_settlement_account,
-            get_delivery_partner_supplier,
-        )
-
-        account = _get_partner_settlement_account(partner)
-        supplier = get_delivery_partner_supplier(partner)
+        return bool(int(inv.get("custom_is_partner_order") or 0))
     except Exception:
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"Return: could not resolve partner ledger for {inv.get('name')}",
-        )
-        return None
-    if not account or not supplier:
-        return None
-    return {
-        "delivery_partner": partner,
-        "account": account,
-        "party_type": "Supplier",
-        "party": supplier,
-    }
+        return False
 
 
 def _money_state(inv: Any) -> str:
@@ -639,7 +616,7 @@ def plan_return_journal_legs(
     company = inv.company
     customer = inv.customer
     receivable = get_company_receivable_account(company)
-    partner = _partner_context(inv)
+    partner_order = _is_partner_order(inv)
     plans: List[Dict[str, Any]] = []
 
     if money_state == MONEY_UNPAID:
@@ -666,21 +643,16 @@ def plan_return_journal_legs(
     elif money_state == MONEY_COURIER_OUTSTANDING:
         # The receivable was moved off Debtors at dispatch and the carrier never
         # remitted. Give the customer their credit and release the carrier's
-        # liability in one entry — against whichever ledger actually holds it:
-        # Courier Outstanding for an ordinary courier, the partner's own
-        # settlement account for a delivery-partner order.
-        if partner:
-            release_leg = {
-                "account": partner["account"], "amount": return_total, "debit": False,
-                "party_type": partner["party_type"], "party": partner["party"],
-            }
-            human = f"Return partner reversal – {inv.name} / {credit_note_name}"
-        else:
-            release_leg = {
-                "account": _get_courier_outstanding_account(company),
-                "amount": return_total, "debit": False,
-            }
-            human = f"Return courier reversal – {inv.name} / {credit_note_name}"
+        # liability in one entry, against Courier Outstanding — which is where
+        # dispatch put it for EVERY carrier, a delivery partner's rider included.
+        # (It used to release a partner order against the partner's own settlement
+        # account, which matched the old model where partner dispatch bypassed
+        # Courier Outstanding. It no longer does.)
+        release_leg = {
+            "account": _get_courier_outstanding_account(company),
+            "amount": return_total, "debit": False,
+        }
+        human = f"Return courier reversal – {inv.name} / {credit_note_name}"
         plans.append({
             "je_type": JE_COURIER_OUTSTANDING,
             "human": human,
@@ -698,21 +670,19 @@ def plan_return_journal_legs(
     # already in the branch, so the only question is the refund, handled
     # separately as a Payment Entry (or left as customer credit).
 
-    if not pay_courier_for_trip and courier:
+    # A delivery partner charges for the trip whether or not the customer keeps the
+    # goods, so their fee is never reversed by a return — it stays on the weekly
+    # bill. ``shipping_amount`` is zero on a partner row (the fee lives on
+    # ``partner_fee``), so this block would skip it anyway; the guard is explicit so
+    # the rule is not lost the next time someone reads the arithmetic.
+    if not pay_courier_for_trip and courier and not partner_order:
         shipping = flt(courier.get("shipping_amount"))
         if shipping > _TOL:
-            # The accrual has to be reversed where it was made. A partner order
-            # accrued the trip fee on the partner's settlement account, not on
-            # Creditors — debiting Creditors here would leave the partner's
-            # payable standing and put a phantom debit on a courier's ledger.
-            if partner:
-                accrual_account = partner["account"]
-                party_type = partner["party_type"]
-                party = partner["party"]
-            else:
-                accrual_account = get_creditors_account(company)
-                party_type = courier.get("party_type")
-                party = courier.get("party")
+            # The accrual has to be reversed where it was made: on Creditors,
+            # against the courier who was going to be paid it.
+            accrual_account = get_creditors_account(company)
+            party_type = courier.get("party_type")
+            party = courier.get("party")
             plans.append({
                 "je_type": JE_FREIGHT_REVERSAL,
                 "human": f"Return freight reversal – {inv.name} / {credit_note_name}",
@@ -962,13 +932,15 @@ def _compensating_courier_transaction(
         ct.notes = f"Return reversal for {inv.name} (credit note {credit_note_name})"
         if courier.get("delivery_partner"):
             ct.delivery_partner = courier.get("delivery_partner")
-        # Mirror the source row's partner flag. The two settlement sweeps select on
-        # it and are mutually exclusive — settle_delivery_partner takes
-        # is_partner_order = 1, settle_courier takes 0/NULL — so a reversal that
-        # leaves it at the default lands in the wrong sweep twice over: the partner
-        # settlement never sees the reversal and still collects for returned goods,
-        # while a generic courier settlement picks up an orphan negative row.
+        # Mirror the source row's partner flag so the reversal is recognisable as
+        # partner-day cash. It carries NO fee of its own: the partner still charges
+        # for a trip whose goods came back, so the original fee stands and there is
+        # nothing to bill or credit here. Marking it already-billed keeps it out of
+        # the weekly reconciliation list, which is a list of trips to pay for.
         ct.is_partner_order = 1 if courier.get("is_partner_order") else 0
+        if ct.is_partner_order:
+            ct.partner_fee = 0
+            ct.partner_settled = 1
         ct.flags.ignore_permissions = True
         ct.insert(ignore_permissions=True)
         return ct.name

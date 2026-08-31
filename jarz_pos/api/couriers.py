@@ -115,9 +115,14 @@ def _guard_branch_action(
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None):
+def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None, partner_fee=None):
     _guard_invoice_action(invoice_name, action_label="recording courier outstanding")
-    return _mark_courier_outstanding(invoice_name, courier, party_type, party)
+    # ``partner_fee`` rides in as the shipping override: for a partner rider it is the
+    # ONLY accepted source of the delivery cost (the service refuses to guess from our
+    # own area rates), and for an ordinary courier it stays None and changes nothing.
+    return _mark_courier_outstanding(
+        invoice_name, courier, party_type, party, shipping_override=partner_fee
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +131,7 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None):
+def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None, partner_fee=None):
     """Move an unpaid online-intent (InstaPay/Mobile Wallet) order Out for Delivery
     while it stays honestly Unpaid (no receivable move, no Payment Entry).
 
@@ -135,7 +140,9 @@ def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: 
     clients can still dispatch an order mid-delivery.
     """
     _guard_invoice_action(invoice_name, action_label="dispatching an order")
-    return _deliver_online_unconfirmed(invoice_name, pos_profile, party_type, party)
+    return _deliver_online_unconfirmed(
+        invoice_name, pos_profile, party_type, party, partner_fee=partner_fee
+    )
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
@@ -640,7 +647,7 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
     settlement_ct_rows = frappe.get_all(
         "Courier Transaction",
         filters=settlement_ct_filters,
-        fields=["amount", "shipping_amount", "party_type", "party"],
+        fields=["amount", "shipping_amount", "party_type", "party", "partner_fee", "is_partner_order"],
         order_by="creation desc",
         limit=1,
     )
@@ -679,8 +686,18 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
             pass
     is_partner_order = bool(_dp)
 
-    # Partner orders: net_amount = full order amount (no shipping deduction)
+    # What the partner charges for the trip is NOT deducted from the cash the branch
+    # collects — the rider hands over every pound and his company bills us weekly.
+    # It lives on the transaction's ``partner_fee``, never on ``shipping_amount``,
+    # which is why the net below is the full amount.
+    partner_fee = 0.0
     if is_partner_order:
+        if settlement_ct is not None:
+            partner_fee = float(settlement_ct.get("partner_fee") or 0)
+        if partner_fee <= 0:
+            partner_fee = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+        # Nothing is withheld from the rider, so the branch collects the whole order.
+        shipping = 0.0
         net_amount = order_amount
     else:
         net_amount = order_amount - shipping
@@ -722,6 +739,7 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
             "last_payment_seconds": last_pe_seconds,
             "is_partner_order": is_partner_order,
             "delivery_partner": _dp,
+            "partner_fee": partner_fee,
             "is_online_unconfirmed": is_online_unconfirmed,
         },
     )
@@ -743,12 +761,18 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
         "expires_in": 180,
         "is_partner_order": is_partner_order,
         "delivery_partner": _dp,
+        "partner_fee": partner_fee,
+        # The cashier must type the partner's own price for this address before the
+        # order can go out — our area rates do not map onto the partner's zones, so
+        # there is deliberately no default to fall back on. Already dispatched
+        # orders (a transaction exists) keep the fee they were sent with.
+        "requires_partner_fee": bool(is_partner_order and settlement_ct is None),
         "is_online_unconfirmed": is_online_unconfirmed,
     }
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile: str | None = None, party_type: str | None = None, party: str | None = None, payment_mode: str = "Cash"):
+def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile: str | None = None, party_type: str | None = None, party: str | None = None, payment_mode: str = "Cash", partner_fee=None):
     """Confirm a previously previewed settlement atomically.
 
     If preview indicated unpaid and mode==pay_now, creates a Payment Entry, then performs
@@ -798,6 +822,12 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
         # Map preview mode to our strategy mode keys
         strat_mode = "now" if (mode or data.get("mode")) in {"pay_now", "now"} else "later"
         # Use separated strategies to perform the correct accounting and CT/JE actions
+        # The partner's own price for this trip, typed by the cashier off the
+        # partner's app. Falls back to the previewed value so a client that already
+        # showed the figure does not have to echo it back.
+        effective_partner_fee = partner_fee
+        if effective_partner_fee is None and data.get("is_partner_order"):
+            effective_partner_fee = data.get("partner_fee")
         res = _dispatch_settlement(
             inv_name=invoice,
             mode=strat_mode,
@@ -805,6 +835,7 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
             payment_type=payment_mode,
             party_type=party_type,
             party=party,
+            partner_fee=effective_partner_fee,
         )
 
         frappe.db.commit()
@@ -826,6 +857,7 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
             "party": party,
             "is_partner_order": data.get("is_partner_order", False),
             "delivery_partner": data.get("delivery_partner"),
+            "partner_fee": effective_partner_fee,
         }
         base.update({k: v for k, v in (res or {}).items() if k not in base})
         return base

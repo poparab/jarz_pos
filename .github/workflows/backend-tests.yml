@@ -130,6 +130,21 @@ jobs:
             test_settlement_accounting
             test_settlement_strategies
             test_settle_courier_for_invoice_scope
+            # Delivery partners. This module existed but was NEVER in this array,
+            # so the whole partner money model shipped untested — which is how the
+            # old one kept booking a cash order's money onto a bank ledger while
+            # the branch drawer it physically went into was never debited.
+            # TestOrdinaryCourierIsUnaffected is the load-bearing class: it pins
+            # that a partner's fee stays off `shipping_amount`, which is the single
+            # convention keeping normal deliveries out of all of this.
+            test_delivery_partner
+            # The approved-override sync. Its partner case pins that a corrected
+            # cost moves `partner_fee` and not the cash column - writing the wrong
+            # one starts deducting the partner's fee from what the branch collects.
+            test_custom_shipping_settlement_sync
+            # Switching cash <-> InstaPay after dispatch. Partner orders used to be
+            # refused outright here; they now go through the ordinary path.
+            test_payment_collection_change
             test_pickup_flow
             test_invoice_creation_accounting
             test_sales_partner_flow

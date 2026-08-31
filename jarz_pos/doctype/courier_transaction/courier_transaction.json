@@ -19,6 +19,10 @@
   "delivery_partner",
   "is_partner_order",
   "partner_invoice_ref",
+  "partner_fee",
+  "partner_settled",
+  "partner_settlement_je",
+  "partner_settled_on",
   "notes",
   "shift_carry_section",
   "carried_from_shift",
@@ -122,6 +126,36 @@
    "description": "Reference number from delivery partner's invoice for reconciliation"
   },
   {
+   "description": "What the delivery partner charges us for this trip. Tracked separately from shipping_amount, which is what the RIDER is owed - a partner rider is owed nothing, so this never nets against the cash he carries.",
+   "fieldname": "partner_fee",
+   "fieldtype": "Currency",
+   "label": "Partner Fee",
+   "depends_on": "eval:doc.is_partner_order"
+  },
+  {
+   "default": "0",
+   "description": "Set when this trip's fee has been paid to the delivery partner on a weekly settlement. Independent of `status`, which tracks the RIDER's cash.",
+   "fieldname": "partner_settled",
+   "fieldtype": "Check",
+   "label": "Partner Fee Settled",
+   "depends_on": "eval:doc.is_partner_order"
+  },
+  {
+   "fieldname": "partner_settlement_je",
+   "fieldtype": "Link",
+   "label": "Partner Settlement Entry",
+   "options": "Journal Entry",
+   "read_only": 1,
+   "depends_on": "eval:doc.is_partner_order"
+  },
+  {
+   "fieldname": "partner_settled_on",
+   "fieldtype": "Datetime",
+   "label": "Partner Fee Settled On",
+   "read_only": 1,
+   "depends_on": "eval:doc.is_partner_order"
+  },
+  {
    "fieldname": "notes",
    "fieldtype": "Small Text",
    "label": "Notes"
@@ -200,7 +234,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-28 10:00:00.000000",
+ "modified": "2026-08-31 09:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Courier Transaction",
