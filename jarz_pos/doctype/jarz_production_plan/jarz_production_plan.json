@@ -40,7 +40,8 @@
   "closed_on",
   "closed_by",
   "section_break_notes",
-  "notes"
+  "notes",
+  "cancellation_reason"
  ],
  "fields": [
   {
@@ -78,7 +79,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Draft\nPlanned\nClosed",
+   "options": "Draft\nPlanned\nClosed\nCancelled",
    "reqd": 1
   },
   {
@@ -242,6 +243,13 @@
    "fieldname": "notes",
    "fieldtype": "Small Text",
    "label": "Notes"
+  },
+  {
+   "fieldname": "cancellation_reason",
+   "fieldtype": "Small Text",
+   "label": "Cancellation Reason",
+   "read_only": 1,
+   "depends_on": "eval:doc.status=='Cancelled'"
   }
  ],
  "index_web_pages_for_search": 1,

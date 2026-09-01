@@ -40,6 +40,9 @@
   "expense_month",
   "approved_by",
   "approved_on",
+  "rejected_by",
+  "rejected_on",
+  "rejection_reason",
   "journal_entry"
  ],
  "fields": [
@@ -187,6 +190,28 @@
    "fieldtype": "Datetime",
    "label": "Approved On",
    "read_only": 1
+  },
+  {
+   "fieldname": "rejected_by",
+   "fieldtype": "Link",
+   "label": "Rejected By",
+   "options": "User",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "rejected_on",
+   "fieldtype": "Datetime",
+   "label": "Rejected On",
+   "read_only": 1,
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "rejection_reason",
+   "fieldtype": "Small Text",
+   "label": "Rejection Reason",
+   "read_only": 1,
+   "allow_on_submit": 1
   },
   {
    "fieldname": "journal_entry",

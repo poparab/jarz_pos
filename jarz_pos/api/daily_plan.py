@@ -391,6 +391,10 @@ def close_plan(
     doc = frappe.get_doc(PLAN_DOCTYPE, name)
     if doc.status == "Closed":
         frappe.throw(_("Production plan {0} is already closed").format(name))
+    if doc.status == "Cancelled":
+        frappe.throw(
+            _("Production plan {0} was cancelled and cannot be closed").format(name)
+        )
 
     if lines is not None:
         parsed = {row["item_code"]: row for row in _coerce_lines(lines)}
@@ -534,6 +538,7 @@ def _serialise(doc) -> Dict[str, Any]:
         "realised_units_per_batch": flt(doc.realised_units_per_batch),
         "closed_on": str(doc.closed_on) if doc.closed_on else None,
         "closed_by": doc.closed_by,
+        "cancellation_reason": doc.cancellation_reason,
         "notes": doc.notes,
         "lines": [
             {
@@ -552,3 +557,58 @@ def _serialise(doc) -> Dict[str, Any]:
             for row in doc.lines or []
         ],
     }
+
+
+@frappe.whitelist()
+def cancel_plan(name: str, reason: str) -> Dict[str, Any]:
+    """Call off a day's plan that will not be produced.
+
+    ``save_plan`` and ``close_plan`` were the only two exits a plan had, so a
+    day planned and then abandoned — the mixer broke, the delivery of cream
+    never arrived, someone planned the wrong date — could only be ended by
+    "closing" it with zero actuals. That is a lie in the one report that
+    measures how well the plan was hit: a cancelled day and a day that produced
+    nothing look identical, and the realised-units-per-batch figure is dragged
+    down by a batch that was never run.
+
+    A cancelled plan is also no longer the day's open plan (``_find_open_plan``
+    matches only ``Draft`` and ``Planned``), so the morning screen can plan the
+    same date again from scratch instead of reopening the abandoned one.
+
+    Nothing is unwound, because nothing was posted: a plan writes no stock and
+    no GL. Batches actually started against it are Work Orders in their own
+    right, and each is cancelled through
+    :func:`jarz_pos.api.manufacturing.cancel_production_batch`.
+    """
+    _ensure_execute_access()
+
+    name = (name or "").strip()
+    if not name:
+        frappe.throw(_("name is required"))
+
+    reason = (reason or "").strip()
+    if not reason:
+        frappe.throw(_("A reason is required to cancel a production plan"))
+
+    if not frappe.db.exists(PLAN_DOCTYPE, name):
+        frappe.throw(_("Production plan {0} not found").format(name))
+
+    doc = frappe.get_doc(PLAN_DOCTYPE, name)
+    if doc.status == "Cancelled":
+        frappe.throw(_("Production plan {0} is already cancelled").format(name))
+    if doc.status == "Closed":
+        frappe.throw(
+            _(
+                "Production plan {0} is already closed. A closed day records what was "
+                "actually made and is not cancelled after the fact."
+            ).format(name)
+        )
+
+    doc.status = "Cancelled"
+    doc.cancellation_reason = reason
+    doc.closed_on = frappe.utils.now_datetime()
+    doc.closed_by = frappe.session.user
+    doc.save()
+    frappe.db.commit()
+
+    return _serialise(doc)

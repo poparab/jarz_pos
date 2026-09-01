@@ -21,7 +21,10 @@
   "uploaded_by",
   "upload_date",
   "confirmed_by",
-  "confirmed_date"
+  "confirmed_date",
+  "rejected_by",
+  "rejected_date",
+  "rejection_reason"
  ],
  "fields": [
   {
@@ -74,7 +77,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-    "options": "Unconfirmed\nConfirmed\nChanged",
+    "options": "Unconfirmed\nConfirmed\nChanged\nRejected",
    "reqd": 1,
    "default": "Unconfirmed"
   },
@@ -123,6 +126,25 @@
    "fieldname": "confirmed_date",
    "fieldtype": "Datetime",
    "label": "Confirmed Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejected_by",
+   "fieldtype": "Link",
+   "label": "Rejected By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejected_date",
+   "fieldtype": "Datetime",
+   "label": "Rejected Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejection_reason",
+   "fieldtype": "Small Text",
+   "label": "Rejection Reason",
    "read_only": 1
   }
  ],

@@ -113,8 +113,16 @@ class JarzExpenseRequest(Document):
         if self.requires_approval is None:
             self.requires_approval = 0
 
-        # Provide a simple textual status hint for list views
-        if self.docstatus == 0:
+        # Provide a simple textual status hint for list views.
+        #
+        # "Rejected" is checked before the docstatus ladder because a rejected
+        # request stays a DRAFT: there is no docstatus for "refused", and
+        # submitting one just to cancel it would post the very Journal Entry the
+        # manager said no to. The rejection stamp is therefore the only thing
+        # that distinguishes it from a request still waiting for an answer.
+        if self.docstatus == 0 and (self.rejection_reason or self.rejected_on):
+            self.status = "Rejected"
+        elif self.docstatus == 0:
             self.status = "Pending Approval" if flt(self.requires_approval) else "Draft"
         elif self.docstatus == 1:
             self.status = "Approved"
@@ -122,6 +130,16 @@ class JarzExpenseRequest(Document):
             self.status = "Cancelled"
 
     def before_submit(self):
+        # A rejected request must never become an approved one by a later
+        # submit: `on_submit` posts the Journal Entry, so letting this through
+        # would spend money a manager explicitly refused. Clearing the rejection
+        # first is the documented way back — an un-reject, not a silent submit.
+        if self.rejection_reason or self.rejected_on:
+            frappe.throw(
+                _("Expense {0} was rejected by {1} and cannot be approved. File a new request.").format(
+                    self.name, self.rejected_by or _("a manager")
+                )
+            )
         if not self.approved_by:
             self.approved_by = frappe.session.user
         if not self.approved_on:
@@ -169,14 +187,36 @@ class JarzExpenseRequest(Document):
         self.db_set("journal_entry", je.name)
 
     def on_cancel(self):
-        if self.journal_entry and frappe.db.exists("Journal Entry", self.journal_entry):
-            try:
-                je = frappe.get_doc("Journal Entry", self.journal_entry)
-                je.flags.ignore_permissions = True
-                if je.docstatus == 1:
-                    je.cancel()
-            except Exception:
-                pass
+        """Reverse the Journal Entry this expense posted.
+
+        Deliberately NOT wrapped in a swallowing ``except``. Cancelling the
+        request while its Journal Entry stays submitted is the worst possible
+        outcome: the money is still out of the account, the ledger still carries
+        the expense, and the only document that explains either now reads
+        "Cancelled". If the reversal cannot be posted the whole cancel must fail
+        so the caller is told, and Frappe rolls the transaction back.
+        """
+        if not self.journal_entry:
+            return
+        if not frappe.db.exists("Journal Entry", self.journal_entry):
+            return
+
+        je = frappe.get_doc("Journal Entry", self.journal_entry)
+        if je.docstatus != 1:
+            return
+        je.flags.ignore_permissions = True
+        je.cancel()
+
+    def before_cancel(self):
+        """Move the textual status to Cancelled.
+
+        ``validate`` is the only place that derives ``status``, and Frappe skips
+        it on a cancel (``_save`` guards ``_validate`` with
+        ``if self._action != "cancel"``). Without this the row keeps reading
+        "Approved" after it has been cancelled — every list view and the mobile
+        expense card included.
+        """
+        self.status = "Cancelled"
 
 
 def on_doctype_update():

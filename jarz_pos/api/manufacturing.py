@@ -1977,6 +1977,22 @@ def return_wip_to_store(work_order: str) -> Dict[str, Any]:
         frappe.throw(_("Work Order {0} is not submitted").format(work_order))
         return {}
 
+    return _post_wip_return(
+        wo,
+        work_order,
+        remarks=f"Jarz: WIP returned to store for Work Order {work_order}",
+    )
+
+
+def _post_wip_return(wo: Any, work_order: str, remarks: str) -> Dict[str, Any]:
+    """Post the WIP -> source-warehouse Material Transfer for one Work Order.
+
+    Shared by :func:`return_wip_to_store` (a manager clearing stranded material
+    off a short batch) and :func:`cancel_production_batch` (the floor aborting a
+    batch outright). One implementation on purpose: the two differ only in who
+    may call them and what the remark says, and a second copy would be the place
+    the netting-off of previous returns silently drifted.
+    """
     leftover = _get_wip_leftover_rows(work_order)
     if not leftover:
         frappe.throw(_("Nothing is left in WIP for Work Order {0}").format(work_order))
@@ -2024,7 +2040,7 @@ def return_wip_to_store(work_order: str) -> Dict[str, Any]:
         # plain Material Transfer, and leaves fg_completed_qty out of it, so the
         # link changes no quantity on the Work Order.
         "work_order": work_order,
-        "remarks": f"Jarz: WIP returned to store for Work Order {work_order}",
+        "remarks": remarks,
         "items": items,
     }
     _apply_posting_datetime(payload, now_dt)
@@ -2041,3 +2057,138 @@ def return_wip_to_store(work_order: str) -> Dict[str, Any]:
         "stock_entry": doc.name,
         "returned_items": items,
     }
+
+
+@frappe.whitelist()
+def cancel_production_batch(work_order: str, reason: str) -> Dict[str, Any]:
+    """Abort a batch that was started but must not be finished.
+
+    Splitting production into ``start`` and ``finish`` created a state the old
+    one-shot flow never had: a batch that is open on the floor. Until now the
+    only way out of it was forward — post a Manufacture entry for goods that
+    were never made — because there was no way back. Operators started a batch
+    on the wrong item, or for the wrong quantity, and then had to choose between
+    faking an output and leaving the Work Order running for ever.
+
+    What this does, in order:
+
+    1. Refuses if anything has already been produced. Once a Manufacture entry
+       exists, finished goods are in stock and unwinding them is an accounting
+       reversal, not a cancel — the batch must be finished for what it actually
+       made. The message names the alternative rather than just saying no.
+    2. Returns everything still in WIP to the warehouse each component came
+       from, via the same Material Transfer :func:`return_wip_to_store` posts.
+       A cancelled batch that left its material in WIP would be worse than no
+       cancel at all: the stranded stock is invisible until a stock take.
+    3. Stops the Work Order. ``Stopped`` is ERPNext's own terminal state for
+       "this will not be produced", and it is deliberately not in
+       ``RUNNING_WORK_ORDER_STATUSES``, so the batch leaves the floor board.
+
+    Full cancellation (docstatus 2) is not used on purpose. It would require
+    cancelling the original Material Transfer for Manufacture, which rewrites
+    the stock ledger at the original posting date and fails outright once that
+    period is closed. Reversing with a new entry keeps the audit trail — the
+    material went out, then came back, and the reason is on the Work Order.
+
+    Gated at execute level rather than manager: a mis-started batch is a floor
+    mistake made minutes ago, and routing every one through a manager is how
+    operators learn to fake the finish instead.
+    """
+    _ensure_production_execute_access()
+
+    work_order = _coerce_str(work_order)
+    if not work_order:
+        frappe.throw(_("work_order is required"))
+
+    reason = _coerce_str(reason)
+    if not reason:
+        frappe.throw(_("A reason is required to cancel a batch"))
+
+    # Row lock FIRST, exactly as `finish_production_batch` does: two tablets
+    # racing a cancel against a finish must not both read produced_qty = 0.
+    wo = _resolve_work_order_doc(work_order, for_update=True)
+
+    if int(_flt(getattr(wo, "docstatus", 0))) != 1:
+        frappe.throw(_("Work Order {0} is not submitted").format(work_order))
+        return {}
+
+    status = _coerce_str(getattr(wo, "status", "") or "")
+    if status in ("Stopped", "Closed", "Completed"):
+        frappe.throw(
+            _("Work Order {0} is already {1} and cannot be cancelled").format(work_order, status)
+        )
+        return {}
+
+    produced = _flt(getattr(wo, "produced_qty", 0))
+    if produced > QTY_TOLERANCE:
+        frappe.throw(
+            _(
+                "{0} has already been produced against Work Order {1}, so it cannot "
+                "be cancelled. Finish the batch for what was actually made instead."
+            ).format(produced, work_order)
+        )
+        return {}
+
+    # Return whatever is still in WIP. A batch can legitimately have nothing
+    # there — someone already returned it by hand — and that must not block the
+    # cancel, so the "nothing left" throw is caught here rather than in the
+    # shared helper, which is right to refuse for its own caller.
+    stock_entry: Optional[str] = None
+    returned_items: List[Dict[str, Any]] = []
+    if _get_wip_leftover_rows(work_order):
+        result = _post_wip_return(
+            wo,
+            work_order,
+            remarks=f"Jarz: batch cancelled - {reason}",
+        )
+        stock_entry = result.get("stock_entry")
+        returned_items = result.get("returned_items") or []
+
+    _stop_work_order(work_order)
+
+    _stamp_work_order(
+        work_order,
+        {
+            "jarz_cancelled_by": _resolve_current_user(),
+            "jarz_cancelled_at": get_datetime(_resolve_now_datetime()),
+            "jarz_cancel_reason": reason,
+        },
+    )
+    _debug_log(f"batch cancelled: {work_order} ({reason})")
+
+    return {
+        "work_order": work_order,
+        "status": "Stopped",
+        "reason": reason,
+        "stock_entry": stock_entry,
+        "returned_items": returned_items,
+    }
+
+
+def _stop_work_order(work_order: str) -> None:
+    """Move a Work Order to ``Stopped``.
+
+    ERPNext exposes this as ``WorkOrder.stop_unstop(status)``, which does more
+    than write a field: it also cancels the reserved-quantity entries and
+    updates the linked production plan. Calling the method is therefore the
+    correct path and a bare ``db_set('status', 'Stopped')`` is not.
+
+    The fallback exists because ``stop_unstop`` has moved between ERPNext
+    versions, and a cancel whose material has ALREADY been returned must not
+    fail on the last step — that would leave the batch on the board with an
+    empty WIP, which reads as "nothing was transferred" and invites a second
+    start. Writing the status directly is a worse outcome than the method call,
+    and a better one than stopping half way.
+    """
+    try:
+        doc = frappe.get_doc("Work Order", work_order)
+        doc.flags.ignore_permissions = True
+        doc.stop_unstop("Stopped")
+        return
+    except Exception:
+        frappe.log_error(
+            title="JARZ - work order stop fell back",
+            message=f"stop_unstop failed for {work_order}; writing status directly",
+        )
+
+    frappe.db.set_value("Work Order", work_order, "status", "Stopped", update_modified=False)

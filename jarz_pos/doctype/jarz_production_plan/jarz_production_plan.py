@@ -29,8 +29,13 @@ from jarz_pos.services import daily_production_plan as planning
 STATUS_DRAFT = "Draft"
 STATUS_PLANNED = "Planned"
 STATUS_CLOSED = "Closed"
+STATUS_CANCELLED = "Cancelled"
 
 OPEN_STATUSES = (STATUS_DRAFT, STATUS_PLANNED)
+# A day that is over, however it ended. Both are exempt from the one-open-plan
+# rule and both keep their end-stamp, and the two guards below must agree on
+# that or a cancelled plan either blocks the replan or loses who cancelled it.
+ENDED_STATUSES = (STATUS_CLOSED, STATUS_CANCELLED)
 
 
 class JarzProductionPlan(Document):
@@ -50,9 +55,12 @@ class JarzProductionPlan(Document):
         Two people each starting a plan for the same morning is the failure
         this prevents — the floor would then be working from whichever one they
         happened to open.  Closed plans are exempt so the history of a day can
-        be re-planned after the fact.
+        be re-planned after the fact, and cancelled plans for the same reason:
+        cancelling is precisely how a day gets re-planned, so checking a
+        cancelled plan against the replacement someone already filed would make
+        the cancel itself impossible.
         """
-        if self.status == STATUS_CLOSED:
+        if self.status in ENDED_STATUSES:
             return
 
         duplicate = frappe.db.exists(
@@ -239,13 +247,20 @@ class JarzProductionPlan(Document):
         self.realised_units_per_batch = flt(realised or 0, 1)
 
     def _stamp_closure(self) -> None:
-        if self.status == STATUS_CLOSED:
+        """Record who ended the day, and when.
+
+        Cancelled counts as ended. Without it this method would null the stamp
+        `api.daily_plan.cancel_plan` just wrote — validate runs after the
+        endpoint sets the fields — and a cancelled plan would name nobody.
+        """
+        if self.status in ENDED_STATUSES:
             if not self.closed_on:
                 self.closed_on = now_datetime()
                 self.closed_by = frappe.session.user
         else:
             self.closed_on = None
             self.closed_by = None
+            self.cancellation_reason = None
 
 
 def _format_run(value: float) -> str:

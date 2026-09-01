@@ -198,6 +198,13 @@ class STATUS:
     CANCELLED = "Cancelled"
     SUBMITTED = "Submitted"
     RETURN = "Return"
+    # A request a manager turned down. Distinct from CANCELLED on purpose:
+    # cancelled means an approved document was reversed, rejected means it never
+    # became one. Collapsing the two would hide which of the requester's
+    # submissions were refused outright.
+    REJECTED = "Rejected"
+    PENDING_APPROVAL = "Pending Approval"
+    APPROVED = "Approved"
 
 
 # ── Payment modes ──────────────────────────────────────────────────────

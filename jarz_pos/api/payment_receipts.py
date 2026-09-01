@@ -16,6 +16,10 @@ from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 RECEIPT_STATUS_UNCONFIRMED = "Unconfirmed"
 RECEIPT_STATUS_CONFIRMED = "Confirmed"
 RECEIPT_STATUS_CHANGED = "Changed"
+# A manager looked at the proof of transfer and did not accept it. Kept
+# listable, unlike "Changed", so the person who uploaded it finds out why
+# instead of watching the receipt sit unconfirmed for ever.
+RECEIPT_STATUS_REJECTED = "Rejected"
 
 
 def _normalize_receipt_method(method: str | None) -> str:
@@ -252,6 +256,9 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
                 'upload_date',
                 'confirmed_by',
                 'confirmed_date',
+                'rejected_by',
+                'rejected_date',
+                'rejection_reason',
                 'creation',
                 'modified'
             ],
@@ -511,7 +518,18 @@ def confirm_receipt(receipt_name: str):
                 'success': True,
                 'message': 'Receipt already confirmed'
             }
-        
+
+        # Confirming a previously rejected receipt is deliberately allowed: it
+        # is the only way back from a rejection made in error, and the
+        # alternative -- refusing -- would strand the receipt in a state with no
+        # exit and push the branch to upload a duplicate image instead.
+        # The stale rejection stamp is cleared so the record does not read as
+        # both rejected and confirmed.
+        if receipt.status == RECEIPT_STATUS_REJECTED:
+            receipt.rejected_by = None
+            receipt.rejected_date = None
+            receipt.rejection_reason = None
+
         receipt.status = RECEIPT_STATUS_CONFIRMED
         receipt.confirmed_by = frappe.session.user
         receipt.confirmed_date = frappe.utils.now()
@@ -550,3 +568,62 @@ def get_accessible_pos_profiles():
     except Exception as e:
         frappe.logger().error(f"Failed to get accessible profiles: {str(e)}")
         frappe.throw(f"Failed to get accessible profiles: {str(e)}")
+
+
+@frappe.whitelist()
+def reject_receipt(receipt_name: str, reason: str):
+    """Turn down a payment receipt, recording who rejected it and why.
+
+    The counterpart :func:`confirm_receipt` shipped without. A receipt whose
+    screenshot showed the wrong amount, a different order, or nothing at all had
+    exactly one available action — Confirm — so the only way to register "this
+    is not proof of payment" was to leave it alone. That reads identically to
+    "nobody has looked yet", which is the state a branch chases the customer
+    over.
+
+    A rejected receipt stays visible rather than being deleted or marked
+    ``Changed``: the uploader has to see the reason to send a correct one, and a
+    receipt that vanishes teaches people to re-upload the same image.
+
+    Rejecting moves no money. ``confirm_receipt`` does not post the Payment
+    Entry either — :func:`jarz_pos.api.couriers.confirm_online_payment` does,
+    against a confirmed receipt — so the invoice simply stays unpaid, which is
+    the true state of the world.
+    """
+    receipt_name = str(receipt_name or "").strip()
+    if not receipt_name:
+        frappe.throw(_("Receipt name is required."))
+
+    reason = str(reason or "").strip()
+    if not reason:
+        frappe.throw(_("A reason is required to reject a payment receipt."))
+
+    receipt = frappe.get_doc("POS Payment Receipt", receipt_name)
+    _ensure_payment_receipt_confirm_access(getattr(receipt, "pos_profile", None))
+
+    if receipt.status == RECEIPT_STATUS_CONFIRMED:
+        frappe.throw(
+            _(
+                "Receipt {0} is already confirmed. If the payment did not arrive, reverse "
+                "the payment entry on the invoice instead."
+            ).format(receipt_name)
+        )
+    if receipt.status == RECEIPT_STATUS_REJECTED:
+        return {
+            "success": True,
+            "message": _("Receipt already rejected"),
+            "status": RECEIPT_STATUS_REJECTED,
+        }
+
+    receipt.status = RECEIPT_STATUS_REJECTED
+    receipt.rejected_by = frappe.session.user
+    receipt.rejected_date = frappe.utils.now()
+    receipt.rejection_reason = reason
+    receipt.save(ignore_permissions=True)
+
+    return {
+        "success": True,
+        "message": _("Receipt rejected"),
+        "status": RECEIPT_STATUS_REJECTED,
+        "reason": reason,
+    }

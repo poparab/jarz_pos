@@ -372,9 +372,15 @@ def _serialize_expense(
     doc: Dict[str, Any],
     account_labels: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
+    is_rejected = bool(doc.get("rejection_reason") or doc.get("rejected_on"))
+    # A rejected request never leaves docstatus 0 (see the doctype controller),
+    # so the docstatus alone cannot tell "refused" from "still waiting".
+    draft_status = STATUS.REJECTED if is_rejected else (
+        STATUS.PENDING_APPROVAL if doc.get("requires_approval") else STATUS.DRAFT
+    )
     status_map = {
-        0: "Pending Approval" if doc.get("requires_approval") else STATUS.DRAFT,
-        1: "Approved",
+        0: draft_status,
+        1: STATUS.APPROVED,
         2: STATUS.CANCELLED,
     }
     reason_label = doc.get("reason_label") or doc.get("reason_account")
@@ -401,7 +407,7 @@ def _serialize_expense(
             "user": doc.get("requested_by") or doc.get("owner"),
         }
     )
-    if doc.get("docstatus") == 0 and doc.get("requires_approval"):
+    if doc.get("docstatus") == 0 and doc.get("requires_approval") and not is_rejected:
         timeline.append(
             {
                 "label": "Awaiting Approval",
@@ -415,6 +421,18 @@ def _serialize_expense(
                 "label": "Approved",
                 "timestamp": doc.get("approved_on"),
                 "user": doc.get("approved_by"),
+            }
+        )
+    if is_rejected:
+        timeline.append(
+            {
+                # A cancel reverses an approval; a reject refuses one. Both stamp
+                # the same three fields, and the docstatus is what tells them
+                # apart for the reader.
+                "label": "Cancelled" if doc.get("docstatus") == 2 else "Rejected",
+                "timestamp": doc.get("rejected_on"),
+                "user": doc.get("rejected_by"),
+                "reason": doc.get("rejection_reason"),
             }
         )
     payload = {
@@ -438,6 +456,10 @@ def _serialize_expense(
         "requested_by": doc.get("requested_by"),
         "approved_by": doc.get("approved_by"),
         "approved_on": doc.get("approved_on"),
+        "rejected_by": doc.get("rejected_by"),
+        "rejected_on": doc.get("rejected_on"),
+        "rejection_reason": doc.get("rejection_reason"),
+        "is_rejected": is_rejected,
         "remarks": doc.get("remarks"),
         "journal_entry": doc.get("journal_entry"),
         "company": doc.get("company"),
@@ -485,6 +507,9 @@ def _collect_expenses(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
             "requested_by",
             "approved_by",
             "approved_on",
+            "rejected_by",
+            "rejected_on",
+            "rejection_reason",
             "remarks",
             "journal_entry",
             "company",
@@ -684,6 +709,130 @@ def approve_expense(name: str):
     doc.submit()
     doc.reload()
 
+    return {
+        "success": True,
+        "expense": _serialize_expense(doc.as_dict()),
+    }
+
+
+@frappe.whitelist(allow_guest=False)
+def reject_expense(name: str, reason: str):
+    """Turn down a pending expense request, recording who said no and why.
+
+    The counterpart to :func:`approve_expense`, which shipped without one — so a
+    request a manager did not want to pay sat in "Pending Approval" for ever and
+    the requester was never told. Silence is not a decision.
+
+    The request is kept as a draft rather than deleted or submitted:
+
+    * Deleting it would erase the reason along with the row, and the requester
+      would see their expense simply vanish.
+    * Submitting it is impossible by definition — ``on_submit`` posts the
+      Journal Entry, which is exactly the payment being refused.
+
+    So the row stays at ``docstatus 0`` and carries the rejection stamp, which
+    is what ``validate`` turns into the ``Rejected`` status. ``before_submit``
+    then refuses to approve it later, so a rejection cannot be walked back into
+    a payment by a second click on Approve.
+    """
+    if not _is_manager():
+        frappe.throw(_("Only managers can reject expenses."), frappe.PermissionError)
+
+    name = (name or "").strip()
+    if not name:
+        frappe.throw(_("Expense document name is required."))
+
+    reason = (reason or "").strip()
+    if not reason:
+        frappe.throw(_("A reason is required to reject an expense request."))
+
+    doc = frappe.get_doc("Jarz Expense Request", name)
+    if doc.docstatus == 1:
+        frappe.throw(
+            _("Expense {0} is already approved. Cancel it instead, which reverses its journal entry.").format(name)
+        )
+    if doc.docstatus == 2:
+        frappe.throw(_("Expense {0} is already cancelled.").format(name))
+    if doc.rejection_reason or doc.rejected_on:
+        frappe.throw(_("Expense {0} was already rejected.").format(name))
+
+    doc.rejected_by = frappe.session.user
+    doc.rejected_on = now_datetime()
+    doc.rejection_reason = reason
+    doc.flags.ignore_permissions = True
+    doc.save()
+
+    # Best-effort audit line. A failed comment must not undo a decision the
+    # manager already made and that is persisted above.
+    try:
+        doc.add_comment("Comment", _("Rejected: {0}").format(reason))
+    except Exception:
+        frappe.log_error(
+            title="JARZ - expense rejection comment failed",
+            message=f"expense={name}",
+        )
+
+    doc.reload()
+    return {
+        "success": True,
+        "expense": _serialize_expense(doc.as_dict()),
+    }
+
+
+@frappe.whitelist(allow_guest=False)
+def cancel_expense(name: str, reason: str):
+    """Reverse an expense that was already approved.
+
+    Approval posts a Journal Entry, so this is not a rejection — it is an
+    accounting reversal, and ``JarzExpenseRequest.on_cancel`` posts it. That
+    method raises rather than swallowing a failed reversal, so a cancel that
+    cannot unwind the ledger fails here too instead of leaving a "Cancelled"
+    request next to a live expense entry.
+
+    The reason is written AFTER the cancel, with ``db.set_value``: at that point
+    the document is at ``docstatus 2`` and a normal save would be rejected, and
+    the three rejection fields are ``allow_on_submit`` for exactly this write.
+    """
+    if not _is_manager():
+        frappe.throw(_("Only managers can cancel expenses."), frappe.PermissionError)
+
+    name = (name or "").strip()
+    if not name:
+        frappe.throw(_("Expense document name is required."))
+
+    reason = (reason or "").strip()
+    if not reason:
+        frappe.throw(_("A reason is required to cancel an approved expense."))
+
+    doc = frappe.get_doc("Jarz Expense Request", name)
+    if doc.docstatus == 0:
+        frappe.throw(_("Expense {0} is not approved yet. Reject it instead.").format(name))
+    if doc.docstatus == 2:
+        frappe.throw(_("Expense {0} is already cancelled.").format(name))
+
+    doc.flags.ignore_permissions = True
+    doc.cancel()
+
+    frappe.db.set_value(
+        "Jarz Expense Request",
+        name,
+        {
+            "rejected_by": frappe.session.user,
+            "rejected_on": now_datetime(),
+            "rejection_reason": reason,
+        },
+        update_modified=False,
+    )
+
+    try:
+        doc.add_comment("Comment", _("Cancelled: {0}").format(reason))
+    except Exception:
+        frappe.log_error(
+            title="JARZ - expense cancellation comment failed",
+            message=f"expense={name}",
+        )
+
+    doc.reload()
     return {
         "success": True,
         "expense": _serialize_expense(doc.as_dict()),
