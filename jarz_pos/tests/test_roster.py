@@ -233,6 +233,62 @@ class TestHistoryStaysReadable(unittest.TestCase):
         self.assertNotIn("Cancelled", roster_service.READABLE_ASSIGNMENT_STATUSES)
 
 
+class TestUnbranchedLocations(unittest.TestCase):
+    """The Factory has no POS Profile and never will.
+
+    It is a production site, not a sales branch, so branch scoping could not
+    express it and its three staff were invisible to every manager except
+    Administrator — nobody could roster the factory at all, and the screen gave
+    no hint that a quarter of the workforce was missing.
+    """
+
+    def _unbranched(self, roles, locations, claimed):
+        with patch.object(roster_service, "frappe") as mock_frappe:
+            mock_frappe.get_roles.return_value = roles
+
+            def fake_get_all(doctype, **kwargs):
+                if doctype == "POS Profile":
+                    return list(claimed)
+                return list(locations)
+
+            mock_frappe.get_all.side_effect = fake_get_all
+            return roster_service._unbranched_locations()
+
+    LOCATIONS = ["Factory", "Nasr City", "Dokki", "6th of October"]
+    CLAIMED = ["Nasr City", "Dokki", "6th of October"]
+
+    def test_manager_tier_reaches_the_factory(self):
+        self.assertEqual(
+            self._unbranched(["JARZ Manager"], self.LOCATIONS, self.CLAIMED), {"Factory"}
+        )
+
+    def test_system_manager_reaches_it_too(self):
+        self.assertEqual(
+            self._unbranched(["System Manager"], self.LOCATIONS, self.CLAIMED), {"Factory"}
+        )
+
+    def test_a_bare_branch_line_manager_does_not(self):
+        """A branch supervisor runs a branch, not the factory."""
+        self.assertEqual(
+            self._unbranched(["JARZ line manager"], self.LOCATIONS, self.CLAIMED), set()
+        )
+
+    def test_rank_and_file_never_does(self):
+        self.assertEqual(self._unbranched(["POS User"], self.LOCATIONS, self.CLAIMED), set())
+
+    def test_mapping_the_factory_later_removes_it_from_this_set(self):
+        """Self-healing: give the Factory a POS Profile and normal scoping takes over."""
+        self.assertEqual(
+            self._unbranched(["JARZ Manager"], self.LOCATIONS, self.LOCATIONS), set()
+        )
+
+    def test_a_failed_lookup_widens_nothing(self):
+        with patch.object(roster_service, "frappe") as mock_frappe:
+            mock_frappe.get_roles.return_value = ["JARZ Manager"]
+            mock_frappe.get_all.side_effect = Exception("db down")
+            self.assertEqual(roster_service._unbranched_locations(), set())
+
+
 class TestMonthBounds(unittest.TestCase):
     def test_february_in_a_leap_year(self):
         start, end = roster_service.month_bounds("2028-02")

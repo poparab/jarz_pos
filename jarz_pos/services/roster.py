@@ -136,7 +136,9 @@ def allowed_shift_locations() -> Optional[Set[str]]:
     Resolution order:
 
     1. ``Administrator`` -> ``None`` (everything).
-    2. The Shift Locations mapped from the caller's POS Profiles.
+    2. The Shift Locations mapped from the caller's POS Profiles, PLUS any
+       location no POS Profile claims at all when the caller holds the manager
+       tier -- see ``_unbranched_locations``.
     3. If **no** POS Profile anywhere carries a mapping, ``None`` with the
        caller's screen shown a notice.
 
@@ -164,13 +166,55 @@ def allowed_shift_locations() -> Optional[Set[str]]:
         )
         if loc
     }
-    if mapped:
-        return mapped
+
+    allowed = set(mapped) | _unbranched_locations()
+    if allowed:
+        return allowed
 
     if not _any_pos_profile_mapped():
         return None
 
     return set()
+
+
+def _unbranched_locations() -> Set[str]:
+    """Shift Locations no POS Profile claims, for the manager tier only.
+
+    The Factory is the case that forced this. It is a production site, not a
+    sales branch, so it has no POS Profile and never will -- which meant branch
+    scoping could not express it and its three staff were invisible to every
+    manager except Administrator. Nobody could roster the factory at all, while
+    the screen gave no hint that a quarter of the workforce was missing.
+
+    Creating a dummy POS Profile to unlock it would be worse: a POS Profile is
+    a real branch everywhere else in this app (order routing, the Kanban board,
+    cash drawers), so inventing one would leak a phantom branch into all of
+    them.
+
+    A location that belongs to no branch belongs to the company, so the manager
+    tier sees it and a *branch* line manager does not. This does not reverse the
+    "branch membership is the POS Profile User table for everyone" decision --
+    that rule is about which branch's ORDERS you may touch, and an unbranched HR
+    location has no orders. Adding a POS Profile mapping later removes the
+    location from this set automatically.
+    """
+    roles = {str(r or "").strip() for r in (frappe.get_roles() or []) if str(r or "").strip()}
+    if not roles.intersection(ROLES.MANAGER | ROLES.ADMIN):
+        return set()
+
+    try:
+        claimed = {
+            loc
+            for loc in frappe.get_all(
+                "POS Profile",
+                filters={POS_PROFILE_LOCATION_FIELD: ("is", "set")},
+                pluck=POS_PROFILE_LOCATION_FIELD,
+            )
+            if loc
+        }
+        return {loc for loc in frappe.get_all("Shift Location", pluck="name") if loc not in claimed}
+    except Exception:
+        return set()
 
 
 def roster_scope_configured() -> bool:
