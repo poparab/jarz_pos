@@ -270,6 +270,14 @@ jobs:
             # thing in this app that can stop a real person from clocking in --
             # each of its allow-paths is pinned individually.
             test_roster
+            # Module history (Stock Transfer, Cash Transfer, Inventory Count,
+            # Shift). Two reasons this must be in CI: the cash transfer history
+            # has no marker to filter on and recognises a transfer purely by
+            # shape, so a loosened test would start listing courier settlements
+            # and freight entries as cash movements; and the shift history is
+            # the one place the blind-close figures could leak back to the
+            # cashier who just counted, which the manager gate here pins.
+            test_module_history
           )
           rc=0
           for m in "${MODULES[@]}"; do

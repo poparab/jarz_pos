@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
-from frappe.utils import strip_html
+from frappe.utils import cint, getdate, strip_html
 from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 
 
@@ -705,3 +705,153 @@ def submit_reconciliation(
             return {"ok": False, "error": str(e), "traceback": tb}
         # Re-raise to preserve HTTP error semantics when not debugging
         raise
+
+
+@frappe.whitelist()
+def list_reconciliations(
+    limit: Any = 30,
+    page: Any = 0,
+    warehouse: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    search: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return submitted Stock Reconciliations — the count history.
+
+    :func:`submit_reconciliation` posts only the *differences*, so the
+    reconciliation is the record of what a count actually changed.  Without
+    this the counter had no way to answer "did last week's count go through,
+    and what did it move?" from inside the app.
+
+    ``warehouse`` matches the reconciliation's own warehouse when it has one
+    and otherwise the warehouse on its lines; ``search`` matches the document
+    name or any item code / item name counted on it.
+    """
+    _ensure_manager_access()
+    limit = max(1, min(cint(limit) or 30, 200))
+    start = max(0, cint(page)) * limit
+
+    filters: Dict[str, Any] = {"docstatus": 1, "purpose": "Stock Reconciliation"}
+    if from_date and to_date:
+        filters["posting_date"] = ["between", [getdate(from_date), getdate(to_date)]]
+    elif from_date:
+        filters["posting_date"] = [">=", getdate(from_date)]
+    elif to_date:
+        filters["posting_date"] = ["<=", getdate(to_date)]
+
+    allowed_parents: Optional[Set[str]] = None
+
+    def _restrict(names: Set[str]) -> None:
+        nonlocal allowed_parents
+        allowed_parents = names if allowed_parents is None else (allowed_parents & names)
+
+    if warehouse:
+        # The header's `set_warehouse` is only populated when every line shares
+        # one warehouse, so matching on the child rows is what actually finds a
+        # count. Both are checked because a header-only match is still a match.
+        by_child = {
+            row["parent"]
+            for row in frappe.get_all(
+                "Stock Reconciliation Item",
+                filters={"warehouse": warehouse},
+                fields=["parent"],
+                limit_page_length=0,
+            )
+        }
+        by_header = {
+            row["name"]
+            for row in frappe.get_all(
+                "Stock Reconciliation",
+                filters={"set_warehouse": warehouse},
+                fields=["name"],
+                limit_page_length=0,
+            )
+        }
+        _restrict(by_child | by_header)
+
+    search = (search or "").strip()
+    if search:
+        like = f"%{search}%"
+        by_name = {
+            row["name"]
+            for row in frappe.get_all(
+                "Stock Reconciliation",
+                filters={**{k: v for k, v in filters.items() if k != "name"}, "name": ["like", like]},
+                fields=["name"],
+                limit_page_length=0,
+            )
+        }
+        by_item = {
+            row["parent"]
+            for row in frappe.get_all(
+                "Stock Reconciliation Item",
+                or_filters=[["item_code", "like", like], ["item_name", "like", like]],
+                fields=["parent"],
+                limit_page_length=0,
+            )
+        }
+        _restrict(by_name | by_item)
+
+    if allowed_parents is not None:
+        if not allowed_parents:
+            return {"counts": [], "total": 0}
+        filters["name"] = ["in", sorted(allowed_parents)]
+
+    total = frappe.db.count("Stock Reconciliation", filters=filters)
+    entries = frappe.get_all(
+        "Stock Reconciliation",
+        filters=filters,
+        fields=[
+            "name", "posting_date", "posting_time", "set_warehouse",
+            "difference_amount", "company", "owner", "creation",
+        ],
+        order_by="posting_date desc, posting_time desc, creation desc",
+        limit_page_length=limit,
+        limit_start=start,
+    )
+
+    names = [e["name"] for e in entries]
+    lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+    if names:
+        for row in frappe.get_all(
+            "Stock Reconciliation Item",
+            filters={"parent": ["in", names]},
+            fields=[
+                "parent", "item_code", "item_name", "warehouse", "qty",
+                "current_qty", "valuation_rate", "current_valuation_rate",
+                "amount", "current_amount",
+            ],
+            order_by="parent asc, idx asc",
+            limit_page_length=0,
+        ):
+            current = float(row.get("current_qty") or 0)
+            counted = float(row.get("qty") or 0)
+            # The line stores before and after; the operator wants the delta,
+            # which is the only number that says what the count corrected.
+            row["qty_difference"] = counted - current
+            lines_by_parent.setdefault(row["parent"], []).append(row)
+
+    owners = {e["owner"] for e in entries if e.get("owner")}
+    full_names = {
+        row["name"]: row.get("full_name") or row["name"]
+        for row in frappe.get_all(
+            "User", filters={"name": ["in", list(owners)]}, fields=["name", "full_name"]
+        )
+    } if owners else {}
+
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        lines = lines_by_parent.get(entry["name"], [])
+        warehouses = sorted({(ln.get("warehouse") or "") for ln in lines} - {""})
+        out.append({
+            **entry,
+            "owner_name": full_names.get(entry.get("owner"), entry.get("owner")),
+            "warehouse": entry.get("set_warehouse") or (warehouses[0] if len(warehouses) == 1 else None),
+            "warehouses": warehouses,
+            "item_count": len(lines),
+            "increase_count": sum(1 for ln in lines if ln["qty_difference"] > 0),
+            "decrease_count": sum(1 for ln in lines if ln["qty_difference"] < 0),
+            "items": lines,
+        })
+
+    return {"counts": out, "total": total}

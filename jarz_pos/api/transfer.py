@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import frappe
 from frappe import _
+from frappe.utils import cint, getdate
 from jarz_pos.constants import DEFAULT_UOM, ROLES
 
 
@@ -262,3 +263,154 @@ def submit_transfer(
     frappe.db.commit()
 
     return {"ok": True, "stock_entry": se.name}
+
+
+@frappe.whitelist()
+def list_transfers(
+    limit: Any = 30,
+    page: Any = 0,
+    source_warehouse: Optional[str] = None,
+    target_warehouse: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    search: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return submitted Material Transfer stock entries — the history view.
+
+    The screen that calls :func:`submit_transfer` had no way to show what it
+    had already moved, so a repeated transfer was indistinguishable from a
+    first one.  Filters are optional and combine with AND; ``search`` matches
+    the Stock Entry name or any item code / item name on it.
+
+    Warehouse filters read the *child* rows rather than the parent, because a
+    Stock Entry carries its warehouses per line, not in the header.
+    """
+    _ensure_transfer_access()
+    limit = max(1, min(cint(limit) or 30, 200))
+    start = max(0, cint(page)) * limit
+
+    filters: Dict[str, Any] = {
+        "docstatus": 1,
+        "stock_entry_type": "Material Transfer",
+    }
+    if from_date and to_date:
+        filters["posting_date"] = ["between", [getdate(from_date), getdate(to_date)]]
+    elif from_date:
+        filters["posting_date"] = [">=", getdate(from_date)]
+    elif to_date:
+        filters["posting_date"] = ["<=", getdate(to_date)]
+
+    # Narrowing by warehouse or free text means asking the child table which
+    # parents qualify first. `None` = "no restriction", which is not the same
+    # as an empty set ("nothing matches") — collapsing the two would silently
+    # return the unfiltered list.
+    allowed_parents: Optional[Set[str]] = None
+
+    def _restrict(names: Set[str]) -> None:
+        nonlocal allowed_parents
+        allowed_parents = names if allowed_parents is None else (allowed_parents & names)
+
+    child_filters: Dict[str, Any] = {}
+    if source_warehouse:
+        child_filters["s_warehouse"] = source_warehouse
+    if target_warehouse:
+        child_filters["t_warehouse"] = target_warehouse
+    if child_filters:
+        _restrict({
+            row["parent"]
+            for row in frappe.get_all(
+                "Stock Entry Detail",
+                filters=child_filters,
+                fields=["parent"],
+                limit_page_length=0,
+            )
+        })
+
+    search = (search or "").strip()
+    if search:
+        like = f"%{search}%"
+        by_name = {
+            row["name"]
+            for row in frappe.get_all(
+                "Stock Entry",
+                filters={**filters, "name": ["like", like]},
+                fields=["name"],
+                limit_page_length=0,
+            )
+        }
+        by_item = {
+            row["parent"]
+            for row in frappe.get_all(
+                "Stock Entry Detail",
+                or_filters=[
+                    ["item_code", "like", like],
+                    ["item_name", "like", like],
+                ],
+                fields=["parent"],
+                limit_page_length=0,
+            )
+        }
+        _restrict(by_name | by_item)
+
+    if allowed_parents is not None:
+        if not allowed_parents:
+            return {"transfers": [], "total": 0}
+        filters["name"] = ["in", sorted(allowed_parents)]
+
+    total = frappe.db.count("Stock Entry", filters=filters)
+    entries = frappe.get_all(
+        "Stock Entry",
+        filters=filters,
+        fields=[
+            "name", "posting_date", "posting_time", "total_outgoing_value",
+            "owner", "creation", "remarks",
+        ],
+        order_by="posting_date desc, posting_time desc, creation desc",
+        limit_page_length=limit,
+        limit_start=start,
+    )
+
+    # One query for every line on the page rather than one per entry.
+    names = [e["name"] for e in entries]
+    lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+    if names:
+        for row in frappe.get_all(
+            "Stock Entry Detail",
+            filters={"parent": ["in", names]},
+            fields=[
+                "parent", "item_code", "item_name", "qty", "uom",
+                "s_warehouse", "t_warehouse", "basic_rate", "amount",
+            ],
+            order_by="parent asc, idx asc",
+            limit_page_length=0,
+        ):
+            lines_by_parent.setdefault(row["parent"], []).append(row)
+
+    owners = {e["owner"] for e in entries if e.get("owner")}
+    full_names = {
+        row["name"]: row.get("full_name") or row["name"]
+        for row in frappe.get_all(
+            "User", filters={"name": ["in", list(owners)]}, fields=["name", "full_name"]
+        )
+    } if owners else {}
+
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        lines = lines_by_parent.get(entry["name"], [])
+        # The header has no warehouses, so the pair shown on the card is
+        # derived from the lines. A transfer built by this app is always one
+        # pair; a hand-made entry may not be, hence the distinct sets.
+        sources = sorted({(ln.get("s_warehouse") or "") for ln in lines} - {""})
+        targets = sorted({(ln.get("t_warehouse") or "") for ln in lines} - {""})
+        out.append({
+            **entry,
+            "owner_name": full_names.get(entry.get("owner"), entry.get("owner")),
+            "source_warehouse": sources[0] if len(sources) == 1 else None,
+            "target_warehouse": targets[0] if len(targets) == 1 else None,
+            "source_warehouses": sources,
+            "target_warehouses": targets,
+            "total_qty": sum(float(ln.get("qty") or 0) for ln in lines),
+            "items": lines,
+        })
+
+    return {"transfers": out, "total": total}

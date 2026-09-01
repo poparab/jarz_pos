@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import frappe
 from frappe import _
+from frappe.utils import cint, getdate
 from jarz_pos.constants import ROLES
 
 
@@ -259,3 +260,194 @@ def submit_transfer(from_account: str, to_account: str, amount: float, posting_d
     frappe.db.commit()
 
     return {"ok": True, "journal_entry": je.name}
+
+
+def _transferable_account_names(company: str) -> Set[str]:
+    """Every account this module can move money between, by name.
+
+    Same membership as :func:`list_accounts` exposes, minus the per-account
+    balance lookups — the history only needs to recognise an account, not
+    price it, and ``get_balance_on`` is one query per account.
+    """
+    names: Set[str] = set()
+    for group in (
+        _get_cashlike_accounts(company),
+        _get_pos_profile_accounts(company),
+        _get_sales_partner_accounts(company),
+    ):
+        for row in group:
+            if row.get("name"):
+                names.add(row["name"])
+    return names
+
+
+@frappe.whitelist()
+def list_transfers(
+    limit: Any = 30,
+    page: Any = 0,
+    company: Optional[str] = None,
+    account: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    search: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return submitted cash transfers — the history view.
+
+    :func:`submit_transfer` writes a plain Journal Entry with no marker on it,
+    so there is nothing to filter on directly.  A transfer is instead
+    recognised by its *shape*: a submitted two-line Journal Entry whose both
+    lines sit on accounts this module can transfer between.  That definition
+    is retroactive — it finds the transfers posted before this endpoint
+    existed — and it deliberately also matches an equivalent entry made by
+    hand in Desk, which is a cash transfer whoever typed it.
+
+    ``account`` matches either side.  ``search`` matches the entry name or the
+    remark.
+    """
+    _ensure_manager_access()
+    limit = max(1, min(cint(limit) or 30, 200))
+    start = max(0, cint(page)) * limit
+
+    if not company:
+        company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value(
+            "Global Defaults", "default_company"
+        )
+    if not company:
+        frappe.throw(_("Company is required"))
+
+    empty = {"transfers": [], "total": 0}
+    transferable = _transferable_account_names(company)
+    if not transferable:
+        return empty
+
+    # Child-first: only entries that touch a transferable account can qualify,
+    # and that is a far smaller set than "every Journal Entry".
+    candidates = {
+        row["parent"]
+        for row in frappe.get_all(
+            "Journal Entry Account",
+            filters={
+                "parenttype": "Journal Entry",
+                "docstatus": 1,
+                "account": ["in", sorted(transferable)],
+            },
+            fields=["parent"],
+            limit_page_length=0,
+        )
+    }
+    if not candidates:
+        return empty
+
+    # Now the shape test, which needs *every* row of each candidate — a shift
+    # discrepancy entry also touches a cash account, but its other leg is Cash
+    # Over/Short, so it is not a transfer.
+    rows_by_parent: Dict[str, List[Dict[str, Any]]] = {}
+    for row in frappe.get_all(
+        "Journal Entry Account",
+        filters={"parent": ["in", sorted(candidates)], "parenttype": "Journal Entry"},
+        fields=[
+            "parent", "account", "debit_in_account_currency",
+            "credit_in_account_currency", "idx",
+        ],
+        order_by="parent asc, idx asc",
+        limit_page_length=0,
+    ):
+        rows_by_parent.setdefault(row["parent"], []).append(row)
+
+    legs_by_parent: Dict[str, Dict[str, Any]] = {}
+    for parent, rows in rows_by_parent.items():
+        if len(rows) != 2:
+            continue
+        if any((r.get("account") or "") not in transferable for r in rows):
+            continue
+        debits = [r for r in rows if float(r.get("debit_in_account_currency") or 0) > 0]
+        credits = [r for r in rows if float(r.get("credit_in_account_currency") or 0) > 0]
+        if len(debits) != 1 or len(credits) != 1:
+            continue
+        if account and account not in (debits[0]["account"], credits[0]["account"]):
+            continue
+        legs_by_parent[parent] = {
+            "from_account": credits[0]["account"],
+            "to_account": debits[0]["account"],
+            "amount": float(debits[0].get("debit_in_account_currency") or 0),
+        }
+
+    if not legs_by_parent:
+        return empty
+
+    filters: Dict[str, Any] = {
+        "name": ["in", sorted(legs_by_parent)],
+        "docstatus": 1,
+        "company": company,
+    }
+    if from_date and to_date:
+        filters["posting_date"] = ["between", [getdate(from_date), getdate(to_date)]]
+    elif from_date:
+        filters["posting_date"] = [">=", getdate(from_date)]
+    elif to_date:
+        filters["posting_date"] = ["<=", getdate(to_date)]
+
+    or_filters: List[Any] = []
+    search = (search or "").strip()
+    if search:
+        like = f"%{search}%"
+        or_filters = [["name", "like", like], ["user_remark", "like", like]]
+
+    fields = [
+        "name", "posting_date", "total_debit", "user_remark",
+        "owner", "creation", "voucher_type",
+    ]
+    entries = frappe.get_all(
+        "Journal Entry",
+        filters=filters,
+        or_filters=or_filters,
+        fields=fields,
+        order_by="posting_date desc, creation desc",
+        limit_page_length=limit,
+        limit_start=start,
+    )
+    # Counting through the same filters, not `len(legs_by_parent)` — the client
+    # pages off this number and a filtered count that ignored the filters would
+    # make "load more" ask for rows that are not there.
+    total = len(
+        frappe.get_all(
+            "Journal Entry",
+            filters=filters,
+            or_filters=or_filters,
+            fields=["name"],
+            limit_page_length=0,
+        )
+    )
+
+    owners = {e["owner"] for e in entries if e.get("owner")}
+    full_names = {
+        row["name"]: row.get("full_name") or row["name"]
+        for row in frappe.get_all(
+            "User", filters={"name": ["in", list(owners)]}, fields=["name", "full_name"]
+        )
+    } if owners else {}
+
+    labels = {
+        row["name"]: row.get("account_name") or row["name"]
+        for row in frappe.get_all(
+            "Account",
+            filters={"name": ["in", sorted(transferable)]},
+            fields=["name", "account_name"],
+            limit_page_length=0,
+        )
+    }
+
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        legs = legs_by_parent[entry["name"]]
+        out.append({
+            **entry,
+            "owner_name": full_names.get(entry.get("owner"), entry.get("owner")),
+            "from_account": legs["from_account"],
+            "to_account": legs["to_account"],
+            "from_label": labels.get(legs["from_account"], legs["from_account"]),
+            "to_label": labels.get(legs["to_account"], legs["to_account"]),
+            "amount": legs["amount"],
+        })
+
+    return {"transfers": out, "total": total}

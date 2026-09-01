@@ -9,14 +9,14 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import flt, nowdate, now_datetime, get_datetime
+from frappe.utils import cint, flt, getdate, nowdate, now_datetime, get_datetime
 
 
 from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
     make_closing_entry_from_opening,
 )
 from erpnext.accounts.utils import get_balance_on
-from jarz_pos.constants import ACCOUNTS, QUERY_LIMITS, WS_EVENTS
+from jarz_pos.constants import ACCOUNTS, QUERY_LIMITS, ROLES, WS_EVENTS
 
 
 def _assert_user_has_profile_access(user: str, pos_profile: str):
@@ -1463,3 +1463,157 @@ def _notify_shift_event(*, pos_profile: str, event_type: str, user: str, opening
     except Exception:
         # Never let notification errors block the shift operation
         frappe.log_error(frappe.get_traceback(), "shift_notification_failed")
+
+
+def _user_can_see_all_shifts() -> bool:
+    """Managers see every shift; everyone else only their own.
+
+    Same tier that already guards the shift monitor — a cashier browsing the
+    branch's takings is a different permission from reviewing their own day.
+    """
+    return bool(set(frappe.get_roles()).intersection(ROLES.MANAGER))
+
+
+@frappe.whitelist(allow_guest=False)
+def list_shifts(
+    limit: Any = 30,
+    page: Any = 0,
+    pos_profile: str | None = None,
+    status: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    mine_only: Any = 0,
+) -> dict[str, Any]:
+    """Return past shifts, newest first — the shift history view.
+
+    Once a shift closed it left the app entirely: ``get_active_shift`` answers
+    only about the open one and the monitor lists only what is still open, so
+    yesterday's close was unreachable from any screen.
+
+    Amounts stay manager-only.  ``get_shift_summary`` deliberately withholds
+    every figure from the closing cashier so the count is blind, and a history
+    that handed the same person those figures afterwards would be a way around
+    that control — so a non-manager gets their own shifts with dates, profile
+    and status, and no money.
+    """
+    limit = max(1, min(cint(limit) or 30, 200))
+    start = max(0, cint(page)) * limit
+    is_manager = _user_can_see_all_shifts()
+
+    filters: dict[str, Any] = {"docstatus": ["<", 2]}
+    if not is_manager or cint(mine_only):
+        filters["user"] = frappe.session.user
+    if pos_profile:
+        filters["pos_profile"] = pos_profile
+    if status:
+        filters["status"] = status
+    if from_date and to_date:
+        filters["period_start_date"] = [
+            "between", [f"{getdate(from_date)} 00:00:00", f"{getdate(to_date)} 23:59:59"]
+        ]
+    elif from_date:
+        filters["period_start_date"] = [">=", f"{getdate(from_date)} 00:00:00"]
+    elif to_date:
+        filters["period_start_date"] = ["<=", f"{getdate(to_date)} 23:59:59"]
+
+    total = frappe.db.count("POS Opening Entry", filters=filters)
+    openings = frappe.get_all(
+        "POS Opening Entry",
+        filters=filters,
+        fields=[
+            "name", "status", "user", "company", "pos_profile",
+            "period_start_date", "period_end_date", "docstatus", "creation",
+        ],
+        order_by="period_start_date desc, creation desc",
+        limit_page_length=limit,
+        limit_start=start,
+    )
+    if not openings:
+        return {"shifts": [], "total": total, "amounts_hidden": 0 if is_manager else 1}
+
+    opening_names = [o["name"] for o in openings]
+    closings = {
+        row["pos_opening_entry"]: row
+        for row in frappe.get_all(
+            "POS Closing Entry",
+            filters={"pos_opening_entry": ["in", opening_names], "docstatus": 1},
+            fields=[
+                "name", "pos_opening_entry", "posting_date", "period_end_date",
+                "grand_total", "net_total", "total_quantity", "status",
+            ],
+            limit_page_length=0,
+        )
+    }
+
+    # Per-mode figures only exist on a submitted closing entry, and only a
+    # manager may read them.
+    recon_by_closing: dict[str, list[dict[str, Any]]] = {}
+    if is_manager and closings:
+        for row in frappe.get_all(
+            "POS Closing Entry Detail",
+            filters={"parent": ["in", [c["name"] for c in closings.values()]]},
+            fields=[
+                "parent", "mode_of_payment", "opening_amount",
+                "expected_amount", "closing_amount", "difference",
+            ],
+            order_by="parent asc, idx asc",
+            limit_page_length=0,
+        ):
+            recon_by_closing.setdefault(row["parent"], []).append(row)
+
+    users = {o["user"] for o in openings if o.get("user")}
+    full_names = {
+        row["name"]: row.get("full_name") or row["name"]
+        for row in frappe.get_all(
+            "User", filters={"name": ["in", list(users)]}, fields=["name", "full_name"]
+        )
+    } if users else {}
+
+    out: list[dict[str, Any]] = []
+    for opening in openings:
+        closing = closings.get(opening["name"])
+        shift: dict[str, Any] = {
+            "opening_entry": opening["name"],
+            "closing_entry": (closing or {}).get("name"),
+            "status": opening.get("status"),
+            "user": opening.get("user"),
+            "user_full_name": full_names.get(opening.get("user"), opening.get("user")),
+            "company": opening.get("company"),
+            "pos_profile": opening.get("pos_profile"),
+            "period_start_date": opening.get("period_start_date"),
+            "period_end_date": (closing or {}).get("period_end_date") or opening.get("period_end_date"),
+            "is_open": (opening.get("status") or "") == "Open",
+        }
+        if is_manager and closing:
+            rows = recon_by_closing.get(closing["name"], [])
+            shift.update({
+                "grand_total": flt(closing.get("grand_total")),
+                "net_total": flt(closing.get("net_total")),
+                "total_quantity": flt(closing.get("total_quantity")),
+                # The signed sum across modes — what the drawer was over or
+                # short by, which is the one number a manager scans a list for.
+                #
+                # `round`, not `flt(..., 2)`: flt reads the rounding method
+                # from System Settings when given a precision, and with no
+                # site bound that lookup raises inside flt and is swallowed,
+                # so flt(-50.0, 2) answers 0.0. Every unit test of this
+                # endpoint would then be asserting against a silent zero.
+                "difference": round(sum(flt(r.get("difference")) for r in rows), 2),
+                "payment_reconciliation": [
+                    {
+                        "mode_of_payment": r.get("mode_of_payment"),
+                        "opening_amount": flt(r.get("opening_amount")),
+                        "expected_amount": flt(r.get("expected_amount")),
+                        "closing_amount": flt(r.get("closing_amount")),
+                        "difference": flt(r.get("difference")),
+                    }
+                    for r in rows
+                ],
+            })
+        out.append(shift)
+
+    return {
+        "shifts": out,
+        "total": total,
+        "amounts_hidden": 0 if is_manager else 1,
+    }
