@@ -30,6 +30,36 @@ def _ensure_materials_report_access():
         frappe.throw(_("You are not permitted to access this report"), frappe.PermissionError)
 
 
+#: Item groups each bucket of the Materials & Consumables report covers.
+#:
+#: Every name is expanded to its descendants before filtering, so moving these
+#: under a parent group — or splitting packaging and labels out of Raw Material —
+#: does not silently empty a bucket. A name that does not exist on a given site
+#: is skipped rather than raising, which keeps the roots list safe to extend
+#: ahead of the data.
+_MATERIAL_ROOTS = ("Raw Material", "Packaging", "Labels")
+_SUB_ASSEMBLY_ROOTS = ("Sub Assemblies",)
+_CONSUMABLE_ROOTS = ("Consumable",)
+
+
+def _expand_item_groups(roots: tuple) -> List[str]:
+    """Each named group plus every group beneath it in the Item Group tree."""
+    names: List[str] = []
+    for root in roots:
+        bounds = frappe.db.get_value("Item Group", root, ["lft", "rgt"], as_dict=True)
+        if not bounds:
+            continue
+        names.extend(
+            row["name"]
+            for row in frappe.get_all(
+                "Item Group",
+                filters={"lft": [">=", bounds["lft"]], "rgt": ["<=", bounds["rgt"]]},
+                fields=["name"],
+            )
+        )
+    return names
+
+
 @frappe.whitelist()
 def get_final_products_report() -> Dict[str, Any]:
     """
@@ -126,8 +156,9 @@ def get_final_products_report() -> Dict[str, Any]:
 @frappe.whitelist()
 def get_materials_report() -> Dict[str, Any]:
     """
-    Return stock balances for Raw Material, Sub Assembly, and Consumable
-    item groups.
+    Return stock balances for the material, sub-assembly and consumable item
+    groups — each expanded to its descendants, so the report follows the Item
+    Group tree rather than a fixed list of leaf names.
 
     Response shape:
     {
@@ -149,7 +180,15 @@ def get_materials_report() -> Dict[str, Any]:
     """
     _ensure_materials_report_access()
 
-    target_groups = ["Raw Material", "Sub Assembly", "Consumable"]
+    # Previously a literal ["Raw Material", "Sub Assembly", "Consumable"]. The
+    # middle name never matched anything — the group is "Sub Assemblies", plural
+    # — so the sub-assemblies bucket was empty on every site since this shipped.
+    material_groups = _expand_item_groups(_MATERIAL_ROOTS)
+    sub_assembly_groups = _expand_item_groups(_SUB_ASSEMBLY_ROOTS)
+    consumable_groups = _expand_item_groups(_CONSUMABLE_ROOTS)
+    target_groups = material_groups + sub_assembly_groups + consumable_groups
+    if not target_groups:
+        return {"raw_materials": [], "sub_assemblies": [], "consumables": []}
 
     items = frappe.get_all(
         "Item",
@@ -176,6 +215,8 @@ def get_materials_report() -> Dict[str, Any]:
     raw_materials = []
     sub_assemblies = []
     consumables = []
+    sub_assembly_set = set(sub_assembly_groups)
+    consumable_set = set(consumable_groups)
 
     for it in items:
         wh_qty = item_wh_map.get(it["item_code"], {})
@@ -191,12 +232,12 @@ def get_materials_report() -> Dict[str, Any]:
             "total_qty": total,
             "warehouse_count": len(wh_qty),
         }
-        if it["item_group"] == "Raw Material":
-            raw_materials.append(entry)
-        elif it["item_group"] == "Sub Assembly":
+        if it["item_group"] in sub_assembly_set:
             sub_assemblies.append(entry)
-        else:
+        elif it["item_group"] in consumable_set:
             consumables.append(entry)
+        else:
+            raw_materials.append(entry)
 
     # Sort consumables: items in more warehouses first
     consumables.sort(key=lambda x: (-x["warehouse_count"], x["item_name"]))
