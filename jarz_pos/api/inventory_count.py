@@ -48,17 +48,73 @@ def list_warehouses(company: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def list_item_groups(search: Optional[str] = None) -> List[Dict[str, Any]]:
-    """List item groups for filtering inventory count"""
+def list_item_groups(
+    search: Optional[str] = None, warehouse: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Item groups worth offering as a count category.
+
+    Two things this deliberately does that the old leaf-only listing did not:
+
+    * **Only groups that contain something countable.** A group earns a place
+      here when its subtree holds at least one enabled, non-variant *stock*
+      item. Several groups on this site hold nothing but non-stock rows --
+      Bundles, Assets, Services, Label Printing -- and offering them as count
+      categories only ever produced an empty sheet.
+    * **Group nodes, not just leaves.** ``Materials`` can now be picked to count
+      Raw Material + Packaging + Labels + Sub Assemblies in one pass, because
+      :func:`list_items_for_count` expands a chosen group to its descendants.
+
+    Passing ``warehouse`` narrows the list to categories that warehouse's count
+    profile actually covers, so the picker never offers a category that would
+    come back empty there.
+    """
     _ensure_manager_access()
-    filters: Dict[str, Any] = {"is_group": 0}  # Only leaf nodes
-    or_filters: List[Any] = []
-    if search:
-        like = f"%{search}%"
-        or_filters = [["Item Group", "name", "like", like], ["Item Group", "item_group_name", "like", like]]
-    
-    fields = ["name", "item_group_name"]
-    return frappe.get_all("Item Group", filters=filters, or_filters=or_filters, fields=fields, order_by="name asc", limit=QUERY_LIMITS.DEFAULT_LIST)
+
+    item_filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
+    if warehouse:
+        allowed_codes = _resolve_count_item_codes(warehouse)
+        if allowed_codes is not None:
+            if not allowed_codes:
+                return []
+            item_filters["name"] = ["in", allowed_codes]
+
+    populated = set(frappe.get_all("Item", filters=item_filters, pluck="item_group") or [])
+    if not populated:
+        return []
+
+    groups = frappe.get_all(
+        "Item Group",
+        fields=["name", "item_group_name", "is_group", "lft", "rgt"],
+        order_by="lft asc",
+        limit=QUERY_LIMITS.DEFAULT_LIST,
+    )
+    bounds = {g["name"]: (g["lft"], g["rgt"]) for g in groups}
+
+    like = f"%{search}%".lower() if search else None
+    out: List[Dict[str, Any]] = []
+    for g in groups:
+        # Keep a group when any populated group sits inside its span -- that is
+        # true for the populated leaf itself and for every ancestor above it.
+        covered = [
+            name
+            for name in populated
+            if name in bounds and g["lft"] <= bounds[name][0] and bounds[name][1] <= g["rgt"]
+        ]
+        if not covered:
+            continue
+        if like and like.strip("%") not in f"{g['name']} {g['item_group_name'] or ''}".lower():
+            continue
+        out.append(
+            {
+                "name": g["name"],
+                "item_group_name": g["item_group_name"],
+                "is_group": int(g["is_group"] or 0),
+                "item_count": frappe.db.count(
+                    "Item", dict(item_filters, item_group=["in", covered])
+                ),
+            }
+        )
+    return out
 
 
 def _warehouse_count_profile_is_available() -> bool:
@@ -150,6 +206,7 @@ def _resolve_count_item_codes(warehouse: str) -> Optional[List[str]]:
                     "item_group": ["in", allowed_groups],
                     "disabled": 0,
                     "has_variants": 0,
+                    "is_stock_item": 1,
                 },
                 pluck="name",
             ),
@@ -162,6 +219,7 @@ def _resolve_count_item_codes(warehouse: str) -> Optional[List[str]]:
                     "name": ["in", sorted(included_items)],
                     "disabled": 0,
                     "has_variants": 0,
+                    "is_stock_item": 1,
                 },
                 pluck="name",
             ),
@@ -255,14 +313,25 @@ def list_items_for_count(
     if not warehouse:
         frappe.throw(_("warehouse is required"))
 
-    filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0}
+    # is_stock_item is the filter that was missing. Without it a warehouse with
+    # no count profile listed every enabled item on the site -- 190 rows, of
+    # which 83 were non-stock (Bundles, Assets, Services, Label Printing). Those
+    # can never hold stock and a Stock Reconciliation rejects them outright, so
+    # they were pure noise on every sheet.
+    filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
     allowed_codes = _resolve_count_item_codes(warehouse)
     if allowed_codes is not None:
         if not allowed_codes:
             return []
         filters["name"] = ["in", allowed_codes]
     if item_group:
-        filters["item_group"] = item_group
+        # Expanded to descendants, so picking "Materials" counts Raw Material,
+        # Packaging, Labels and Sub Assemblies together instead of matching a
+        # group node that directly holds no items and returning nothing.
+        expanded = _expand_item_groups([item_group], True)
+        if not expanded:
+            return []
+        filters["item_group"] = ["in", expanded]
     or_filters: List[Any] = []
     if search:
         like = f"%{search}%"
@@ -275,7 +344,10 @@ def list_items_for_count(
         "has_batch_no",
         "has_serial_no",
     ]
-    items = frappe.get_all("Item", filters=filters, or_filters=or_filters, fields=fields, order_by="modified desc", limit=limit)
+    # Alphabetical, not "modified desc": the limit means the sort decides which
+    # rows survive the cut, and a sheet whose contents shuffle whenever someone
+    # edits an item is not a sheet anyone can walk a shelf with.
+    items = frappe.get_all("Item", filters=filters, or_filters=or_filters, fields=fields, order_by="item_name asc", limit=limit)
     codes = [it["item_code"] for it in items]
     qty_map = _get_bin_qty_map(warehouse, codes)
 

@@ -165,3 +165,84 @@ class TestInventoryCountAPI(unittest.TestCase):
 					posting_date=None,
 					lines=[],
 				)
+
+	def test_list_items_for_count_filters_to_stock_items(self):
+		"""The missing filter. Without it a warehouse with no count profile
+		listed every enabled item on the site -- 190 rows on production, 83 of
+		them non-stock rows a Stock Reconciliation rejects outright."""
+		captured = {}
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "Item":
+				captured["filters"] = kwargs.get("filters")
+				captured["order_by"] = kwargs.get("order_by")
+			return []
+
+		with patch.object(inventory_count, "_ensure_manager_access"), patch.object(
+			inventory_count, "_resolve_count_item_codes", return_value=None
+		), patch.object(inventory_count.frappe, "get_all", fake_get_all):
+			inventory_count.list_items_for_count(warehouse="Raw Material - J")
+
+		self.assertEqual(1, captured["filters"]["is_stock_item"])
+		self.assertEqual(0, captured["filters"]["disabled"])
+		# Alphabetical, because the limit means the sort decides which rows survive.
+		self.assertEqual("item_name asc", captured["order_by"])
+
+	def test_list_items_for_count_expands_a_group_to_its_descendants(self):
+		"""Picking "Materials" must count Raw Material, Packaging, Labels and
+		Sub Assemblies -- a group node holds no items of its own, so an exact
+		match on it returned nothing."""
+		captured = {}
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "Item":
+				captured["filters"] = kwargs.get("filters")
+			return []
+
+		with patch.object(inventory_count, "_ensure_manager_access"), patch.object(
+			inventory_count, "_resolve_count_item_codes", return_value=None
+		), patch.object(
+			inventory_count,
+			"_expand_item_groups",
+			return_value=["Materials", "Raw Material", "Packaging", "Labels"],
+		), patch.object(inventory_count.frappe, "get_all", fake_get_all):
+			inventory_count.list_items_for_count(
+				warehouse="Raw Material - J", item_group="Materials"
+			)
+
+		self.assertEqual(
+			["in", ["Materials", "Raw Material", "Packaging", "Labels"]],
+			captured["filters"]["item_group"],
+		)
+
+	def test_list_item_groups_drops_groups_with_nothing_countable(self):
+		"""Bundles, Assets, Services and Label Printing hold only non-stock rows.
+		Offering them as count categories only ever produced an empty sheet."""
+		tree = [
+			{"name": "Materials", "item_group_name": "Materials", "is_group": 1, "lft": 1, "rgt": 6},
+			{"name": "Raw Material", "item_group_name": "Raw Material", "is_group": 0, "lft": 2, "rgt": 3},
+			{"name": "Labels", "item_group_name": "Labels", "is_group": 0, "lft": 4, "rgt": 5},
+			{"name": "Bundles", "item_group_name": "Bundles", "is_group": 0, "lft": 7, "rgt": 8},
+		]
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "Item":
+				# Only Raw Material and Labels hold a countable item.
+				return ["Raw Material", "Labels"]
+			if doctype == "Item Group":
+				return tree
+			return []
+
+		with patch.object(inventory_count, "_ensure_manager_access"), patch.object(
+			inventory_count.frappe, "get_all", fake_get_all
+		), patch.object(
+			inventory_count.frappe,
+			"db",
+			SimpleNamespace(count=lambda *a, **k: 3),
+		):
+			result = inventory_count.list_item_groups()
+
+		names = [row["name"] for row in result]
+		# The parent survives because its subtree is populated; Bundles does not.
+		self.assertEqual(["Materials", "Raw Material", "Labels"], names)
+		self.assertEqual(1, result[0]["is_group"])
