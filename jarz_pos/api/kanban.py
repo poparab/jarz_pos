@@ -729,15 +729,24 @@ def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]
 
 
 def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, float]:
-    """Customer cash still to be collected at the door, per invoice.
+    """Customer money still to be collected on this order, per invoice.
 
-    This is the CUSTOMER leg of an unsettled Courier Transaction (``amount``), which is
-    NOT the same thing as "the courier transaction is unsettled": a COD order switched
-    to an online method keeps an unsettled row for the SHIPPING leg while its customer
-    ``amount`` is zeroed, because the customer has already paid.
+    Two shapes hold that money in two different places, and reading only one of them
+    gets both wrong:
 
-    ``outstanding_amount`` alone cannot answer this — a COD order is settled against
-    Courier Outstanding at Out-for-Delivery, so it reads as fully paid while the
+    * **COD** — the money is the CUSTOMER leg of an unsettled Courier Transaction
+      (``amount``), which is NOT the same thing as "the courier transaction is
+      unsettled": a COD order switched to an online method keeps an unsettled row for
+      the SHIPPING leg while its customer ``amount`` is zeroed, because the customer has
+      already paid.
+    * **unpaid online-intent** — the courier row is a FREIGHT row (``amount`` 0) whose
+      settled flag is about HIS FEE, so it never reports the customer's money at all.
+      There the receivable is still on Debtors and ``outstanding_amount`` is the answer.
+      Missing this is what let the board hide "Change collection method" the moment a
+      shift close settled the freight, on orders whose customer still owed every pound.
+
+    ``outstanding_amount`` alone cannot answer the first one — a COD order is settled
+    against Courier Outstanding at Out-for-Delivery, so it reads as fully paid while the
     customer has not handed over a single pound yet.
     """
     amount_map: Dict[str, float] = {}
@@ -761,6 +770,33 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
             amount_map[invoice_name] = amount_map.get(invoice_name, 0.0) + float(row.get("amount") or 0.0)
     except Exception:
         return {}
+
+    # "Awaiting Payment" is stamped only by handle_unpaid_online_deliver_unconfirmed and
+    # cleared the moment the transfer is confirmed or the order is converted to cash, so
+    # it identifies exactly the shape above. ``max`` rather than ``+``: the two shapes
+    # are mutually exclusive, and adding them would double an order that somehow carried
+    # both.
+    try:
+        invoice_rows = frappe.get_all(
+            "Sales Invoice",
+            filters={
+                "name": ["in", cleaned],
+                "docstatus": 1,
+                "custom_payment_confirmation_status": "Awaiting Payment",
+            },
+            fields=["name", "outstanding_amount"],
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
+        )
+        for row in invoice_rows:
+            invoice_name = row.get("name")
+            if not invoice_name:
+                continue
+            outstanding = float(row.get("outstanding_amount") or 0.0)
+            if outstanding > amount_map.get(invoice_name, 0.0):
+                amount_map[invoice_name] = outstanding
+    except Exception:
+        pass
+
     return amount_map
 
 
@@ -1678,9 +1714,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "shipping_income": card_shipping_income,
                 "shipping_expense": terr_ship.get("expense", 0.0),
                 "has_unsettled_courier_txn": bool(has_unsettled),
-                # Customer cash still to be collected at the door. Distinct from the
-                # flag above: a COD order switched to an online method keeps an
-                # unsettled SHIPPING leg while the customer has already paid.
+                # Whether the CUSTOMER still owes money on this order. Distinct from
+                # the flag above in both directions: a COD order switched to an online
+                # method keeps an unsettled SHIPPING leg while the customer has already
+                # paid, and an unpaid online-intent order keeps owing its full total
+                # after a shift close settles the courier's freight row. This is the
+                # flag the collection-method action gates on.
                 "has_unsettled_customer_amount": bool(
                     float(unsettled_customer_amounts.get(inv.name, 0.0)) > 0.005
                 ),

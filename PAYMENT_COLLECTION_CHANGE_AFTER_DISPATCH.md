@@ -730,3 +730,91 @@ So the safest workflow is:
 6. Adjust courier transaction responsibility so settlement asks for exactly what the courier really owes or is owed.
 7. Settle after the correction.
 8. If settlement already happened, use a separate finance correction path.
+
+
+## As Built: the unpaid-online shape (2026-09-01)
+
+Everything above was written against the two classic shapes, where the Courier
+Transaction is where the customer's money lives. A third shape exists and it breaks that
+assumption, so the rules below override "Source CT must be unsettled" (common validation
+item 8) and "Block: already settled CT" (phase 1) for it, and only for it.
+
+### Why the courier row does not speak for the customer here
+
+`handle_unpaid_online_deliver_unconfirmed` dispatches an order whose customer promised a
+transfer that has not landed. It deliberately moves no money: no customer Payment Entry,
+no Courier Outstanding, receivable still on Debtors, invoice still Unpaid, and
+`custom_payment_confirmation_status = "Awaiting Payment"`. The courier still delivered,
+so it books him a FREIGHT row — `amount = 0`, `shipping_amount = <his fee>`, `Unsettled`.
+
+That row is about HIS FEE. Its `amount` never reports the customer's money (it is always
+0), and its `status` flips to Settled when a shift close pays him — which says nothing
+about whether the customer has paid. Reading either as the customer's position gets the
+answer wrong:
+
+- Reading `amount`: fixed in 465a0a4, which stopped refusing with "Courier transaction
+  has no customer amount to change".
+- Reading `status`: fixed here. Until 2026-09-01 the lookup filtered
+  `status != 'Settled'`, so the action died the moment the freight was settled.
+  ACC-SINV-2026-18023 (810), ACC-SINV-2026-18025 (370) and ACC-SINV-2026-18026-2 (850)
+  were all still "Awaiting Payment" for their full grand totals when their freight rows
+  were settled between 00:04 and 00:46, and became unreachable.
+
+**The invoice is the source of truth for the customer's side of this shape**:
+`outstanding_amount > 0` plus `custom_payment_confirmation_status = "Awaiting Payment"`.
+
+### The three postings
+
+`_apply_collection_change_for_unpaid_online` picks one of three, on `new_method` and on
+whether the courier's row can still carry cash (`_courier_row_can_still_carry_cash`):
+
+| New method | Courier row | Posting | `collection_change_mode` |
+|---|---|---|---|
+| Cash | Unsettled | DR Courier Outstanding (party) / CR Debtors; `amount` written to his EXISTING row | `unpaid_online_to_cash` |
+| Cash | Settled, or none | DR branch cash / CR Debtors, as a Receive Payment Entry allocated to the invoice | `unpaid_online_cash_at_branch` |
+| Another online method | either | none — only the expected ledger changes | `unpaid_online_retarget` |
+
+Notes on the second row, which is the new one:
+
+- **It is a different claim, not a variant.** The courier closed out and went home, so
+  the money cannot land on his balance. Booking it at the branch says the till holds it.
+  The posting is dated now, and shift close reads expected cash as the ledger balance of
+  the POS profile's cash account, so the next count expects it without any extra wiring.
+- **The drawer is the ORDER's branch.** `resolve_assignment_pos_profile` prefers the
+  invoice's own profile and refuses a mismatch; the whitelisted wrapper has already
+  required an open shift there.
+- **A settled row's money columns are never written.** Only `notes` and
+  `idempotency_token` are. Arming `amount` on a row settlement has closed would reopen a
+  courier balance for cash he never carried.
+- **`custom_payment_confirmation_status` becomes "Converted to Cash"** in both cash
+  branches, which takes the order out of the InstaPay reconciliation queue. It is never
+  "Payment Confirmed": no transfer landed.
+
+The retarget branch needs no receipt and no reference in either state — there is nothing
+to prove yet. `confirm_online_payment` still books the transfer when it arrives, and
+demands the screenshot then.
+
+### What the settled fallback will NOT adopt
+
+`_get_collection_change_source_ct` prefers an unsettled row and falls back to a settled
+one only when it is zero-amount and non-partner:
+
+- **A settled row that carried a customer `amount`** — that money was counted at a shift
+  close; reopening it here would count it twice.
+- **A partner row (`is_partner_order`)** — born Settled at dispatch while its rider is
+  still out with the order, so its settled flag says nothing about whether anyone can
+  still carry cash. A partner unpaid-online order therefore still cannot change its
+  collection method; it threw before this change and still throws.
+
+When no row is adopted but one exists for the invoice, the endpoint refuses rather than
+falling through to the branch posting: a rider who is still out has the order, and
+declaring the cash at the branch would claim money nobody handed over.
+
+### Client gating
+
+The board card gates "Change collection method" on `has_unsettled_customer_amount`, not
+`has_unsettled_courier_txn`. The two differ in both directions — a COD order switched to
+an online method keeps an unsettled SHIPPING leg while the customer has already paid, and
+this shape keeps owing everything after its freight row settles.
+`_get_unsettled_customer_amount_map` therefore reads the CT customer leg for COD orders
+and `outstanding_amount` for orders stamped "Awaiting Payment".

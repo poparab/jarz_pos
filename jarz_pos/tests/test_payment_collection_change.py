@@ -610,3 +610,227 @@ class TestUnpaidOnlineCollectionChange(unittest.TestCase):
                 invoice_name="INV-UO-4", new_method="Cash", pos_profile="Dokki")
 
         self.assertIn("nothing left to collect", str(exc.exception))
+
+
+
+class TestSettledFreightCollectionChange(unittest.TestCase):
+    """The same unpaid-online order AFTER a shift close settled the courier's freight.
+
+    That row is a FREIGHT row: its Settled flag records that the courier was paid HIS
+    FEE, not that the customer paid anything. Until 2026-09-01 the lookup filtered
+    ``status != 'Settled'``, so the action died the moment the fee was settled and the
+    endpoint answered "No unsettled courier transaction was found for this invoice"
+    while the customer still owed the whole grand total. Three production orders were
+    stranded that way -- ACC-SINV-2026-18023 (810), -18025 (370) and -18026-2 (850) --
+    all settled between 00:04 and 00:46 the same night.
+    """
+
+    SETTLED_FREIGHT_CT = {
+        "name": "CT-FREIGHT-SETTLED",
+        "party_type": "Employee",
+        "party": "EMP-010",
+        "amount": 0.0,
+        "shipping_amount": 35.0,
+        "payment_mode": "Deferred",
+        "status": "Settled",
+        "notes": "Courier freight accrual (unpaid online delivery, awaiting payment)",
+        "idempotency_token": None,
+        "is_partner_order": 0,
+        "delivery_partner": None,
+        "partner_invoice_ref": None,
+    }
+
+    def _module(self, invoice, outstanding, source_ct):
+        module, stub_frappe = _import_delivery_handling(invoice)
+        module._publish_branch_event = MagicMock(return_value=[])
+        module._get_collection_change_source_ct = MagicMock(return_value=source_ct)
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module._validate_collection_receipt = MagicMock()
+        module.mark_payment_receipts_changed_for_invoice = MagicMock(return_value=[])
+        module._get_receivable_account = MagicMock(return_value="Debtors - TC")
+        module._get_courier_outstanding_account = MagicMock(return_value="Courier Outstanding - TC")
+        module.resolve_assignment_pos_profile = MagicMock(return_value="Dokki")
+        module.get_pos_cash_account = MagicMock(return_value="Cash - Dokki - TC")
+        module.validate_account_exists = MagicMock()
+        stub_frappe.db.get_value = MagicMock(return_value=outstanding)
+        return module, stub_frappe
+
+    def _awaiting_invoice(self, name, total):
+        return _FakeInvoice(
+            name=name,
+            grand_total=total,
+            custom_payment_method="Instapay",
+            custom_payment_confirmation_status="Awaiting Payment",
+            outstanding_amount=total,
+        )
+
+    def test_switch_to_cash_books_it_in_the_branch_drawer_not_courier_outstanding(self):
+        invoice = self._awaiting_invoice("ACC-SINV-2026-18023", 810.0)
+        module, stub_frappe = self._module(
+            invoice, 810.0, dict(self.SETTLED_FREIGHT_CT)
+        )
+        module._create_payment_entry = MagicMock(return_value=SimpleNamespace(name="PE-BRANCH-1"))
+
+        result = module.change_payment_collection_method(
+            invoice_name="ACC-SINV-2026-18023", new_method="Cash", pos_profile="Dokki")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["collection_change_mode"], "unpaid_online_cash_at_branch")
+        self.assertEqual(result["cash_account"], "Cash - Dokki - TC")
+
+        # DR branch cash / CR Debtors -- the courier closed out, so this money can no
+        # longer arrive as Courier Outstanding. No courier party on the posting.
+        module._create_payment_entry.assert_called_once()
+        args = module._create_payment_entry.call_args.args
+        self.assertEqual(args[1], "Debtors - TC")
+        self.assertEqual(args[2], "Cash - Dokki - TC")
+        self.assertEqual(args[3], 810.0)
+        self.assertEqual(len(args), 4)
+        module._get_courier_outstanding_account.assert_not_called()
+
+        # The drawer is the ORDER's branch, resolved from the invoice.
+        module.resolve_assignment_pos_profile.assert_called_once()
+        self.assertEqual(
+            module.resolve_assignment_pos_profile.call_args.kwargs["requested_pos_profile"],
+            "Dokki",
+        )
+
+        # A settled row is history: only its audit trail may still be written. Arming
+        # its money columns would reopen a courier balance for cash he never carried.
+        values = stub_frappe.db.set_value.call_args.args[2]
+        self.assertNotIn("amount", values)
+        self.assertNotIn("payment_mode", values)
+        self.assertNotIn("status", values)
+        self.assertIn("notes", values)
+        self.assertEqual(values["idempotency_token"], result["idempotency_token"])
+
+        self.assertEqual(invoice.custom_payment_method, "Cash")
+        self.assertEqual(invoice.custom_payment_confirmation_status, "Converted to Cash")
+
+    def test_switch_between_online_methods_moves_nothing_and_needs_no_receipt(self):
+        invoice = self._awaiting_invoice("ACC-SINV-2026-18025", 370.0)
+        module, stub_frappe = self._module(
+            invoice, 370.0, dict(self.SETTLED_FREIGHT_CT)
+        )
+        module._create_payment_entry = MagicMock()
+
+        result = module.change_payment_collection_method(
+            invoice_name="ACC-SINV-2026-18025", new_method="Mobile Wallet", pos_profile="Dokki")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["collection_change_mode"], "unpaid_online_retarget")
+        module._create_payment_entry.assert_not_called()
+        module._validate_collection_receipt.assert_not_called()
+        values = stub_frappe.db.set_value.call_args.args[2]
+        self.assertNotIn("amount", values)
+        self.assertNotIn("payment_mode", values)
+        self.assertEqual(invoice.custom_payment_method, "Mobile Wallet")
+        # Still waiting on a transfer -- confirm_online_payment books it.
+        self.assertEqual(invoice.custom_payment_confirmation_status, "Awaiting Payment")
+
+    def test_no_courier_row_at_all_still_books_the_cash_at_the_branch(self):
+        # The dispatch assigns no courier when the client sent none, and accrues no
+        # freight when the territory charges none, so this order never had a row.
+        invoice = self._awaiting_invoice("INV-NO-CT", 500.0)
+        module, stub_frappe = self._module(invoice, 500.0, None)
+        module._create_payment_entry = MagicMock(return_value=SimpleNamespace(name="PE-BRANCH-2"))
+        stub_frappe.db.exists = MagicMock(return_value=False)
+
+        result = module.change_payment_collection_method(
+            invoice_name="INV-NO-CT", new_method="Cash", pos_profile="Dokki")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["collection_change_mode"], "unpaid_online_cash_at_branch")
+        self.assertIsNone(result["courier_transaction"])
+        args = module._create_payment_entry.call_args.args
+        self.assertEqual(args[2], "Cash - Dokki - TC")
+        stub_frappe.db.set_value.assert_not_called()
+
+    def test_a_row_the_lookup_refused_blocks_the_branch_posting(self):
+        # A partner row is born Settled while its rider is still out with the order, and
+        # a row for another courier is somebody else's cash position. Neither may be
+        # silently bypassed into "the branch has the money".
+        invoice = self._awaiting_invoice("INV-PARTNER", 640.0)
+        module, stub_frappe = self._module(invoice, 640.0, None)
+        module._create_payment_entry = MagicMock()
+        stub_frappe.db.exists = MagicMock(return_value=True)
+
+        with self.assertRaises(Exception) as exc:
+            module.change_payment_collection_method(
+                invoice_name="INV-PARTNER", new_method="Cash", pos_profile="Dokki")
+
+        self.assertIn("No unsettled courier transaction", str(exc.exception))
+        module._create_payment_entry.assert_not_called()
+
+    def test_a_replayed_token_on_a_settled_row_does_not_choke_on_deferred(self):
+        # The settled branch never rewrites payment_mode, so a retry replays a row that
+        # still says "Deferred". Normalising that as a collection method throws
+        # "Invalid collection method" -- the reused mode has to be checked first.
+        replayed = dict(self.SETTLED_FREIGHT_CT, idempotency_token="TOKEN-1")
+        invoice = self._awaiting_invoice("INV-REPLAY", 810.0)
+        module, _ = self._module(invoice, 810.0, replayed)
+        module._create_payment_entry = MagicMock()
+
+        result = module.change_payment_collection_method(
+            invoice_name="INV-REPLAY", new_method="Cash", pos_profile="Dokki",
+            idempotency_token="TOKEN-1")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(invoice.custom_payment_method, "Cash")
+        module._create_payment_entry.assert_not_called()
+
+    def test_a_paid_order_with_no_row_says_there_is_nothing_to_collect(self):
+        invoice = _FakeInvoice(name="INV-PAID-NO-CT", grand_total=200.0, outstanding_amount=0.0)
+        module, _ = self._module(invoice, 0.0, None)
+
+        with self.assertRaises(Exception) as exc:
+            module.change_payment_collection_method(
+                invoice_name="INV-PAID-NO-CT", new_method="Cash", pos_profile="Dokki")
+
+        self.assertIn("nothing left to collect", str(exc.exception))
+
+
+class TestCollectionChangeSourceLookup(unittest.TestCase):
+    """Which Courier Transaction a collection change is allowed to read and stamp."""
+
+    UNSETTLED = {"name": "CT-LIVE", "party_type": "Employee", "party": "EMP-1", "amount": 0.0}
+    SETTLED_FREIGHT = {"name": "CT-DONE", "party_type": "Employee", "party": "EMP-1", "amount": 0.0}
+
+    def test_an_unsettled_row_wins_and_the_settled_fallback_is_never_queried(self):
+        module, stub_frappe = _import_delivery_handling()
+        stub_frappe.get_all = MagicMock(return_value=[dict(self.UNSETTLED)])
+
+        row = module._get_collection_change_source_ct("INV-1", "Employee", "EMP-1")
+
+        self.assertEqual(row["name"], "CT-LIVE")
+        self.assertEqual(stub_frappe.get_all.call_count, 1)
+
+    def test_the_fallback_takes_only_a_zero_amount_non_partner_settled_row(self):
+        module, stub_frappe = _import_delivery_handling()
+        stub_frappe.get_all = MagicMock(side_effect=[[], [dict(self.SETTLED_FREIGHT)]])
+
+        row = module._get_collection_change_source_ct("INV-1", "Employee", "EMP-1")
+
+        self.assertEqual(row["name"], "CT-DONE")
+        filters = stub_frappe.get_all.call_args_list[1].kwargs["filters"]
+        self.assertEqual(filters["status"], "Settled")
+        # Settled money was already counted at a shift close; a partner row is born
+        # Settled while its rider is still carrying the order.
+        self.assertEqual(filters["amount"], ["<=", 0.0001])
+        self.assertEqual(filters["is_partner_order"], 0)
+
+    def test_nothing_usable_returns_none(self):
+        module, stub_frappe = _import_delivery_handling()
+        stub_frappe.get_all = MagicMock(return_value=[])
+
+        self.assertIsNone(module._get_collection_change_source_ct("INV-1", None, None))
+
+    def test_a_settled_row_cannot_carry_the_customers_cash(self):
+        module, _ = _import_delivery_handling()
+
+        self.assertFalse(module._courier_row_can_still_carry_cash({"status": "Settled"}))
+        self.assertFalse(module._courier_row_can_still_carry_cash(None))
+        self.assertTrue(module._courier_row_can_still_carry_cash({"status": "Unsettled"}))
+        # An older row read without the column reads as still open, which is the
+        # behaviour every caller had before the settled fallback existed.
+        self.assertTrue(module._courier_row_can_still_carry_cash({}))

@@ -3522,27 +3522,32 @@ def change_payment_collection_method(
         pass
 
     source_ct = _get_collection_change_source_ct(inv.name, party_type, party)
-    if not source_ct:
-        frappe.throw("No unsettled courier transaction was found for this invoice")
-
-    party_type = source_ct.get("party_type")
-    party = source_ct.get("party")
-    if not (party_type and party):
-        frappe.throw("Courier party is required for collection method change")
+    if source_ct:
+        party_type = source_ct.get("party_type")
+        party = source_ct.get("party")
+        if not (party_type and party):
+            frappe.throw("Courier party is required for collection method change")
 
     # Delivery-partner orders go through here unchanged. Switching how the CUSTOMER
     # pays says nothing about the partner's fee, which is owed either way and was
     # already accrued at dispatch — so there is nothing partner-specific to do, and
     # refusing (as this did until 2026-08-31) left partner day without a tool every
     # other day has.
-    if source_ct.get("idempotency_token") == idempotency_token:
-        effective_method = _normalize_collection_method(source_ct.get("payment_mode") or new_method)
+    if source_ct and source_ct.get("idempotency_token") == idempotency_token:
+        stored_mode = source_ct.get("payment_mode")
+        effective_method = _normalize_collection_method(
+            stored_mode if _is_recognised_collection_method(stored_mode) else new_method
+        )
         update_submitted_sales_invoice_fields(inv, {"custom_payment_method": effective_method})
         shipping_amount = float(source_ct.get("shipping_amount") or 0)
         if shipping_amount <= 0.0001:
             stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
             shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
         return {
+            # Same shape as the branches below, ``success`` included, so a client that
+            # replays a timed-out call reads the same contract it would have got first
+            # time round.
+            "success": True,
             "mode": "cod_to_online" if _is_online_collection_method(effective_method) else "online_intent_to_cash",
             "invoice": inv.name,
             "courier_transaction": source_ct.get("name"),
@@ -3566,7 +3571,7 @@ def change_payment_collection_method(
             )
         )
 
-    order_amount = float(source_ct.get("amount") or 0)
+    order_amount = float((source_ct or {}).get("amount") or 0)
 
     # An order dispatched through the UNPAID-ONLINE path carries no customer money on
     # its Courier Transaction: the courier collects nothing (the customer was to transfer
@@ -3576,8 +3581,14 @@ def change_payment_collection_method(
     # ``_apply_collection_change_to_online`` would credit a Courier Outstanding balance
     # that does not exist and drive it negative. Read the customer amount off the invoice
     # instead, and route to the path that understands this shape.
+    #
+    # The invoice — not the courier row — is the source of truth for the customer's side
+    # of this shape, which is why the row may be Settled by now, or absent entirely (the
+    # dispatch assigns no courier when the client sent none, and accrues no freight when
+    # the territory charges none).
     unpaid_online = False
     latest_outstanding = 0.0
+    courier_can_carry = _courier_row_can_still_carry_cash(source_ct)
     if order_amount <= 0.0001:
         # Read straight from the DB: the loaded document can be stale about payment.
         latest_outstanding = _safe_float(
@@ -3593,7 +3604,17 @@ def change_payment_collection_method(
                 "no collection method to change."
             )
 
-    shipping_amount = float(source_ct.get("shipping_amount") or 0)
+    if not source_ct:
+        # Only the unpaid-online shape reaches here: every classic shape reads its
+        # customer amount off the row and has already thrown above. Refuse anyway when a
+        # row DOES exist that ``_get_collection_change_source_ct`` declined to adopt — a
+        # partner row, or one belonging to a courier other than the requested party. Its
+        # rider is still out with the order, so booking the cash at the branch (the only
+        # posting available without a usable row) would claim money nobody has handed over.
+        if frappe.db.exists("Courier Transaction", {"reference_invoice": inv.name}):
+            frappe.throw("No unsettled courier transaction was found for this invoice")
+
+    shipping_amount = float((source_ct or {}).get("shipping_amount") or 0)
     if shipping_amount <= 0.0001:
         stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
         shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
@@ -3618,6 +3639,8 @@ def change_payment_collection_method(
                 party_type=party_type,
                 party=party,
                 outstanding=latest_outstanding,
+                courier_can_carry=courier_can_carry,
+                pos_profile=pos_profile,
                 notes=notes,
                 idempotency_token=idempotency_token,
             )
@@ -3650,6 +3673,13 @@ def change_payment_collection_method(
             "event": WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION,
             "invoice": inv.name,
             "mode": "payment_collection_changed",
+            # ``mode`` above is the board event's name and shadows the applier's, so the
+            # posting that was actually made travels under its own key. It is the only
+            # thing that distinguishes cash the courier will bring
+            # (``unpaid_online_to_cash``) from cash the branch has taken into its drawer
+            # (``unpaid_online_cash_at_branch``).
+            "collection_change_mode": result.get("mode"),
+            "cash_account": result.get("cash_account"),
             "payment_changed": True,
             "new_method": new_method,
             "actual_payment_method": new_method,
@@ -3761,6 +3791,24 @@ def _normalize_collection_method(method: str | None) -> str:
     frappe.throw("Invalid collection method. Choose Cash, Instapay, Mobile Wallet, or Payment Gateway.")
 
 
+def _is_recognised_collection_method(method: str | None) -> bool:
+    """Whether *method* is one of the four collection methods, without throwing.
+
+    A Courier Transaction's ``payment_mode`` is not always one of them: the dispatch
+    paths write ``Deferred`` there, and the unpaid-online path leaves it that way when
+    the row is Settled. Callers that only want to REUSE a stored mode need to ask before
+    normalising it, or :func:`_normalize_collection_method` refuses a replayed request
+    with "Invalid collection method".
+    """
+    normalized = str(method or "").strip().lower().replace(" ", "").replace("_", "")
+    return normalized in {
+        "cash", "cod", "cashondelivery",
+        "instapay", "insta", "bank", "bankaccount",
+        "mobilewallet", "wallet",
+        "paymentgateway", "gateway", "card",
+    }
+
+
 def _is_cash_collection_method(method: str) -> bool:
     return (method or "").strip().lower() == "cash"
 
@@ -3770,35 +3818,66 @@ def _is_online_collection_method(method: str) -> bool:
 
 
 def _get_collection_change_source_ct(invoice_name: str, party_type: str | None, party: str | None):
-    filters = {
-        "reference_invoice": invoice_name,
-        "status": ["!=", "Settled"],
-    }
+    """The Courier Transaction a collection-method change should read and stamp.
+
+    An UNSETTLED row is always preferred. Failing that, a SETTLED FREIGHT row is
+    adopted, because for an unpaid-online order that row's settled flag is not about
+    the customer at all: it says the courier was paid HIS FEE at shift close, while the
+    customer's money never left Debtors. Refusing on it stranded three production
+    orders on 2026-09-01 - ACC-SINV-2026-18023, -18025 and -18026-2, every one still
+    "Awaiting Payment" for its full grand total - the moment their freight rows were
+    settled between 00:04 and 00:46.
+
+    Two kinds of settled row are deliberately NOT adopted:
+
+    * one that carried a customer ``amount`` - that money was counted at a shift close,
+      and reopening it here would count it twice;
+    * a partner row (``is_partner_order``), which is born Settled at dispatch while its
+      rider is still out with the order, so its settled flag says nothing about whether
+      anyone can still carry cash for it.
+    """
+    base: dict[str, object] = {"reference_invoice": invoice_name}
     if party_type:
-        filters["party_type"] = party_type
+        base["party_type"] = party_type
     if party:
-        filters["party"] = party
+        base["party"] = party
+
+    fields = [
+        "name",
+        "party_type",
+        "party",
+        "amount",
+        "shipping_amount",
+        "payment_mode",
+        "journal_entry",
+        "idempotency_token",
+        "delivery_partner",
+        "is_partner_order",
+        "partner_invoice_ref",
+        "notes",
+        "status",
+    ]
 
     rows = frappe.get_all(
         "Courier Transaction",
-        filters=filters,
-        fields=[
-            "name",
-            "party_type",
-            "party",
-            "amount",
-            "shipping_amount",
-            "payment_mode",
-            "journal_entry",
-            "idempotency_token",
-            "delivery_partner",
-            "is_partner_order",
-            "partner_invoice_ref",
-            "notes",
-        ],
+        filters={**base, "status": ["!=", "Settled"]},
+        fields=fields,
         order_by="amount desc, creation desc",
         limit=1,
     )
+    if not rows:
+        rows = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                **base,
+                "status": "Settled",
+                "amount": ["<=", 0.0001],
+                "is_partner_order": 0,
+            },
+            fields=fields,
+            order_by="creation desc",
+            limit=1,
+        )
     if not rows:
         return None
     try:
@@ -3806,6 +3885,21 @@ def _get_collection_change_source_ct(invoice_name: str, party_type: str | None, 
     except Exception:
         pass
     return rows[0]
+
+
+def _courier_row_can_still_carry_cash(ct: dict | None) -> bool:
+    """Whether the courier on *ct* is still open and could bring the customer's cash.
+
+    False once his row is Settled: he closed out and went home, so a switch to Cash
+    cannot land as Courier Outstanding - see
+    :func:`_apply_collection_change_for_unpaid_online`.
+    """
+    if ct is None:
+        return False
+    # ``is None`` rather than a falsiness test: an empty mapping means a row was found
+    # but read without its status, and every caller treated that as still open before
+    # the settled fallback existed.
+    return str(ct.get("status") or "").strip() != "Settled"
 
 
 def _get_real_customer_payment_entry(invoice_name: str, company: str):
@@ -3960,38 +4054,60 @@ def _apply_collection_change_to_cash(*, inv, ct, new_method: str, order_amount: 
     }
 
 
-def _apply_collection_change_for_unpaid_online(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, party_type: str, party: str, outstanding: float, notes: str | None, idempotency_token: str):
+def _apply_collection_change_for_unpaid_online(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, party_type: str | None, party: str | None, outstanding: float, courier_can_carry: bool, pos_profile: str, notes: str | None, idempotency_token: str):
     """Change how an UNPAID online-intent order will be collected.
 
     These orders came through :func:`handle_unpaid_online_deliver_unconfirmed`: no
     customer Payment Entry was made, the receivable is still on Debtors, and the Courier
-    Transaction holds only the courier's freight (``amount == 0``). Two different things
-    can be asked of that state:
+    Transaction holds only the courier's freight (``amount == 0``). Three different
+    things can be asked of that state, and they are three different postings:
 
-    * **switch to Cash** — the customer will now pay the courier at the door, so the order
-      becomes an ordinary COD: move the receivable to Courier Outstanding and put the
-      amount on the courier's EXISTING row. His freight was already accrued at dispatch,
-      so ``shipping_amount`` is deliberately left untouched — re-stating it, or adding a
-      second Courier Transaction, makes settlement pay him for one delivery twice.
-    * **switch to another online method** — nothing has been paid and no money moves; only
-      the ledger the transfer is expected in changes. ``confirm_online_payment`` still
-      books it when the transfer actually lands.
+    * **switch to Cash while the courier is still open** (``courier_can_carry``) — the
+      customer will now pay him at the door, so the order becomes an ordinary COD: move
+      the receivable to Courier Outstanding and put the amount on his EXISTING row. His
+      freight was already accrued at dispatch, so ``shipping_amount`` is deliberately
+      left untouched — re-stating it, or adding a second Courier Transaction, makes
+      settlement pay him for one delivery twice.
+    * **switch to Cash after he has closed out** — his row is Settled (or there is no
+      row at all): he has gone home, so this money can no longer arrive as Courier
+      Outstanding. It arrives at the branch instead — DR the branch cash account,
+      CR Debtors — which is what actually happens operationally: whoever collects it
+      puts it in the till. The posting lands in the currently open shift by date, so
+      the next cash count expects it. Nothing is written to the settled row's money
+      columns: arming a row that settlement has already closed would reopen a courier
+      balance for cash he never carried.
+    * **switch to another online method** — nothing has been paid and no money moves in
+      either state; only the ledger the transfer is expected in changes.
+      ``confirm_online_payment`` still books it when the transfer actually lands.
     """
-    ct_name = ct.get("name")
+    ct_name = (ct or {}).get("name")
     to_cash = _is_cash_collection_method(new_method)
     changed_receipts = mark_payment_receipts_changed_for_invoice(inv.name)
 
-    # Debtors -> Courier Outstanding. ``_create_payment_entry`` returns a Journal Entry
-    # rather than a Payment Entry when the destination ledger expects a party, so this
-    # holds whichever voucher was posted.
+    # ``_create_payment_entry`` returns a Journal Entry rather than a Payment Entry when
+    # the destination ledger expects a party (Courier Outstanding does), so this holds
+    # whichever voucher was posted.
     voucher_name = None
-    ct_updates: dict[str, object] = {
-        "payment_mode": new_method,
-        "idempotency_token": idempotency_token,
-    }
+    cash_account = None
+    mode = "unpaid_online_retarget"
+
+    # A Settled row is history. Only its audit trail may still be written; see the
+    # docstring for why its money columns are off limits.
+    ct_updates: dict[str, object] = {"idempotency_token": idempotency_token}
+    if courier_can_carry:
+        ct_updates["payment_mode"] = new_method
     invoice_updates: dict[str, object] = {"custom_payment_method": new_method}
 
     if to_cash:
+        # No longer waiting on a bank transfer — this is the state the InstaPay
+        # reconciliation screen stamps for the same decision, and it is what takes the
+        # order out of that screen's queue.
+        invoice_updates["custom_payment_confirmation_status"] = "Converted to Cash"
+
+    if to_cash and courier_can_carry:
+        mode = "unpaid_online_to_cash"
+        if not (party_type and party):
+            frappe.throw("Courier party is required for collection method change")
         if outstanding > 0.0001:
             voucher = _create_payment_entry(
                 inv,
@@ -4003,31 +4119,50 @@ def _apply_collection_change_for_unpaid_online(*, inv, ct, new_method: str, orde
             )
             voucher_name = getattr(voucher, "name", None)
         ct_updates["amount"] = order_amount
-        # No longer waiting on a bank transfer — this is the state the InstaPay
-        # reconciliation screen stamps for the same decision.
-        invoice_updates["custom_payment_confirmation_status"] = "Converted to Cash"
+    elif to_cash:
+        mode = "unpaid_online_cash_at_branch"
+        if outstanding > 0.0001:
+            # The branch whose drawer receives it is the ORDER's branch, not whatever
+            # the client named: resolve_assignment_pos_profile prefers the invoice's own
+            # profile and refuses a mismatch, and the whitelisted wrapper has already
+            # required an open shift there. That is the shift whose count will include
+            # this cash.
+            resolved_profile = resolve_assignment_pos_profile(
+                inv, requested_pos_profile=pos_profile
+            )
+            cash_account = get_pos_cash_account(resolved_profile, inv.company)
+            validate_account_exists(cash_account)
+            voucher = _create_payment_entry(
+                inv,
+                _get_receivable_account(inv.company),
+                cash_account,
+                outstanding,
+            )
+            voucher_name = getattr(voucher, "name", None)
 
-    ct_updates["notes"] = _append_collection_change_note(
-        ct.get("notes"),
-        old_method=ct.get("payment_mode"),
-        new_method=new_method,
-        order_amount=order_amount,
-        shipping_amount=shipping_amount,
-        journal_entry=voucher_name,
-        receipt_name=None,
-        reference_no=None,
-        notes=notes,
-        idempotency_token=idempotency_token,
-        changed_receipts=changed_receipts,
-    )
-    frappe.db.set_value("Courier Transaction", ct_name, ct_updates)
+    if ct_name:
+        ct_updates["notes"] = _append_collection_change_note(
+            (ct or {}).get("notes"),
+            old_method=(ct or {}).get("payment_mode"),
+            new_method=new_method,
+            order_amount=order_amount,
+            shipping_amount=shipping_amount,
+            journal_entry=voucher_name,
+            receipt_name=None,
+            reference_no=None,
+            notes=notes,
+            idempotency_token=idempotency_token,
+            changed_receipts=changed_receipts,
+        )
+        frappe.db.set_value("Courier Transaction", ct_name, ct_updates)
     update_submitted_sales_invoice_fields(inv, invoice_updates)
 
     return {
-        "mode": "unpaid_online_to_cash" if to_cash else "unpaid_online_retarget",
+        "mode": mode,
         "invoice": inv.name,
         "courier_transaction": ct_name,
         "journal_entry": voucher_name,
+        "cash_account": cash_account,
         "order_amount": order_amount,
         "shipping_amount": shipping_amount,
         "changed_receipts": changed_receipts,
