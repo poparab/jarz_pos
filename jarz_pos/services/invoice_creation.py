@@ -303,6 +303,39 @@ def _resolve_customer_price_list(customer_doc) -> str | None:
     return candidate
 
 
+def _resolve_b2b_baseline_price_list(order_purpose: str | None) -> str | None:
+    """The B2B base list ("B2B Selling"), for a B2B Supply order with no tier.
+
+    The "B2B Supply" policy carries no price list on purpose: the tier is supposed to
+    come from ``Customer.default_price_list`` or the customer group's. When neither is
+    set — which is every B2B customer on both servers today — the chain used to fall
+    through to the POS Profile's list and the order booked at RETAIL. Proven on staging
+    2026-09-03: a B2B Supply order booked Molten Large at 160 instead of the agreed 92.
+
+    So this sits AFTER the customer/group lookup and BEFORE the POS Profile default: a
+    configured tier still wins, and only the un-tiered customer is caught here.
+
+    Deliberately scoped to ONE purpose. "Free Shipping Waiver" also has no price list,
+    but it is a retail order with the shipping income waived and must keep pricing at
+    retail — returning the B2B list for it would quietly discount every waiver order.
+    """
+    from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE, PRICE_LIST as B2B_PRICE_LIST
+
+    if (order_purpose or "").strip() != B2B_SUPPLY_PURPOSE:
+        return None
+    try:
+        row = frappe.db.get_value(
+            "Price List", B2B_PRICE_LIST, ["enabled", "selling"], as_dict=True
+        )
+    except Exception:
+        return None
+    # A disabled or buying-only list would be rejected downstream anyway; falling back
+    # to the POS default is the safer answer than throwing at checkout.
+    if not row or not row.get("enabled") or not row.get("selling"):
+        return None
+    return _normalize_price_list_name(B2B_PRICE_LIST)
+
+
 def _resolve_company_default_price_list() -> str | None:
     try:
         return _normalize_price_list_name(
@@ -317,6 +350,7 @@ def _auto_derivable_price_lists(
     default_price_list: str | None,
     policy_matched: bool = False,
     policy_price_list: str | None = None,
+    policy_order_purpose: str | None = None,
     customer_doc=None,
     sales_partner: str | None = None,
 ) -> set[str]:
@@ -351,6 +385,10 @@ def _auto_derivable_price_lists(
                 _normalize_price_list_name(policy_price_list),
                 _resolve_sales_partner_price_list(sales_partner),
                 _resolve_customer_price_list(customer_doc),
+                # The B2B baseline is server-derived exactly like the ones above, so a
+                # rep echoing it back from the cart must not trip the manager gate —
+                # that is the lockout this whole function exists to prevent.
+                _resolve_b2b_baseline_price_list(policy_order_purpose),
             )
         )
     return {candidate for candidate in candidates if candidate}
@@ -366,6 +404,7 @@ def _resolve_effective_price_list(
     logger,
     policy_matched: bool = False,
     policy_price_list: str | None = None,
+    policy_order_purpose: str | None = None,
     customer_doc=None,
     sales_partner: str | None = None,
 ) -> str | None:
@@ -391,6 +430,7 @@ def _resolve_effective_price_list(
             default_price_list=default_price_list,
             policy_matched=policy_matched,
             policy_price_list=policy_price_list,
+            policy_order_purpose=policy_order_purpose,
             customer_doc=customer_doc,
             sales_partner=sales_partner,
         )
@@ -414,6 +454,9 @@ def _resolve_effective_price_list(
             or policy_pl
             or _resolve_sales_partner_price_list(sales_partner)
             or _resolve_customer_price_list(customer_doc)
+            # Un-tiered B2B customer: the agreed base list, never retail. Sits below the
+            # customer/group lookup so a configured tier still wins.
+            or _resolve_b2b_baseline_price_list(policy_order_purpose)
             or default_price_list
             or _resolve_company_default_price_list()
         )
@@ -890,6 +933,7 @@ def create_pos_invoice(
             logger=logger,
             policy_matched=policy_decision.matched,
             policy_price_list=policy_decision.price_list,
+            policy_order_purpose=policy_decision.order_purpose,
             customer_doc=customer_doc,
             sales_partner=sales_partner,
         )

@@ -253,13 +253,24 @@ def get_commercial_policies(profile: str | None = None):
 
 
 @frappe.whitelist(allow_guest=False)
-def resolve_customer_price_list(customer: str, pos_profile: str | None = None):
+def resolve_customer_price_list(
+    customer: str, pos_profile: str | None = None, order_purpose: str | None = None
+):
     """Resolve the effective selling price list (B2B tier) for a customer.
 
-    Cascade: Customer.default_price_list → Customer Group.default_price_list → None.
+    Cascade: Customer.default_price_list → Customer Group.default_price_list →
+    (for a "B2B Supply" order) the B2B base list → None.
     The Flutter cart calls this when a B2B customer is selected under a customer-group
     driven order purpose (one whose policy has no fixed price list) so it can show the
     correct tier prices before checkout. Returns {"price_list": <name|null>}.
+
+    ``order_purpose`` is optional and defaults to the pre-existing behaviour, so an
+    older app build keeps working: it just falls back to the POS default in the cart
+    while the server books the B2B base rate. The displayed price is then higher than
+    the booked one — never the other way round — and the gap closes as soon as the
+    build carrying the parameter lands. This mirrors
+    ``services/invoice_creation._resolve_b2b_baseline_price_list``; the two must agree,
+    or the cart shows one number and the invoice books another.
     """
     result = {"price_list": None}
     if not customer or not frappe.db.exists("Customer", customer):
@@ -273,6 +284,10 @@ def resolve_customer_price_list(customer: str, pos_profile: str | None = None):
     # Only surface enabled selling price lists.
     if pl and not frappe.db.get_value("Price List", pl, "selling"):
         pl = None
+    if not pl:
+        from jarz_pos.services.invoice_creation import _resolve_b2b_baseline_price_list
+
+        pl = _resolve_b2b_baseline_price_list(order_purpose)
     result["price_list"] = pl
     return result
 

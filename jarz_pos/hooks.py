@@ -108,6 +108,13 @@ after_migrate = [
     # other seeder here this one deliberately CORRECTS drift rather than being
     # create-only, and reports each correction; see the module docstring.
     "jarz_pos.setup.employee_pricing.ensure_employee_price_list_rates",
+    # Seed the B2B base rates (Large 92 / Medium 77) on the "B2B Selling" list, in
+    # the same two layers. Also after b2b_master_data, which creates that list.
+    # CREATE-ONLY on purpose — the exact opposite of employee_pricing above: a B2B
+    # price is negotiated and the Pricing page exists to change it, so this fills
+    # what is missing and never overwrites a rate somebody set. The one-time
+    # corrective pass is opt-in (ensure_b2b_base_prices(realign=True), by hand).
+    "jarz_pos.setup.b2b_pricing.ensure_b2b_base_prices",
     # Employee-advance schema: Customer.custom_employee plus the six custom_jarz_*
     # columns on Employee Advance. Guarded on HRMS being installed, never raises.
     # After b2b_master_data because the name-matching fallback in

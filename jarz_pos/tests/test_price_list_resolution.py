@@ -15,7 +15,7 @@ precedence is asserted deterministically without any DB / doctype-migration depe
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from jarz_pos.services import invoice_creation as ic
 
@@ -114,6 +114,148 @@ class TestItemGroupFallback(unittest.TestCase):
             ic, "get_item_price", return_value=None
         ):
             self.assertEqual(ic._resolve_item_rate(_CODE, None, fallback_rate=42), 42.0)
+
+
+_B2B_LIST = "B2B Selling"
+_B2B_PURPOSE = "B2B Supply"
+_POS_DEFAULT = "Standard Selling"
+
+
+def _price_list_row(enabled=1, selling=1):
+    """frappe.db.get_value side effect for the Price List flag lookup."""
+
+    def _gv(doctype, name=None, fieldname=None, *args, **kwargs):
+        if doctype == "Price List":
+            return {"enabled": enabled, "selling": selling}
+        return None
+
+    return _gv
+
+
+class TestB2bBaselinePriceList(unittest.TestCase):
+    """The fallback that stops an un-tiered B2B customer pricing at retail."""
+
+    def test_b2b_supply_resolves_to_the_base_list(self):
+        with patch.object(ic.frappe.db, "get_value", side_effect=_price_list_row()):
+            self.assertEqual(
+                ic._resolve_b2b_baseline_price_list(_B2B_PURPOSE), _B2B_LIST
+            )
+
+    def test_other_purposes_never_get_b2b_pricing(self):
+        # "Free Shipping Waiver" also carries no price list, but it is a RETAIL order
+        # with the shipping income waived — handing it the B2B list would silently
+        # discount every waiver order.
+        with patch.object(ic.frappe.db, "get_value", side_effect=_price_list_row()):
+            for purpose in ("Free Shipping Waiver", "Standard", "Employee", "", None):
+                self.assertIsNone(ic._resolve_b2b_baseline_price_list(purpose), purpose)
+
+    def test_disabled_or_buying_only_list_falls_through(self):
+        # Returning a list the invoice would reject anyway just moves the failure to
+        # checkout; falling back to the POS default is the safer answer.
+        for flags in ({"enabled": 0, "selling": 1}, {"enabled": 1, "selling": 0}):
+            with patch.object(
+                ic.frappe.db, "get_value", side_effect=_price_list_row(**flags)
+            ):
+                self.assertIsNone(ic._resolve_b2b_baseline_price_list(_B2B_PURPOSE), flags)
+
+    def test_missing_list_falls_through(self):
+        with patch.object(ic.frappe.db, "get_value", return_value=None):
+            self.assertIsNone(ic._resolve_b2b_baseline_price_list(_B2B_PURPOSE))
+
+    def test_baseline_is_server_derivable(self):
+        # If the baseline were missing from this set, a B2B rep whose cart echoes the
+        # resolved list back at checkout would trip the manager gate and be locked out
+        # of B2B checkout entirely — the exact lockout that set exists to prevent.
+        with patch.object(ic.frappe.db, "get_value", side_effect=_price_list_row()):
+            derivable = ic._auto_derivable_price_lists(
+                default_price_list=_POS_DEFAULT,
+                policy_matched=True,
+                policy_price_list=None,
+                policy_order_purpose=_B2B_PURPOSE,
+                customer_doc=None,
+                sales_partner=None,
+            )
+        self.assertIn(_B2B_LIST, derivable)
+
+    def test_standard_order_derives_nothing_new(self):
+        # A Standard (retail) order must not be able to reach the B2B list without
+        # manager approval — a cashier applying B2B pricing to a walk-in sale.
+        derivable = ic._auto_derivable_price_lists(
+            default_price_list=_POS_DEFAULT,
+            policy_matched=False,
+            policy_order_purpose=_B2B_PURPOSE,
+        )
+        self.assertEqual(derivable, {_POS_DEFAULT})
+
+
+class _Profile:
+    def __init__(self, price_list=_POS_DEFAULT):
+        self.selling_price_list = price_list
+        self.name = "Dokki"
+
+
+class _Customer:
+    def __init__(self, default_price_list=None, customer_group=None):
+        self.default_price_list = default_price_list
+        self.customer_group = customer_group
+
+
+class TestEffectivePriceListChain(unittest.TestCase):
+    """Where the baseline sits in the chain is the whole design decision."""
+
+    def _resolve(self, *, customer_doc=None, purpose=_B2B_PURPOSE, matched=True,
+                 group_list=None):
+        def _gv(doctype, name=None, fieldname=None, *args, **kwargs):
+            if doctype == "Price List":
+                return {"enabled": 1, "selling": 1}
+            if doctype == "Customer Group":
+                return group_list
+            return None
+
+        with patch.object(ic.frappe.db, "get_value", side_effect=_gv), patch.object(
+            ic.frappe.db, "exists", return_value=True
+        ):
+            return ic._resolve_effective_price_list(
+                _Profile(),
+                [{"item_code": "JAR-L1", "qty": 1}],
+                requested_price_list=None,
+                suppress_shipping_income=None,
+                suppress_legacy_delivery_charges=None,
+                logger=MagicMock(),
+                policy_matched=matched,
+                policy_price_list=None,
+                policy_order_purpose=purpose,
+                customer_doc=customer_doc,
+                sales_partner=None,
+            )
+
+    def test_untiered_b2b_customer_gets_the_base_list_not_retail(self):
+        self.assertEqual(self._resolve(customer_doc=_Customer()), _B2B_LIST)
+
+    def test_customer_tier_still_wins(self):
+        self.assertEqual(
+            self._resolve(customer_doc=_Customer(default_price_list="Cafes")), "Cafes"
+        )
+
+    def test_customer_group_tier_still_wins(self):
+        self.assertEqual(
+            self._resolve(
+                customer_doc=_Customer(customer_group="Cafes"), group_list="Cafes"
+            ),
+            "Cafes",
+        )
+
+    def test_free_shipping_waiver_keeps_retail_pricing(self):
+        self.assertEqual(
+            self._resolve(customer_doc=_Customer(), purpose="Free Shipping Waiver"),
+            _POS_DEFAULT,
+        )
+
+    def test_standard_order_is_unchanged(self):
+        self.assertEqual(
+            self._resolve(customer_doc=_Customer(), purpose="Standard", matched=False),
+            _POS_DEFAULT,
+        )
 
 
 if __name__ == "__main__":
