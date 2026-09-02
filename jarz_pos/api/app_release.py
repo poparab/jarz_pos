@@ -19,6 +19,13 @@ plain integers.
 **Raising the floor is unforgiving.** Only ever raise it to a build that already
 contains the update gate; devices older than that have no code to render the
 blocking screen, so they would see nothing but failing requests.
+
+**The floor follows the published APK.** Every ``full_apk`` release ends with
+``publish_apk.ps1`` calling :func:`publish_android_release` (over ``bench
+execute``, never HTTP), which raises the floor to the build it just put on
+``/pos/download/``. So installing the newest APK is the only way to keep using
+the app, while a Shorebird patch - which never publishes an APK - leaves the
+floor alone, because the patch itself is the update.
 """
 
 from __future__ import annotations
@@ -59,6 +66,12 @@ class AppUpgradeRequired(Exception):
     """
 
     http_status_code = UPGRADE_REQUIRED_STATUS
+
+# The first build that shipped the update gate. A floor below this is never
+# meaningful, and a floor above it applied to a device below it is a lockout
+# with no screen to explain itself, so :func:`publish_android_release` refuses
+# to set anything lower.
+FIRST_GATED_BUILD = 431
 
 # Endpoints a blocked client must still reach, or it cannot show the user what
 # is wrong or get them to the fix.
@@ -278,3 +291,91 @@ def before_request() -> None:
         return
 
     _refuse_stale_build(build_number, minimum_build)
+
+
+class ReleasePublishRefused(Exception):
+    """A floor change that must not happen. Never raised from a request path."""
+
+
+def _as_flag(value: Any) -> bool:
+    """``bench execute --kwargs`` hands over Python literals, but a caller may
+    still spell a flag as ``"1"`` / ``"true"``; accept the obvious forms."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def publish_android_release(
+    build_number: Any,
+    download_url: Optional[str] = None,
+    allow_lower: Any = False,
+    commit: Any = True,
+) -> "dict[str, Any]":
+    """Make ``build_number`` the build every Android device must be on.
+
+    Called by ``publish_apk.ps1`` after the APK is verified live on
+    ``/pos/download/`` - never before, because the moment the floor moves every
+    older device is sent to that page. Sets both ``mobile_minimum_android_build``
+    (the hard gate) and ``mobile_latest_android_build`` (the nudge) to the same
+    number: once the floor follows the release, "available" and "required" are
+    the same thing.
+
+    Deliberately **not** whitelisted. It is reached through
+    ``bench execute jarz_pos.api.app_release.publish_android_release``, i.e.
+    only by something that already holds a shell on the server. Exposing a
+    floor-raising verb over HTTP would turn one leaked token into a way to lock
+    every till out at once.
+
+    Refuses, rather than clamps, anything that would strand devices:
+
+    * a build below :data:`FIRST_GATED_BUILD`, which no device could act on;
+    * lowering the floor, unless ``allow_lower`` is passed on purpose (the
+      escape hatch for a floor raised by mistake - the app re-checks and
+      unblocks itself, no reinstall needed).
+
+    Re-publishing the current build is a no-op that still reports success, so
+    a page re-render does not need a special case.
+
+    Writes with ``frappe.db.set_single_value`` on purpose: a full ``save()`` of
+    Jarz POS Settings validates every Link on the Single, and one stale Link
+    elsewhere on it would turn a routine release into a failed one.
+    """
+    target = _as_build_number(build_number)
+    if target is None:
+        raise ReleasePublishRefused(
+            f"build_number must be a positive integer, got {build_number!r}"
+        )
+    if target < FIRST_GATED_BUILD:
+        raise ReleasePublishRefused(
+            f"Refusing floor {target}: builds before {FIRST_GATED_BUILD} have no update "
+            "gate, so a floor there would lock devices out with no screen to explain it."
+        )
+
+    previous_minimum = _settings_int("mobile_minimum_android_build")
+    previous_latest = _settings_int("mobile_latest_android_build")
+
+    if target < previous_minimum and not _as_flag(allow_lower):
+        raise ReleasePublishRefused(
+            f"Refusing to lower the floor from {previous_minimum} to {target}. "
+            "Pass allow_lower=True if this rollback is deliberate."
+        )
+
+    frappe.db.set_single_value("Jarz POS Settings", "mobile_minimum_android_build", target)
+    frappe.db.set_single_value("Jarz POS Settings", "mobile_latest_android_build", target)
+
+    url = (download_url or "").strip()
+    if url:
+        frappe.db.set_single_value("Jarz POS Settings", "mobile_apk_download_url", url)
+
+    if _as_flag(commit):
+        frappe.db.commit()
+
+    return {
+        "ok": True,
+        "minimum_build": target,
+        "latest_build": target,
+        "previous_minimum_build": previous_minimum,
+        "previous_latest_build": previous_latest,
+        "download_url": url or _download_url(),
+        "changed": target != previous_minimum or target != previous_latest,
+    }

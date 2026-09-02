@@ -703,7 +703,7 @@
    "fieldtype": "Int",
    "label": "Minimum Android Build",
    "non_negative": 1,
-   "description": "Android builds below this number are blocked with a non-dismissible update screen. 0 disables the gate. The build number is the revision count CI stamps into the APK - read it off the About screen or the Firebase release notes. Never set it above a build that predates the update gate itself, or those devices are locked out with no way to show the prompt."
+   "description": "Android builds below this number are blocked with a non-dismissible update screen. 0 disables the gate. Raised AUTOMATICALLY to the published build by every full APK release (publish_apk.ps1), so installed apps are forced onto the newest APK; Shorebird patches never move it. Lower it by hand only to roll back a bad release. Never set it below 431 - builds before that have no update gate and would be locked out with no screen to explain it."
   },
   {
    "fieldname": "mobile_latest_android_build",

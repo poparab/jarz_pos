@@ -38,7 +38,11 @@ class AppReleaseTestCase(unittest.TestCase):
         fake_frappe.log_error = MagicMock()
         fake_frappe.get_traceback = MagicMock(return_value="traceback")
         fake_frappe.db = SimpleNamespace(
-            get_single_value=MagicMock(side_effect=lambda _dt, field: values.get(field))
+            get_single_value=MagicMock(side_effect=lambda _dt, field: values.get(field)),
+            set_single_value=MagicMock(
+                side_effect=lambda _dt, field, value: values.__setitem__(field, value)
+            ),
+            commit=MagicMock(),
         )
         fake_frappe.utils = SimpleNamespace(get_url=MagicMock(return_value=url))
         fake_frappe.local = SimpleNamespace(request=None, form_dict={}, response={})
@@ -250,3 +254,88 @@ class TestBeforeRequestGate(AppReleaseTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPublishAndroidRelease(AppReleaseTestCase):
+    """The release-time floor raise: the published APK becomes the required build."""
+
+    def test_raises_floor_and_latest_to_the_published_build(self):
+        module = self._load_module({"mobile_minimum_android_build": 440})
+
+        result = module.publish_android_release(449, download_url="https://erp.example.com/pos/download/")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["previous_minimum_build"], 440)
+        self.assertEqual(
+            module.frappe.db.get_single_value("Jarz POS Settings", "mobile_minimum_android_build"), 449
+        )
+        self.assertEqual(
+            module.frappe.db.get_single_value("Jarz POS Settings", "mobile_latest_android_build"), 449
+        )
+        self.assertEqual(
+            module.frappe.db.get_single_value("Jarz POS Settings", "mobile_apk_download_url"),
+            "https://erp.example.com/pos/download/",
+        )
+        module.frappe.db.commit.assert_called_once()
+
+        # And the gate now enforces it, from the same settings.
+        self.assertTrue(module.resolve_requirement("android", 448)["update_required"])
+        self.assertFalse(module.resolve_requirement("android", 449)["update_required"])
+
+    def test_accepts_a_string_build_number_from_the_command_line(self):
+        module = self._load_module()
+        module.publish_android_release("449")
+        self.assertEqual(
+            module.frappe.db.get_single_value("Jarz POS Settings", "mobile_minimum_android_build"), 449
+        )
+
+    def test_republishing_the_current_build_is_a_noop(self):
+        module = self._load_module(
+            {"mobile_minimum_android_build": 449, "mobile_latest_android_build": 449}
+        )
+        result = module.publish_android_release(449)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["changed"])
+
+    def test_refuses_a_floor_below_the_first_gated_build(self):
+        module = self._load_module()
+        with self.assertRaises(module.ReleasePublishRefused):
+            module.publish_android_release(module.FIRST_GATED_BUILD - 1)
+        module.frappe.db.set_single_value.assert_not_called()
+
+    def test_refuses_garbage(self):
+        module = self._load_module()
+        for bad in (None, "", "abc", 0, -3, "12.0"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(module.ReleasePublishRefused):
+                    module.publish_android_release(bad)
+        module.frappe.db.set_single_value.assert_not_called()
+
+    def test_refuses_to_lower_the_floor_by_default(self):
+        module = self._load_module({"mobile_minimum_android_build": 449})
+        with self.assertRaises(module.ReleasePublishRefused):
+            module.publish_android_release(445)
+        module.frappe.db.set_single_value.assert_not_called()
+
+    def test_lowering_is_allowed_when_asked_for(self):
+        module = self._load_module({"mobile_minimum_android_build": 449})
+        result = module.publish_android_release(445, allow_lower="true")
+        self.assertEqual(result["minimum_build"], 445)
+        self.assertEqual(
+            module.frappe.db.get_single_value("Jarz POS Settings", "mobile_minimum_android_build"), 445
+        )
+
+    def test_download_url_is_left_alone_when_not_given(self):
+        module = self._load_module({"mobile_apk_download_url": "https://custom.example/apk"})
+        result = module.publish_android_release(449)
+        self.assertEqual(
+            module.frappe.db.get_single_value("Jarz POS Settings", "mobile_apk_download_url"),
+            "https://custom.example/apk",
+        )
+        self.assertEqual(result["download_url"], "https://custom.example/apk")
+
+    def test_commit_can_be_left_to_the_caller(self):
+        module = self._load_module()
+        module.publish_android_release(449, commit=False)
+        module.frappe.db.commit.assert_not_called()
