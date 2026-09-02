@@ -32,8 +32,11 @@ from jarz_pos.utils.account_utils import (
 )
 from jarz_pos.utils.courier_visibility import (
     assert_courier_matches_pos_profile,
+    get_visible_pos_profiles,
+    map_invoice_branches,
     resolve_assignment_pos_profile,
     resolve_courier_delivery_partner,
+    user_has_global_profile_access,
 )
 from jarz_pos.utils.invoice_utils import get_woo_order_ids, normalize_woo_order_id
 
@@ -2362,10 +2365,36 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
     cts = frappe.get_all(
         "Courier Transaction",
         filters=filters,
-        fields=["name", "amount", "shipping_amount", "party_type", "party", "is_partner_order"],
+        fields=[
+            "name",
+            "reference_invoice",
+            "amount",
+            "shipping_amount",
+            "party_type",
+            "party",
+            "is_partner_order",
+        ],
     )
+
+    # Settle only what belongs to THIS branch. The journal entry below is funded
+    # by ``get_pos_cash_account(pos_profile)``, so settling a row whose invoice
+    # belongs to another branch moves that branch's courier cash into this one's
+    # drawer and clears the row the other branch still has to collect. Until
+    # 2026-09-02 a party-wide settle did exactly that for every branch the
+    # courier had ever delivered for.
+    invoice_branches = map_invoice_branches([r.get("reference_invoice") for r in cts])
+    cts = [
+        r
+        for r in cts
+        if invoice_branches.get((r.get("reference_invoice") or "").strip(), "") == pos_profile
+    ]
+
     if not cts:
-        frappe.throw("No unsettled courier transactions found for the selected party.")
+        frappe.throw(
+            _("No unsettled courier transactions found for the selected party in {0}.").format(
+                pos_profile
+            )
+        )
 
     if not (party_type and party):
         for row in cts:
@@ -4468,10 +4497,20 @@ def _get_invoice_city(invoice_name):
         return territory
 
 
-def get_courier_balances():
+def get_courier_balances(pos_profile: str | None = None):
     """
     Return outstanding balances grouped by unified delivery party
     (Employee/Supplier) with a backward-compatible shape.
+
+    BRANCH SCOPE. Rows are limited to the branches the caller may see — the one
+    named by *pos_profile*, or every branch the user is assigned to when it is
+    omitted. A row belongs to the branch that owns its invoice
+    (``custom_kanban_profile``, falling back to ``pos_profile``), which is the
+    same key ``services.courier_carry.get_unsettled_transactions`` uses at shift
+    close, and the branch whose cash account ``settle_delivery_party`` actually
+    pays out of. Until 2026-09-02 this returned every unsettled row site-wide,
+    so one branch saw — and could settle, out of its own drawer — another
+    branch's courier money.
 
     Important: Avoid referencing a non-existent "Courier" DocType. We derive
     balances solely from `Courier Transaction` rows.
@@ -4518,6 +4557,27 @@ def get_courier_balances():
         filters=balance_filters,
         fields=fields,
     )
+
+    # Branch scope. An unattributable row (no invoice, or an invoice carrying no
+    # profile at all) is shown only to users with global profile access, so the
+    # money stays visible to someone instead of disappearing from every screen.
+    visible_profiles = set(get_visible_pos_profiles(requested_pos_profile=pos_profile))
+    if not visible_profiles:
+        return []
+    invoice_branches = map_invoice_branches([r.get("reference_invoice") for r in rows])
+    show_unscoped = user_has_global_profile_access()
+
+    scoped_rows = []
+    for r in rows:
+        branch = invoice_branches.get((r.get("reference_invoice") or "").strip(), "")
+        if branch:
+            if branch not in visible_profiles:
+                continue
+        elif not show_unscoped:
+            continue
+        r["pos_profile"] = branch
+        scoped_rows.append(r)
+    rows = scoped_rows
 
     groups = {}
 
@@ -4580,6 +4640,7 @@ def get_courier_balances():
             "territory": loc_label,
             "amount": amt,
             "shipping": ship,
+            "pos_profile": r.get("pos_profile") or "",
         })
 
     data = list(groups.values())

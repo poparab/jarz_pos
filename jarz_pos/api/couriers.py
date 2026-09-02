@@ -179,8 +179,15 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def get_courier_balances():
-    return _get_courier_balances()
+def get_courier_balances(pos_profile: str | None = None):
+    """Unsettled courier balances for the caller's branch(es).
+
+    ``pos_profile`` narrows to one branch (and is access-checked); omitting it
+    returns every branch the caller is assigned to. Neither form can reach a
+    branch the caller is not a member of — the scope is applied server-side, so
+    an older client that sends nothing is scoped too.
+    """
+    return _get_courier_balances(pos_profile=pos_profile)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]

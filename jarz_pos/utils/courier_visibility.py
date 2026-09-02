@@ -366,3 +366,38 @@ def filter_available_couriers(
 		result.append(row_out)
 
 	return result
+
+def map_invoice_branches(invoice_names: Iterable[object] | None) -> dict[str, str]:
+	"""Batch-map Sales Invoice name -> the branch (POS Profile) that owns it.
+
+	``custom_kanban_profile`` wins over ``pos_profile`` for the same reason
+	``jarz_pos.services.courier_carry`` prefers it: the latter goes stale when an
+	order is transferred between branches, and the branch that must account for
+	the courier's cash is the one currently holding the order.
+
+	Invoices with neither field set are absent from the result, so a plain
+	``.get(name)`` yields ``None`` for an unattributable row.
+	"""
+	names = {_clean(name) for name in (invoice_names or [])}
+	names.discard("")
+	if not names:
+		return {}
+
+	fields = ["name", "pos_profile"]
+	try:
+		if frappe.db.has_column("Sales Invoice", "custom_kanban_profile"):
+			fields.append("custom_kanban_profile")
+	except Exception:
+		pass
+
+	out: dict[str, str] = {}
+	rows = frappe.get_all(
+		"Sales Invoice",
+		filters={"name": ["in", list(names)]},
+		fields=fields,
+	) or []
+	for row in rows:
+		branch = _clean(_row_value(row, "custom_kanban_profile")) or _clean(_row_value(row, "pos_profile"))
+		if branch:
+			out[_clean(_row_value(row, "name"))] = branch
+	return out

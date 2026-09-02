@@ -1433,8 +1433,12 @@ def _matrix(env: Dict[str, Any]) -> List[Probe]:
               known_open=True, leak_proof=_proof_recent_invoices,
               note="returns every POS invoice site-wide, unscoped"),
         Probe("leak.courier_balances", "jarz_pos.api.couriers.get_courier_balances",
-              {"staff": DENY}, known_open=True, leak_proof=_proof_courier_balances,
-              note="every courier's outstanding rows, whatever branch they belong to"),
+              {"staff": DENY}, leak_proof=_proof_courier_balances,
+              note="CLOSED 2026-09-02: the endpoint now scopes rows to the branch that owns "
+                   "each invoice, so this answers 200 with the persona's OWN branches and the "
+                   "probe skips as unproven. It stays here as the regression watch — if it "
+                   "ever proves a leak again, the scope in services.delivery_handling."
+                   "get_courier_balances has been lost"),
         Probe("leak.branch_drawer", "jarz_pos.api.pos.get_pos_profile_account_balance",
               {"staff": DENY}, params={"profile": other_profile},
               known_open=True, leak_proof=_proof_branch_drawer,

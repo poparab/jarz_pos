@@ -1111,19 +1111,30 @@ class TestSettlementPreviewMatchesBatch(unittest.TestCase):
 
     # ── Batch side ────────────────────────────────────────────────────
 
-    def _batch_balance(self, ct_rows):
-        """Return the per-party balance get_courier_balances would show."""
+    def _batch_balance(self, ct_rows, *, branch="Madinaty Branch"):
+        """Return the per-party balance get_courier_balances would show.
+
+        The rows are placed in *branch* and the caller is scoped to it, so this
+        exercises the branch filter rather than bypassing it — the balance a
+        real operator sees is the one for their own branch.
+        """
+        rows = list(ct_rows)
+        invoice_branches = {
+            str(r.get("reference_invoice") or "").strip(): branch
+            for r in rows
+            if r.get("reference_invoice")
+        }
         with patch("jarz_pos.services.delivery_handling.frappe") as mf:
             mf.db.get_table_columns.return_value = [
                 "name", "reference_invoice", "amount", "shipping_amount", "party_type", "party",
                 "is_partner_order",
             ]
-            mf.get_all.return_value = list(ct_rows)
+            mf.get_all.return_value = rows
 
-            with patch("jarz_pos.services.delivery_handling._get_invoice_city", return_value="Madinaty"):
+            with patch("jarz_pos.services.delivery_handling._get_invoice_city", return_value="Madinaty"),                  patch("jarz_pos.services.delivery_handling.get_visible_pos_profiles", return_value=[branch]),                  patch("jarz_pos.services.delivery_handling.map_invoice_branches", return_value=invoice_branches),                  patch("jarz_pos.services.delivery_handling.user_has_global_profile_access", return_value=False):
                 from jarz_pos.services.delivery_handling import get_courier_balances
 
-                data = get_courier_balances()
+                data = get_courier_balances(pos_profile=branch)
 
         self.assertEqual(len(data), 1, f"Expected one party group, got {data}")
         return data[0]["balance"]
@@ -1467,6 +1478,146 @@ class TestZeroCollectionSettlementGuards(unittest.TestCase):
         self.assertAlmostEqual(float(cash["debit_in_account_currency"]), 480.0, places=2)
         self.assertAlmostEqual(float(co["credit_in_account_currency"]), 480.0, places=2)
         self.assertAlmostEqual(je_capture.total_debit, je_capture.total_credit, places=2)
+
+
+class TestCourierBalancesBranchScope(unittest.TestCase):
+    """A branch sees — and settles — only its own courier money.
+
+    Reported 2026-09-02: one POS profile could see another branch's courier
+    settlements. Two halves to it, and the second is the expensive one:
+    ``get_courier_balances`` listed every unsettled row site-wide, and
+    ``settle_delivery_party`` then cleared all of them in a journal entry funded
+    by ``get_pos_cash_account(<the caller's branch>)`` — so Branch A's drawer
+    absorbed cash Branch B was still owed, and B's rows went Settled without B
+    ever collecting.
+
+    A row belongs to the branch that owns its INVOICE (``custom_kanban_profile``
+    then ``pos_profile``), the same key shift-close uses in
+    ``services.courier_carry.get_unsettled_transactions``.
+    """
+
+    HOME = "Branch A"
+    OTHER = "Branch B"
+
+    def _rows(self):
+        return [
+            {
+                "name": "CT-A",
+                "reference_invoice": "ACC-SINV-2026-00001",
+                "amount": 500.0,
+                "shipping_amount": 50.0,
+                "party_type": "Employee",
+                "party": "EMP-0001",
+                "is_partner_order": 0,
+            },
+            {
+                "name": "CT-B",
+                "reference_invoice": "ACC-SINV-2026-00002",
+                "amount": 900.0,
+                "shipping_amount": 60.0,
+                "party_type": "Employee",
+                "party": "EMP-0001",
+                "is_partner_order": 0,
+            },
+        ]
+
+    @property
+    def _branches(self):
+        return {
+            "ACC-SINV-2026-00001": self.HOME,
+            "ACC-SINV-2026-00002": self.OTHER,
+        }
+
+    def _balances(self, *, visible, branches=None, global_access=False):
+        rows = self._rows()
+        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+            mf.db.get_table_columns.return_value = [
+                "name", "reference_invoice", "amount", "shipping_amount",
+                "party_type", "party", "is_partner_order",
+            ]
+            mf.get_all.return_value = rows
+            with patch("jarz_pos.services.delivery_handling._get_invoice_city", return_value="Madinaty"),                  patch("jarz_pos.services.delivery_handling.get_visible_pos_profiles", return_value=visible),                  patch(
+                     "jarz_pos.services.delivery_handling.map_invoice_branches",
+                     return_value=self._branches if branches is None else branches,
+                 ),                  patch(
+                     "jarz_pos.services.delivery_handling.user_has_global_profile_access",
+                     return_value=global_access,
+                 ):
+                from jarz_pos.services.delivery_handling import get_courier_balances
+
+                return get_courier_balances(pos_profile=visible[0] if visible else None)
+
+    def test_other_branch_rows_are_not_listed(self):
+        """Branch A's screen shows CT-A only — CT-B is Branch B's money."""
+        data = self._balances(visible=[self.HOME])
+
+        invoices = [d["invoice"] for grp in data for d in grp["details"]]
+        self.assertEqual(invoices, ["ACC-SINV-2026-00001"])
+        self.assertAlmostEqual(data[0]["balance"], 450.0, places=2)
+
+    def test_each_branch_sees_its_own_balance(self):
+        """The same courier nets differently per branch; neither sees the other."""
+        other = self._balances(visible=[self.OTHER])
+
+        invoices = [d["invoice"] for grp in other for d in grp["details"]]
+        self.assertEqual(invoices, ["ACC-SINV-2026-00002"])
+        self.assertAlmostEqual(other[0]["balance"], 840.0, places=2)
+
+    def test_details_carry_the_owning_branch(self):
+        """Each detail names its branch, so the UI never has to guess."""
+        data = self._balances(visible=[self.HOME, self.OTHER])
+
+        got = {d["invoice"]: d["pos_profile"] for grp in data for d in grp["details"]}
+        self.assertEqual(got, self._branches)
+
+    def test_unassigned_user_sees_nothing(self):
+        """No branch membership is no access — not a site-wide read."""
+        self.assertEqual(self._balances(visible=[]), [])
+
+    def test_unattributable_row_hidden_from_branch_staff(self):
+        """A row whose invoice carries no profile is not silently every branch's."""
+        data = self._balances(visible=[self.HOME], branches={})
+
+        self.assertEqual(data, [])
+
+    def test_unattributable_row_visible_to_global_access(self):
+        """...but it must stay visible to someone, or the money vanishes."""
+        data = self._balances(visible=[self.HOME], branches={}, global_access=True)
+
+        invoices = sorted(d["invoice"] for grp in data for d in grp["details"])
+        self.assertEqual(invoices, ["ACC-SINV-2026-00001", "ACC-SINV-2026-00002"])
+
+    def test_settlement_refuses_another_branch_rows(self):
+        """Branch A cannot settle a party whose only open rows belong to Branch B.
+
+        Without the filter this posted a JE against Branch A's cash account and
+        marked CT-B Settled, leaving Branch B nothing to collect and no record
+        that it was owed.
+        """
+        rows = [r for r in self._rows() if r["name"] == "CT-B"]
+        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+            mf.get_all.return_value = rows
+            mf.throw.side_effect = RuntimeError
+            with patch(
+                "jarz_pos.services.delivery_handling._resolve_guarded_settlement_profile",
+                return_value=self.HOME,
+            ), patch(
+                "jarz_pos.services.delivery_handling.map_invoice_branches",
+                return_value=self._branches,
+            ), patch(
+                "jarz_pos.services.delivery_handling._create_settlement_journal_entry"
+            ) as mock_je, patch(
+                "jarz_pos.services.delivery_handling.mark_courier_transactions_settled"
+            ) as mock_mark:
+                from jarz_pos.services.delivery_handling import settle_delivery_party
+
+                with self.assertRaises(RuntimeError):
+                    settle_delivery_party(
+                        party_type="Employee", party="EMP-0001", pos_profile=self.HOME
+                    )
+
+        mock_je.assert_not_called()
+        mock_mark.assert_not_called()
 
 
 if __name__ == "__main__":
