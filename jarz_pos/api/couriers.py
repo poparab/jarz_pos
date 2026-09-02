@@ -439,36 +439,6 @@ def change_payment_collection_method(
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def debug_get_last_courier_transaction():
-    """Return the most recent Courier Transaction (name, amounts, invoice) for debugging."""
-    row = frappe.db.sql(
-        """
-        SELECT name, reference_invoice, amount, shipping_amount
-        FROM `tabCourier Transaction`
-        ORDER BY creation DESC
-        LIMIT 1
-        """,
-        as_dict=True,
-    )
-    return row[0] if row else {}
-
-
-@frappe.whitelist()  # type: ignore[attr-defined]
-def debug_get_courier_transactions(invoice_name: str):
-    rows = frappe.db.sql(
-        """
-        SELECT name, reference_invoice, amount, shipping_amount, status, payment_mode, notes
-        FROM `tabCourier Transaction`
-        WHERE reference_invoice=%s
-        ORDER BY creation DESC
-        """,
-        (invoice_name,),
-        as_dict=True,
-    )
-    return rows
-
-
-@frappe.whitelist()  # type: ignore[attr-defined]
 def create_delivery_party(
     party_type: str,
     name: str | None = None,
