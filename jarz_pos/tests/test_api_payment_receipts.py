@@ -42,6 +42,9 @@ class _FakeReceiptDoc:
 		self.receipt_image_url = receipt_image_url
 		self.confirmed_by = None
 		self.confirmed_date = None
+		self.rejected_by = "manager@example.com" if status == "Rejected" else None
+		self.rejected_date = "2026-09-01 09:00:00" if status == "Rejected" else None
+		self.rejection_reason = "Wrong amount" if status == "Rejected" else None
 		self.save = MagicMock()
 
 
@@ -157,7 +160,7 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.get_doc.return_value = new_receipt
 		mock_frappe.session.user = "manager@example.com"
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
 			result = create_payment_receipt(
 				sales_invoice="ACC-SINV-0001",
 				payment_method="Instapay",
@@ -171,6 +174,173 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 			mock_frappe.get_all.call_args.kwargs["filters"]["status"],
 			["!=", "Changed"],
 		)
+
+
+	# -- Branch scoping on the write endpoints -------------------------------
+	#
+	# ``list_payment_receipts`` has always scoped what a user can SEE to the POS
+	# Profiles they are assigned to, while upload/remove/create scoped nothing --
+	# so any ``Sales User`` who knew a receipt name could replace or drop another
+	# branch's proof of transfer.
+
+	def test_upload_receipt_image_refuses_another_branch(self):
+		from jarz_pos.api.payment_receipts import upload_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		receipt = _FakeReceiptDoc(pos_profile="Nasr city")
+		mock_frappe.get_doc.return_value = receipt
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+			with self.assertRaises(FrappePermissionError) as exc:
+				upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
+
+		self.assertIn("branch you are not assigned to", str(exc.exception))
+		receipt.save.assert_not_called()
+		mock_frappe.delete_doc.assert_not_called()
+
+	def test_remove_receipt_image_refuses_another_branch(self):
+		from jarz_pos.api.payment_receipts import remove_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.throw.side_effect = _raise_frappe
+		receipt = _FakeReceiptDoc(pos_profile="Nasr city")
+		mock_frappe.get_doc.return_value = receipt
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+			with self.assertRaises(FrappePermissionError) as exc:
+				remove_receipt_image("PPR-0001")
+
+		self.assertIn("branch you are not assigned to", str(exc.exception))
+		self.assertEqual(receipt.receipt_image_url, "/files/receipt.png")
+		receipt.save.assert_not_called()
+		mock_frappe.delete_doc.assert_not_called()
+
+	def test_create_payment_receipt_refuses_another_branch(self):
+		from jarz_pos.api.payment_receipts import create_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+			with self.assertRaises(FrappePermissionError) as exc:
+				create_payment_receipt(
+					sales_invoice="ACC-SINV-0001",
+					payment_method="Instapay",
+					amount=120.0,
+					pos_profile="Nasr city",
+				)
+
+		self.assertIn("branch you are not assigned to", str(exc.exception))
+		mock_frappe.db.commit.assert_not_called()
+
+	def test_branch_access_tolerates_a_receipt_with_no_profile(self):
+		from jarz_pos.api.payment_receipts import _has_receipt_branch_access
+
+		# ``pos_profile`` is reqd, so an empty one can only be a row predating the
+		# field. Refusing would brick it for everyone, its own branch included.
+		with patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+			self.assertTrue(_has_receipt_branch_access(""))
+			self.assertTrue(_has_receipt_branch_access(None))
+			self.assertFalse(_has_receipt_branch_access("Nasr city"))
+
+	# -- A rejection asks for a better screenshot; it is not a dead end ------
+
+	def test_upload_receipt_image_reopens_a_rejected_receipt(self):
+		from jarz_pos.api.payment_receipts import upload_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.throw.side_effect = _raise_frappe
+		receipt = _FakeReceiptDoc(status="Rejected", receipt_image_url="/files/bad.png")
+		new_file = MagicMock()
+		new_file.name = "FILE-NEW"
+		new_file.file_url = "/files/good.png"
+
+		def _get_doc(*args, **kwargs):
+			if args and args[0] == "POS Payment Receipt":
+				return receipt
+			return new_file
+
+		mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe.get_all.return_value = []
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+			result = upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
+
+		self.assertTrue(result["success"])
+		self.assertTrue(result["reopened"])
+		self.assertEqual(result["status"], "Unconfirmed")
+		# Back in the manager's queue, with the stale verdict cleared.
+		self.assertEqual(receipt.status, "Unconfirmed")
+		self.assertIsNone(receipt.rejected_by)
+		self.assertIsNone(receipt.rejected_date)
+		self.assertIsNone(receipt.rejection_reason)
+		self.assertEqual(receipt.receipt_image_url, "/files/good.png")
+
+	def test_upload_receipt_image_leaves_an_unconfirmed_receipt_alone(self):
+		from jarz_pos.api.payment_receipts import upload_receipt_image
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.throw.side_effect = _raise_frappe
+		receipt = _FakeReceiptDoc()
+		new_file = MagicMock()
+		new_file.name = "FILE-NEW"
+		new_file.file_url = "/files/new.png"
+
+		def _get_doc(*args, **kwargs):
+			if args and args[0] == "POS Payment Receipt":
+				return receipt
+			return new_file
+
+		mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe.get_all.return_value = []
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+			result = upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
+
+		self.assertFalse(result["reopened"])
+		self.assertEqual(receipt.status, "Unconfirmed")
+
+	# -- Jarz POS Staff files the proof; it never adjudicates it -------------
+
+	def test_pos_staff_may_write_receipts_but_never_confirm(self):
+		import json
+		import os
+
+		from jarz_pos.api.payment_receipts import _has_payment_receipt_confirm_access
+
+		doctype_json = os.path.join(
+			os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+			"doctype", "pos_payment_receipt", "pos_payment_receipt.json",
+		)
+		with open(doctype_json, encoding="utf-8") as handle:
+			perms = json.load(handle)["permissions"]
+
+		staff = [row for row in perms if row.get("role") == "Jarz POS Staff"]
+		self.assertEqual(len(staff), 1, "Jarz POS Staff must hold exactly one DocPerm row")
+		# Upload and re-upload need create + write. Deleting the row itself is a
+		# manager's call, so no delete.
+		self.assertEqual(staff[0].get("create"), 1)
+		self.assertEqual(staff[0].get("write"), 1)
+		self.assertEqual(staff[0].get("read"), 1)
+		self.assertNotEqual(staff[0].get("delete"), 1)
+
+		# Write access must not leak into approval authority: confirm and reject
+		# are gated in the API, not by the DocPerm row.
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "staff@example.com"
+		mock_frappe.get_roles.return_value = ["Jarz POS Staff", "POS User"]
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			self.assertFalse(_has_payment_receipt_confirm_access("Dokki"))
+			self.assertFalse(_has_payment_receipt_confirm_access(None))
 
 	def test_ensure_uploaded_payment_receipt_requires_image_and_matching_invoice(self):
 		from jarz_pos.api.payment_receipts import ensure_uploaded_payment_receipt
@@ -214,7 +384,7 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 			{"name": "FILE-OLD", "file_url": "/files/old.png", "attached_to_field": "receipt_image"},
 		]
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
 			result = upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
 
 		self.assertTrue(result["success"])
@@ -233,7 +403,7 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.get_doc.return_value = _FakeReceiptDoc(status="Confirmed")
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
 			with self.assertRaises(Exception) as exc:
 				upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
 
@@ -253,7 +423,7 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 			{"name": "FILE-OLD", "file_url": "/files/old.png", "attached_to_field": "receipt_image"},
 		]
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
 			result = remove_receipt_image("PPR-0001")
 
 		self.assertTrue(result["success"])
@@ -276,7 +446,7 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		receipt = _FakeReceiptDoc(status="Confirmed")
 		mock_frappe.get_doc.return_value = receipt
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
 			with self.assertRaises(Exception) as exc:
 				remove_receipt_image("PPR-0001")
 
@@ -293,7 +463,7 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.get_doc.return_value = _FakeReceiptDoc(status="Changed")
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
 			with self.assertRaises(Exception) as exc:
 				remove_receipt_image("PPR-0001")
 

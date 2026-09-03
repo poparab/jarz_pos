@@ -69,6 +69,10 @@ before_migrate = [
     "jarz_pos.utils.cleanup.ensure_delivery_slot_fields",
     # Remove legacy single datetime field
     "jarz_pos.utils.cleanup.remove_required_delivery_datetime_field",
+    # POS Payment Receipt grants "Jarz POS Staff" create+write, and a DocPerm row
+    # is a Link to Role — so the record has to exist before the DocType syncs,
+    # which happens in the schema updates and therefore before after_migrate.
+    "jarz_pos.setup.pos_staff_role.ensure_pos_staff_role",
 ]
 
 after_migrate = [

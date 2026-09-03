@@ -122,7 +122,12 @@ def ensure_uploaded_payment_receipt(
 
 
 def _ensure_receipt_image_editable(receipt) -> None:
-    """Allow image changes only while the receipt is still Unconfirmed."""
+    """Allow image changes while the receipt is still Unconfirmed or Rejected.
+
+    ``Confirmed`` is evidence and ``Changed`` is audit history, so both are
+    frozen. ``Rejected`` deliberately is not: a rejection asks the branch for a
+    better screenshot, and freezing it would leave them nothing to do about it.
+    """
     status = str(getattr(receipt, "status", "") or "").strip()
     if status == RECEIPT_STATUS_CONFIRMED:
         frappe.throw(_("Confirmed payment receipts cannot be changed."))
@@ -198,6 +203,55 @@ def _has_payment_receipt_confirm_access(pos_profile: str | None = None) -> bool:
         return False
 
     return str(pos_profile or "").strip() in allowed_profiles
+
+
+def _allowed_pos_profiles() -> list[str]:
+    """POS Profiles the session user is assigned to.
+
+    Wrapped rather than imported at module scope on purpose: ``api.manager``
+    pulls in the real ``frappe`` package, and this module's unit tests run
+    site-less against a stub. Patch this name to scope a test.
+    """
+    from jarz_pos.api.manager import _current_user_allowed_profiles
+
+    return list(_current_user_allowed_profiles() or [])
+
+
+def _has_receipt_branch_access(pos_profile: str | None) -> bool:
+    """Whether the caller may write to a receipt filed against *pos_profile*.
+
+    ``list_payment_receipts`` has always scoped what a user can SEE to the POS
+    Profiles they are assigned to, but the write endpoints scoped nothing — so
+    any ``Sales User`` who knew a receipt name could replace or drop another
+    branch's proof of transfer. This mirrors the scoping half of
+    :func:`_has_payment_receipt_confirm_access` so seeing and editing agree.
+
+    ``Administrator`` passes because ``get_user_pos_profiles`` hands the
+    unrestricted user every enabled profile.
+    """
+    profile = str(pos_profile or "").strip()
+    if not profile:
+        # ``pos_profile`` is reqd on the DocType, so an empty one can only be a
+        # row that predates the field. There is nothing to scope against, and
+        # refusing here would brick it for everyone.
+        return True
+
+    allowed_profiles = {
+        str(allowed or "").strip()
+        for allowed in _allowed_pos_profiles()
+        if str(allowed or "").strip()
+    }
+    return profile in allowed_profiles
+
+
+def _ensure_receipt_branch_access(pos_profile: str | None) -> None:
+    if _has_receipt_branch_access(pos_profile):
+        return
+
+    frappe.throw(
+        _("This payment receipt belongs to a branch you are not assigned to."),
+        FrappePermissionError,
+    )
 
 
 def _ensure_payment_receipt_confirm_access(pos_profile: str | None = None) -> None:
@@ -305,6 +359,10 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
     """
     try:
         frappe.logger().info(f"Creating payment receipt for invoice {sales_invoice}")
+
+        # Filing a receipt against a branch the caller is not assigned to is the
+        # same hole as editing one; close it at the door.
+        _ensure_receipt_branch_access(pos_profile)
         
         # Reuse only active receipts; changed receipts are audit history and should not block recreation.
         existing = frappe.get_all(
@@ -356,6 +414,11 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
             'message': 'Receipt created successfully'
         }
     
+    except FrappePermissionError:
+        # A branch refusal is a 403 and says so. Letting it fall into the
+        # catch-all below would relabel it "Failed to create payment receipt",
+        # which reads as a bug rather than a permission boundary.
+        raise
     except Exception as e:
         frappe.logger().error(f"Failed to create payment receipt: {str(e)}")
         frappe.throw(f"Failed to create payment receipt: {str(e)}")
@@ -381,7 +444,11 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
         
         # Get the receipt document
         receipt = frappe.get_doc('POS Payment Receipt', receipt_name)
+        _ensure_receipt_branch_access(getattr(receipt, 'pos_profile', None))
         _ensure_receipt_image_editable(receipt)
+        was_rejected = (
+            str(getattr(receipt, 'status', '') or '').strip() == RECEIPT_STATUS_REJECTED
+        )
 
         # Remember the previous image so it can be cleaned up after the swap.
         previous_files = _receipt_image_file_names(
@@ -414,6 +481,14 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
         receipt.receipt_image_url = file_doc.file_url
         receipt.upload_date = frappe.utils.now()
         receipt.uploaded_by = frappe.session.user
+        if was_rejected:
+            # A rejection is a request for a better screenshot, not a dead end.
+            # Leaving the row Rejected after a fresh upload keeps it out of the
+            # manager's queue for ever, so the corrected proof re-enters it.
+            receipt.status = RECEIPT_STATUS_UNCONFIRMED
+            receipt.rejected_by = None
+            receipt.rejected_date = None
+            receipt.rejection_reason = None
         receipt.save()
 
         # The receipt no longer points at the old file, so it is safe to drop.
@@ -429,10 +504,12 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
             'success': True,
             'file_url': file_doc.file_url,
             'replaced': bool(previous_files),
+            'status': str(getattr(receipt, 'status', '') or '').strip(),
+            'reopened': was_rejected,
             'message': 'Image uploaded successfully'
         }
     
-    except FrappeValidationError:
+    except (FrappeValidationError, FrappePermissionError):
         raise
     except Exception as e:
         frappe.logger().error(f"Failed to upload receipt image: {str(e)}")
@@ -461,6 +538,7 @@ def remove_receipt_image(receipt_name: str):
             frappe.throw(_('Payment receipt was not found'))
 
         receipt = frappe.get_doc('POS Payment Receipt', normalized_name)
+        _ensure_receipt_branch_access(getattr(receipt, 'pos_profile', None))
         _ensure_receipt_image_editable(receipt)
 
         file_names = _receipt_image_file_names(
@@ -487,7 +565,7 @@ def remove_receipt_image(receipt_name: str):
             'message': 'Image removed successfully'
         }
 
-    except FrappeValidationError:
+    except (FrappeValidationError, FrappePermissionError):
         raise
     except Exception as e:
         frappe.logger().error(f"Failed to remove receipt image: {str(e)}")
