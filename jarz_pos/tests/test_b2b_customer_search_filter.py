@@ -2,9 +2,23 @@
 
 Asserts that the new optional ``customer_type`` argument:
   - adds a parameterized ``customer_type = %(customer_type)s`` clause ONLY when passed,
-  - validates the value (rejects anything other than Individual/Company),
+  - validates the value (rejects anything other than Individual/Company) on EVERY path,
   - leaves the query/params byte-identical when omitted (None),
-  - is ANDed onto the name/phone OR-group (so it always constrains results).
+  - is ANDed onto the **name** match only.
+
+That last point changed on 2026-09-04, and this file used to assert the opposite.
+A phone search is an identity lookup, not browsing: ``create_customer`` blocks a
+duplicate mobile across every customer_type, so filtering a phone search by type
+hid the exact record the create-guard rejects on. Production: an operator searched
+01111088233, saw nothing (the holder was a Company/"Employee" staff account),
+tried to create, and was told the number already exists — 13 times in 4 minutes.
+Search said no, save said yes, and there was no way out from inside the app.
+
+The filter stays on the name match, which is what actually keeps Company/B2B
+accounts out of B2C name lists. The known cost: a B2B phone search
+(``searchCompanyCustomers``, customer_type="Company") can now surface an
+Individual holding that number. That is deliberate — the B2B create-guard blocks
+on it too, so hiding it would recreate the same dead end on the B2B side.
 
 The DB layer (``frappe.db.sql`` / ``frappe.db.has_column``) and territory augmentation
 are fully mocked; no real query runs. We capture the SQL + params handed to ``db.sql``.
@@ -70,12 +84,33 @@ class TestCustomerTypeFilterPresent(unittest.TestCase):
         # The name OR-group is still present.
         self.assertIn("search_term", cap["params"])
 
-    def test_individual_filter_added(self):
+    def test_phone_search_ignores_type_filter(self):
+        # Was test_individual_filter_added, which asserted the opposite. A phone
+        # search must return the holder of that number whatever its customer_type,
+        # because that is precisely what create_customer blocks on. See the module
+        # docstring for the incident this encodes.
         cap = {}
         with _patched_db(cap):
             cust_api.search_customers(phone="0100", customer_type="Individual")
-        self.assertEqual(cap["params"].get("customer_type"), "Individual")
-        self.assertIn("%(customer_type)s", cap["query"])
+        self.assertNotIn("%(customer_type)s", cap["query"])
+        self.assertNotIn("customer_type", cap["params"])
+        # The phone match itself is still there and still parameterized.
+        self.assertIn("phone_term_0", cap["params"])
+
+    def test_name_and_phone_are_ored_with_type_on_the_name_only(self):
+        # Previously `if name: ... elif phone:` silently dropped the phone whenever
+        # a name was also supplied. Both criteria now widen the search.
+        cap = {}
+        with _patched_db(cap):
+            cust_api.search_customers(
+                name="acme", phone="0100", customer_type="Company"
+            )
+        self.assertEqual(cap["params"].get("customer_type"), "Company")
+        self.assertIn("search_term", cap["params"])
+        self.assertIn("phone_term_0", cap["params"])
+        # Shape: ((name AND type) OR phone) — the type never constrains the phone leg.
+        self.assertIn(" OR ", cap["query"])
+        self.assertIn("AND", cap["query"].upper())
 
     def test_type_clause_skipped_when_column_missing(self):
         # If the Customer doctype lacks the customer_type column, the filter is
@@ -96,6 +131,15 @@ class TestCustomerTypeValidation(unittest.TestCase):
             with self.assertRaises(Exception):
                 cust_api.search_customers(name="acme", customer_type="Wholesale")
         # db.sql must not have been reached.
+        self.assertNotIn("query", cap)
+
+    def test_invalid_type_throws_on_phone_search_too(self):
+        # The phone path no longer *applies* the filter, but it must still reject a
+        # bad value — otherwise a client typo would silently widen the search.
+        cap = {}
+        with _patched_db(cap):
+            with self.assertRaises(Exception):
+                cust_api.search_customers(phone="0100", customer_type="Wholesale")
         self.assertNotIn("query", cap)
 
 
