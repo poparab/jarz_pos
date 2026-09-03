@@ -527,6 +527,17 @@ def search_customers(name=None, phone=None, customer_type=None):
     Optional ``customer_type`` ("Individual" | "Company") restricts results to that
     customer type — used to keep Company customers in the B2B flow and out of B2C.
     Default None leaves results unchanged (all types).
+
+    The type filter applies to the **name** match only. A phone number identifies
+    one subscriber, and ``create_customer`` blocks a duplicate mobile across every
+    customer_type; filtering a phone search by type therefore hid the very record
+    the create-guard rejects on (a staff "Employee"/Company account holding that
+    number), leaving the operator with an unexplainable error and no way to find
+    the record. Name browsing keeps the filter so Company/B2B accounts stay out of
+    the B2C name lists.
+
+    When both ``name`` and ``phone`` are supplied the two match groups are ORed —
+    previously ``phone`` was silently ignored whenever a name was also passed.
     """
 
     if not name and not phone:
@@ -545,15 +556,16 @@ def search_customers(name=None, phone=None, customer_type=None):
 
     query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
 
-    conditions = []
     params = {}
+    name_condition = None
+    phone_condition = None
 
     if name:
-        conditions.append("(`customer_name` LIKE %(search_term)s OR `name` LIKE %(search_term)s)")
+        name_condition = "(`customer_name` LIKE %(search_term)s OR `name` LIKE %(search_term)s)"
         params['search_term'] = f"%{name}%"
         frappe.logger().info(f"Searching customers by name: {name}")
 
-    elif phone:
+    if phone:
         # Match every stored spelling of the number. A search for 01111034268 has
         # to surface a record stored as +201111034268 — otherwise the operator
         # cannot see the customer they already have and creates a second one.
@@ -566,30 +578,39 @@ def search_customers(name=None, phone=None, customer_type=None):
             params[param_key] = f"%{term}%"
             for fieldname in phone_fields:
                 phone_conditions.append(f"`{fieldname}` LIKE %({param_key})s")
-        conditions.append(f"({' OR '.join(phone_conditions)})")
+        phone_condition = f"({' OR '.join(phone_conditions)})"
         frappe.logger().info(f"Searching customers by phone: {phone}")
 
-    if not conditions:
-        return []
-
-    # Optional customer_type filter (parameterized). Constrains the name/phone match.
+    # Optional customer_type filter (parameterized). Validated for BOTH search
+    # paths so an invalid value is still rejected, but only ANDed onto the *name*
+    # match — see the docstring: a phone search must return the record whatever
+    # its customer_type, because that is exactly what create_customer blocks on.
     resolved_type = (customer_type or "").strip()
+    type_condition = None
     if resolved_type:
         if resolved_type not in ("Individual", "Company"):
             frappe.throw("customer_type must be 'Individual' or 'Company'")
         if frappe.db.has_column("Customer", "customer_type"):
-            conditions.append("`customer_type` = %(customer_type)s")
+            type_condition = "`customer_type` = %(customer_type)s"
+
+    # Each supplied criterion becomes one match group; the groups are ORed so that
+    # passing both name and phone widens the search instead of dropping the phone.
+    # The customer_type value is bound only when its placeholder is actually in the
+    # query, so a phone-only search never carries an unused parameter.
+    match_groups = []
+    if name_condition:
+        if type_condition:
             params['customer_type'] = resolved_type
+            match_groups.append(f"({name_condition} AND {type_condition})")
+        else:
+            match_groups.append(name_condition)
+    if phone_condition:
+        match_groups.append(phone_condition)
 
-    # The name/phone match is a single OR group; the optional customer_type filter
-    # (when present) is ANDed so it always constrains the result set.
-    type_condition = None
-    if resolved_type and 'customer_type' in params:
-        type_condition = conditions.pop()  # the customer_type clause appended above
+    if not match_groups:
+        return []
 
-    query += "(" + " OR ".join(conditions) + ")"
-    if type_condition:
-        query += f" AND {type_condition}"
+    query += "(" + " OR ".join(match_groups) + ")"
 
     query += " ORDER BY `customer_name` ASC LIMIT 20"
     
@@ -755,6 +776,116 @@ def _contacts_block_lead_conversion(mobile_no, source_lead):
         return True
 
 
+def _customer_conflict_label(customer_row) -> str:
+    """Human label for the Customer that blocks a create: "'Eman Elsayd' (Employee)".
+
+    The qualifier is what makes the message actionable. The record holding the
+    number is usually one the operator cannot see from the B2C flow — a staff
+    "Employee" account, or a Company/B2B customer — so naming only the phone
+    number reads as a phantom conflict and the operator just retries. Emitted
+    only when a group/type is actually set, so the message never trails "()".
+    """
+    label = (customer_row.get("customer_name") or customer_row.get("name") or "").strip()
+    qualifier = (customer_row.get("customer_group") or "").strip() or (
+        customer_row.get("customer_type") or ""
+    ).strip()
+    return f"'{label}' ({qualifier})" if qualifier else f"'{label}'"
+
+
+def _customer_conflict_text(mobile_no, customer_row) -> str:
+    """Single-line throw text naming the customer that already owns *mobile_no*."""
+    return (
+        f"Mobile number '{mobile_no}' already belongs to customer "
+        f"{_customer_conflict_label(customer_row)}. "
+        f"Search for that customer instead of creating a new one."
+    )
+
+
+def _customer_linked_to_contact(contact_name):
+    """The Customer a Contact points at via Dynamic Link, or None. Never raises."""
+    try:
+        link_names = frappe.get_all(
+            "Dynamic Link",
+            filters={
+                "parenttype": "Contact",
+                "parent": contact_name,
+                "link_doctype": "Customer",
+            },
+            pluck="link_name",
+            limit=1,
+        )
+        if not link_names:
+            return None
+        rows = frappe.get_all(
+            "Customer",
+            filters={"name": link_names[0]},
+            fields=["name", "customer_name", "customer_group", "customer_type"],
+            limit=1,
+        )
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _contact_belongs_to_lead(contact_name, source_lead) -> bool:
+    """True when *contact_name* is linked to *source_lead*. Never raises."""
+    try:
+        return bool(
+            frappe.get_all(
+                "Dynamic Link",
+                filters={
+                    "parenttype": "Contact",
+                    "parent": contact_name,
+                    "link_doctype": "Lead",
+                    "link_name": source_lead,
+                },
+                limit=1,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _contact_conflict_text(mobile_no, phone_forms, source_lead=None) -> str:
+    """Throw text for the Contact guards in ``create_customer``.
+
+    A Contact — not a Customer — blocked the create here, so the old message
+    ("Customer with mobile number ... already exists") sent the operator hunting
+    for a customer that may not exist at all. Resolve the Contact's linked
+    Customer when there is one and name it; otherwise say plainly that a contact
+    record holds the number, and name that contact so it is at least findable.
+
+    ``source_lead`` mirrors ``_contacts_block_lead_conversion``: the Lead's own
+    auto-created Contact is never the blocker, so it must not be the one named.
+    """
+    try:
+        contacts = frappe.get_all(
+            "Contact", filters={"mobile_no": ["in", phone_forms]}, pluck="name"
+        ) or []
+    except Exception:
+        contacts = []
+
+    unlinked = []
+    for contact_name in contacts:
+        customer_row = _customer_linked_to_contact(contact_name)
+        if customer_row:
+            return _customer_conflict_text(mobile_no, customer_row)
+        if source_lead and _contact_belongs_to_lead(contact_name, source_lead):
+            continue  # the lead's own contact — ignorable, never the blocker
+        unlinked.append(contact_name)
+
+    if unlinked:
+        return (
+            f"Mobile number '{mobile_no}' is already held by contact '{unlinked[0]}', "
+            f"which is not linked to any customer yet. "
+            f"Open that contact or ask a manager to release the number before creating a customer."
+        )
+    return (
+        f"Mobile number '{mobile_no}' is already held by an existing contact record. "
+        f"Ask a manager to check that contact before creating a customer."
+    )
+
+
 @frappe.whitelist()
 def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None, customer_type=None, customer_group=None, source_lead=None, latitude=None, longitude=None, geo_source=None):
     """Create a new customer quickly from POS with Territory integration.
@@ -779,20 +910,33 @@ def create_customer(customer_name, mobile_no, customer_primary_address, territor
         # Matched across every stored spelling of the number: production holds the
         # same subscriber as 01111034268 and +201111034268, and an exact-string
         # check lets a second record through whenever the two forms disagree.
+        # The guard blocks on ANY customer_type by design, but the B2C client
+        # searches with customer_type="Individual", so the blocking record is often
+        # invisible to the operator (staff/Employee and Company accounts). Fetch the
+        # record rather than a boolean and name it in the error, otherwise the only
+        # available response is to retry the same create.
         phone_forms = phone_variants(mobile_no) or [mobile_no]
-        if frappe.db.exists("Customer", {"mobile_no": ["in", phone_forms]}):
-            frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
+        existing_customer = frappe.get_all(
+            "Customer",
+            filters={"mobile_no": ["in", phone_forms]},
+            fields=["name", "customer_name", "customer_group", "customer_type"],
+            limit=1,
+        )
+        if existing_customer:
+            frappe.throw(_customer_conflict_text(mobile_no, existing_customer[0]))
         # Also guard against existing contacts with the same mobile.
         # Lead-aware: when converting a Lead -> Customer, ignore the Lead's own
         # auto-created Contact; otherwise keep the strict B2C behavior.
+        # These two sites are blocked by a *Contact*, so the message resolves that
+        # contact's linked Customer (when any) instead of asserting a Customer exists.
         valid_source_lead = bool(source_lead) and bool(
             frappe.db.exists("Lead", source_lead)
         )
         if valid_source_lead:
             if _contacts_block_lead_conversion(mobile_no, source_lead):
-                frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
+                frappe.throw(_contact_conflict_text(mobile_no, phone_forms, source_lead))
         elif frappe.db.exists("Contact", {"mobile_no": ["in", phone_forms]}):
-            frappe.throw(f"Customer with mobile number '{mobile_no}' already exists")
+            frappe.throw(_contact_conflict_text(mobile_no, phone_forms))
         
         # Validate territory exists
         if not frappe.db.exists("Territory", territory_id):
