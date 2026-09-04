@@ -14,6 +14,20 @@ amendment only changes invoice-level data (delivery income, address, slot) the
 cart does not need to round-trip through the client at all: this module rebuilds
 it verbatim from the persisted rows, which is both unambiguous and immune to
 catalog drift.
+
+Two things stop that being the whole story, because most bundle invoices are now
+created by WooCommerce rather than by this app:
+
+* ``bundle_code`` on the parent row can point at a Jarz Bundle that has since
+  been deleted, so it is verified against the database and re-derived from the
+  parent ERPNext item when it is stale.
+* ``bundle_group_key`` is missing on the great majority of bundle-child rows.
+  It can only be *derived* by asking which group of the bundle contains the
+  item, and that answer is ambiguous exactly when the bundle repeats an item
+  group.  So a child with no stored key is keyed by its group NAME instead and
+  the split across the repeated rows is left to
+  :class:`jarz_pos.services.bundle_processing.BundleProcessor`, which is the one
+  place that knows each row's required quantity.
 """
 
 from __future__ import annotations
@@ -50,6 +64,37 @@ def _is_bundle_child_row(row: Any) -> bool:
     return _flag(row, "is_bundle_child") or bool(_text(row, "parent_bundle"))
 
 
+def _bundle_exists(bundle_code: str, cache: Dict[str, bool]) -> bool:
+    """Return whether ``bundle_code`` still names a live Jarz Bundle record."""
+    if bundle_code not in cache:
+        try:
+            cache[bundle_code] = bool(frappe.db.exists("Jarz Bundle", bundle_code))
+        except Exception:
+            # A lookup failure must not turn a rebuildable invoice into an error:
+            # trust the stored code, which is the pre-existing behaviour.
+            cache[bundle_code] = True
+    return cache[bundle_code]
+
+
+def _resolve_bundle_code(
+    row: Any,
+    bundle_code_cache: Dict[str, str],
+    bundle_exists_cache: Dict[str, bool],
+) -> str:
+    """Return the Jarz Bundle this parent row should be rebuilt against.
+
+    The stored ``bundle_code`` is preferred but only when the record still
+    exists.  Woo-created invoices routinely carry the id of a bundle that was
+    later deleted and recreated; trusting it blindly makes every group lookup
+    return nothing and the rebuild fails with "has no bundle group recorded"
+    even though the parent item still maps to a perfectly good bundle.
+    """
+    stored_code = _text(row, "bundle_code")
+    if stored_code and _bundle_exists(stored_code, bundle_exists_cache):
+        return stored_code
+    return _derive_bundle_code_from_parent_item(row.item_code, bundle_code_cache)
+
+
 def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
     """Return the POS cart payload that reproduces ``invoice`` line-for-line.
 
@@ -57,6 +102,8 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
     are keyed by the persisted ``bundle_group_key`` — the same key
     :func:`jarz_pos.services.bundle_processing.BundleProcessor._aggregate_selected_items`
     matches on — so bundles that repeat an item group survive the round trip.
+    Rows that never stored a key (nearly every Woo-created invoice) fall back to
+    the group name, which the same method splits across the repeated rows.
 
     Raises a ValidationError when the invoice cannot be expressed as a cart
     (missing bundle code, orphaned children, fractional bundle quantities) rather
@@ -67,16 +114,18 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
         frappe.throw(_("Invoice {0} has no items to rebuild.").format(getattr(invoice, "name", "")))
 
     bundle_code_cache: Dict[str, str] = {}
+    bundle_exists_cache: Dict[str, bool] = {}
     group_metadata_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
 
     # Resolve each parent row's bundle code up front so children can be attached.
     parent_bundle_codes: Dict[int, str] = {}
+    # Children point at whatever code the parent row stored. When that code is
+    # stale it is replaced above, so keep the translation to re-attach them.
+    resolved_by_stored_code: Dict[str, str] = {}
     for index, row in enumerate(rows):
         if _is_bundle_child_row(row) or not _is_bundle_parent_row(row):
             continue
-        bundle_code = _text(row, "bundle_code") or _derive_bundle_code_from_parent_item(
-            row.item_code, bundle_code_cache
-        )
+        bundle_code = _resolve_bundle_code(row, bundle_code_cache, bundle_exists_cache)
         if not bundle_code:
             frappe.throw(
                 _(
@@ -85,14 +134,22 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
                 ).format(row.item_code, getattr(invoice, "name", ""))
             )
         parent_bundle_codes[index] = bundle_code
+        stored_code = _text(row, "bundle_code")
+        if stored_code:
+            resolved_by_stored_code[stored_code] = bundle_code
 
+    resolved_codes = set(parent_bundle_codes.values())
     children_by_bundle: Dict[str, List[Any]] = {}
     orphan_children: List[Any] = []
     for row in rows:
         if not _is_bundle_child_row(row):
             continue
         parent_bundle = _text(row, "parent_bundle")
-        if parent_bundle:
+        parent_bundle = resolved_by_stored_code.get(parent_bundle, parent_bundle)
+        # A child pointing at a bundle no parent row resolved to is treated as an
+        # orphan rather than quietly dropped from the rebuilt cart — dropping it
+        # would produce a replacement invoice missing a line the customer paid for.
+        if parent_bundle and parent_bundle in resolved_codes:
             children_by_bundle.setdefault(parent_bundle, []).append(row)
         else:
             orphan_children.append(row)
@@ -175,13 +232,21 @@ def _build_bundle_cart_row(
     for child in children:
         group_key = _text(child, "bundle_group_key")
         group_name = _text(child, "bundle_group_name")
-        if not group_key:
+        if group_key:
+            # The invoice recorded the exact Jarz Bundle Item Group row: use it.
+            selection_key = group_key
+        else:
             derived_key, derived_name = _derive_bundle_group_metadata(
                 bundle_code, child.item_code, group_metadata_cache
             )
-            group_key = derived_key
             group_name = group_name or derived_name
-        selection_key = group_key or group_name
+            # Nothing was recorded, so the row can only be inferred from group
+            # membership — and that inference maps an item to ONE group row, so on
+            # a bundle repeating an item group it always answers with the last of
+            # them (4 selections would be posted against a row needing 1). Key by
+            # the group NAME instead and let BundleProcessor, which knows each
+            # row's required quantity, split the list across the rows.
+            selection_key = group_name or derived_key
         if not selection_key:
             frappe.throw(
                 _(

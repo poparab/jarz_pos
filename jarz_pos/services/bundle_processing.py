@@ -80,103 +80,236 @@ class BundleProcessor:
         try:
             # Get the bundle document using Frappe API
             self.bundle_doc = frappe.get_doc("Jarz Bundle", self.bundle_code)
-            
+
             if not self.bundle_doc:
                 frappe.throw(_("Bundle {0} not found").format(self.bundle_code))
-            
+
             # Use the erpnext_item field as the parent item (this is the key fix!)
             if not self.bundle_doc.erpnext_item:
                 frappe.throw(_("Bundle {0} has no ERPNext item configured").format(self.bundle_code))
-                
+
             # The parent item is the ERPNext item from the bundle
             self.parent_item = frappe.get_doc("Item", self.bundle_doc.erpnext_item)
-            
-            # Load bundle items from the child table (items is the table field)
-            for item_group_row in self.bundle_doc.items:
-                # The bundle item group contains item_group (not item_code) and quantity (not qty)
-                # We need to get items from this item group
-                item_group_name = item_group_row.item_group
-                item_group_key = getattr(item_group_row, "name", None)
-                item_quantity = item_group_row.quantity
 
-                # Fetch all candidate items within this group for UI parity and validation
-                items_in_group = frappe.get_all(
-                    "Item",
-                    filters={
-                        "item_group": item_group_name,
-                        "disabled": 0,
-                        "has_variants": 0,
-                    },
-                    fields=["name", "item_name", "standard_rate", "stock_uom"],
-                    limit=0,
-                )
+            # Load bundle items from the child table (items is the table field).
+            # Rows are grouped into "plans" first: normally one plan per row, but a
+            # bundle that lists the SAME item group on several rows and receives a
+            # name-keyed selection list is expanded as one requirement (see
+            # _build_group_plans) and split back across its rows afterwards.
+            for plan in self._build_group_plans():
+                self._expand_group_plan(plan)
 
-                if not items_in_group:
-                    frappe.throw(f"No available items found in item group '{item_group_name}'")
-
-                # Attempt to honor user-selected items for this group (if provided from client)
-                allowed_codes = {row["name"] for row in items_in_group}
-
-                aggregated_selected = self._aggregate_selected_items(
-                    item_group_key,
-                    item_group_name,
-                    item_quantity,
-                )
-
-                if aggregated_selected:
-                    invalid_codes = [code for code in aggregated_selected.keys() if code not in allowed_codes]
-                    if invalid_codes:
-                        frappe.throw(_(f"Bundle {self.bundle_code}: invalid selections for group '{item_group_name}': {', '.join(invalid_codes)}"))
-
-                    frappe.logger("jarz_pos.bundle").info({
-                        "event": "bundle_selections_applied",
-                        "bundle": self.bundle_code,
-                        "group": item_group_name,
-                        "required": item_quantity,
-                        "selections": {code: data["qty"] for code, data in aggregated_selected.items()},
-                    })
-
-                    for item_code, data in aggregated_selected.items():
-                        try:
-                            item_doc = frappe.get_doc("Item", item_code)
-                        except Exception:
-                            frappe.throw(
-                                _(f"Selected item '{item_code}' for bundle {self.bundle_code} could not be found"))
-
-                        override_rate = data.get("rate")
-                        if override_rate is not None:
-                            rate = flt(override_rate)
-                        else:
-                            rate = self.get_item_rate(item_doc.name)
-
-                        self.bundle_items.append({
-                            'item': item_doc,
-                            'qty': data["qty"],
-                            'rate': rate,
-                            'item_group': item_group_name,
-                            'item_group_key': item_group_key,
-                        })
-
-                    # Skip fallback when selections were provided
-                    continue
-
-                # No explicit selections provided — fallback to legacy behaviour (first available item)
-                selected_item = items_in_group[0]
-                item_doc = frappe.get_doc("Item", selected_item['name'])
-
-                self.bundle_items.append({
-                    'item': item_doc,
-                    'qty': item_quantity,
-                    'rate': self.get_item_rate(item_doc.name),
-                    'item_group': item_group_name,
-                    'item_group_key': item_group_key,
-                })
-                
             frappe.log_error(f"Bundle loaded: {self.bundle_code}, ERPNext Item: {self.parent_item.name}, Child Items: {len(self.bundle_items)}", "Bundle Processing")
-                
+
         except Exception as e:
             frappe.log_error(f"Bundle loading error: {str(e)}", "Bundle Processing")
             raise
+
+    def _selection_keys(self):
+        """Return the keys the client used in ``selected_items`` as strings."""
+        if not isinstance(self.selected_items, dict):
+            return set()
+        return {str(key) for key in self.selected_items.keys()}
+
+    def _build_group_plans(self):
+        """Group the bundle's item-group rows into expansion plans.
+
+        A plan is normally a single Jarz Bundle Item Group row and behaves exactly
+        as it always has.  The exception is a bundle that lists the *same* item
+        group on more than one row (e.g. "Jarz Indulgence Five" = ``Large x4`` +
+        ``Large x1``).  A selection list keyed by the group NAME describes the
+        group as a whole and cannot be attributed to one row: validating it row by
+        row rejects the correct payload with "expected 4 selection(s) from 'Large',
+        received 5".  Those rows are therefore merged into ONE plan whose required
+        quantity is the SUM, validated once against the whole list, and then
+        distributed back across the rows in order.
+
+        Rows whose own key appears in ``selected_items`` always stay on their own
+        plan, so a per-row-keyed cart (the path that already works today) is
+        untouched, and so is every bundle whose item groups are unique.
+        """
+        rows = []
+        for item_group_row in self.bundle_doc.items:
+            rows.append({
+                "key": getattr(item_group_row, "name", None),
+                "name": item_group_row.item_group,
+                "quantity": item_group_row.quantity,
+            })
+
+        provided_keys = self._selection_keys()
+
+        occurrences = {}
+        for row in rows:
+            occurrences[row["name"]] = occurrences.get(row["name"], 0) + 1
+
+        plans = []
+        merged_plan_index = {}
+        for row in rows:
+            group_name = row["name"]
+            row_key = row["key"]
+            row_is_keyed = bool(row_key) and str(row_key) in provided_keys
+
+            # Unique group, or the client addressed this exact row: keep it alone.
+            if occurrences.get(group_name, 0) < 2 or row_is_keyed:
+                plans.append([row])
+                continue
+
+            existing = merged_plan_index.get(group_name)
+            if existing is None:
+                merged_plan_index[group_name] = len(plans)
+                plans.append([row])
+            else:
+                plans[existing].append(row)
+
+        return plans
+
+    def _expand_group_plan(self, plan):
+        """Validate one plan's selections and append the resulting child items."""
+        item_group_name = plan[0]["name"]
+        merged = len(plan) > 1
+
+        # A merged plan has no single row key, so it can only be matched by group
+        # name; a single-row plan keeps the row key exactly as before.
+        match_key = None if merged else plan[0]["key"]
+        # Single-row plans pass their quantity through untouched (a blank/zero
+        # quantity keeps its legacy "skip validation" meaning).
+        required_quantity = sum(cint(row["quantity"]) for row in plan) if merged else plan[0]["quantity"]
+
+        # Fetch all candidate items within this group for UI parity and validation
+        items_in_group = frappe.get_all(
+            "Item",
+            filters={
+                "item_group": item_group_name,
+                "disabled": 0,
+                "has_variants": 0,
+            },
+            fields=["name", "item_name", "standard_rate", "stock_uom"],
+            limit=0,
+        )
+
+        if not items_in_group:
+            frappe.throw(f"No available items found in item group '{item_group_name}'")
+
+        # Attempt to honor user-selected items for this group (if provided from client)
+        allowed_codes = {row["name"] for row in items_in_group}
+
+        aggregated_selected = self._aggregate_selected_items(
+            match_key,
+            item_group_name,
+            required_quantity,
+        )
+
+        if aggregated_selected:
+            invalid_codes = [code for code in aggregated_selected.keys() if code not in allowed_codes]
+            if invalid_codes:
+                frappe.throw(_(f"Bundle {self.bundle_code}: invalid selections for group '{item_group_name}': {', '.join(invalid_codes)}"))
+
+            frappe.logger("jarz_pos.bundle").info({
+                "event": "bundle_selections_applied",
+                "bundle": self.bundle_code,
+                "group": item_group_name,
+                "required": required_quantity,
+                "selections": {code: data["qty"] for code, data in aggregated_selected.items()},
+                "merged_group_rows": [row["key"] for row in plan] if merged else None,
+            })
+
+            item_doc_cache = {}
+            for allocation in self._allocate_selections_to_rows(aggregated_selected, plan):
+                item_code = allocation["item_code"]
+                item_doc = item_doc_cache.get(item_code)
+                if item_doc is None:
+                    try:
+                        item_doc = frappe.get_doc("Item", item_code)
+                    except Exception:
+                        frappe.throw(
+                            _(f"Selected item '{item_code}' for bundle {self.bundle_code} could not be found"))
+                    item_doc_cache[item_code] = item_doc
+
+                override_rate = allocation.get("rate")
+                if override_rate is not None:
+                    rate = flt(override_rate)
+                else:
+                    rate = self.get_item_rate(item_doc.name)
+
+                self.bundle_items.append({
+                    'item': item_doc,
+                    'qty': allocation["qty"],
+                    'rate': rate,
+                    'item_group': allocation["group_name"],
+                    'item_group_key': allocation["group_key"],
+                })
+
+            # Skip fallback when selections were provided
+            return
+
+        # No explicit selections provided — fallback to legacy behaviour (first available item).
+        # Each row keeps its own line so a merged plan is indistinguishable from the
+        # per-row expansion this branch has always produced.
+        selected_item = items_in_group[0]
+        item_doc = frappe.get_doc("Item", selected_item['name'])
+        fallback_rate = self.get_item_rate(item_doc.name)
+
+        for row in plan:
+            self.bundle_items.append({
+                'item': item_doc,
+                'qty': row["quantity"],
+                'rate': fallback_rate,
+                'item_group': row["name"],
+                'item_group_key': row["key"],
+            })
+
+    def _allocate_selections_to_rows(self, aggregated, plan):
+        """Spread already-validated selections across a plan's bundle rows.
+
+        For a single-row plan this is a pass-through and returns the aggregated
+        entries in their original order.  For a merged plan the totals are known
+        to match (``_aggregate_selected_items`` enforced it), so this is a pure
+        re-slicing: each row consumes selections until its own quantity is filled.
+        A selection that straddles two rows is split into two allocations — that
+        is what lets every emitted child row carry the bundle group key it really
+        belongs to, which is what the amendment rebuild reads back.
+        """
+        pending = [[code, cint(data["qty"]), data.get("rate")] for code, data in aggregated.items()]
+        allocations = []
+        cursor = 0
+
+        for row in plan:
+            remaining = cint(row["quantity"])
+            while remaining > 0 and cursor < len(pending):
+                entry = pending[cursor]
+                if entry[1] <= 0:
+                    cursor += 1
+                    continue
+                take = min(remaining, entry[1])
+                allocations.append({
+                    "item_code": entry[0],
+                    "qty": take,
+                    "rate": entry[2],
+                    "group_key": row["key"],
+                    "group_name": row["name"],
+                })
+                entry[1] -= take
+                remaining -= take
+                if entry[1] <= 0:
+                    cursor += 1
+
+        # Anything left over means the row quantities did not constrain the total
+        # (a blank/zero row quantity skips validation). Emit the remainder on the
+        # last row rather than silently dropping paid-for selections.
+        last_row = plan[-1]
+        while cursor < len(pending):
+            entry = pending[cursor]
+            if entry[1] > 0:
+                allocations.append({
+                    "item_code": entry[0],
+                    "qty": entry[1],
+                    "rate": entry[2],
+                    "group_key": last_row["key"],
+                    "group_name": last_row["name"],
+                })
+            cursor += 1
+
+        return allocations
 
     def _aggregate_selected_items(self, item_group_key, item_group_name, required_quantity):
         """Normalize and validate selected items coming from the client for a given group."""

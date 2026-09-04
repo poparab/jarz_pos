@@ -4,11 +4,15 @@ Covers the regression that broke amendments for invoice ACC-SINV-2026-17035:
 a Jarz Bundle listing the same item group twice ("Medium x8" + "Medium x2")
 collapsed into a single group during client-side reconstruction, so the backend
 rejected it with "expected 8 selection(s) from 'Medium', received 10".
+
+:class:`TestStaleBundleCode` covers the second, far more common shape found on
+ACC-SINV-2026-18026: a Woo-created invoice whose rows point at a Jarz Bundle
+that no longer exists and which never stored ``bundle_group_key`` at all.
 """
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def _row(**kwargs):
@@ -68,8 +72,50 @@ def _royal_feast_invoice():
     )
 
 
+def _indulgence_five_invoice():
+    """ACC-SINV-2026-18026's shape: a Woo invoice with a dead bundle code.
+
+    ``cdijpvbrkt`` no longer exists as a Jarz Bundle, and — as on 94% of the
+    invoices carrying a bundle child — none of the children recorded which
+    Jarz Bundle Item Group row they came from.
+    """
+    return SimpleNamespace(
+        name="ACC-SINV-2026-18026",
+        items=[
+            _row(
+                item_code="JARZ-INDULGENCE-FIVE", qty=1.0, rate=0.0,
+                price_list_rate=400.0, discount_percentage=100.0,
+                is_bundle_parent=1, bundle_code="cdijpvbrkt",
+            ),
+            _row(item_code="LARGE-A", qty=1.0, rate=75.05, price_list_rate=100.0,
+                 is_bundle_child=1, parent_bundle="cdijpvbrkt"),
+            _row(item_code="LARGE-B", qty=1.0, rate=75.05, price_list_rate=100.0,
+                 is_bundle_child=1, parent_bundle="cdijpvbrkt"),
+            _row(item_code="LARGE-C", qty=1.0, rate=75.05, price_list_rate=100.0,
+                 is_bundle_child=1, parent_bundle="cdijpvbrkt"),
+            _row(item_code="LARGE-D", qty=1.0, rate=75.05, price_list_rate=100.0,
+                 is_bundle_child=1, parent_bundle="cdijpvbrkt"),
+            _row(item_code="LARGE-E", qty=1.0, rate=99.80, price_list_rate=133.0,
+                 is_bundle_child=1, parent_bundle="cdijpvbrkt"),
+        ],
+    )
+
+
 class TestAmendmentCartRebuild(unittest.TestCase):
     """Test class for jarz_pos.services.amendment_cart."""
+
+    def setUp(self):
+        """Pin the bundle-existence lookup for the fixtures in this class.
+
+        The rebuilder now checks the stored bundle code against the database
+        before trusting it. These fixtures use ids that exist on no test site,
+        so the answer is stated here rather than left to the site's data.
+        """
+        patcher = patch(
+            "jarz_pos.services.amendment_cart._bundle_exists", return_value=True
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_duplicate_item_groups_stay_on_their_own_rows(self):
         """Two bundle rows of the same item group must keep separate selections."""
@@ -232,3 +278,165 @@ class TestAmendmentHelpers(unittest.TestCase):
 
         self.assertIsNone(manager._territory_default_delivery_income(""))
         self.assertIsNone(manager._territory_default_delivery_income(None))
+
+
+class TestStaleBundleCode(unittest.TestCase):
+    """A Woo invoice pointing at a Jarz Bundle that no longer exists.
+
+    This is the ACC-SINV-2026-18026 failure. The stored code ``cdijpvbrkt`` is
+    dead, so every group lookup came back empty and the rebuild died with
+    "has no bundle group recorded" before the amendment could even start.
+    """
+
+    def _rebuild(self, invoice, *, derived_code="irk4mnvoe2", group=("irkqulhim1", "Large")):
+        """Rebuild with the bundle catalog faked at its two seams.
+
+        ``group`` reproduces what group derivation really answers for a bundle
+        that repeats an item group: the LAST matching row, for every item.
+        """
+        from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
+
+        with patch(
+            "jarz_pos.services.amendment_cart._bundle_exists",
+            side_effect=lambda code, cache: code != "cdijpvbrkt",
+        ), patch(
+            "jarz_pos.services.amendment_cart._derive_bundle_code_from_parent_item",
+            return_value=derived_code,
+        ) as derive_code, patch(
+            "jarz_pos.services.amendment_cart._derive_bundle_group_metadata",
+            return_value=group,
+        ):
+            cart = build_amendment_cart_from_invoice(invoice)
+        return cart, derive_code
+
+    def test_dead_bundle_code_is_re_derived_from_the_parent_item(self):
+        """The rebuild must not throw, and must target the live bundle."""
+        cart, derive_code = self._rebuild(_indulgence_five_invoice())
+
+        self.assertEqual(len(cart), 1)
+        self.assertEqual(cart[0]["item_code"], "irk4mnvoe2")
+        self.assertTrue(cart[0]["is_bundle"])
+        self.assertEqual(cart[0]["rate"], 400.0)
+        derive_code.assert_called_once()
+
+    def test_children_are_re_attached_to_the_re_derived_bundle(self):
+        """Children still name the dead code; losing them would drop paid lines."""
+        cart, _ = self._rebuild(_indulgence_five_invoice())
+
+        entries = [
+            entry for group in cart[0]["selected_items"].values() for entry in group
+        ]
+        self.assertEqual(
+            sorted(entry["id"] for entry in entries),
+            ["LARGE-A", "LARGE-B", "LARGE-C", "LARGE-D", "LARGE-E"],
+        )
+        self.assertEqual(sum(entry["selected_quantity"] for entry in entries), 5)
+
+    def test_children_with_no_stored_group_key_are_keyed_by_group_name(self):
+        """Derivation can only name ONE row, so the group name is used instead.
+
+        Keying by the derived row would post all five selections at the row that
+        needs one — the same rejection under a different message. The name lets
+        BundleProcessor split them 4 + 1.
+        """
+        cart, _ = self._rebuild(_indulgence_five_invoice())
+
+        self.assertEqual(list(cart[0]["selected_items"].keys()), ["Large"])
+        self.assertEqual(len(cart[0]["selected_items"]["Large"]), 5)
+
+    def test_stored_group_key_still_wins_when_the_invoice_has_one(self):
+        """Invoices written by this app record the exact row: keep using it."""
+        invoice = _indulgence_five_invoice()
+        for child in invoice.items[1:5]:
+            child.bundle_group_key = "irkm6iq1qc"
+            child.bundle_group_name = "Large"
+        invoice.items[5].bundle_group_key = "irkqulhim1"
+        invoice.items[5].bundle_group_name = "Large"
+
+        cart, _ = self._rebuild(invoice)
+
+        selections = cart[0]["selected_items"]
+        self.assertEqual(sorted(selections.keys()), ["irkm6iq1qc", "irkqulhim1"])
+        self.assertEqual(len(selections["irkm6iq1qc"]), 4)
+        self.assertEqual(len(selections["irkqulhim1"]), 1)
+
+    def test_child_prices_are_taken_from_the_invoice(self):
+        """The rebuilt cart must reprice the bundle exactly as it was sold."""
+        cart, _ = self._rebuild(_indulgence_five_invoice())
+
+        prices = {
+            entry["id"]: entry["price"]
+            for entry in cart[0]["selected_items"]["Large"]
+        }
+        self.assertEqual(prices["LARGE-A"], 100.0)
+        self.assertEqual(prices["LARGE-E"], 133.0)
+
+    def test_a_live_bundle_code_is_used_without_derivation(self):
+        """No behaviour change for invoices whose bundle code is still valid."""
+        from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
+
+        derive_code = MagicMock(return_value="")
+        with patch(
+            "jarz_pos.services.amendment_cart._bundle_exists", return_value=True
+        ), patch(
+            "jarz_pos.services.amendment_cart._derive_bundle_code_from_parent_item",
+            derive_code,
+        ):
+            cart = build_amendment_cart_from_invoice(_royal_feast_invoice())
+
+        self.assertEqual(cart[0]["item_code"], "gf9k3rfeg5")
+        derive_code.assert_not_called()
+
+    def test_a_dead_code_with_no_derivable_bundle_still_throws(self):
+        """When nothing resolves, fail loudly instead of rebuilding a wrong cart."""
+        import frappe
+
+        from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
+
+        with patch(
+            "jarz_pos.services.amendment_cart._bundle_exists", return_value=False
+        ), patch(
+            "jarz_pos.services.amendment_cart._derive_bundle_code_from_parent_item",
+            return_value="",
+        ):
+            with self.assertRaises(frappe.ValidationError):
+                build_amendment_cart_from_invoice(_indulgence_five_invoice())
+
+
+class TestRebuiltCartExpandsCleanly(unittest.TestCase):
+    """The end-to-end proof: the rebuilt cart must survive bundle expansion.
+
+    Rebuilding is only half the amendment. The cart is handed straight back to
+    BundleProcessor, which recomputes every child rate and the uniform discount,
+    so a cart that rebuilds but cannot expand is still a failed amendment.
+    """
+
+    def test_the_18026_cart_expands_to_five_correctly_keyed_children(self):
+        from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
+        from jarz_pos.tests.test_bundle_processing import _children, _expand
+
+        with patch(
+            "jarz_pos.services.amendment_cart._bundle_exists", return_value=False
+        ), patch(
+            "jarz_pos.services.amendment_cart._derive_bundle_code_from_parent_item",
+            return_value="irk4mnvoe2",
+        ), patch(
+            "jarz_pos.services.amendment_cart._derive_bundle_group_metadata",
+            return_value=("irkqulhim1", "Large"),
+        ):
+            cart = build_amendment_cart_from_invoice(_indulgence_five_invoice())
+
+        _processor, rows = _expand(cart[0]["selected_items"])
+        children = _children(rows)
+
+        self.assertEqual(
+            [(row["item_code"], row["qty"], row["bundle_group_key"]) for row in children],
+            [
+                ("LARGE-A", 1.0, "irkm6iq1qc"),
+                ("LARGE-B", 1.0, "irkm6iq1qc"),
+                ("LARGE-C", 1.0, "irkm6iq1qc"),
+                ("LARGE-D", 1.0, "irkm6iq1qc"),
+                ("LARGE-E", 1.0, "irkqulhim1"),
+            ],
+            "The replacement invoice records the row keys the source never had",
+        )
