@@ -33,6 +33,7 @@ from jarz_pos.utils.invoice_utils import (
 )
 from jarz_pos.utils.customer_address_utils import (
     ensure_shipping_address,
+    preferred_address_was_honoured,
     resolve_customer_shipping_address,
 )
 from jarz_pos.services import delivery_handling as _delivery
@@ -59,6 +60,41 @@ except Exception:  # pragma: no cover - exercised only on a not-yet-migrated sit
 
     def record_invoice_territory_exception(invoice_doc):  # type: ignore
         return None
+
+
+def _exception_detail(exc) -> str:
+    """Human-readable cause of ``exc`` — never an empty string.
+
+    ``frappe.PermissionError`` and friends are raised by ``frappe/__init__.py``
+    with NO arguments; the real text is parked in ``frappe.flags.error_message``
+    and the exception itself stringifies to "". Formatting such an exception with
+    ``str(e)`` is how the till came to display "Error during document validation: "
+    — a colon and nothing else — for every permission failure.
+
+    Order: the exception's own text, then the parked flag, then the class name so
+    the operator at least learns *what kind* of failure it was.
+    """
+    try:
+        detail = str(exc)
+    except Exception:
+        detail = ""
+    if detail.strip():
+        return detail
+
+    parked = None
+    try:
+        flags = getattr(frappe, "flags", None)
+        if flags is not None:
+            getter = getattr(flags, "get", None)
+            parked = getter("error_message") if callable(getter) else getattr(flags, "error_message", None)
+    except Exception:
+        parked = None
+    # isinstance guard: under a mocked frappe this attribute is a Mock, which is
+    # truthy and would stringify into the operator's error message.
+    if isinstance(parked, str) and parked.strip():
+        return parked.strip()
+
+    return type(exc).__name__
 
 
 _MANAGER_PRICING_ROLES = ROLES.LINE_MANAGER_TIER
@@ -527,7 +563,12 @@ def _validate_policy_price_list_coverage(policy_decision, effective_price_list, 
         missing.append(code)
     if missing:
         names = ", ".join(sorted(set(missing)))
-        logger.error(
+        # WARNING, not ERROR: this record is immediately followed by a throw, and
+        # sentry_sdk's LoggingIntegration files every ERROR record as its own event.
+        # The throw is already captured downstream with the full traceback, so an
+        # ERROR here only duplicates one failure into a second Sentry issue. As a
+        # warning it stays in the log file and rides along as a breadcrumb.
+        logger.warning(
             f"Policy price list '{effective_price_list}' missing prices for: {names}"
         )
         frappe.throw(
@@ -877,7 +918,7 @@ def create_pos_invoice(
             allowed_methods = ["Cash", "Instapay", "Mobile Wallet", "Kashier Card", "Kashier Wallet"]
             if payment_method not in allowed_methods:
                 error_msg = f"Invalid payment_method: {payment_method}. Must be one of: {', '.join(allowed_methods)}"
-                logger.error(error_msg)
+                logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
                 print(f"   ❌ {error_msg}")
                 frappe.throw(error_msg)
             print(f"   ✅ Payment method validated: {payment_method}")
@@ -1010,8 +1051,17 @@ def create_pos_invoice(
             customer_doc.name,
             preferred_address_name=shipping_address_name,
         )
-        if shipping_address_name and (
-            not resolved_shipping_address or resolved_shipping_address.get("name") != shipping_address_name
+        # The guard asks whether the requested address was HONOURED, not whether the
+        # resolver echoed its name back. The resolver deliberately substitutes the
+        # deduped survivor of an equivalent address (same address_line1|address_line2|
+        # city), so name equality rejected its own correct answer: 5.8% of the last 90
+        # days' invoices were affected, and every one of them was permanently
+        # unamendable because the amendment replays shipping_address_name verbatim.
+        # The guard is kept, not deleted — an address belonging to another customer,
+        # or one that no longer exists, still has no raw row here and must never fall
+        # through to candidates[0] silently.
+        if shipping_address_name and not preferred_address_was_honoured(
+            customer_doc.name, shipping_address_name, resolved_shipping_address
         ):
             frappe.throw("Selected shipping address is no longer available for this customer")
         resolved_shipping_address_name = None
@@ -1502,8 +1552,8 @@ def _parse_delivery_charges(delivery_charges_json, logger):
             for i, charge in enumerate(delivery_charges, 1):
                 print(f"      {i}. {charge.get('charge_type', 'Unknown')}: ${charge.get('amount', 0)}")
         except (ValueError, TypeError) as e:
-            error_msg = f"Invalid delivery charges JSON format: {str(e)}"
-            logger.error(error_msg)
+            error_msg = f"Invalid delivery charges JSON format: {_exception_detail(e)}"
+            logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
             print(f"   ❌ {error_msg}")
             frappe.throw(error_msg)
     else:
@@ -1591,7 +1641,7 @@ def _process_cart_items(cart_items, pos_profile, logger, price_list=None, custom
     
     if not processed_items:
         error_msg = "No valid items found in cart after processing"
-        logger.error(error_msg)
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
     
@@ -1609,7 +1659,7 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
         is_valid, message, bundle_code = validate_bundle_configuration_by_item(item_code)
         if not is_valid:
             error_msg = f"Bundle validation failed for ERPNext item {item_code}: {message}"
-            logger.error(error_msg)
+            logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
             print(f"      ❌ {error_msg}")
             frappe.throw(error_msg)
         
@@ -1634,8 +1684,8 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
         print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
         return bundle_items
     except Exception as bundle_error:
-        error_msg = f"Error processing bundle with ERPNext item {item_code}: {str(bundle_error)}"
-        logger.error(error_msg)
+        error_msg = f"Error processing bundle with ERPNext item {item_code}: {_exception_detail(bundle_error)}"
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"      ❌ {error_msg}")
         frappe.throw(error_msg)
 
@@ -1650,7 +1700,7 @@ def _process_regular_item(item_data, logger, price_list=None, customer=None):
     # Validate regular item exists
     if not frappe.db.exists("Item", item_code):
         error_msg = f"Item '{item_code}' does not exist"
-        logger.error(error_msg)
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"         ❌ {error_msg}")
         frappe.throw(error_msg)
     
@@ -1703,8 +1753,8 @@ def _process_regular_item(item_data, logger, price_list=None, customer=None):
 
         return result
     except Exception as e:
-        error_msg = f"Error loading item '{item_code}': {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"Error loading item '{item_code}': {_exception_detail(e)}"
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"         ❌ {error_msg}")
         frappe.throw(error_msg)
 
@@ -1767,8 +1817,8 @@ def _create_invoice_document(logger):
         print(f"   ✅ New document created")
         return invoice_doc
     except Exception as e:
-        error_msg = f"Error creating Sales Invoice document: {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"Error creating Sales Invoice document: {_exception_detail(e)}"
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
 
@@ -1799,8 +1849,8 @@ def _validate_and_calculate_document(invoice_doc, logger):
         print(f"      - Net Total: {invoice_doc.net_total}")
         print(f"      - Grand Total: {invoice_doc.grand_total}")
     except Exception as e:
-        error_msg = f"Error during document validation: {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"Error during document validation: {_exception_detail(e)}"
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
 
@@ -1875,8 +1925,8 @@ def _save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime
             )
             
     except Exception as e:
-        error_msg = f"Error saving document: {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"Error saving document: {_exception_detail(e)}"
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
 
@@ -1934,8 +1984,8 @@ def _submit_document(invoice_doc, logger):
         verify_invoice_totals(invoice_doc, logger)
         
     except Exception as e:
-        error_msg = f"Error submitting document: {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"Error submitting document: {_exception_detail(e)}"
+        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"   ❌ {error_msg}")
         frappe.throw(error_msg)
 
@@ -2133,11 +2183,16 @@ def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | 
 
 def _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger):
     """Handle and log invoice creation errors."""
-    error_msg = f"Error in create_pos_invoice: {str(e)}"
+    detail = _exception_detail(e)
+    error_msg = f"Error in create_pos_invoice: {detail}"
+    # This ERROR record — the only one on the failure path — is what Sentry's
+    # LoggingIntegration promotes into a single exception event with the full
+    # chained traceback. Every inner pre-throw log is a warning so one failure
+    # files one issue, not two or three.
     logger.error(error_msg, exc_info=True)
     print(f"\n❌ FUNCTION ERROR:")
     print(f"   Type: {type(e).__name__}")
-    print(f"   Message: {str(e)}")
+    print(f"   Message: {detail}")
     
     # Log full error details for debugging
     full_traceback = traceback.format_exc()
@@ -2149,7 +2204,7 @@ def _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger):
         title=f"POS Invoice Creation Error: {type(e).__name__}",
         message=f"""
 FUNCTION: create_pos_invoice
-ERROR: {str(e)}
+ERROR: {detail}
 PARAMETERS:
 - customer_name: {customer_name}
 - pos_profile_name: {pos_profile_name}

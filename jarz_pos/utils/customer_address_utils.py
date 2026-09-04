@@ -213,6 +213,64 @@ def resolve_customer_shipping_address(
     return candidates[0]
 
 
+def preferred_address_was_honoured(
+    customer: str,
+    address_name: Optional[str],
+    resolved: Optional[Dict[str, Any]],
+) -> bool:
+    """Did ``resolve_customer_shipping_address`` honour ``address_name``?
+
+    Callers used to check this with raw name equality
+    (``resolved["name"] == address_name``) and refuse the order when it failed. But
+    the resolver is DESIGNED to answer with a different name: ``_dedupe_address_rows``
+    collapses every address sharing the ``address_line1|address_line2|city``
+    signature onto one survivor, and ``_resolve_candidate_by_name_or_signature``
+    deliberately maps a collapsed duplicate onto that survivor. Name equality
+    therefore rejected the resolver's own correct answer — which is what produced
+    "Selected shipping address is no longer available for this customer" on real
+    checkouts, and made every amendment of such an order impossible (the amendment
+    replays the stored ``shipping_address_name`` verbatim).
+
+    So the question is equivalence, not identity:
+
+    * blank preference          -> True (nothing was asked for, nothing to honour)
+    * resolver returned nothing -> False
+    * same name                 -> True
+    * requested row exists for THIS customer and shares the resolved row's
+      signature -> True (the deliberate dedupe substitution)
+    * anything else             -> False
+
+    The last branch is what keeps the guard worth having: an address belonging to a
+    different customer, or one that does not exist at all, has no raw row among this
+    customer's linked addresses, so it can never be "honoured" by the resolver
+    silently falling back to ``candidates[0]``.
+    """
+    requested = str(address_name or "").strip()
+    if not requested:
+        return True
+
+    if not resolved:
+        return False
+
+    resolved_name = str(resolved.get("name") or "").strip()
+    if resolved_name and resolved_name == requested:
+        return True
+
+    raw_row = next(
+        (
+            row
+            for row in get_linked_customer_addresses(customer)
+            if str(row.get("name") or "").strip() == requested
+        ),
+        None,
+    )
+    if raw_row is None:
+        # Not one of this customer's addresses at all.
+        return False
+
+    return _address_signature(raw_row) == _address_signature(resolved)
+
+
 def find_matching_customer_address(customer: str, address_text: str) -> Optional[Dict[str, Any]]:
     normalized_address = _normalize_address_text(address_text)
     if not customer or not normalized_address:

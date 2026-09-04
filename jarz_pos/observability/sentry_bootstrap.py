@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Mapping
 from typing import Any
@@ -19,6 +20,9 @@ from jarz_pos.observability.request_context import (
 
 _INITIALIZED = False
 _INIT_LOCK = threading.Lock()
+_RELEASE_NAME_CACHE: str | None = None
+_RELEASE_NAME_CACHED = False
+_RELEASE_PREFIX = "jarz-pos-backend"
 _SENSITIVE_KEYS = (
 	"password",
 	"authorization",
@@ -245,8 +249,132 @@ def _allow_staff_email() -> bool:
 
 
 def _release_name() -> str | None:
-	value = str(frappe.conf.get("sentry_release_backend") or "").strip()
-	return value or None
+	"""Release tag for Sentry, e.g. ``jarz-pos-backend@<sha>``.
+
+	``site_config.sentry_release_backend`` still wins when it is set, but nothing in
+	the deploy tooling ever writes that key — so for years both servers reported a
+	release pinned to whatever commit happened to be current when the key was first
+	typed in (bbc8f39, 335 commits stale). Stack-trace line numbers then no longer
+	match the running code and "first seen in release" is meaningless.
+
+	OPERATIONAL NOTE: because the key still wins, this fallback stays INERT on any
+	site whose site_config carries the stale value. Deleting
+	``sentry_release_backend`` from staging's and production's site_config is what
+	switches the release tag over to the deployed commit.
+
+	When the key is absent we read the deployed commit out of the app's own ``.git``
+	directory BY FILE READ. Deliberately not
+	``frappe.utils.change_log.get_app_last_commit_ref()``: that shells out to git with
+	a cwd-relative path, and since the deploy pulls with ``sudo git`` the repo is not
+	owned by the ``frappe`` process user, so git refuses it under ``safe.directory``.
+
+	Everything is wrapped so this can only ever return a string or None. It is called
+	from ``ensure_sentry()`` inside the ``before_request`` hook: an exception escaping
+	here would break every HTTP request on the site.
+	"""
+	global _RELEASE_NAME_CACHE, _RELEASE_NAME_CACHED
+
+	try:
+		configured = str(frappe.conf.get("sentry_release_backend") or "").strip()
+	except Exception:  # pragma: no cover - conf is always readable in practice
+		configured = ""
+	if configured:
+		return configured
+
+	if _RELEASE_NAME_CACHED:
+		return _RELEASE_NAME_CACHE
+
+	commit = _read_app_commit_sha()
+	_RELEASE_NAME_CACHE = f"{_RELEASE_PREFIX}@{commit}" if commit else None
+	_RELEASE_NAME_CACHED = True
+	return _RELEASE_NAME_CACHE
+
+
+def _reset_release_name_cache() -> None:
+	"""Drop the memoized release name (tests only)."""
+	global _RELEASE_NAME_CACHE, _RELEASE_NAME_CACHED
+
+	_RELEASE_NAME_CACHE = None
+	_RELEASE_NAME_CACHED = False
+
+
+def _read_app_commit_sha() -> str | None:
+	"""Deployed commit of the ``jarz_pos`` app, read straight off ``.git``."""
+	try:
+		app_dir = os.path.dirname(frappe.get_app_path("jarz_pos"))
+		git_dir = _resolve_git_dir(app_dir)
+		if not git_dir:
+			return None
+
+		with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as handle:
+			head = handle.read().strip()
+		if not head:
+			return None
+
+		# Detached HEAD: the file holds the sha itself.
+		if not head.startswith("ref:"):
+			return head if _is_commit_sha(head) else None
+
+		ref = head.split(":", 1)[1].strip()
+		if not ref:
+			return None
+
+		# Loose ref first (.git/refs/heads/main), then the packed-refs table.
+		loose_ref = os.path.join(git_dir, *ref.split("/"))
+		try:
+			with open(loose_ref, encoding="utf-8") as handle:
+				sha = handle.read().strip()
+			if _is_commit_sha(sha):
+				return sha
+		except OSError:
+			pass
+
+		return _read_packed_ref(git_dir, ref)
+	except Exception:
+		return None
+
+
+def _resolve_git_dir(app_dir: str) -> str | None:
+	"""``<app>/.git`` — following the ``gitdir:`` pointer when it is a file."""
+	git_path = os.path.join(app_dir, ".git")
+	if os.path.isdir(git_path):
+		return git_path
+	if os.path.isfile(git_path):
+		with open(git_path, encoding="utf-8") as handle:
+			pointer = handle.read().strip()
+		if pointer.startswith("gitdir:"):
+			target = pointer.split(":", 1)[1].strip()
+			if not os.path.isabs(target):
+				target = os.path.join(app_dir, target)
+			return target if os.path.isdir(target) else None
+	return None
+
+
+def _read_packed_ref(git_dir: str, ref: str) -> str | None:
+	packed_refs = os.path.join(git_dir, "packed-refs")
+	try:
+		with open(packed_refs, encoding="utf-8") as handle:
+			for raw_line in handle:
+				line = raw_line.strip()
+				# "#" is the header, "^" is a tag's peeled object.
+				if not line or line.startswith("#") or line.startswith("^"):
+					continue
+				parts = line.split()
+				if len(parts) != 2:
+					continue
+				sha, name = parts[0], parts[1]
+				if name == ref and _is_commit_sha(sha):
+					return sha
+	except OSError:
+		return None
+	return None
+
+
+def _is_commit_sha(value: str) -> bool:
+	candidate = str(value or "").strip()
+	if not 7 <= len(candidate) <= 64:
+		return False
+	return all(character in "0123456789abcdefABCDEF" for character in candidate)
 
 
 def _as_bool(value: Any) -> bool:

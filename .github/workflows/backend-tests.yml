@@ -177,6 +177,41 @@ jobs:
             test_realtime_scoping
             test_cancellation_guards
             test_amendment_cart
+            # Amendment hardening (idempotency keys, locks, rollback). The
+            # amendment path replays the source invoice's shipping_address_name
+            # verbatim, so an over-strict address guard makes an order
+            # permanently unamendable -- a failure mode with no CI cover until
+            # this module was listed here.
+            # NOT YET LISTED: test_amendment_hardening. It carries a
+            # pre-existing failure -- test_publish_realtime_called_on_success
+            # asserts publish_realtime fires exactly once on a successful
+            # amendment and it fires zero times. That is mock-driven, so it is
+            # a genuine defect rather than a site-less harness artefact, and it
+            # predates this commit (it fails identically at 093cb54). Listing
+            # the module today would red the build on a bug this change did not
+            # introduce. Fix the realtime publish, then add it here.
+            # Bundle expansion pricing/rounding.
+            test_bundle_processing
+            # The address book + resolver. `_dedupe_address_rows` collapses
+            # equivalent addresses and the resolver deliberately answers with the
+            # survivor; `preferred_address_was_honoured` is the only thing telling
+            # that legitimate substitution apart from a foreign address name. A
+            # regression here either blocks real checkouts or lets one customer's
+            # order be stamped with another customer's address.
+            test_customer_address_utils
+            # create_pos_invoice / amendment endpoint surface.
+            test_api_invoices
+            # What the till is told and what Sentry is told when an order fails:
+            # the argument-less PermissionError that used to render as a bare
+            # colon, the one-ERROR-record rule that keeps one failure from being
+            # filed as two Sentry issues, and the shipping-address guard.
+            test_invoice_error_reporting
+            # Observability: the Sentry release tag read out of .git, the
+            # before_send redaction, and the error-response envelope. This module
+            # was written pytest-style (bare def test_*, monkeypatch fixture) and
+            # therefore collected ZERO tests under bench's unittest loader -- it
+            # had never once executed before being converted to TestCase classes.
+            test_observability
             test_shipping_income_resolution
             test_territory_resolution
             test_woo_order_id_display

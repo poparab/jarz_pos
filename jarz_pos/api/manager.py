@@ -1631,7 +1631,13 @@ def _run_invoice_amendment_job(
     except Exception as exc:
         if save_point:
             frappe.db.rollback(save_point=save_point)
-        logger.error(
+        # WARNING, not ERROR. sentry_sdk's LoggingIntegration files every ERROR
+        # record as its own Sentry event, so this record used to open a THIRD issue
+        # for a single failed amendment (this one, plus the message + exception pair
+        # from invoice_creation). The failure is still recorded in full by the
+        # frappe.log_error below and by the exception event raised downstream; this
+        # line now rides along as a breadcrumb instead of as a duplicate issue.
+        logger.warning(
             {
                 "event": "invoice_amendment_failed",
                 "source_invoice": invoice_id,

@@ -171,6 +171,162 @@ class TestCustomerAddressUtils(unittest.TestCase):
 
         self.assertEqual(result["name"], "ADDR-SHIP-1")
 
+    # ------------------------------------------------------------------
+    # preferred_address_was_honoured
+    #
+    # The resolver above is DESIGNED to answer with a different name than the one
+    # it was asked for (the deduped survivor of an equivalent address). The POS
+    # invoice guard used to compare names and refuse the order when they differed,
+    # which rejected the resolver's own correct answer: 5.8% of 90 days of
+    # submitted invoices, every one of them permanently unamendable. These cases
+    # pin the replacement rule -- equivalence, not identity -- and, more
+    # importantly, pin that it still says NO to an address that is not this
+    # customer's.
+    # ------------------------------------------------------------------
+
+    def _raw_rows(self):
+        return [
+            {
+                "name": "ADDR-LEGACY",
+                "address_type": "Billing",
+                "address_line1": "12 Road",
+                "address_line2": "",
+                "city": "Giza",
+            },
+            {
+                "name": "ADDR-SURVIVOR",
+                "address_type": "Shipping",
+                "address_line1": "12 Road",
+                "address_line2": "",
+                "city": "Giza",
+            },
+            {
+                "name": "ADDR-OTHER-STREET",
+                "address_type": "Shipping",
+                "address_line1": "8 Nile St",
+                "address_line2": "",
+                "city": "Cairo",
+            },
+        ]
+
+    def _survivor(self):
+        return {
+            "name": "ADDR-SURVIVOR",
+            "address_line1": "12 Road",
+            "address_line2": "",
+            "city": "Giza",
+        }
+
+    def test_preferred_address_was_honoured_accepts_the_deduped_survivor(self):
+        utils = self._load_utils_module()
+
+        with patch.object(utils, "get_linked_customer_addresses", return_value=self._raw_rows()):
+            honoured = utils.preferred_address_was_honoured(
+                "CUST-1", "ADDR-LEGACY", self._survivor()
+            )
+
+        self.assertTrue(honoured)
+
+    def test_preferred_address_was_honoured_short_circuits_on_an_exact_name_match(self):
+        utils = self._load_utils_module()
+
+        # The exact-name fast path must not need a database read at all -- the POS
+        # calls this on every checkout.
+        blow_up = MagicMock(side_effect=AssertionError("must not query addresses"))
+        with patch.object(utils, "get_linked_customer_addresses", blow_up):
+            honoured = utils.preferred_address_was_honoured(
+                "CUST-1", "ADDR-SURVIVOR", self._survivor()
+            )
+
+        self.assertTrue(honoured)
+        blow_up.assert_not_called()
+
+    def test_preferred_address_was_honoured_rejects_another_customers_address(self):
+        """LOAD-BEARING: a foreign address name must never be accepted.
+
+        Not even when its text is identical to the resolved row. The resolver
+        answers `candidates[0]` for any preference it cannot map, so without this
+        the order would be silently stamped with an address the caller never
+        chose, taken from a customer whose address book we just proved does not
+        contain the requested name.
+        """
+        utils = self._load_utils_module()
+
+        # ADDR-FOREIGN belongs to somebody else: it is absent from THIS customer's
+        # linked rows, even though its address text collides exactly.
+        with patch.object(utils, "get_linked_customer_addresses", return_value=self._raw_rows()):
+            honoured = utils.preferred_address_was_honoured(
+                "CUST-1", "ADDR-FOREIGN", self._survivor()
+            )
+        self.assertFalse(honoured)
+
+        # And the same answer when the customer has no addresses at all.
+        with patch.object(utils, "get_linked_customer_addresses", return_value=[]):
+            honoured = utils.preferred_address_was_honoured(
+                "CUST-1", "ADDR-FOREIGN", self._survivor()
+            )
+        self.assertFalse(honoured)
+
+    def test_preferred_address_was_honoured_rejects_a_nonexistent_address(self):
+        utils = self._load_utils_module()
+
+        with patch.object(utils, "get_linked_customer_addresses", return_value=self._raw_rows()):
+            honoured = utils.preferred_address_was_honoured(
+                "CUST-1", "ADDR-DOES-NOT-EXIST", self._survivor()
+            )
+
+        self.assertFalse(honoured)
+
+    def test_preferred_address_was_honoured_rejects_a_different_address_of_the_same_customer(self):
+        utils = self._load_utils_module()
+
+        # Both rows are this customer's, but they are genuinely different places:
+        # substituting one for the other would ship to the wrong door.
+        with patch.object(utils, "get_linked_customer_addresses", return_value=self._raw_rows()):
+            honoured = utils.preferred_address_was_honoured(
+                "CUST-1", "ADDR-OTHER-STREET", self._survivor()
+            )
+
+        self.assertFalse(honoured)
+
+    def test_preferred_address_was_honoured_rejects_when_the_resolver_returned_nothing(self):
+        utils = self._load_utils_module()
+
+        with patch.object(utils, "get_linked_customer_addresses", return_value=self._raw_rows()):
+            honoured = utils.preferred_address_was_honoured("CUST-1", "ADDR-LEGACY", None)
+
+        self.assertFalse(honoured)
+
+    def test_preferred_address_was_honoured_is_vacuously_true_without_a_preference(self):
+        utils = self._load_utils_module()
+
+        blow_up = MagicMock(side_effect=AssertionError("must not query addresses"))
+        with patch.object(utils, "get_linked_customer_addresses", blow_up):
+            self.assertTrue(utils.preferred_address_was_honoured("CUST-1", None, None))
+            self.assertTrue(utils.preferred_address_was_honoured("CUST-1", "   ", self._survivor()))
+
+    def test_preferred_address_was_honoured_matches_the_resolvers_own_substitution(self):
+        """Whatever resolve_customer_shipping_address returns must be honoured.
+
+        This runs the real resolver over a duplicate pair and feeds its answer
+        straight back in, so the guard can never disagree with the code it guards.
+        """
+        utils = self._load_utils_module()
+
+        candidates = [self._survivor()]
+        raw_rows = self._raw_rows()
+
+        with patch.object(utils, "get_customer_shipping_addresses", return_value=candidates), \
+             patch.object(utils, "get_linked_customer_addresses", return_value=raw_rows), \
+             patch.object(utils.frappe.db, "get_value", return_value=None):
+            resolved = utils.resolve_customer_shipping_address(
+                "CUST-1", preferred_address_name="ADDR-LEGACY"
+            )
+            honoured = utils.preferred_address_was_honoured("CUST-1", "ADDR-LEGACY", resolved)
+
+        self.assertEqual(resolved["name"], "ADDR-SURVIVOR")
+        self.assertTrue(honoured)
+
     def test_find_matching_customer_address_reuses_existing_line1_match(self):
         utils = self._load_utils_module()
 
