@@ -42,21 +42,32 @@ class TestInvoiceAPI(unittest.TestCase):
 		self.assertEqual(result, {"success": True, "invoice_name": "INV-0001"})
 		mock_resolve_order_territory.assert_called_once_with("Test Customer", shipping_address_name=None)
 		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False, territory_name=None)
-		mock_create_invoice.assert_called_once_with(
-			cart_json='[{"item_code":"ITEM-001","qty":1,"rate":100}]',
-			customer_name="Test Customer",
-			pos_profile_name="Main POS",
-			delivery_charges_json=None,
-			required_delivery_datetime=None,
-			shipping_address_name=None,
-			sales_partner=None,
-			payment_type=None,
-			pickup=False,
-			payment_method="Cash",
-			price_list="B2B Selling",
-			suppress_shipping_income=True,
-			suppress_legacy_delivery_charges=True,
-		)
+		# Assert the kwargs this test is about rather than the whole call.
+		# The exact-call form rotted silently: the API grew custom_delivery_income,
+		# order_purpose, commercial_policy, policy_reason, promo_codes and channel
+		# over several releases and this assertion was never updated, because the
+		# module ran nowhere -- site-less it errors on BranchAccessError, and it
+		# was absent from the CI module list until 2026-09-04.
+		mock_create_invoice.assert_called_once()
+		self.assertEqual(mock_create_invoice.call_args.args, ())
+		forwarded = mock_create_invoice.call_args.kwargs
+		for key, expected in {
+			"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
+			"customer_name": "Test Customer",
+			"pos_profile_name": "Main POS",
+			"delivery_charges_json": None,
+			"required_delivery_datetime": None,
+			"shipping_address_name": None,
+			"sales_partner": None,
+			"payment_type": None,
+			"pickup": False,
+			"payment_method": "Cash",
+			"price_list": "B2B Selling",
+			"suppress_shipping_income": True,
+			"suppress_legacy_delivery_charges": True,
+		}.items():
+			self.assertIn(key, forwarded)
+			self.assertEqual(forwarded[key], expected, f"{key} was not forwarded intact")
 
 	@patch("jarz_pos.utils.invoice_utils.resolve_order_territory", return_value=None)
 	@patch("jarz_pos.utils.invoice_utils.assert_pos_profile_matches_territory")
@@ -88,21 +99,27 @@ class TestInvoiceAPI(unittest.TestCase):
 
 		mock_resolve_order_territory.assert_called_once_with("Test Customer", shipping_address_name=None)
 		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False, territory_name=None)
-		mock_create_invoice.assert_called_once_with(
-			cart_json='[{"item_code":"ITEM-001","qty":1,"rate":100}]',
-			customer_name="Test Customer",
-			pos_profile_name="Main POS",
-			delivery_charges_json=None,
-			required_delivery_datetime=None,
-			shipping_address_name=None,
-			sales_partner=None,
-			payment_type=None,
-			pickup=False,
-			payment_method=None,
-			price_list=None,
-			suppress_shipping_income=True,
-			suppress_legacy_delivery_charges=True,
-		)
+		# Subset assertion for the same reason as the test above.
+		mock_create_invoice.assert_called_once()
+		self.assertEqual(mock_create_invoice.call_args.args, ())
+		forwarded = mock_create_invoice.call_args.kwargs
+		for key, expected in {
+			"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
+			"customer_name": "Test Customer",
+			"pos_profile_name": "Main POS",
+			"delivery_charges_json": None,
+			"required_delivery_datetime": None,
+			"shipping_address_name": None,
+			"sales_partner": None,
+			"payment_type": None,
+			"pickup": False,
+			"payment_method": None,
+			"price_list": None,
+			"suppress_shipping_income": True,
+			"suppress_legacy_delivery_charges": True,
+		}.items():
+			self.assertIn(key, forwarded)
+			self.assertEqual(forwarded[key], expected, f"{key} was not forwarded intact")
 
 	def test_api_modules_present(self):
 		"""Test that invoice API modules can be imported."""
