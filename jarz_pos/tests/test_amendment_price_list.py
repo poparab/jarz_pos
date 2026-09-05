@@ -428,6 +428,13 @@ class TestSellingPriceListPersistedAfterSubmit(unittest.TestCase):
             patch("jarz_pos.services.invoice_creation._submit_document", side_effect=_clobber),
             patch("jarz_pos.services.invoice_creation._record_territory_exception"),
             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"),
+            # Runs after the STEP 10.1 re-stamp and reads a dozen real invoice fields
+            # (customer, territory, totals, address) off the document. The capture stub
+            # deliberately carries only what the price-list assertions need, so let the
+            # response builder stand in — what is under test is the db_set, not the
+            # payload shape.
+            patch("jarz_pos.services.invoice_creation._prepare_response",
+                  return_value={"success": True}),
             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as promo,
             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"),
             patch("jarz_pos.services.invoice_creation.frappe") as mf,
