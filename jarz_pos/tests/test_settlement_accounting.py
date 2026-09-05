@@ -787,8 +787,11 @@ class TestMarkCourierOutstanding(unittest.TestCase):
 
     def test_partner_rider_owes_the_full_amount(self):
         """Nothing is withheld from a partner rider, so the branch collects it all."""
+        # outstanding == grand_total: nothing was paid before dispatch. The row now
+        # carries what is still OWED (a part payment before dispatch has already
+        # reached the drawer), so the fixture must be consistent to expect 850.
         _, ct, _, mock_je_fn, mock_partner_je_fn = self._run_mark(
-            grand_total=850.0, shipping_exp=55.0,
+            outstanding=850.0, grand_total=850.0, shipping_exp=55.0,
             delivery_partner="Deliverk", partner_fee=55.0,
         )
         self.assertEqual(ct.amount, 850.0)
