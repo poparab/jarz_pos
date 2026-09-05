@@ -264,7 +264,12 @@ def block_cancel_if_dispatched(doc: Any, method: Optional[str] = None) -> None:
 	try:
 		from jarz_pos.api.manager import get_invoice_hard_mutation_blocker
 
-		blocker = get_invoice_hard_mutation_blocker(doc)
+		# An UNSETTLED sales-partner transaction is a pending charge with no ledger
+		# behind it, not a settlement artifact; release_unsettled_partner_transactions
+		# (on_cancel) drops it. A settled one still blocks: its fee is in the books.
+		blocker = get_invoice_hard_mutation_blocker(
+			doc, ignore_unsettled_partner_transactions=True
+		)
 	except Exception:
 		blocker = None
 
@@ -278,6 +283,37 @@ def block_cancel_if_dispatched(doc: Any, method: Optional[str] = None) -> None:
 				"cancelled directly. Use the corrective / return workflow."
 			)
 		frappe.throw(reason, title=frappe._("Cancellation blocked"))
+
+
+def release_unsettled_partner_transactions(doc: Any, method: Optional[str] = None) -> None:
+	"""Drop the pending partner fee rows of a cancelled invoice (on_cancel).
+
+	A paid-online sales-partner order carries a Sales Partner Transaction from the
+	moment it is created. Once the order is cancelled there is nothing to charge a
+	commission on, and leaving the row would make ``settle_sales_partner`` post a
+	fee for a cancelled order. Only Unsettled rows go; a settled row has a fee
+	journal behind it and ``block_cancel_if_dispatched`` refuses the cancel first.
+	Registered as a doc event so every cancel path (board, Desk, script) agrees.
+	"""
+	if not frappe or not doc or not getattr(doc, "name", None):
+		return
+	try:
+		rows = frappe.get_all(
+			"Sales Partner Transactions",
+			filters={"reference_invoice": doc.name, "status": "Unsettled"},
+			pluck="name",
+		) or []
+		for row_name in rows:
+			frappe.delete_doc(
+				"Sales Partner Transactions", row_name, ignore_permissions=True, force=True
+			)
+		if rows:
+			frappe.logger().info(
+				f"jarz_pos: released {len(rows)} unsettled partner transaction(s) on cancel of {doc.name}"
+			)
+	except Exception:
+		if frappe:
+			frappe.log_error(frappe.get_traceback(), "release_unsettled_partner_transactions failed")
 
 
 def validate_invoice_before_submit(doc: Any, method: Optional[str] = None) -> None:

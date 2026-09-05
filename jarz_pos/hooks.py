@@ -384,6 +384,9 @@ doc_events = {
         # Keep operational workflow fields aligned across all cancellation paths.
         "on_cancel": [
             "jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",
+            # A pending (unsettled) sales-partner fee row has nothing to charge once
+            # the order is cancelled; drop it so the partner settlement never posts it.
+            "jarz_pos.events.sales_invoice.release_unsettled_partner_transactions",
             "jarz_pos.services.consumable_deduction.reverse_consumable_deduction_on_cancel",
             # Promo-code engine: reverse redemptions, recompute times_used
             "jarz_pos.services.promo_codes.reverse_redemptions_on_cancel",

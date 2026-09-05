@@ -826,8 +826,10 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
                 "reference_invoice": ["in", cleaned],
                 "status": ["!=", "Settled"],
                 "amount": ["<=", 0.0001],
-                "journal_entry": ["not in", [None, ""]],
-                "payment_mode": ["not in", [None, "", "Deferred", "later", "cash_now", "Cash"]],
+                # "is set", not "not in (None, '')": SQL's NOT IN against a NULL
+                # never holds, which silently emptied this whole query.
+                "journal_entry": ["is", "set"],
+                "payment_mode": ["not in", ["", "Deferred", "later", "cash_now", "Cash"]],
             },
             fields=["reference_invoice", "journal_entry"],
             limit=QUERY_LIMITS.KANBAN_INVOICES,
@@ -2789,9 +2791,13 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
         except Exception as exc:
             if savepoint:
                 try:
-                    frappe.db.rollback(savepoint=savepoint)
+                    # Keyword is ``save_point``. The old ``savepoint=`` raised a
+                    # TypeError that the bare except swallowed, so a cancel that
+                    # failed AFTER its Payment Entries were cancelled left them
+                    # cancelled and the invoice submitted and unpaid.
+                    frappe.db.rollback(save_point=savepoint)
                 except Exception:
-                    pass
+                    frappe.db.rollback()
             error_msg = f"Error cancelling invoice: {exc}"
             frappe.logger().error(error_msg)
             frappe.log_error(
