@@ -149,6 +149,10 @@ jobs:
             test_invoice_creation_accounting
             test_sales_partner_flow
             test_kanban_settlement
+            # Board search. `test_kanban` itself touches the DB in setUpClass and
+            # so can never run in this site-less gate, which is why every search
+            # assertion it holds had never executed here. These are pure mocks.
+            test_kanban_search
             # The board/receipt payment-method resolver. Its pre-fix
             # `else: "Cash"` catch-all badged an ONLINE Talabat order as
             # Cash, and nothing in CI read that function at all.

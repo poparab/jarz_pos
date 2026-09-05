@@ -295,6 +295,20 @@ def _like_pattern(search: str) -> str:
     return f"%{escaped}%"
 
 
+#: How many Customer/Contact/Address rows a single search term may resolve to.
+#:
+#: These caps used to be 50, unordered. A search for a common name ("Ahmed",
+#: "01001") matches far more than 50 customers, so the board was filtered by an
+#: arbitrary 50 of them and orders that plainly matched what was typed simply
+#: were not there — the single loudest way this search reads as broken. The caps
+#: are now wide enough that ordinary searches are never truncated, and every
+#: query is ordered `modified desc` so that if one ever is, what survives is the
+#: recently-active customers who actually have orders on the board rather than a
+#: set chosen by whatever order the database happened to return.
+_SEARCH_MATCH_LIMIT = 500
+_SEARCH_LINK_LIMIT = 1000
+
+
 def _find_customer_search_matches(search_term: str) -> List[str]:
     search = sanitize_printable_text(search_term)
     if not search:
@@ -319,7 +333,8 @@ def _find_customer_search_matches(search_term: str) -> List[str]:
                 "Customer",
                 or_filters=customer_or_filters,
                 pluck="name",
-                limit=50,
+                order_by="modified desc",
+                limit=_SEARCH_MATCH_LIMIT,
             ) or []
         )
     except Exception:
@@ -336,7 +351,8 @@ def _find_customer_search_matches(search_term: str) -> List[str]:
                 {"phone": ["like", like]},
             ],
             pluck="name",
-            limit=50,
+            order_by="modified desc",
+            limit=_SEARCH_MATCH_LIMIT,
         ) or []
         if contacts:
             customer_ids.update(
@@ -348,7 +364,7 @@ def _find_customer_search_matches(search_term: str) -> List[str]:
                         "link_doctype": "Customer",
                     },
                     pluck="link_name",
-                    limit=100,
+                    limit=_SEARCH_LINK_LIMIT,
                 ) or []
             )
     except Exception:
@@ -367,7 +383,8 @@ def _find_customer_search_matches(search_term: str) -> List[str]:
                 "Address",
                 or_filters=[{fieldname: ["like", like]} for fieldname in address_fields],
                 pluck="name",
-                limit=50,
+                order_by="modified desc",
+                limit=_SEARCH_MATCH_LIMIT,
             ) or []
             if addresses:
                 customer_ids.update(
@@ -379,7 +396,7 @@ def _find_customer_search_matches(search_term: str) -> List[str]:
                             "link_doctype": "Customer",
                         },
                         pluck="link_name",
-                        limit=100,
+                        limit=_SEARCH_LINK_LIMIT,
                     ) or []
                 )
     except Exception:
@@ -1466,7 +1483,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         # Report the shortfall instead of quietly serving a partial board.
         board_truncated = len(invoices) >= QUERY_LIMITS.KANBAN_INVOICES
         total_matching = len(invoices)
-        if board_truncated:
+        # frappe.db.count() takes `filters` only — it has no way to express the
+        # search's OR group, so running it while a search is active counts every
+        # invoice the *other* filters allow and reports a total that ignores what
+        # was typed. Better to under-report the cap than to tell staff a search
+        # for one order matched forty thousand.
+        if board_truncated and not search_or_filters:
             try:
                 total_matching = frappe.db.count("Sales Invoice", filters=filter_conditions)
             except Exception:
