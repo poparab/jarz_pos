@@ -814,6 +814,46 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
     except Exception:
         pass
 
+    # Third shape: a COD order switched to an online method after dispatch and
+    # not settled yet. Its row carries amount 0 and the invoice reads as paid,
+    # but the switch's journal entry holds the customer's money in an online
+    # ledger, and it can still move back to cash (or to another ledger) until the
+    # courier settles. Read the amount off that entry's Courier Outstanding credit.
+    try:
+        switched_rows = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": ["in", cleaned],
+                "status": ["!=", "Settled"],
+                "amount": ["<=", 0.0001],
+                "journal_entry": ["not in", [None, ""]],
+                "payment_mode": ["not in", [None, "", "Deferred", "later", "cash_now", "Cash"]],
+            },
+            fields=["reference_invoice", "journal_entry"],
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
+        )
+        je_names = [r.get("journal_entry") for r in switched_rows if r.get("journal_entry")]
+        if je_names:
+            credits: Dict[str, float] = {}
+            for acc in frappe.get_all(
+                "Journal Entry Account",
+                filters={
+                    "parent": ["in", je_names],
+                    "parenttype": "Journal Entry",
+                    "account": ["like", f"{ACCOUNTS.COURIER_OUTSTANDING}%"],
+                    "docstatus": 1,
+                },
+                fields=["parent", "credit_in_account_currency"],
+            ):
+                credits[acc.get("parent")] = credits.get(acc.get("parent"), 0.0) + float(acc.get("credit_in_account_currency") or 0.0)
+            for row in switched_rows:
+                invoice_name = row.get("reference_invoice")
+                amount = credits.get(row.get("journal_entry"), 0.0)
+                if invoice_name and amount > amount_map.get(invoice_name, 0.0):
+                    amount_map[invoice_name] = amount
+    except Exception:
+        pass
+
     return amount_map
 
 
@@ -1096,6 +1136,62 @@ def _get_allowed_states() -> List[str]:  # override previous implementation
 
 def _state_key(label: str) -> str:
     return (label or "").strip().lower().replace(' ', '_')
+
+
+# The board's forward sequence. Moves are one stage at a time; the only
+# backward move is the kitchen correction Ready -> In Progress. Cancelled and
+# Returned are reached through their own actions, never by moving the card.
+# Until 2026-09-05 only the client enforced this, so Ready -> Delivered was
+# accepted server-side and produced orders with no Delivery Note that could
+# neither be cancelled nor returned.
+_STATE_SEQUENCE = ["recieved", "in_progress", "ready", "out_for_delivery", "delivered"]
+_STATE_ALIASES = {"received": "recieved", "processing": "in_progress"}
+_STATE_LABELS = {
+    "recieved": "Received",
+    "in_progress": "In Progress",
+    "ready": "Ready",
+    "out_for_delivery": "Out for Delivery",
+    "delivered": "Delivered",
+}
+
+
+def _sequence_index(label: Any) -> Optional[int]:
+    key = _state_key(str(label or ""))
+    key = _STATE_ALIASES.get(key, key)
+    return _STATE_SEQUENCE.index(key) if key in _STATE_SEQUENCE else None
+
+
+def _transition_block_reason(old_state: Any, new_state: Any) -> Optional[str]:
+    """Why a board move is not allowed, or None when it is.
+
+    Unknown labels on either side (legacy values, empty state) are left to the
+    caller's other checks rather than refused here.
+    """
+    new_key = _state_key(str(new_state or ""))
+    if new_key == "cancelled":
+        return "Orders are cancelled through the Cancel Order action, not by moving the card."
+    if new_key in {"returned", "return"}:
+        return "Orders reach Returned through the Return Order action, not by moving the card."
+    old_idx = 0 if old_state in (None, "") else _sequence_index(old_state)
+    new_idx = _sequence_index(new_state)
+    if old_idx is None or new_idx is None:
+        return None
+    if new_idx == old_idx + 1:
+        return None
+    if old_idx == 2 and new_idx == 1:
+        return None
+    old_label = _STATE_LABELS[_STATE_SEQUENCE[old_idx]]
+    new_label = _STATE_LABELS[_STATE_SEQUENCE[new_idx]]
+    if new_idx <= old_idx:
+        return (
+            f"Cannot move an order backward from '{old_label}' to '{new_label}'. "
+            "Only Ready can go back to In Progress."
+        )
+    next_label = _STATE_LABELS[_STATE_SEQUENCE[old_idx + 1]]
+    return (
+        f"Move one stage at a time: from '{old_label}' the next stage is '{next_label}', "
+        f"not '{new_label}'."
+    )
 
 
 def _safe_datetime(value: Any) -> Optional[datetime.datetime]:
@@ -1928,6 +2024,10 @@ def update_invoice_state(
         if _state_key(str(invoice.get("custom_return_status") or "")) == "fully_returned":
             return _failure("This order was fully returned and can no longer be moved.")
 
+        transition_block = _transition_block_reason(old_state, new_state)
+        if transition_block:
+            return _failure(transition_block)
+
         meta = frappe.get_meta("Sales Invoice")
         fields_to_update: List[str] = []
         for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
@@ -1943,6 +2043,20 @@ def update_invoice_state(
         # Received -> In Progress -> Ready moves stay open.
         if create_dn:
             ensure_open_shift_for_invoice(invoice, action_label="dispatching an order")
+            # A pickup order is handed over at the counter: the goods leave with the
+            # customer, so the money has to be in the till first. The app enforces
+            # this; the server did not, so an unpaid pickup could be dispatched and
+            # end up Delivered with its whole total still on Debtors.
+            if _is_pickup_invoice(invoice):
+                try:
+                    pickup_outstanding = float(invoice.get("outstanding_amount") or 0)
+                except Exception:
+                    pickup_outstanding = 0.0
+                if pickup_outstanding > 0.5:
+                    return _failure(
+                        "Pickup orders must be paid before they are handed over. "
+                        "Register the payment first."
+                    )
         dn_logic_version = DN_LOGIC_VERSION
         shortage_approved = _coerce_bool(shortage_approved)
         shortage_reason = (shortage_reason or "").strip() or None
@@ -2229,7 +2343,11 @@ def update_invoice_state(
                 if sales_partner_val:
                     # Idempotency token pattern: SPTRN::<invoice_name>
                     idem_token = f"SPTRN::{invoice.name}"
-                    if not frappe.db.exists("Sales Partner Transactions", {"idempotency_token": idem_token}):
+                    # One transaction per invoice. The paid-online partner hook already
+                    # minted one at invoice creation under its own token; matching on
+                    # THIS token alone added a second row here on every kanban dispatch,
+                    # and the partner's commission then settled twice.
+                    if not frappe.db.exists("Sales Partner Transactions", {"reference_invoice": invoice.name}):
                         txn = frappe.new_doc("Sales Partner Transactions")
                         txn.sales_partner = sales_partner_val
                         txn.status = "Unsettled"  # always unsettle on creation
@@ -2371,6 +2489,28 @@ def _release_operational_artifacts(invoice_name: str) -> Dict[str, Any]:
     """
     released: Dict[str, Any] = {}
 
+    # An UNSETTLED Sales Partner Transaction is a fee not yet posted: with the
+    # order cancelled there is nothing to charge commission on, so the row goes.
+    # (A settled one has a fee journal behind it and blocks the cancel upstream.)
+    try:
+        unsettled_partner_rows = frappe.get_all(
+            "Sales Partner Transactions",
+            filters={"reference_invoice": invoice_name, "status": "Unsettled"},
+            pluck="name",
+        ) or []
+        removed: List[str] = []
+        for row_name in unsettled_partner_rows:
+            frappe.delete_doc(
+                "Sales Partner Transactions", row_name, ignore_permissions=True, force=True
+            )
+            removed.append(row_name)
+        if removed:
+            released["sales_partner_transactions"] = removed
+    except Exception:
+        frappe.logger().warning(
+            f"KANBAN API: partner transaction release failed for {invoice_name}"
+        )
+
     try:
         from jarz_pos.api.payment_receipts import mark_payment_receipts_changed_for_invoice
 
@@ -2445,7 +2585,12 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
         if int(getattr(invoice, "is_return", 0) or 0):
             return _failure("Return invoices cannot be cancelled")
 
-        mutation_blocker = get_invoice_hard_mutation_blocker(invoice)
+        # An unsettled partner transaction is not a settlement artifact: no fee has
+        # been posted, so a paid-online Talabat order can still be cancelled before
+        # dispatch. _release_operational_artifacts drops the row after the cancel.
+        mutation_blocker = get_invoice_hard_mutation_blocker(
+            invoice, ignore_unsettled_partner_transactions=True
+        )
         if mutation_blocker:
             return _failure(
                 mutation_blocker.get("mutation_block_reason")

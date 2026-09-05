@@ -658,8 +658,16 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
             rows = frappe.get_all(
                 "Payment Entry",
                 filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
-                fields=["name", "creation", "posting_date", "reference_no"],
+                fields=["name", "creation", "posting_date", "reference_no", "paid_to"],
             )
+            # The transfer to Courier Outstanding is not a customer payment: it is
+            # what dispatch posts, always AFTER the courier row, so counting it
+            # here flipped every settled cash order back to "unpaid" and offered
+            # "Collect <total>" again once its rows were closed.
+            rows = [
+                r for r in rows
+                if not str(r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)
+            ]
             pe_names = [r["name"] for r in rows]
             has_customer_payment = bool(rows)
             if rows:
@@ -699,6 +707,19 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         paid_after_ofd = True
         is_unpaid = True
 
+    # No open rows but settled ones: the courier position for this order is closed.
+    # Nothing is left to collect or pay, whatever the invoice's payment status says.
+    already_settled = False
+    if not has_ct_rows:
+        try:
+            settled_row = frappe.db.exists(
+                "Courier Transaction", {"reference_invoice": inv.name, "status": "Settled"}
+            )
+            # exists() answers with the row name; anything else (a test double) is not a hit.
+            already_settled = isinstance(settled_row, str) and bool(settled_row.strip())
+        except Exception:
+            already_settled = False
+
     if has_ct_rows:
         # AUTHORITATIVE: an unsettled Courier Transaction exists, so the courier's position on
         # this invoice is already recorded. Take it verbatim — exactly like the batch path,
@@ -715,6 +736,9 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         # settle_courier_collected_payment, fabricating a cash receipt for money nobody ever
         # collected and crediting a Courier Outstanding balance that was never debited.
         order_amount = ct_order_total
+    elif already_settled:
+        order_amount = 0.0
+        shipping = 0.0
     elif is_unpaid:
         # No transaction accrued yet (preview requested before Out for Delivery): anticipate a
         # settle-now collection of the whole invoice.
@@ -778,7 +802,11 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     else:  # net_amount == 0
         scenario = "even"
         branch_action = "none"
-        msg = f"Nothing to pay or collect – Invoice: {paid_note}"
+        msg = (
+            f"Courier position already settled – Invoice: {paid_note}"
+            if already_settled
+            else f"Nothing to pay or collect – Invoice: {paid_note}"
+        )
 
     return {
         "invoice": inv.name,
@@ -804,6 +832,7 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     # True when the amounts above came verbatim from the accrued Courier Transaction
     # (the same rows the batch settlement aggregates) rather than the pre-OFD heuristic.
     "has_courier_transaction": has_ct_rows,
+    "already_settled": already_settled,
     "courier_order_amount": ct_order_total,
     "courier_shipping_amount": ct_shipping_total,
     "is_online_unconfirmed": is_online_unconfirmed,

@@ -438,6 +438,151 @@ def _persist_invoice_courier_assignment(
     return update_submitted_sales_invoice_fields(inv, field_values)
 
 
+# ---------------------------------------------------------------------------
+# Dispatch guards shared by EVERY path that moves an order Out for Delivery.
+#
+# Until 2026-09-05 only ``api.kanban.update_invoice_state`` (the pickup / paid
+# sales-partner drag) checked the sub-territory, the pending custom-shipping
+# request and the stock-shortage approval. Every courier order goes through
+# ``api.couriers.confirm_settlement`` -> ``dispatch_settlement`` instead, which
+# checked none of them, so the "block until the manager approves" rule held for
+# the smallest share of dispatches. The same audit found that a second dispatch
+# of an already-dispatched cash order accrued the courier's fee twice, because
+# the receivable had moved to Courier Outstanding and the invoice read as paid.
+# ---------------------------------------------------------------------------
+
+_DISPATCHED_STATE_KEYS = {"out_for_delivery", "delivered", "completed"}
+
+
+def _state_key_of(inv) -> str:
+    try:
+        raw = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or ""
+    except Exception:
+        raw = getattr(inv, "custom_sales_invoice_state", "") or ""
+    return str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def assert_not_already_dispatched(inv) -> None:
+    """Refuse to dispatch an order that already left.
+
+    Dispatch is not idempotent across its two paths: once the receivable sits in
+    Courier Outstanding the invoice reads as paid, so a repeat takes the *paid*
+    path, which keeps its own freight tag and its own courier-row note and finds
+    nothing of its own — the courier is then owed the fee twice. The permanent
+    ``custom_was_out_for_delivery`` stamp is the authority; the live state is the
+    fallback for the race where the stamp has not landed yet.
+    """
+    try:
+        was_ofd = bool(int(inv.get("custom_was_out_for_delivery") or 0))
+    except Exception:
+        was_ofd = False
+    if was_ofd or _state_key_of(inv) in _DISPATCHED_STATE_KEYS:
+        frappe.throw(
+            _(
+                "Order {0} is already out for delivery. Refresh the board — dispatching it "
+                "again would accrue the courier's fee a second time."
+            ).format(getattr(inv, "name", "?")),
+            title=_("Already dispatched"),
+        )
+
+
+def _format_qty(value) -> str:
+    try:
+        qty = float(value or 0)
+    except Exception:
+        qty = 0.0
+    if abs(qty - round(qty)) < 0.0001:
+        return str(int(round(qty)))
+    return f"{qty:.3f}".rstrip("0").rstrip(".")
+
+
+def build_ofd_preview_errors(preview: dict) -> list[str]:
+    """Human-readable blockers from an OFD shortage preview (shared by every dispatch path)."""
+    from jarz_pos.services import ofd_pin_gate
+
+    errors = list(preview.get("validation_errors") or [])
+    for mismatch in preview.get("warehouse_mismatches") or []:
+        errors.append(
+            "Invoice {invoice}: item {item} still points to warehouse {warehouse} instead of {expected}.".format(
+                invoice=mismatch.get("invoice_name") or "?",
+                item=mismatch.get("item_code") or "?",
+                warehouse=mismatch.get("warehouse") or "blank",
+                expected=mismatch.get("expected_warehouse") or "?",
+            )
+        )
+    for shortage in preview.get("blocking_shortages") or []:
+        errors.append(
+            "Invoice(s) {invoices}: item {item} needs {required} in {warehouse}, only {available} available, and negative stock is disabled.".format(
+                invoices=", ".join(shortage.get("invoice_names") or []) or "?",
+                item=shortage.get("item_code") or "?",
+                required=_format_qty(shortage.get("required_qty")),
+                warehouse=shortage.get("warehouse") or "?",
+                available=_format_qty(shortage.get("available_qty")),
+            )
+        )
+    errors.extend(ofd_pin_gate.build_missing_pin_errors(preview))
+    return errors
+
+
+def evaluate_dispatch_gates(inv, *, shortage_approved=False, shortage_reason: str | None = None) -> dict:
+    """The three pre-dispatch rules, evaluated without mutating anything.
+
+    Returns ``{"errors": [...], "requires_shortage_reason": bool, "preview": ...,
+    "audit_field_values": {...}}``. ``api.kanban.update_invoice_state`` keeps its
+    own inline copy of the same rules (its unit tests patch that module's names);
+    this one serves the courier and unpaid-online dispatch paths.
+    """
+    errors: list[str] = []
+    try:
+        from jarz_pos.api.territories import territory_has_children
+
+        inv_territory = str(inv.get("territory") or "").strip()
+        inv_sub_territory = str(inv.get("custom_sub_territory") or "").strip()
+        if inv_territory and territory_has_children(inv_territory) and not inv_sub_territory:
+            errors.append("Please select a sub-territory before sending out for delivery")
+    except ImportError:
+        pass
+
+    if str(inv.get("custom_shipping_override_status") or "").strip() == "Pending":
+        errors.append(
+            "Custom shipping request is pending manager approval. Cannot proceed to Out for Delivery."
+        )
+
+    preview = get_ofd_shortage_preview([inv])
+    errors.extend(build_ofd_preview_errors(preview))
+
+    approved = str(shortage_approved).strip().lower() in {"1", "true", "yes", "on"} if not isinstance(shortage_approved, bool) else shortage_approved
+    reason = (shortage_reason or "").strip() or None
+    requires_reason = bool(preview.get("requires_reason")) and not (approved and reason)
+    audit_field_values = build_ofd_shortage_field_values(
+        (preview.get("invoice_previews") or {}).get(getattr(inv, "name", None)),
+        shortage_reason=reason,
+        shortage_approved=approved,
+    ) if not errors else {}
+    return {
+        "errors": errors,
+        "requires_shortage_reason": requires_reason,
+        "preview": preview,
+        "audit_field_values": audit_field_values,
+    }
+
+
+def enforce_dispatch_gates(inv, *, shortage_approved=False, shortage_reason: str | None = None) -> dict:
+    """Throw on any blocker; persist the shortage audit fields when the move may go ahead."""
+    gates = evaluate_dispatch_gates(inv, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
+    if gates["errors"]:
+        frappe.throw(" ".join(gates["errors"]), title=_("Cannot dispatch"))
+    if gates["requires_shortage_reason"]:
+        frappe.throw(
+            _("Stock shortage approval reason is required before moving this invoice Out for Delivery."),
+            title=_("Shortage approval required"),
+        )
+    values = {k: v for k, v in (gates.get("audit_field_values") or {}).items() if v not in (None, "")}
+    if values:
+        update_submitted_sales_invoice_fields(inv, values)
+    return gates
+
+
 @contextmanager
 def _allow_disabled_invoice_items_for_delivery_note(item_codes: set[str]):
     """Allow historical invoice items to pass DN creation even if later disabled.
@@ -1094,7 +1239,13 @@ def _mark_courier_outstanding_locked(
 
     company = inv.company
     outstanding = latest_outstanding
-    order_amount = float(inv.grand_total or (outstanding or 0))
+    # What the courier will actually collect is what is still OWED, not the grand
+    # total: a part payment taken before dispatch has already reached the drawer,
+    # and only the remainder moves to Courier Outstanding below. Writing the
+    # grand total here made the settlement credit Courier Outstanding for more
+    # than was ever debited on every partly-paid order.
+    grand_total = float(inv.grand_total or 0)
+    order_amount = outstanding if outstanding > 0.0001 else grand_total
 
     # A delivery partner prices by its OWN zones, which are far finer than ours —
     # they split one of our areas into dozens. Our territory rate is therefore never
@@ -1416,9 +1567,13 @@ def handle_unpaid_online_deliver_unconfirmed(
         resolved_pos_profile = resolve_assignment_pos_profile(inv, requested_pos_profile=pos_profile)
         courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
     else:
-        frappe.logger("jarz_pos").warning(
-            f"Invoice {inv.name} moved Out for Delivery (unpaid online, awaiting payment) "
-            f"with no courier assigned - client did not send party_type/party."
+        # A courier IS required. Without one nothing below accrues the freight or
+        # writes a Courier Transaction, so the rider who delivers is never owed
+        # anything in the books. The cash paths refuse a courier-less dispatch
+        # already; this path let one through with only a log line.
+        frappe.throw(
+            _("Assign a courier before sending {0} out for delivery.").format(inv.name),
+            title=_("Courier required"),
         )
 
     # Operational state → Out for Delivery
@@ -1937,9 +2092,13 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
     # Create/ensure Sales Partner Transaction record (idempotent)
     try:
         idemp = f"{inv.name}::sales_partner_unpaid_cash"
+        # One transaction per invoice, whichever path minted it. The three
+        # paths (this one, the paid partner hook, the kanban state endpoint)
+        # each carry their own token, and matching only on the token let a
+        # second path add a second row — and the fee posted twice at settlement.
         existing_spt = frappe.get_all(
             "Sales Partner Transactions",
-            filters={"idempotency_token": idemp},
+            filters={"reference_invoice": inv.name},
             pluck="name",
             limit_page_length=1,
         )
@@ -2063,9 +2222,10 @@ def sales_partner_paid_out_for_delivery(invoice_name: str, payment_mode: str | N
     # Record Sales Partner Transaction for paid invoices as well
     try:
         idemp = f"{inv.name}::sales_partner_paid"
+        # Per invoice, not per token — see sales_partner_unpaid_out_for_delivery.
         existing_spt = frappe.get_all(
             "Sales Partner Transactions",
-            filters={"idempotency_token": idemp},
+            filters={"reference_invoice": inv.name},
             pluck="name",
             limit_page_length=1,
         )
@@ -2431,10 +2591,16 @@ def settle_delivery_party(party_type: str | None = None, party: str | None = Non
             total_shipping_amount=total_shipping,
             party_type=party_type,
             party=party,
+            invoices=[r.get("reference_invoice") for r in cts],
         )
 
+    # Stamp the settlement entry on every row it closed. Without this the
+    # batch entry (which names no invoice) and the rows (which named no entry)
+    # could not be tied together, and Courier Outstanding was impossible to
+    # reconcile per invoice after a batch settle.
     mark_courier_transactions_settled(
-        [r.name for r in cts], pos_profile=pos_profile
+        [r.name for r in cts], pos_profile=pos_profile,
+        extra={"journal_entry": je_name} if je_name else None,
     )
     frappe.db.commit()
 
@@ -2517,7 +2683,9 @@ def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None
             "reference_invoice": invoice_name,
             "status": ["!=", "Settled"],
         },
-        fields=["name", "courier", "amount", "shipping_amount", "party_type", "party"],
+        # The legacy ``courier`` link column no longer exists on the DocType;
+        # selecting it made this endpoint 500 on every call.
+        fields=["name", "amount", "shipping_amount", "party_type", "party"],
     )
 
     if not cts:
@@ -2728,6 +2896,17 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         # v16 overwrites the JE title with the first account name on save.
         je_name = _find_existing_je_by_tag(company, inv.name, "OFD")
 
+        # Cross-path dedupe. The settle-later cash dispatch accrues the same
+        # freight under the COURIER_EXPENSE tag; once the receivable has moved
+        # to Courier Outstanding the invoice reads as paid and a repeat lands
+        # here, where only the OFD tag used to be checked — so the courier was
+        # credited twice. Two accruals for one delivery are never right.
+        if shipping_exp > 0 and _find_existing_je_by_tag(company, inv.name, "COURIER_EXPENSE"):
+            frappe.throw(
+                _("The courier's fee for {0} was already accrued when it was dispatched.").format(inv.name),
+                title=_("Already dispatched"),
+            )
+
         if je_name and shipping_exp > 0:
             try:
                 existing_je = frappe.get_doc("Journal Entry", je_name)
@@ -2810,6 +2989,16 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
             "notes": ["like", "%Out For Delivery transition%"],
         }
         existing_ct = frappe.get_all("Courier Transaction", filters=ct_filters, pluck="name", limit_page_length=1)
+        if not existing_ct:
+            # Any open row for this courier on this invoice already states the
+            # freight (the outstanding path writes a different note). Adding a
+            # second row pays him twice at settlement.
+            existing_ct = frappe.get_all(
+                "Courier Transaction",
+                filters={"reference_invoice": inv.name, "party_type": party_type, "party": party, "status": ["!=", "Settled"]},
+                pluck="name",
+                limit_page_length=1,
+            )
         if existing_ct:
             ct_name = existing_ct[0]
             # Backfill amount / shipping if prior logic stored 0 for cash_now path
@@ -3254,7 +3443,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             },
             pluck="name",
         )
-        mark_courier_transactions_settled(cts, pos_profile=pos_profile)
+        mark_courier_transactions_settled(cts, pos_profile=pos_profile, extra={"journal_entry": je_name} if je_name else None)
 
         payload = {
             "invoice": inv.name,
@@ -3325,7 +3514,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             ct.insert(ignore_permissions=True)
             cts = [ct.name]
         else:
-            mark_courier_transactions_settled(cts, pos_profile=pos_profile)
+            mark_courier_transactions_settled(cts, pos_profile=pos_profile, extra={"journal_entry": je_name} if je_name else None)
 
         payload = {
             "invoice": inv.name,
@@ -3487,7 +3676,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         },
         pluck="name",
     )
-    mark_courier_transactions_settled(cts, pos_profile=pos_profile)
+    mark_courier_transactions_settled(cts, pos_profile=pos_profile, extra={"journal_entry": je_name} if je_name else None)
 
     payload = {
         "invoice": inv.name,
@@ -3616,6 +3805,7 @@ def change_payment_collection_method(
     # dispatch assigns no courier when the client sent none, and accrues no freight when
     # the territory charges none).
     unpaid_online = False
+    from_online = False
     latest_outstanding = 0.0
     courier_can_carry = _courier_row_can_still_carry_cash(source_ct)
     if order_amount <= 0.0001:
@@ -3624,9 +3814,17 @@ def change_payment_collection_method(
             frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount"),
             default=_safe_float(inv.get("outstanding_amount")),
         )
+        switched_amount = _switched_online_amount(source_ct)
         if latest_outstanding > 0.0001:
             unpaid_online = True
             order_amount = float(inv.grand_total or 0) or latest_outstanding
+        elif switched_amount > 0.0001:
+            # A cash order that was switched to an online ledger after dispatch and
+            # is not settled yet. The customer's money is claimed in that ledger by
+            # the switch's journal entry; it can still move — back to the courier's
+            # cash, or to a different online ledger — until the courier settles.
+            from_online = True
+            order_amount = switched_amount
         else:
             frappe.throw(
                 "This order has nothing left to collect from the customer, so there is "
@@ -3658,7 +3856,21 @@ def change_payment_collection_method(
 
     try:
         frappe.db.savepoint("change_payment_collection_method")
-        if unpaid_online:
+        if from_online:
+            result = _apply_collection_change_from_online(
+                inv=inv,
+                ct=source_ct,
+                new_method=new_method,
+                order_amount=order_amount,
+                shipping_amount=shipping_amount,
+                reference_no=reference_no,
+                reference_date=reference_date,
+                receipt_name=receipt_name,
+                receipt_data=receipt_data,
+                notes=notes,
+                idempotency_token=idempotency_token,
+            )
+        elif unpaid_online:
             result = _apply_collection_change_for_unpaid_online(
                 inv=inv,
                 ct=source_ct,
@@ -4199,6 +4411,144 @@ def _apply_collection_change_for_unpaid_online(*, inv, ct, new_method: str, orde
     }
 
 
+def _switched_online_amount(ct: dict | None) -> float:
+    """The customer money a cod->online switch moved into an online ledger, still reversible.
+
+    Reads the switch's own journal entry (the Courier Outstanding credit it
+    posted) rather than the invoice, because the invoice has read as paid since
+    dispatch. Zero for anything that is not an unsettled, online-switched row.
+    """
+    if not ct or str(ct.get("status") or "").strip() == "Settled":
+        return 0.0
+    if abs(_safe_float(ct.get("amount"))) > 0.0001:
+        return 0.0
+    je_name = str(ct.get("journal_entry") or "").strip()
+    mode = str(ct.get("payment_mode") or "").strip()
+    if not je_name or not mode:
+        return 0.0
+    try:
+        # Only a REAL online method counts: "Deferred" / "later" are dispatch
+        # labels, and a partner fee row links its accrual entry under "Online"
+        # too — the Courier Outstanding credit test below rules that one out.
+        if not _is_recognised_collection_method(mode) or _is_cash_collection_method(_normalize_collection_method(mode)):
+            return 0.0
+    except Exception:
+        return 0.0
+    if frappe.db.get_value("Journal Entry", je_name, "docstatus") != 1:
+        return 0.0
+    rows = frappe.get_all(
+        "Journal Entry Account",
+        filters={"parent": je_name, "parenttype": "Journal Entry"},
+        fields=["account", "credit_in_account_currency"],
+    )
+    return round(sum(
+        _safe_float(r.get("credit_in_account_currency"))
+        for r in rows
+        if str(r.get("account") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)
+    ), 2)
+
+
+def _apply_collection_change_from_online(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, reference_no: str | None, reference_date: str | None, receipt_name: str | None, receipt_data: dict | None, notes: str | None, idempotency_token: str):
+    """Move an online-switched (unsettled) order back to cash, or to another online ledger.
+
+    The earlier switch posted ``DR <online ledger> / CR Courier Outstanding``. Back to
+    cash reverses exactly that, so the courier's row carries the customer amount again
+    and settlement collects it from him. To a different online ledger moves the claim
+    between the two ledgers and leaves the courier row at zero.
+    """
+    ct_name = ct.get("name")
+    prior_je = str(ct.get("journal_entry") or "").strip()
+    prior_rows = frappe.get_all(
+        "Journal Entry Account",
+        filters={"parent": prior_je, "parenttype": "Journal Entry"},
+        fields=["account", "debit_in_account_currency", "credit_in_account_currency"],
+    )
+    old_online_account = next(
+        (r.get("account") for r in prior_rows
+         if _safe_float(r.get("debit_in_account_currency")) > 0.0001
+         and not str(r.get("account") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)),
+        None,
+    )
+    if not old_online_account:
+        frappe.throw("Could not identify the online ledger the earlier collection change used.")
+    courier_outstanding_acc = _get_courier_outstanding_account(inv.company)
+    to_cash = _is_cash_collection_method(new_method)
+
+    je_type = f"COLLECTION_CHANGE-{idempotency_token}"
+    je_name = _find_existing_je_by_tag(inv.company, inv.name, je_type)
+    changed_receipts: list[str] = []
+    if to_cash:
+        debit_account, credit_account = courier_outstanding_acc, old_online_account
+        mode = "online_to_cash_revert"
+    else:
+        new_online_account = _get_online_collection_account(new_method, inv.company)
+        if new_online_account == old_online_account:
+            frappe.throw("The order is already collected through that method.")
+        debit_account, credit_account = new_online_account, old_online_account
+        mode = "online_to_online"
+
+    if not je_name:
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.posting_date = frappe.utils.nowdate()
+        je.company = inv.company
+        je.title = f"Payment Collection Change - {inv.name}"
+        je.user_remark = _je_user_remark(
+            inv.name, je_type,
+            f"Payment collection changed to {new_method} for {inv.name} (reverses {prior_je}).",
+        )
+        je.append("accounts", {"account": debit_account, "debit_in_account_currency": order_amount, "credit_in_account_currency": 0})
+        je.append("accounts", {"account": credit_account, "debit_in_account_currency": 0, "credit_in_account_currency": order_amount})
+        je.save(ignore_permissions=True)
+        je.submit()
+        je_name = je.name
+
+    if to_cash:
+        changed_receipts = mark_payment_receipts_changed_for_invoice(inv.name)
+
+    resolved_receipt_name = (receipt_data or {}).get("name") or receipt_name
+    frappe.db.set_value(
+        "Courier Transaction",
+        ct_name,
+        {
+            "amount": order_amount if to_cash else 0,
+            "shipping_amount": shipping_amount,
+            "payment_mode": new_method,
+            "journal_entry": je_name,
+            "idempotency_token": idempotency_token,
+            "notes": _append_collection_change_note(
+                ct.get("notes"),
+                old_method=ct.get("payment_mode"),
+                new_method=new_method,
+                order_amount=order_amount,
+                shipping_amount=shipping_amount,
+                journal_entry=je_name,
+                receipt_name=resolved_receipt_name if not to_cash else None,
+                reference_no=reference_no,
+                notes=notes,
+                idempotency_token=idempotency_token,
+                changed_receipts=changed_receipts,
+            ),
+        },
+    )
+    update_submitted_sales_invoice_fields(inv, {"custom_payment_method": new_method})
+    return {
+        "mode": mode,
+        "invoice": inv.name,
+        "courier_transaction": ct_name,
+        "journal_entry": je_name,
+        "order_amount": order_amount,
+        "shipping_amount": shipping_amount,
+        "reference_no": reference_no,
+        "reference_date": reference_date,
+        "receipt_name": resolved_receipt_name if not to_cash else None,
+        "receipt_image_url": (receipt_data or {}).get("receipt_image_url") if not to_cash else None,
+        "receipt_status": (receipt_data or {}).get("status") if not to_cash else None,
+        "changed_receipts": changed_receipts,
+        "idempotency_token": idempotency_token,
+    }
+
+
 def _apply_collection_change_to_online(*, inv, ct, new_method: str, order_amount: float, shipping_amount: float, reference_no: str | None, reference_date: str | None, receipt_name: str | None, receipt_data: dict | None, notes: str | None, idempotency_token: str):
     ct_name = ct.get("name")
     existing_je = None
@@ -4733,7 +5083,9 @@ def _create_shipping_expense_to_creditors_je(inv, shipping_exp: float, creditors
     company = inv.company
 
     # Idempotency guard: reuse a courier-expense JE already tagged for this invoice.
-    existing = _find_existing_je_by_tag(company, inv.name, "COURIER_EXPENSE")
+    # The paid-dispatch path tags its accrual "OFD"; either tag means the freight
+    # for this order is already in the ledger, so neither may post a second one.
+    existing = _find_existing_je_by_tag(company, inv.name, "COURIER_EXPENSE") or _find_existing_je_by_tag(company, inv.name, "OFD")
     if existing:
         return existing
 
@@ -5162,6 +5514,7 @@ def _create_settlement_journal_entry(
     total_shipping_amount: float,
     party_type: str | None,
     party: str | None,
+    invoices: list | None = None,
 ):
     """Create a balanced settlement Journal Entry that splits cash and shipping lines."""
 
@@ -5177,8 +5530,13 @@ def _create_settlement_journal_entry(
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Courier Settlement – {courier}"
+    # Name the invoices this entry settles: it is the only place the batch
+    # settlement can be traced back to the orders whose Courier Outstanding it
+    # clears. Sorted + de-duplicated so the same set always reads the same.
+    invoice_names = sorted({str(i or "").strip() for i in (invoices or []) if str(i or "").strip()})
     je.user_remark = (
         f"Order: {order_amt}, Shipping: {shipping_amt}, Net to branch: {net_branch}"
+        + (f" | Invoices: {', '.join(invoice_names)}" if invoice_names else "")
     )
 
     tolerance = 0.005

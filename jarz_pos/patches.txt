@@ -26,3 +26,4 @@ jarz_pos.Patches.v1_6.backfill_bundle_group_metadata
 # option would not exist yet, the patch would no-op, and patch_handler would
 # still log it as executed and never run it again. It is wired as an
 # after_migrate hook instead, where the fixture is already synced.
+jarz_pos.Patches.v1_8.dedupe_sales_partner_transactions

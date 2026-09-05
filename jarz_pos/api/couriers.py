@@ -130,16 +130,33 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
 # ---------------------------------------------------------------------------
 
 
+def _guard_dispatch(invoice_name: str, *, shortage_approved=False, shortage_reason: str | None = None):
+    """The pre-dispatch rules every Out-for-Delivery entry point shares.
+
+    Refuses a second dispatch of an order that already left (the repeat took the
+    paid path and accrued the courier's fee twice), then applies the sub-territory,
+    pending-shipping-request and stock-shortage gates that only the plain state
+    endpoint used to enforce. Returns the loaded invoice for the caller's use.
+    """
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    _delivery_services.assert_not_already_dispatched(inv)
+    _delivery_services.enforce_dispatch_gates(
+        inv, shortage_approved=shortage_approved, shortage_reason=shortage_reason
+    )
+    return inv
+
+
 @frappe.whitelist()  # type: ignore[attr-defined]
-def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None, partner_fee=None):
+def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None, partner_fee=None, shortage_approved=False, shortage_reason: str | None = None):
     """Move an unpaid online-intent (InstaPay/Mobile Wallet) order Out for Delivery
     while it stays honestly Unpaid (no receivable move, no Payment Entry).
 
-    The courier (party_type/party) is recorded for attribution only; settlement happens
-    later on the manager reconciliation screen. Courier params are optional so older
-    clients can still dispatch an order mid-delivery.
+    The courier (party_type/party) is recorded and the freight accrued to them;
+    settlement of the customer's money happens later on the manager reconciliation
+    screen.
     """
     _guard_invoice_action(invoice_name, action_label="dispatching an order")
+    _guard_dispatch(invoice_name, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
     return _deliver_online_unconfirmed(
         invoice_name, pos_profile, party_type, party, partner_fee=partner_fee
     )
@@ -348,16 +365,18 @@ def get_active_couriers(pos_profile: str | None = None):
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: str, pos_profile: str, party_type: str | None = None, party: str | None = None):
+def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: str, pos_profile: str, party_type: str | None = None, party: str | None = None, shortage_approved=False, shortage_reason: str | None = None):
     # 'courier' kept only for backward compatibility; underlying service ignores legacy Courier DocType
     _guard_invoice_action(invoice_name, action_label="dispatching an order")
+    _guard_dispatch(invoice_name, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
     return _handle_out_for_delivery_paid(invoice_name, courier, settlement, pos_profile, party_type, party)
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: str, pos_profile: str, idempotency_token: str | None = None, party_type: str | None = None, party: str | None = None):
+def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: str, pos_profile: str, idempotency_token: str | None = None, party_type: str | None = None, party: str | None = None, shortage_approved=False, shortage_reason: str | None = None):
     # 'courier' kept only for backward compatibility; underlying service ignores legacy Courier DocType
     _guard_invoice_action(invoice_name, action_label="dispatching an order")
+    _guard_dispatch(invoice_name, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
     return _handle_out_for_delivery_transition(invoice_name, courier, mode, pos_profile, idempotency_token, party_type, party)
 
 
@@ -749,11 +768,16 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
-def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile: str | None = None, party_type: str | None = None, party: str | None = None, payment_mode: str = "Cash", partner_fee=None):
+def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile: str | None = None, party_type: str | None = None, party: str | None = None, payment_mode: str = "Cash", partner_fee=None, shortage_approved=False, shortage_reason: str | None = None):
     """Confirm a previously previewed settlement atomically.
 
     If preview indicated unpaid and mode==pay_now, creates a Payment Entry, then performs
     Out For Delivery transition using unified delivery party details. All inside one transaction.
+
+    ``shortage_approved`` / ``shortage_reason`` carry the operator's stock-shortage
+    approval, exactly as ``api.kanban.update_invoice_state`` takes it: this is the
+    entry point for every courier dispatch, and until 2026-09-05 it applied none of
+    the pre-dispatch gates.
     """
     if not invoice:
         frappe.throw("invoice is required")
@@ -767,6 +791,7 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
     # not a substitute: it is minted by generate_settlement_preview, which was
     # equally unguarded, so a caller could simply mint their own.
     _guard_invoice_action(invoice, action_label="confirm a settlement")
+    _guard_dispatch(invoice, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
 
     cache_key = f"jarz_pos:settle_preview:{preview_token}"
     data = frappe.cache().hget(cache_key, "data")

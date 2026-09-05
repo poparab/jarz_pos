@@ -464,12 +464,19 @@ def _find_courier_transactions(invoice_name: str) -> List[str]:
     return sorted({row for row in rows if row})
 
 
-def _find_sales_partner_transactions(invoice_name: str) -> List[str]:
-    """Return Sales Partner Transaction rows already linked to the Sales Invoice."""
+def _find_sales_partner_transactions(invoice_name: str, *, settled_only: bool = False) -> List[str]:
+    """Return Sales Partner Transaction rows already linked to the Sales Invoice.
+
+    ``settled_only`` narrows to rows whose fee has actually been posted. An
+    Unsettled row is a pending charge, not a settlement artifact.
+    """
+    filters: Dict[str, Any] = {"reference_invoice": invoice_name}
+    if settled_only:
+        filters["status"] = "Settled"
     try:
         rows = frappe.get_all(
             "Sales Partner Transactions",
-            filters={"reference_invoice": invoice_name},
+            filters=filters,
             pluck="name",
             limit_page_length=20,
         ) or []
@@ -589,8 +596,17 @@ def _get_active_delivery_trip_name(inv: Any) -> Optional[str]:
     return None
 
 
-def get_invoice_hard_mutation_blocker(inv: Any) -> Optional[Dict[str, Any]]:
-    """Return the first downstream artifact that blocks cancel/amend mutations."""
+def get_invoice_hard_mutation_blocker(
+    inv: Any, *, ignore_unsettled_partner_transactions: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Return the first downstream artifact that blocks cancel/amend mutations.
+
+    ``ignore_unsettled_partner_transactions`` is what cancellation passes: a
+    paid-online sales-partner order carries a partner transaction from the moment
+    it is created, and until the fee is settled that row is a pending charge with
+    no ledger behind it. Amendment keeps the strict reading because it would
+    leave the row pointing at a cancelled invoice.
+    """
     invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
     if not invoice_name:
         return None
@@ -619,7 +635,9 @@ def get_invoice_hard_mutation_blocker(inv: Any) -> Optional[Dict[str, Any]]:
             "courier_transactions": courier_transactions,
         }
 
-    sales_partner_transactions = _find_sales_partner_transactions(invoice_name)
+    sales_partner_transactions = _find_sales_partner_transactions(
+        invoice_name, settled_only=ignore_unsettled_partner_transactions
+    )
     if sales_partner_transactions:
         return {
             "mutation_block_code": "sales_partner_transaction_exists",
@@ -747,7 +765,9 @@ def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:
             suggest_return=True,
         )
 
-    mutation_blocker = get_invoice_hard_mutation_blocker(inv)
+    mutation_blocker = get_invoice_hard_mutation_blocker(
+        inv, ignore_unsettled_partner_transactions=True
+    )
     if mutation_blocker:
         return _blocked(
             mutation_blocker.get("mutation_block_code") or "mutation_blocked",
