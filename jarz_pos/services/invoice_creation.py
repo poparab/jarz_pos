@@ -510,6 +510,66 @@ def _resolve_effective_price_list(
     return effective_price_list
 
 
+def _persist_selling_price_list(invoice_doc, effective_price_list, logger) -> None:
+    """Re-stamp the resolved price list onto the invoice AFTER ERPNext validation.
+
+    Why this exists (production incident, order 17206 / ACC-SINV-2026-18128):
+    ``create_pos_invoice`` sets ``selling_price_list`` at STEP 6, but every invoice this
+    package writes carries ``is_pos=1``, and ERPNext's own
+    ``SalesInvoice.set_pos_fields`` then OVERWRITES that column with
+    ``customer.default_price_list or customer_group.default_price_list or
+    pos_profile.selling_price_list``. The operator's choice therefore never reached the
+    database: ACC-SINV-2026-18128 has item rates of 92 (B2B Selling) while its header
+    reads ``Standard Selling``, and the only surviving trace of the real list is the
+    free-text ``[PRICE LIST OVERRIDE]`` audit marker.
+
+    That lie is not cosmetic. The amendment draft loader (both the Flutter client and
+    :func:`jarz_pos.api.manager._resolve_amendment_price_list`) reads the header to know
+    what the order was priced at, so a clobbered header re-prices the replacement at
+    retail — the customer on 17206 was overcharged EGP 476 across four identical
+    amendments.
+
+    Mechanism: re-stamp the EXISTING ``selling_price_list`` column with ``db_set`` once
+    the document is submitted and ERPNext can no longer touch it. Deliberately not a new
+    custom field — Sales Invoice on this site sits at the MariaDB 247-column row limit,
+    so it has no room for one — and deliberately not a re-parse of the audit marker,
+    which is free text and only a breadcrumb. Nothing in GL reads this column (item
+    rates are already stamped on the child rows), so correcting it moves no money.
+
+    ``update_modified=False`` keeps the in-memory document's timestamp valid, so the
+    post-submit steps that follow (partner payment entry, branch fulfilment) do not hit
+    a ``TimestampMismatchError``.
+
+    Fully defensive: a submitted invoice must never be lost to a metadata correction.
+    """
+    wanted = _normalize_price_list_name(effective_price_list)
+    if not wanted:
+        return
+    current = _normalize_price_list_name(getattr(invoice_doc, "selling_price_list", None))
+    if current == wanted:
+        # The overwhelmingly common case (no override): nothing to do, no query.
+        return
+    try:
+        invoice_doc.db_set("selling_price_list", wanted, update_modified=False)
+        print(f"   🏷️ Selling Price List re-stamped after submit: {current or '<blank>'} → {wanted}")
+        try:
+            logger.info(
+                f"selling_price_list re-stamped on {getattr(invoice_doc, 'name', '?')}: "
+                f"{current or ''} -> {wanted} (ERPNext set_pos_fields clobber)"
+            )
+        except Exception:
+            pass
+    except Exception as exc:  # pragma: no cover - metadata fix must never abort creation
+        print(f"   ⚠️ Could not re-stamp selling_price_list: {exc}")
+        try:
+            logger.warning(
+                f"Failed to re-stamp selling_price_list on "
+                f"{getattr(invoice_doc, 'name', '?')}: {exc}"
+            )
+        except Exception:
+            pass
+
+
 def _validate_policy_price_list_coverage(policy_decision, effective_price_list, cart_items, logger) -> None:
     """For a MATCHED commercial policy, ensure the resolved price list has a selling
     Item Price for every plain cart item. Gives a clear, actionable error (instead of a
@@ -1447,6 +1507,12 @@ def create_pos_invoice(
         # STEP 10: Submit Document
         print("\n🔟 SUBMITTING DOCUMENT:")
         _submit_document(invoice_doc, logger)
+
+        # STEP 10.1: Re-stamp the resolved price list. ERPNext's `set_pos_fields` runs on
+        # every is_pos=1 document and overwrites `selling_price_list` from the customer /
+        # customer-group / POS-Profile chain, so the value set at STEP 6 never survives
+        # validation. See `_persist_selling_price_list` for the full incident note.
+        _persist_selling_price_list(invoice_doc, effective_price_list, logger)
 
         # STEP 10.5: File a territory / branch exception for review (F-08, F-09).
         #

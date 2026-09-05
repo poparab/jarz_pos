@@ -71,6 +71,15 @@ try:
 except Exception:
     _create_amendment_invoice = None  # type: ignore
 
+try:
+    # Reused verbatim so the amendment path never grows a second, drifting notion of
+    # what a price-list name is.
+    from jarz_pos.services.invoice_creation import _normalize_price_list_name
+except Exception:  # pragma: no cover - defensive, mirrors the import above
+    def _normalize_price_list_name(value):  # type: ignore
+        cleaned = str(value or "").strip()
+        return cleaned or None
+
 from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
 
 from jarz_pos.utils.access_control import (
@@ -905,9 +914,17 @@ def _build_invoice_amendment_request_id(
     suppress_legacy_delivery_charges: Union[bool, int, str, None] = None,
     zero_shipping_override: Union[bool, int, str, None] = None,
     custom_delivery_income: Union[float, str, None] = None,
+    price_list: Optional[str] = None,
     provided_idempotency_key: Optional[str] = None,
 ) -> str:
-    """Build a stable idempotency key for amendment retries of the same payload."""
+    """Build a stable idempotency key for amendment retries of the same payload.
+
+    ``price_list`` participates in the digest because the price list IS part of the
+    payload: on order 17206 the operator re-submitted the same cart four times trying to
+    get the B2B rate back, and every attempt has to be a DISTINCT request — an amendment
+    that changes only the price list must not be swallowed as an already-processed
+    duplicate of the retail-priced one.
+    """
     provided = str(provided_idempotency_key or "").strip()
     if provided:
         return provided
@@ -937,10 +954,75 @@ def _build_invoice_amendment_request_id(
             else frappe.utils.flt(custom_delivery_income)
         ),
     }
+    # Added to the digest only when a price list was actually requested, so an amendment
+    # that never mentions one keeps EXACTLY the request id it produced before this key
+    # existed. Standard/B2C orders are the overwhelming majority and must not churn.
+    normalized_price_list = _normalize_price_list_name(price_list)
+    if normalized_price_list:
+        payload["price_list"] = normalized_price_list
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()
     return f"amd-{invoice_id}-{digest[:16]}"
+
+
+def _pos_profile_default_price_list(pos_profile_name: Optional[str]) -> Optional[str]:
+    """The POS Profile's own selling price list, or None when unresolvable."""
+    name = str(pos_profile_name or "").strip()
+    if not name:
+        return None
+    try:
+        return _normalize_price_list_name(
+            frappe.db.get_value("POS Profile", name, "selling_price_list")
+        )
+    except Exception:
+        return None
+
+
+def _resolve_amendment_price_list(
+    source_invoice: Any,
+    requested: Optional[str],
+    *,
+    pos_profile_name: Optional[str],
+) -> Optional[str]:
+    """Return the price list the replacement invoice must be priced from.
+
+    Precedence, highest first:
+
+    1. an explicit ``price_list`` argument — the operator changed the list on this
+       amendment and that choice is the whole point of the request;
+    2. the source invoice's own persisted ``selling_price_list``, when it differs from
+       the POS Profile default — i.e. the order carried an override, and an amendment
+       that only flips pickup / address / slot must NOT lose it;
+    3. ``None`` — no override, so ``create_pos_invoice`` re-derives exactly as it does
+       today.
+
+    Case 2 is the production regression: ``submit_invoice_amendment`` had no
+    ``price_list`` parameter at all, so Frappe silently dropped the one the Flutter
+    client sends and every replacement re-priced from the POS Profile default. Order
+    17206 fell from a B2B rate of 92 to the retail 160 on its first amendment and could
+    not be brought back.
+
+    No new resolution logic lives here: whatever this returns is handed to
+    ``create_pos_invoice(price_list=...)`` and run through the existing
+    ``_resolve_effective_price_list`` chain (policy → sales partner → customer → B2B
+    baseline → profile default), including its manager gate.
+    """
+    explicit = _normalize_price_list_name(requested)
+    if explicit:
+        return explicit
+
+    source_price_list = _normalize_price_list_name(source_invoice.get("selling_price_list"))
+    if not source_price_list:
+        return None
+
+    # Equal to the profile default means "never overridden": return None so the
+    # amendment is byte-identical to today's behaviour rather than being re-classified
+    # as an explicit request.
+    if source_price_list == _pos_profile_default_price_list(pos_profile_name):
+        return None
+
+    return source_price_list
 
 
 def _territory_default_delivery_income(territory_name: Optional[str]) -> Optional[float]:
@@ -1207,6 +1289,7 @@ def _run_invoice_amendment_job(
     expected_source_grand_total: Optional[float] = None,
     expected_source_item_count: Optional[int] = None,
     custom_delivery_income: Union[float, str, None] = None,
+    price_list: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
     if _create_amendment_invoice is None:
@@ -1270,6 +1353,10 @@ def _run_invoice_amendment_job(
     effective_delivery_end_datetime = delivery_end_datetime or _derive_delivery_end_datetime(source_invoice)
     effective_custom_delivery_income = _resolve_amendment_delivery_income(
         source_invoice, custom_delivery_income
+    )
+    # Explicit request → the source invoice's own override → None (re-derive as today).
+    effective_price_list = _resolve_amendment_price_list(
+        source_invoice, price_list, pos_profile_name=effective_pos_profile
     )
     woo_order_id = source_invoice.get("woo_order_id")
     # Preserve commercial-policy / order purpose on amendment. Without this a B2B /
@@ -1419,7 +1506,10 @@ def _run_invoice_amendment_job(
     # (rows that keep a real, lower rate) are unaffected — the guard stays intact.
     from jarz_pos.services.invoice_creation import _resolve_item_rate as _amend_resolve_item_rate
 
-    _amend_price_list = source_invoice.get("selling_price_list") or None
+    # Price the rate-less rows from the list the REPLACEMENT will actually use, so a
+    # carried-over B2B override is not measured against retail rates (which would make
+    # the rebuilt cart look ~40% cheaper than the source and falsely trip the guard).
+    _amend_price_list = effective_price_list or source_invoice.get("selling_price_list") or None
     submitted_total = 0.0
     if isinstance(parsed_cart, list):
         for row in parsed_cart:
@@ -1548,6 +1638,10 @@ def _run_invoice_amendment_job(
                 payment_type,
                 effective_pickup,
                 effective_payment_method,
+                # 11th positional parameter of create_pos_invoice. Passed by keyword so
+                # the mapping is unmistakable: dropping it is what silently re-priced
+                # every amended B2B order at retail.
+                price_list=effective_price_list,
                 amended_from=invoice_id,
                 woo_order_id=woo_order_id,
                 suppress_shipping_income=effective_suppress_shipping_income,
@@ -1703,6 +1797,7 @@ def submit_invoice_amendment(
     expected_source_item_count: Optional[int] = None,
     custom_delivery_income: Union[float, str, None] = None,
     reuse_source_cart: Union[bool, int, str, None] = None,
+    price_list: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload.
 
@@ -1710,6 +1805,13 @@ def submit_invoice_amendment(
     only invoice-level data — delivery income, address, slot. The cart is then
     rebuilt server-side from the persisted invoice rows, which reproduces bundles
     exactly instead of relying on the client's lossy reconstruction.
+
+    ``price_list`` is the selling price list to re-price the replacement from. Omit it
+    to keep whatever override the source invoice already carries (see
+    :func:`_resolve_amendment_price_list`); an order with no override is unaffected.
+    The parameter has to exist in THIS signature — Frappe silently discards whitelisted
+    kwargs that the function does not declare, which is how the client's ``price_list``
+    was being dropped and every amended B2B order re-priced at retail.
     """
     invoice_id = (invoice_id or "").strip()
     if not invoice_id:
@@ -1758,6 +1860,7 @@ def submit_invoice_amendment(
         suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
         zero_shipping_override=zero_shipping_override,
         custom_delivery_income=custom_delivery_income,
+        price_list=price_list,
         provided_idempotency_key=idempotency_key,
     )
     if existing_replacement:
@@ -1806,6 +1909,7 @@ def submit_invoice_amendment(
         expected_source_grand_total=float(expected_source_grand_total) if expected_source_grand_total is not None else None,
         expected_source_item_count=int(expected_source_item_count) if expected_source_item_count is not None else None,
         custom_delivery_income=custom_delivery_income,
+        price_list=price_list,
     )
 
 

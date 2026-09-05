@@ -181,6 +181,14 @@ jobs:
             test_realtime_scoping
             test_cancellation_guards
             test_amendment_cart
+            # Price-list survival across an amendment (order 17206 /
+            # ACC-SINV-2026-18128). Two defects, both invisible to every other
+            # module here: ERPNext's set_pos_fields overwrites `selling_price_list`
+            # on any is_pos=1 invoice, and `submit_invoice_amendment` had no
+            # `price_list` parameter at all, so Frappe silently dropped the one the
+            # client sends. Together they repriced a 92 EGP B2B order at the 160 EGP
+            # retail rate on its first amendment, with no way to get it back.
+            test_amendment_price_list
             # Amendment hardening (idempotency keys, locks, rollback). The
             # amendment path replays the source invoice's shipping_address_name
             # verbatim, so an over-strict address guard makes an order
