@@ -154,7 +154,9 @@ class TestKanbanOperations(unittest.TestCase):
 
 		self.assertFalse(result.get('success'))
 		self.assertIn('journal', result.get('error', '').lower())
-		mock_blocker.assert_called_once_with(mock_invoice)
+		# Cancellation reads the blocker with unsettled partner transactions ignored:
+		# a pending partner fee is not a settlement artifact (kanban cycle audit, 2026-09-05).
+		mock_blocker.assert_called_once_with(mock_invoice, ignore_unsettled_partner_transactions=True)
 
 	@patch('jarz_pos.api.kanban._get_allowed_states')
 	@patch('jarz_pos.api.kanban.frappe')
