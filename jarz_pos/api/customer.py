@@ -1315,6 +1315,47 @@ def delete_customer_shipping_address(customer, address_name):
         frappe.throw(_("Failed to delete address."))
 
 
+def _booked_shipping_income(inv) -> tuple:
+    """Return ``(has_row, amount)`` for the Shipping Income tax rows on an invoice doc.
+
+    Same predicate the rebuild block below uses, so the guard and the rewrite
+    agree on which rows count.
+    """
+    rows = [
+        t for t in (inv.get("taxes") or [])
+        if str(t.description or "").lower().startswith("shipping income")
+    ]
+    return bool(rows), sum(flt(t.tax_amount) for t in rows)
+
+
+def _assert_submitted_invoice_fee_unchanged(inv, new_territory: str, new_income: float) -> None:
+    """Refuse a territory change that would re-rate delivery on a SUBMITTED invoice.
+
+    The Shipping Income row is part of ``grand_total``. Rewriting it after submit
+    (``save`` with ``ignore_validate_update_after_submit``) updates the document
+    but ERPNext's ``on_update_after_submit`` reposts the ledger only when an
+    account head changes -- the row keeps the same account, so the receivable
+    stayed at the old total and every later Payment Entry failed validation.
+    A draft may still be re-rated; an invoice with no Shipping Income row is
+    left alone by the rebuild block anyway, so nothing to refuse there.
+    """
+    if int(inv.get("docstatus") or 0) != 1:
+        return
+    has_row, booked = _booked_shipping_income(inv)
+    if not has_row:
+        return
+    if abs(flt(new_income) - flt(booked)) <= 0.005:
+        return
+    frappe.throw(
+        _(
+            "Order {0} is already submitted and {1} bills a different delivery fee "
+            "({2} -> {3}). Changing the address now would alter the invoice total "
+            "after it was posted. Cancel and amend the order to change this address."
+        ).format(inv.name, new_territory, flt(booked), flt(new_income)),
+        title=_("Address change refused"),
+    )
+
+
 @frappe.whitelist()
 def change_invoice_shipping_address(invoice_name, address_name):
     """Re-link a Sales Invoice to a different shipping address and optionally
@@ -1324,6 +1365,15 @@ def change_invoice_shipping_address(invoice_name, address_name):
     has no downstream settlement artifacts (Courier Transaction, Sales Partner
     Transaction, Journal Entry from Settle Later).  Payment-only (paid but
     pre-OFD) invoices are explicitly allowed.
+
+    On a SUBMITTED invoice the change is refused when the new territory bills a
+    different delivery fee than the one already on the invoice.  Rewriting the
+    Shipping Income row after submit changes ``grand_total`` on the document but
+    ERPNext only reposts the ledger when an account head changes, so the
+    receivable stayed at the old total and every later Payment Entry was
+    rejected with "Allocated Amount cannot be greater than outstanding amount"
+    (ACC-SINV-2026-18096 / Woo 17176, 685 booked vs 700 on the document).  A fee
+    change on a posted order is a financial amendment: cancel and amend instead.
 
     Args:
         invoice_name: Name of the Sales Invoice.
@@ -1352,9 +1402,6 @@ def change_invoice_shipping_address(invoice_name, address_name):
                 )
         except ImportError:
             pass
-
-        # Re-link address fields on the SI (works on Submitted via ignore_validate_update_after_submit).
-        link_shipping_address_to_invoice(invoice_name, address_name)
 
         old_territory = str(inv.territory or "").strip()
         address_doc = frappe.get_doc("Address", address_name)
@@ -1401,14 +1448,22 @@ def change_invoice_shipping_address(invoice_name, address_name):
         old_income, old_expense = _territory_values(old_territory)
         new_income = old_income
         new_expense = old_expense
+        if territory_changed:
+            new_income, new_expense = _territory_values(new_territory)
+
+        # Everything above is a read. Decide BEFORE the first write whether this
+        # change is allowed at all, so a refusal leaves the invoice untouched.
+        if territory_changed:
+            _assert_submitted_invoice_fee_unchanged(inv, new_territory, new_income)
+
+        # Re-link address fields on the SI (works on Submitted via ignore_validate_update_after_submit).
+        link_shipping_address_to_invoice(invoice_name, address_name)
 
         if territory_changed:
             # Update territory on invoice.
             frappe.db.set_value(
                 "Sales Invoice", invoice_name, "territory", new_territory, update_modified=False
             )
-
-            new_income, new_expense = _territory_values(new_territory)
 
             # Recompute custom_shipping_expense unless an Approved override is in place.
             override_status = str(
@@ -1483,6 +1538,11 @@ def change_invoice_shipping_address(invoice_name, address_name):
             "old_income": old_income,
             "new_income": new_income,
         }
+    except frappe.ValidationError:
+        # Deliberate refusals (hard-mutation blocker, fee guard, not-found) carry
+        # their own message. Wrapping them in the generic one below hid the
+        # reason from the app, which showed "Failed to change invoice address".
+        raise
     except Exception as e:
         frappe.log_error(f"change_invoice_shipping_address: {str(e)}", frappe.get_traceback())
         frappe.throw(_("Failed to change invoice shipping address."))

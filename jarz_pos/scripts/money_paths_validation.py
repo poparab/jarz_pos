@@ -76,9 +76,13 @@ MARKER_END = "MONEY_PATHS_JSON_END"
 #: Deliberately odd fixture rates so a stray row is unmistakable.
 TERRITORY_A = "_B2BVALID_MPT_A"
 TERRITORY_B = "_B2BVALID_MPT_B"
+#: Same delivery INCOME as A, different expense: the one territory change a
+#: submitted invoice may still make (the customer-facing total does not move).
+TERRITORY_C = "_B2BVALID_MPT_C"
 TERRITORY_FREE = "_B2BVALID_MPT_FREE"
 TERR_A_INCOME, TERR_A_EXPENSE = 13.37, 7.11
 TERR_B_INCOME, TERR_B_EXPENSE = 41.73, 19.29
+TERR_C_INCOME, TERR_C_EXPENSE = TERR_A_INCOME, 23.57
 TERR_FREE_INCOME, TERR_FREE_EXPENSE = 0.0, 5.05
 
 #: Residues used by the cancel-tolerance case (kanban.py's tolerance is 0.50).
@@ -1427,15 +1431,19 @@ def _case_amendment_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
 #                            save(ignore_validate_update_after_submit) on a
 #                            SUBMITTED invoice               (verified)
 #
-# api/customer.py calls no make_gl_entries and no update_outstanding_amt ITSELF,
-# but that is not the same as "the ledger does not follow". The save() at :1271 is
-# a save on a SUBMITTED document, so the framework's own on_update_after_submit
-# repost fires and the receivable + outstanding ARE rewritten to the new total --
-# verified directly on ACC-SINV-2026-17999/18014 (grand_total 361.73,
-# rounded_total 362.00, outstanding 362.00, Debtors 362.00). The assertions below
-# therefore compare against ``_receivable_total`` (rounded_total when rounding is
-# enabled), not against grand_total: the earlier grand_total comparison invented a
-# 0.27 shortfall that no ledger ever had.
+# The ledger does NOT follow that save. ERPNext's on_update_after_submit reposts
+# only when a tax row's account_head (or an accounting dimension) changes, and the
+# rebuilt Shipping Income row keeps the same account -- so the document moved
+# 685 -> 700 on ACC-SINV-2026-18096 (Woo 17176, 2026-09-03) while Debtors stayed
+# at 685, and every Payment Entry afterwards failed "Allocated Amount cannot be
+# greater than outstanding amount". (The earlier "verified on 17999/18014" note
+# in this header compared a receivable that had not actually been re-rated.)
+#
+# Since 2026-09-05 api/customer.py refuses a fee-changing territory move on a
+# submitted invoice BEFORE its first write; a same-fee move (territory C below)
+# is still allowed, and the free-shipping gate is unchanged. The assertions below
+# compare against ``_receivable_total`` (rounded_total when rounding is enabled),
+# not against grand_total.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _prepare_c3_customer(ctx: RunContext, env: Dict[str, Any], suffix: str,
@@ -1527,87 +1535,144 @@ def _case_address_territory_change(ctx: RunContext, env: Dict[str, Any]) -> None
         return
     frappe.db.commit()
 
+    # ---- a fee-changing move on a SUBMITTED invoice must be REFUSED ----------
+    # ACC-SINV-2026-18096 (Woo 17176): the rebuild took the document 685 -> 700
+    # while the ledger stayed at 685 (ERPNext reposts on_update_after_submit only
+    # when an account head changes, and the rebuilt row keeps the same account),
+    # so every later Payment Entry failed "Allocated Amount cannot be greater than
+    # outstanding amount". The guard now runs before the first write.
+    old_territory_on_invoice = str(_invoice_value(invoice, "territory") or "")
+    old_expense_on_invoice = flt(_invoice_value(invoice, "custom_shipping_expense"))
+    old_receivable = _receivable_total(invoice)
+    old_receivable_debit = _gl_net_for_invoices([invoice], receivable_acc)
     try:
         res = change_invoice_shipping_address(invoice, address_b) or {}
+        refused, reason = False, json.dumps(res, default=str)[:300]
+        frappe.db.commit()
     except Exception as exc:
-        ctx.record(f"{case}.address_change_succeeded", False, f"{exc}")
-        return
-    frappe.db.commit()
+        refused, reason = True, str(exc)
+        frappe.db.rollback()
 
     ctx.record(
-        f"{case}.address_change_succeeded",
-        bool(res.get("success")) and bool(res.get("territory_changed"))
-        and str(res.get("new_territory")) == TERRITORY_B,
-        json.dumps(res, default=str)[:300],
+        f"{case}.submitted_invoice_fee_change_is_refused",
+        refused and "already submitted" in reason,
+        f"income {TERR_A_INCOME} -> {TERR_B_INCOME} on a submitted invoice; "
+        f"refused={refused}; {reason}",
     )
-    if not res.get("territory_changed"):
-        _skip(ctx, f"{case}.ledger_assertions",
-              f"the territory did not change (resolved={res.get('territory_resolved')}, "
-              f"unresolved_city={res.get('unresolved_city')!r}), so no income delta exists "
-              "to test the ledger against")
-        return
+    ctx.record(
+        f"{case}.refusal_reason_reaches_the_caller_unwrapped",
+        refused and "Failed to change invoice shipping address" not in reason,
+        reason,
+    )
 
     new_grand = _grand_total(invoice)
     new_income_present, new_income = _shipping_income_row(invoice)
-    expected_grand = round(old_grand - old_income + TERR_B_INCOME, 2)
-
     ctx.record(
-        f"{case}.shipping_income_row_rewritten_to_the_new_rate",
-        new_income_present and abs(new_income - TERR_B_INCOME) <= _TOL,
-        f"Shipping Income {old_income} -> {new_income} (expected {TERR_B_INCOME})",
+        f"{case}.shipping_income_row_untouched_by_the_refusal",
+        new_income_present and abs(new_income - old_income) <= _TOL,
+        f"Shipping Income {old_income} -> {new_income} (must stay {TERR_A_INCOME})",
     )
     ctx.record(
-        f"{case}.grand_total_recomputed",
-        abs(new_grand - expected_grand) <= _TOL,
-        f"grand_total {old_grand} -> {new_grand} expected {expected_grand}",
+        f"{case}.grand_total_untouched_by_the_refusal",
+        abs(new_grand - old_grand) <= _TOL,
+        f"grand_total {old_grand} -> {new_grand}",
+    )
+    ctx.record(
+        f"{case}.territory_and_expense_untouched_by_the_refusal",
+        str(_invoice_value(invoice, "territory") or "") == old_territory_on_invoice
+        and abs(flt(_invoice_value(invoice, "custom_shipping_expense"))
+                - old_expense_on_invoice) <= _TOL,
+        f"territory {old_territory_on_invoice!r} -> "
+        f"{_invoice_value(invoice, 'territory')!r}; custom_shipping_expense "
+        f"{old_expense_on_invoice} -> {_invoice_value(invoice, 'custom_shipping_expense')}",
     )
 
     new_receivable = _receivable_total(invoice)
     receivable_debit = _gl_net_for_invoices([invoice], receivable_acc)
     delta = round(receivable_debit - new_receivable, 2)
     ctx.record(
-        f"{case}.receivable_gl_equals_the_new_grand_total",
-        abs(delta) <= _TOL,
-        f"live SUM(debit-credit) on {receivable_acc} for {invoice} = {receivable_debit}; "
-        f"new receivable total = {new_receivable} (grand_total={new_grand}); DELTA = "
-        f"{delta} (old grand_total was {old_grand}; income moved {old_income} -> "
-        f"{new_income}). The save() on the submitted invoice at api/customer.py:1271 "
-        "triggers the framework repost, and ERPNext books the receivable at "
-        "rounded_total whenever disable_rounded_total is 0.",
+        f"{case}.receivable_gl_still_equals_the_document_total",
+        abs(delta) <= _TOL and abs(receivable_debit - old_receivable_debit) <= _TOL,
+        f"live SUM(debit-credit) on {receivable_acc} for {invoice} = {receivable_debit} "
+        f"(was {old_receivable_debit}); document receivable total = {new_receivable} "
+        f"(was {old_receivable}); DELTA = {delta}. This is the invariant 17176 broke.",
     )
 
     allocated = _allocated_total(invoice)
     outstanding = _outstanding(invoice)
     expected_outstanding = round(new_receivable - allocated, 2)
     ctx.record(
-        f"{case}.outstanding_equals_new_total_minus_payments",
+        f"{case}.outstanding_equals_total_minus_payments",
         abs(outstanding - expected_outstanding) <= _TOL,
         f"outstanding={outstanding} expected={expected_outstanding} "
-        f"(receivable total={new_receivable} from grand_total={new_grand} - "
-        f"allocated={allocated}); DELTA = "
+        f"(receivable total={new_receivable} - allocated={allocated}); DELTA = "
         f"{round(outstanding - expected_outstanding, 2)}",
     )
 
     balanced, detail = assert_gl_balanced("Sales Invoice", invoice)
-    _observe(
-        ctx, f"{case}.invoice_gl_after_the_rewrite",
-        f"{detail} -- a balanced pair at the OLD total is exactly what an unreposted "
-        "invoice looks like, so balance alone does not clear this path.",
-    )
+    _observe(ctx, f"{case}.invoice_gl_after_the_refusal", detail)
 
-    if expense_supported:
-        ctx.record(
-            f"{case}.shipping_expense_follows_the_new_territory",
-            abs(flt(_invoice_value(invoice, "custom_shipping_expense"))
-                - TERR_B_EXPENSE) <= _TOL,
-            f"custom_shipping_expense="
-            f"{_invoice_value(invoice, 'custom_shipping_expense')} "
-            f"expected={TERR_B_EXPENSE} (territory {TERRITORY_B})",
-        )
+    # ---- a SAME-fee move is still allowed, and the ledger still matches -------
+    # Territory C bills the same delivery income as A with a different courier
+    # expense: the customer-facing total cannot move, so the change goes through
+    # and only custom_shipping_expense follows the new territory.
+    _ensure_mp_territory(ctx, TERRITORY_C, TERR_C_INCOME, TERR_C_EXPENSE)
+    frappe.db.commit()
+    address_c = _ensure_mp_address(ctx, customer, f"{customer}_ALT_C", TERRITORY_C)
+    if not address_c:
+        _skip(ctx, f"{case}.same_fee_change_is_allowed",
+              f"could not build a shipping address in {TERRITORY_C}")
     else:
-        _skip(ctx, f"{case}.shipping_expense_follows_the_new_territory",
-              "Territory has no delivery_expense column on this site, so _territory_values "
-              "in api/customer.py always reads 0 for expense")
+        frappe.db.commit()
+        try:
+            res_c = change_invoice_shipping_address(invoice, address_c) or {}
+            frappe.db.commit()
+            ctx.record(
+                f"{case}.same_fee_change_is_allowed",
+                bool(res_c.get("success")) and bool(res_c.get("territory_changed"))
+                and str(res_c.get("new_territory")) == TERRITORY_C,
+                json.dumps(res_c, default=str)[:300],
+            )
+        except Exception as exc:
+            ctx.record(f"{case}.same_fee_change_is_allowed", False, f"{exc}")
+            frappe.db.rollback()
+            res_c = {}
+
+        if res_c.get("territory_changed"):
+            c_grand = _grand_total(invoice)
+            c_present, c_income = _shipping_income_row(invoice)
+            ctx.record(
+                f"{case}.same_fee_change_keeps_the_shipping_income_row",
+                c_present and abs(c_income - TERR_A_INCOME) <= _TOL,
+                f"Shipping Income {old_income} -> {c_income} (territory {TERRITORY_C} "
+                f"bills {TERR_C_INCOME})",
+            )
+            ctx.record(
+                f"{case}.same_fee_change_keeps_grand_total",
+                abs(c_grand - old_grand) <= _TOL,
+                f"grand_total {old_grand} -> {c_grand}",
+            )
+            c_receivable = _receivable_total(invoice)
+            c_debit = _gl_net_for_invoices([invoice], receivable_acc)
+            ctx.record(
+                f"{case}.same_fee_change_receivable_gl_equals_the_document_total",
+                abs(c_debit - c_receivable) <= _TOL,
+                f"live SUM(debit-credit) on {receivable_acc} = {c_debit}; document "
+                f"receivable total = {c_receivable}; DELTA = {round(c_debit - c_receivable, 2)}",
+            )
+            if expense_supported:
+                ctx.record(
+                    f"{case}.shipping_expense_follows_the_new_territory",
+                    abs(flt(_invoice_value(invoice, "custom_shipping_expense"))
+                        - TERR_C_EXPENSE) <= _TOL,
+                    f"custom_shipping_expense="
+                    f"{_invoice_value(invoice, 'custom_shipping_expense')} "
+                    f"expected={TERR_C_EXPENSE} (territory {TERRITORY_C})",
+                )
+            else:
+                _skip(ctx, f"{case}.shipping_expense_follows_the_new_territory",
+                      "Territory has no delivery_expense column on this site, so "
+                      "_territory_values in api/customer.py always reads 0 for expense")
 
     # ---- an Approved shipping override must survive the territory change (:1233) ----
     if not frappe.get_meta("Sales Invoice").get_field("custom_shipping_override_status"):
@@ -1637,12 +1702,15 @@ def _case_address_territory_change(ctx: RunContext, env: Dict[str, Any]) -> None
                  "custom_shipping_expense": override_expense},
                 update_modified=False,
             )
+            # Territory C, not B: the invoice is submitted, so a fee-changing move
+            # is refused before the override branch is ever reached.
+            _ensure_mp_territory(ctx, TERRITORY_C, TERR_C_INCOME, TERR_C_EXPENSE)
             ov_address = _ensure_mp_address(ctx, ov_customer, f"{ov_customer}_ALT",
-                                            TERRITORY_B)
+                                            TERRITORY_C)
             frappe.db.commit()
             if not ov_address:
                 _skip(ctx, f"{case}.approved_override_is_respected",
-                      f"could not build a shipping address in {TERRITORY_B} for the "
+                      f"could not build a shipping address in {TERRITORY_C} for the "
                       "override fixture")
             else:
                 try:
@@ -1654,11 +1722,12 @@ def _case_address_territory_change(ctx: RunContext, env: Dict[str, Any]) -> None
                         f"{case}.approved_override_is_respected",
                         abs(after_expense - override_expense) <= _TOL,
                         f"custom_shipping_expense stayed {after_expense} (override "
-                        f"{override_expense}); territory {TERRITORY_B} would bill "
-                        f"{TERR_B_EXPENSE}",
+                        f"{override_expense}); territory {TERRITORY_C} would bill "
+                        f"{TERR_C_EXPENSE}",
                     )
                 except Exception as exc:
                     ctx.record(f"{case}.approved_override_is_respected", False, f"{exc}")
+                    frappe.db.rollback()
 
     # ---- free shipping -> charged territory (the had_shipping_income_row gate) ----
     _ensure_mp_territory(ctx, TERRITORY_FREE, TERR_FREE_INCOME, TERR_FREE_EXPENSE)
