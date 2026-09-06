@@ -138,6 +138,27 @@ class TestManufacturingPrecheck(unittest.TestCase):
         inserted_doc.insert.assert_called_once()
         inserted_doc.submit.assert_called_once()
 
+    def test_apply_posting_datetime_preserves_fractional_order_for_mapping_and_document(self):
+        from jarz_pos.api import manufacturing
+
+        scheduled_dt = datetime(2026, 5, 8, 14, 30, 0, 505453)
+        earlier_receipt_time = "14:30:00.290189"
+        mapping = {}
+
+        class FakeDocument:
+            pass
+
+        document = FakeDocument()
+        with patch.object(manufacturing, "Document", FakeDocument):
+            manufacturing._apply_posting_datetime(mapping, scheduled_dt)
+            manufacturing._apply_posting_datetime(document, scheduled_dt)
+
+        self.assertEqual("14:30:00.505453", mapping["posting_time"])
+        self.assertEqual("14:30:00.505453", document.posting_time)
+        self.assertGreater(mapping["posting_time"], earlier_receipt_time)
+        self.assertEqual(1, mapping["set_posting_time"])
+        self.assertEqual(1, document.set_posting_time)
+
     def test_make_and_submit_se_raises_original_insert_submit_error(self):
         from jarz_pos.api import manufacturing
 

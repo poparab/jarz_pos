@@ -607,6 +607,12 @@ def _assert_batch_value_within_threshold(
 def _apply_posting_datetime(stock_entry: Any, scheduled_dt: Any) -> None:
     posting_date = scheduled_dt.strftime("%Y-%m-%d")
     posting_time = scheduled_dt.strftime("%H:%M:%S")
+    # Frappe's Time default preserves six fractional digits.  Keep the same
+    # precision here or two stock movements in one wall-clock second can be
+    # reordered: ``12.290189`` receipt followed by a transfer truncated to
+    # ``12`` makes ERPNext validate the transfer before its available stock.
+    if int(getattr(scheduled_dt, "microsecond", 0) or 0):
+        posting_time += scheduled_dt.strftime(".%f")
 
     if isinstance(stock_entry, Document):
         stock_entry.posting_date = posting_date
