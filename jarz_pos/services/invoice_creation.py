@@ -1889,6 +1889,51 @@ def _create_invoice_document(logger):
         frappe.throw(error_msg)
 
 
+_RESOLVED_PRICING_FLAG = "jarz_resolved_item_pricing"
+
+
+def _capture_resolved_item_pricing(invoice_doc):
+    return [
+        {
+            "item_code": item.item_code,
+            "price_list_rate": float(getattr(item, "price_list_rate", 0) or 0),
+            "discount_percentage": float(
+                getattr(item, "discount_percentage", 0) or 0
+            ),
+        }
+        for item in invoice_doc.items
+    ]
+
+
+def _attach_resolved_item_pricing(invoice_doc, pricing=None):
+    pricing = pricing or _capture_resolved_item_pricing(invoice_doc)
+    setattr(invoice_doc.flags, _RESOLVED_PRICING_FLAG, pricing)
+    return pricing
+
+
+def _restore_resolved_item_pricing(invoice_doc, pricing):
+    if len(invoice_doc.items) != len(pricing):
+        frappe.throw("Invoice items changed while preserving resolved pricing")
+
+    for item, resolved in zip(invoice_doc.items, pricing, strict=True):
+        if item.item_code != resolved["item_code"]:
+            frappe.throw("Invoice item order changed while preserving resolved pricing")
+        price_list_rate = resolved["price_list_rate"]
+        discount_percentage = resolved["discount_percentage"]
+        item.price_list_rate = price_list_rate
+        item.discount_percentage = discount_percentage
+        item.rate = price_list_rate * (1 - discount_percentage / 100.0)
+
+
+def restore_resolved_item_pricing_on_validate(doc, method=None):
+    """Restore Jarz-resolved pricing after the Sales Invoice controller validates."""
+    pricing = getattr(doc.flags, _RESOLVED_PRICING_FLAG, None)
+    if not pricing:
+        return
+    _restore_resolved_item_pricing(doc, pricing)
+    doc.calculate_taxes_and_totals()
+
+
 def _validate_and_calculate_document(invoice_doc, logger):
     """Validate and calculate document totals using native ERPNext logic."""
     logger.debug("Running ERPNext document validation (native discount logic)...")
@@ -1905,23 +1950,12 @@ def _validate_and_calculate_document(invoice_doc, logger):
         # a matching Item Price row, so v16 can replace an already resolved rate
         # with zero. Preserve the pricing decision made while processing the cart,
         # including bundle and operator discounts, across that native defaults pass.
-        resolved_pricing = [
-            (
-                float(getattr(item, "price_list_rate", 0) or 0),
-                float(getattr(item, "discount_percentage", 0) or 0),
-            )
-            for item in invoice_doc.items
-        ]
+        resolved_pricing = _attach_resolved_item_pricing(invoice_doc)
 
         print(f"   Running set_missing_values()...")
         invoice_doc.set_missing_values()
 
-        for item, (price_list_rate, discount_percentage) in zip(
-            invoice_doc.items, resolved_pricing, strict=True
-        ):
-            item.price_list_rate = price_list_rate
-            item.discount_percentage = discount_percentage
-            item.rate = price_list_rate * (1 - discount_percentage / 100.0)
+        _restore_resolved_item_pricing(invoice_doc, resolved_pricing)
 
         print(f"   Running calculate_taxes_and_totals()...")
         invoice_doc.calculate_taxes_and_totals()
@@ -2020,8 +2054,10 @@ def _verify_delivery_field_after_save(
 ):
     """Verify delivery slot fields were set correctly after save."""
     print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
+    resolved_pricing = _capture_resolved_item_pricing(invoice_doc)
     # Reload document to get fresh state from database
     invoice_doc.reload()
+    _attach_resolved_item_pricing(invoice_doc, resolved_pricing)
 
     # Fetch new fields
     date_attr = getattr(invoice_doc, "custom_delivery_date", None)
@@ -2055,9 +2091,11 @@ def _submit_document(invoice_doc, logger):
     """Submit the invoice document."""
     logger.debug("Submitting document")
     try:
+        resolved_pricing = _capture_resolved_item_pricing(invoice_doc)
         # Reload document to get fresh state from database
         # Use reload() instead of get_doc() to avoid timestamp mismatch
         invoice_doc.reload()
+        _attach_resolved_item_pricing(invoice_doc, resolved_pricing)
         
         # Frappe best practice: Submit after successful save
         invoice_doc.submit()

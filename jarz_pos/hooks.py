@@ -344,6 +344,9 @@ doc_events = {
             # update_stock during validate, and every profile here has it on —
             # so stock must be re-suppressed on EVERY save, not just at creation.
             "jarz_pos.events.sales_invoice.suppress_pos_invoice_stock_update",
+            # Native Sales Invoice validation resolves Item Price again. Restore
+            # the scoped Jarz pricing snapshot after the controller has run.
+            "jarz_pos.services.invoice_creation.restore_resolved_item_pricing_on_validate",
         ],
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
     "on_submit": [

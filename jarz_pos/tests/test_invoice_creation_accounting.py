@@ -230,7 +230,9 @@ class TestResolvedRatePreservation(unittest.TestCase):
             rate=price_list_rate,
             amount=price_list_rate,
         )
-        invoice = SimpleNamespace(items=[row], net_total=0, grand_total=0)
+        invoice = SimpleNamespace(
+            items=[row], flags=SimpleNamespace(), net_total=0, grand_total=0
+        )
 
         def set_missing_values():
             # ERPNext v16 does this when there is no matching per-item Item Price,
@@ -265,6 +267,93 @@ class TestResolvedRatePreservation(unittest.TestCase):
         self.assertEqual(row.price_list_rate, 77)
         self.assertEqual(row.discount_percentage, 0)
         self.assertEqual(row.rate, 77)
+
+    def test_pricing_survives_insert_reload_and_submit_validation(self):
+        from jarz_pos.services import invoice_creation
+
+        class LifecycleInvoice:
+            def __init__(self):
+                self.items = [
+                    SimpleNamespace(
+                        item_code="SAMPLE",
+                        qty=1,
+                        price_list_rate=120,
+                        discount_percentage=100,
+                        discount_amount=0,
+                        rate=120,
+                        amount=120,
+                    ),
+                    SimpleNamespace(
+                        item_code="ORDINARY",
+                        qty=1,
+                        price_list_rate=77,
+                        discount_percentage=0,
+                        discount_amount=0,
+                        rate=77,
+                        amount=77,
+                    ),
+                ]
+                self.flags = SimpleNamespace()
+                self.net_total = 0
+                self.grand_total = 0
+                self.name = "TEST-LIFECYCLE-INVOICE"
+                self.persisted = None
+                self.lifecycle_snapshots = []
+
+            def _native_price_overwrite(self):
+                for row in self.items:
+                    row.price_list_rate = 0
+                    row.discount_percentage = 0
+                    row.rate = 0
+
+            def _persist(self, event):
+                self.persisted = [
+                    (row.item_code, row.price_list_rate, row.discount_percentage, row.rate)
+                    for row in self.items
+                ]
+                self.lifecycle_snapshots.append((event, self.persisted))
+
+            def set_missing_values(self):
+                self._native_price_overwrite()
+
+            def calculate_taxes_and_totals(self):
+                for row in self.items:
+                    row.amount = row.qty * row.rate
+                self.net_total = sum(row.amount for row in self.items)
+                self.grand_total = self.net_total
+
+            def insert(self, **kwargs):
+                self._native_price_overwrite()
+                invoice_creation.restore_resolved_item_pricing_on_validate(self)
+                self._persist("insert")
+
+            def reload(self):
+                if self.persisted:
+                    for row, (_, price_list_rate, discount_percentage, rate) in zip(
+                        self.items, self.persisted, strict=True
+                    ):
+                        row.price_list_rate = price_list_rate
+                        row.discount_percentage = discount_percentage
+                        row.rate = rate
+                self.flags = SimpleNamespace()
+
+            def submit(self):
+                self._native_price_overwrite()
+                invoice_creation.restore_resolved_item_pricing_on_validate(self)
+                self._persist("submit")
+
+        invoice = LifecycleInvoice()
+        logger = MagicMock()
+        invoice_creation._validate_and_calculate_document(invoice, logger)
+        invoice_creation._save_document(invoice, None, logger)
+        with patch.object(invoice_creation, "verify_invoice_totals"):
+            invoice_creation._submit_document(invoice, logger)
+
+        expected = [
+            ("SAMPLE", 120.0, 100.0, 0.0),
+            ("ORDINARY", 77.0, 0.0, 77.0),
+        ]
+        self.assertEqual(invoice.lifecycle_snapshots, [("insert", expected), ("submit", expected)])
 
 
 # ===========================================================================
