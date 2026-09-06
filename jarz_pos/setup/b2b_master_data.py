@@ -85,6 +85,8 @@ def _ensure_b2b_docperms(log):
 	Customer deliberately has read only: reps may find/reuse an account, while a
 	new account is created only through the source-Lead-guarded conversion endpoint.
 	They cannot create arbitrary Customers in Desk or edit commercial terms.
+	Address also has read only; the Address permission hooks narrow that base grant
+	to rows directly linked to Customers the actor may read.
 	``setup_custom_perms`` preserves every shipped role before our additive Custom
 	DocPerm is inserted.
 	"""
@@ -99,6 +101,7 @@ def _ensure_b2b_docperms(log):
 	crm_writer.update({"write": 1, "create": 1})
 	specs = {
 		"Customer": read_only,
+		"Address": read_only,
 		"Lead": crm_writer,
 		"Opportunity": crm_writer,
 	}

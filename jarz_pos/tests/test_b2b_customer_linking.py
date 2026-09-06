@@ -379,10 +379,15 @@ class TestB2BDocPermissions(unittest.TestCase):
             b2b_master_data._ensure_b2b_docperms(log)
 
         by_doctype = {row["parent"]: row for row in inserted}
-        self.assertEqual(set(by_doctype), {"Customer", "Lead", "Opportunity"})
+        self.assertEqual(
+            set(by_doctype), {"Customer", "Address", "Lead", "Opportunity"}
+        )
         self.assertEqual(by_doctype["Customer"]["read"], 1)
         self.assertEqual(by_doctype["Customer"]["create"], 0)
         self.assertEqual(by_doctype["Customer"]["write"], 0)
+        self.assertEqual(by_doctype["Address"]["read"], 1)
+        self.assertEqual(by_doctype["Address"]["write"], 0)
+        self.assertEqual(by_doctype["Address"]["delete"], 0)
         self.assertEqual(by_doctype["Lead"]["write"], 1)
         self.assertEqual(by_doctype["Opportunity"]["write"], 1)
 

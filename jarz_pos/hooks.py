@@ -296,13 +296,13 @@ after_uninstall = "jarz_pos.utils.cleanup.remove_required_delivery_datetime_fiel
 # -----------
 # Permissions evaluated in scripted ways
 
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
-#
-# has_permission = {
-# 	"Event": "frappe.desk.doctype.event.event.has_permission",
-# }
+permission_query_conditions = {
+    "Address": "jarz_pos.permissions.address.get_permission_query_conditions",
+}
+
+has_permission = {
+    "Address": "jarz_pos.permissions.address.has_permission",
+}
 
 # DocType Class
 # ---------------
