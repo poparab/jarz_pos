@@ -59,6 +59,175 @@ def _get_item_price_from_price_list(item_code: str, price_list: Optional[str]) -
     return flt(rate)
 
 
+def _get_b2b_catalog_item_rate(
+    item_code: str,
+    price_list: str,
+    fallback_rate: float,
+    customer: str,
+) -> float:
+    """Use the invoice pricing engine for a validated B2B catalog context."""
+    from jarz_pos.services.invoice_creation import _resolve_item_rate
+
+    return _resolve_item_rate(
+        item_code,
+        price_list,
+        fallback_rate=fallback_rate,
+        customer=customer,
+    )
+
+
+def _serialize_price_list_option(price_list: str, profile_currency: Optional[str]) -> dict:
+    row = frappe.db.get_value(
+        "Price List",
+        price_list,
+        ["name", "enabled", "selling", "currency"],
+        as_dict=True,
+    )
+    if not row or not int(row.get("enabled") or 0) or not int(row.get("selling") or 0):
+        frappe.throw(_("Price List {0} is unavailable for selling").format(price_list))
+
+    currency = _normalize_price_list_name(row.get("currency"))
+    if profile_currency and currency and currency != profile_currency:
+        frappe.throw(
+            _("Price List {0} uses currency {1}, but POS Profile uses {2}").format(
+                price_list, currency, profile_currency
+            )
+        )
+
+    display_label = price_list
+    zero_shipping_default = False
+    if frappe.db.has_column("Price List", "custom_jarz_price_override_label"):
+        display_label = (
+            frappe.db.get_value("Price List", price_list, "custom_jarz_price_override_label")
+            or price_list
+        )
+    if frappe.db.has_column("Price List", "custom_jarz_zero_shipping_default"):
+        zero_shipping_default = bool(
+            frappe.db.get_value("Price List", price_list, "custom_jarz_zero_shipping_default")
+        )
+
+    return {
+        "name": price_list,
+        "display_label": display_label,
+        "currency": currency or profile_currency,
+        "is_default": True,
+        "zero_shipping_default": zero_shipping_default,
+    }
+
+
+def _resolve_b2b_pricing_context(
+    profile: str,
+    customer: str,
+    order_purpose: str,
+    *,
+    requested_price_list: Optional[str] = None,
+) -> dict:
+    """Resolve the one policy/list combination a B2B catalog may use."""
+    from jarz_pos.api.crm import _B2B_ORDER_PURPOSE, _SAMPLE_ORDER_PURPOSE
+    from jarz_pos.services import commercial_policy
+    from jarz_pos.services.invoice_creation import _resolve_effective_price_list as resolve_invoice_price_list
+    from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
+
+    profile_name = str(profile or "").strip()
+    customer_name = str(customer or "").strip()
+    purpose = str(order_purpose or "").strip()
+    if not profile_name or not customer_name or not purpose:
+        frappe.throw(_("profile, customer and order_purpose are required for B2B pricing"))
+    if purpose not in {_B2B_ORDER_PURPOSE, _SAMPLE_ORDER_PURPOSE}:
+        frappe.throw(_("Order purpose {0} is not available for B2B catalog pricing").format(purpose))
+
+    roles = set(frappe.get_roles(frappe.session.user) or [])
+    is_manager = bool(roles.intersection(_MANAGER_PRICING_ROLES))
+    if "B2B Sales Rep" not in roles and not is_manager:
+        frappe.throw(_("Not permitted: B2B sales access required"), frappe.PermissionError)
+
+    assert_pos_profile_enabled(profile_name)
+    profile_doc = frappe.get_doc("POS Profile", profile_name)
+    if not getattr(profile_doc, "company", None) or not frappe.db.exists(
+        "Company", profile_doc.company
+    ):
+        frappe.throw(_("POS Profile {0} has no valid company").format(profile_name))
+    if not is_manager and not frappe.db.exists(
+        "POS Profile User", {"parent": profile_name, "user": frappe.session.user}
+    ):
+        frappe.throw(
+            _("Not permitted: POS Profile {0} is not assigned to this user").format(
+                profile_name
+            ),
+            frappe.PermissionError,
+        )
+
+    if not frappe.db.exists("Customer", customer_name) or not frappe.has_permission(
+        "Customer", ptype="read", doc=customer_name
+    ):
+        frappe.throw(_("Not permitted: customer access is required"), frappe.PermissionError)
+    customer_doc = frappe.get_doc("Customer", customer_name)
+    if int(getattr(customer_doc, "disabled", 0) or 0):
+        frappe.throw(_("Customer {0} is disabled").format(customer_name))
+
+    logger = frappe.logger("jarz_pos.b2b_pricing")
+    decision = commercial_policy.resolve_commercial_policy(
+        order_purpose=purpose,
+        pos_profile=profile_doc,
+        logger=logger,
+    )
+    if not decision.matched or decision.order_purpose != purpose or not decision.policy_name:
+        frappe.throw(_("No enabled Commercial Policy found for order purpose {0}").format(purpose))
+
+    effective_price_list = resolve_invoice_price_list(
+        profile_doc,
+        [],
+        requested_price_list=None,
+        suppress_shipping_income=None,
+        suppress_legacy_delivery_charges=None,
+        logger=logger,
+        policy_matched=True,
+        policy_price_list=decision.price_list,
+        policy_order_purpose=decision.order_purpose,
+        customer_doc=customer_doc,
+        sales_partner=None,
+    )
+    if not effective_price_list:
+        frappe.throw(_("No selling Price List could be resolved for this B2B order"))
+
+    requested = _normalize_price_list_name(requested_price_list)
+    if requested and requested != effective_price_list:
+        frappe.throw(
+            _("Price List {0} does not match the server-resolved B2B price list").format(
+                requested
+            )
+        )
+
+    profile_currency = _normalize_price_list_name(getattr(profile_doc, "currency", None))
+    if not profile_currency:
+        profile_currency = _normalize_price_list_name(
+            frappe.db.get_value("Company", profile_doc.company, "default_currency")
+        )
+    price_list_option = _serialize_price_list_option(effective_price_list, profile_currency)
+    policy_doc = frappe.get_doc("Jarz Commercial Policy", decision.policy_name)
+
+    return {
+        "profile": profile_name,
+        "customer": customer_name,
+        "order_purpose": purpose,
+        "commercial_policy": {
+            "name": decision.policy_name,
+            "policy_name": getattr(policy_doc, "policy_name", None),
+            "order_purpose": decision.order_purpose,
+            "price_list": decision.price_list,
+            "discount_percentage": float(decision.discount_percentage or 0),
+            "waives_shipping_income": bool(decision.suppress_shipping_income),
+            "no_courier": bool(decision.no_courier),
+        },
+        "price_list": price_list_option,
+    }
+
+
+@frappe.whitelist(allow_guest=False)
+def get_b2b_pricing_context(profile: str, customer: str, order_purpose: str):
+    return _resolve_b2b_pricing_context(profile, customer, order_purpose)
+
+
 def _get_valid_sales_item_codes(item_codes):
     """Return item codes that are enabled and allowed for sales."""
     item_codes = [item_code for item_code in item_codes if item_code]
@@ -293,15 +462,31 @@ def resolve_customer_price_list(
 
 
 @frappe.whitelist(allow_guest=False)
-def get_profile_bundles(profile: str, price_list: Optional[str] = None):
+def get_profile_bundles(
+    profile: str,
+    price_list: Optional[str] = None,
+    customer: Optional[str] = None,
+    order_purpose: Optional[str] = None,
+):
     """Return bundles with items available to the given POS profile."""
     from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
     assert_pos_profile_enabled(profile)
 
-    effective_price_list, _default_price_list = _resolve_effective_price_list(
-        profile,
-        requested_price_list=price_list,
-    )
+    if customer is not None or order_purpose is not None:
+        pricing_context = _resolve_b2b_pricing_context(
+            profile,
+            customer or "",
+            order_purpose or "",
+            requested_price_list=price_list,
+        )
+        effective_price_list = pricing_context["price_list"]["name"]
+        pricing_customer = pricing_context["customer"]
+    else:
+        effective_price_list, _default_price_list = _resolve_effective_price_list(
+            profile,
+            requested_price_list=price_list,
+        )
+        pricing_customer = None
 
     # For now, just get all available bundles
     # Future: filter by POS profile permissions
@@ -356,9 +541,17 @@ def get_profile_bundles(profile: str, price_list: Optional[str] = None):
 
             if effective_price_list:
                 for item in items_in_group:
-                    rate = _get_item_price_from_price_list(item['id'], effective_price_list)
-                    if rate is not None:
-                        item['price'] = rate
+                    if pricing_customer:
+                        item['price'] = _get_b2b_catalog_item_rate(
+                            item['id'],
+                            effective_price_list,
+                            item.get('price') or 0,
+                            pricing_customer,
+                        )
+                    else:
+                        rate = _get_item_price_from_price_list(item['id'], effective_price_list)
+                        if rate is not None:
+                            item['price'] = rate
 
             # attach stock qty per POS profile warehouse if defined (same as main items)
             try:
@@ -391,9 +584,17 @@ def get_profile_bundles(profile: str, price_list: Optional[str] = None):
             continue
 
         if effective_price_list:
-            bundle_rate = _get_item_price_from_price_list(b['erpnext_item'], effective_price_list)
-            if bundle_rate is not None:
-                b['price'] = bundle_rate
+            if pricing_customer:
+                b['price'] = _get_b2b_catalog_item_rate(
+                    b['erpnext_item'],
+                    effective_price_list,
+                    b.get('price') or 0,
+                    pricing_customer,
+                )
+            else:
+                bundle_rate = _get_item_price_from_price_list(b['erpnext_item'], effective_price_list)
+                if bundle_rate is not None:
+                    b['price'] = bundle_rate
 
         b['item_groups'] = processed_groups
         b['parent_item_code'] = b.get('erpnext_item')
@@ -409,12 +610,28 @@ def get_profile_bundles(profile: str, price_list: Optional[str] = None):
     return filtered_bundles
 
 @frappe.whitelist(allow_guest=False)
-def get_profile_products(profile: str, price_list: Optional[str] = None):
+def get_profile_products(
+    profile: str,
+    price_list: Optional[str] = None,
+    customer: Optional[str] = None,
+    order_purpose: Optional[str] = None,
+):
     """Return items whose item_group is allowed for the given POS profile."""
-    effective_price_list, _default_price_list = _resolve_effective_price_list(
-        profile,
-        requested_price_list=price_list,
-    )
+    if customer is not None or order_purpose is not None:
+        pricing_context = _resolve_b2b_pricing_context(
+            profile,
+            customer or "",
+            order_purpose or "",
+            requested_price_list=price_list,
+        )
+        effective_price_list = pricing_context["price_list"]["name"]
+        pricing_customer = pricing_context["customer"]
+    else:
+        effective_price_list, _default_price_list = _resolve_effective_price_list(
+            profile,
+            requested_price_list=price_list,
+        )
+        pricing_customer = None
 
     # ERPNext v14+: child DocType exists; earlier/forked instances may not
     try:
@@ -448,9 +665,17 @@ def get_profile_products(profile: str, price_list: Optional[str] = None):
 
     if effective_price_list:
         for itm in items:
-            rate = _get_item_price_from_price_list(itm['id'], effective_price_list)
-            if rate is not None:
-                itm['price'] = rate
+            if pricing_customer:
+                itm['price'] = _get_b2b_catalog_item_rate(
+                    itm['id'],
+                    effective_price_list,
+                    itm.get('price') or 0,
+                    pricing_customer,
+                )
+            else:
+                rate = _get_item_price_from_price_list(itm['id'], effective_price_list)
+                if rate is not None:
+                    itm['price'] = rate
             itm['price_list'] = effective_price_list
 
     # attach stock qty per POS profile warehouse if defined
