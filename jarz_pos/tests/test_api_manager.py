@@ -28,6 +28,19 @@ class _FakeInvoice:
 		return None
 
 
+#: What `courier_carry.get_carried_balances` returns for a quiet branch. The
+#: shift monitor calls it through the service module's own `frappe`, so it is
+#: stubbed rather than mocked — otherwise the monitor tests read live courier
+#: rows off the site and assert against whatever happens to be outstanding.
+_EMPTY_COURIER_OUTSTANDING = {
+	"couriers": [],
+	"total_net_balance": 0.0,
+	"transaction_count": 0,
+	"carried_count": 0,
+	"oldest_days_outstanding": 0,
+}
+
+
 def _raise_frappe(message, exc=None, title=None):
 	if exc and isinstance(exc, type) and issubclass(exc, Exception):
 		raise exc(message)
@@ -233,7 +246,20 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertEqual(result.get("sales_partner_transactions"), ["SPT-001"])
 
 	def test_get_invoice_amendment_eligibility_rejects_submitted_journal_entries(self):
-		"""Amendment flow must stop once settlement Journal Entries exist."""
+		"""Amendment flow must stop once settlement Journal Entries exist.
+
+		Updated for the row-shaped Journal Entry probe. Unlike every sibling
+		blocker, `_find_submitted_journal_entries` does NOT pluck names: it asks
+		for `fields=["name", <fieldname>]` and then narrows the deliberately
+		broad SQL `LIKE` in Python through `_mentions_invoice`, so an amendment's
+		JE (`INV-JE-001-1`) can no longer block its own source (`INV-JE-001`).
+		This test used to return plucked strings, on which the row read raises
+		`AttributeError` inside the finder's `except Exception: pass` — the
+		blocker then reported "no journal entries" and the assertion failed
+		against real, correct behaviour. The mock now returns the row dicts the
+		query actually asks for, with a remark that genuinely mentions the
+		invoice so the token match holds.
+		"""
 		from jarz_pos.api.manager import get_invoice_amendment_eligibility
 
 		invoice = _FakeInvoice(
@@ -244,8 +270,12 @@ class TestManagerAPI(unittest.TestCase):
 		)
 
 		def _get_all(doctype, **kwargs):
-			if doctype == "Journal Entry" and kwargs.get("filters", {}).get("docstatus") == 1:
-				return ["JE-001"]
+			filters = kwargs.get("filters") or {}
+			fields = kwargs.get("fields") or []
+			# v16 overwrites `title` on validate, so the real hit arrives on
+			# `user_remark`; the two are queried in separate passes.
+			if doctype == "Journal Entry" and filters.get("docstatus") == 1 and "user_remark" in fields:
+				return [{"name": "JE-001", "user_remark": "Shift settlement for INV-JE-001"}]
 			return []
 
 		mock_frappe = MagicMock()
@@ -399,8 +429,21 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.has_permission.assert_not_called()
 
 	def test_submit_invoice_amendment_rejects_staff_without_profile_access(self):
-		"""Staff should not amend invoices outside their assigned POS Profiles."""
+		"""Staff should not amend invoices outside their assigned POS Profiles.
+
+		Patch target corrected, no behaviour change — the same refactor as
+		`test_update_invoice_branch_rejects_unowned_source_invoice`. The branch
+		guard lives in `jarz_pos.utils.access_control` and holds its own
+		`frappe`, so patching `manager.frappe` left it inert; the call then ran
+		on to `_find_existing_amendment_invoice`, which returned a truthy
+		`MagicMock` from the auto-specced module, took the already-processed
+		early return, and blew up formatting a stub invoice that has no `items`.
+		The guard now runs for real and raises `BranchAccessError`, which is a
+		`frappe.PermissionError` — NOT the builtin of the same name that this
+		test used to assert on.
+		"""
 		from jarz_pos.api.manager import submit_invoice_amendment
+		from jarz_pos.utils.access_control import BranchAccessError
 
 		source_invoice = _FakeInvoice(
 			name="INV-AMD-STAFF-002",
@@ -415,12 +458,14 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.session.user = "staff@example.com"
 		mock_frappe.get_roles.return_value = ["Sales User"]
 		mock_frappe.get_doc.return_value = source_invoice
-		mock_frappe.PermissionError = PermissionError
-		mock_frappe.throw.side_effect = PermissionError("Not permitted")
+		mock_frappe.throw.side_effect = _raise_frappe
 
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+				 patch("jarz_pos.utils.access_control.is_unrestricted_user", return_value=False), \
+				 patch("jarz_pos.utils.access_control.ensure_user_pos_profiles", return_value=["Nasr city"]), \
 				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
-			with self.assertRaises(PermissionError):
+			with self.assertRaises(BranchAccessError):
 				submit_invoice_amendment(
 					invoice_id="INV-AMD-STAFF-002",
 					cart_json="[]",
@@ -586,6 +631,7 @@ class TestManagerAPI(unittest.TestCase):
 			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
 			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]), \
 			 patch("jarz_pos.api.manager.notify_invoice_reassignment") as mock_notify, \
+			 patch("jarz_pos.api.manager.publish_to_branches") as mock_publish, \
 			 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress", "Ready"]):
 			result = update_invoice_branch(invoice_id="INV-001", new_branch="Nasr city")
 
@@ -604,9 +650,16 @@ class TestManagerAPI(unittest.TestCase):
 		invoice.add_comment.assert_called_once()
 		mock_notify.assert_called_once_with(invoice, "Nasr city")
 
-		events = [call.args[0] for call in mock_frappe.publish_realtime.call_args_list]
+		# The reassignment broadcast no longer calls frappe.publish_realtime
+		# inline: it goes through utils.realtime.publish_to_branches, which
+		# addresses the event at the users of the named branches instead of
+		# every logged-in device. Both sides must be told — the losing branch
+		# has to drop the card, the receiving branch has to draw it.
+		events = [call.args[0] for call in mock_publish.call_args_list]
 		self.assertEqual(events, ["jarz_pos_invoice_state_change", "kanban_update"])
-		payload = mock_frappe.publish_realtime.call_args_list[0].args[1]
+		for call in mock_publish.call_args_list:
+			self.assertEqual(call.args[2], ["Dokki", "Nasr city"])
+		payload = mock_publish.call_args_list[0].args[1]
 		self.assertEqual(payload["event"], "invoice_reassigned")
 		self.assertEqual(payload["old_profile"], "Dokki")
 		self.assertEqual(payload["new_profile"], "Nasr city")
@@ -750,7 +803,19 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertEqual(item_row.warehouse, "Stores - Nasr city")
 
 	def test_update_invoice_branch_rejects_unowned_source_invoice(self):
-		"""Staff cannot transfer an order whose source branch is not one of their assigned profiles."""
+		"""Staff cannot transfer an order whose source branch is not one of their assigned profiles.
+
+		Patch target corrected, no behaviour change. Source-side scoping is no
+		longer inline in `manager`: it delegates to
+		`jarz_pos.utils.access_control.ensure_profile_scoped_invoice_access`,
+		which holds its OWN `frappe` reference, so patching `manager.frappe`
+		never made the guard throw. Execution ran on past the check and died
+		later on `except frappe.ValidationError` — a `MagicMock` attribute is
+		not an exception class — which the endpoint's outer handler turned into
+		"catching classes that do not inherit from BaseException". The guard is
+		driven here through its real module so the rejection is genuine, and it
+		raises the real `BranchAccessError`.
+		"""
 		from jarz_pos.api.manager import update_invoice_branch
 
 		invoice = _FakeInvoice(
@@ -778,8 +843,12 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 
 		# Staff is assigned to "Mohandessin" only; the invoice's source branch is "Dokki".
+		# The guard runs for real inside utils.access_control, so it is steered by
+		# its own inputs and raises the real BranchAccessError.
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
 				 patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
+				 patch("jarz_pos.utils.access_control.is_unrestricted_user", return_value=False), \
+				 patch("jarz_pos.utils.access_control.ensure_user_pos_profiles", return_value=["Mohandessin"]), \
 				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Mohandessin"]):
 			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-003", new_branch="Nasr city")
 
@@ -1084,20 +1153,72 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.db.set_value.assert_called_once()
 		invoice.add_comment.assert_called_once()
 
-	def test_get_pos_shift_monitor_denies_line_manager_only_access(self):
-		"""Line-manager-only users must not access the shift monitor page."""
+	def test_get_pos_shift_monitor_admits_line_manager_tier(self):
+		"""A line-manager-only user MAY open the shift monitor.
+
+		Inverted from the original assertion, which pinned behaviour that has
+		legitimately changed. `f3cd807` ("line manager gains Materials report +
+		Shift Monitor, loses B2B") deliberately moved this gate onto
+		`ROLES.ADMIN | ROLES.LINE_MANAGER_TIER`, mirroring
+		`_has_manager_dashboard_access` exactly — the shift monitor is part of
+		the manager dashboard surface, and a narrower gate on a screen the user
+		can already open is just a dead button. The tier invariant from
+		`constants.py` holds: whatever the line manager may do, the manager tier
+		and Administrator may do too.
+		"""
+		from jarz_pos.api.manager import _ensure_shift_monitor_access, _has_shift_monitor_access
+
+		for role in ("JARZ line manager", "jarz line manager", "JARZ Manager"):
+			with self.subTest(role=role):
+				mock_frappe = MagicMock()
+				mock_frappe.get_roles.return_value = [role]
+				mock_frappe.throw.side_effect = _raise_frappe
+
+				with patch("jarz_pos.api.manager.frappe", mock_frappe):
+					self.assertTrue(_has_shift_monitor_access())
+					# Must not raise.
+					_ensure_shift_monitor_access()
+				mock_frappe.throw.assert_not_called()
+
+	def test_get_pos_shift_monitor_denies_users_outside_the_manager_tier(self):
+		"""A user holding none of the monitor roles is still refused.
+
+		Replaces the line-manager denial case above: the gate did not disappear
+		when the line manager was admitted, it only widened. `frappe.throw` is
+		given the REAL `frappe.PermissionError` here — a bare `MagicMock`
+		attribute is not an exception class, so the previous mock could never
+		have raised the error it asserted on.
+		"""
+		import frappe as real_frappe
+
 		from jarz_pos.api.manager import get_pos_shift_monitor
 
 		mock_frappe = MagicMock()
-		mock_frappe.get_roles.return_value = ["JARZ line manager"]
+		mock_frappe.get_roles.return_value = ["Sales User", "POS User"]
+		mock_frappe.PermissionError = real_frappe.PermissionError
 		mock_frappe.throw.side_effect = _raise_frappe
 
 		with patch("jarz_pos.api.manager.frappe", mock_frappe):
-			with self.assertRaises(PermissionError):
+			with self.assertRaises(real_frappe.PermissionError):
 				get_pos_shift_monitor()
 
 	def test_get_pos_shift_monitor_returns_open_and_closed_shift_rows(self):
-		"""Shift monitor should aggregate open and closed rows with discrepancy totals."""
+		"""Shift monitor should aggregate open and closed rows with discrepancy totals.
+
+		Two stale mocks fixed, no behaviour change.
+
+		1. `_resolve_pos_profile_account` was patched with a positional
+		   `side_effect` list that assumed Dokki resolved first. Rows are built
+		   in the order the query returns them — `period_start_date desc`, so
+		   the 09:00 Nasr city shift precedes the 08:00 Dokki one — and each row
+		   was handed the *other* branch's cash account. The patch is now keyed
+		   on the `pos_profile` argument, which is order-independent.
+		2. `get_carried_balances` / `get_shift_carry_stats_bulk` live in
+		   `jarz_pos.services.courier_carry` and hold their own `frappe`, so
+		   patching `manager.frappe` never reached them and the assertion ran
+		   against real courier rows from the live site. They are stubbed here
+		   so the test is hermetic in CI.
+		"""
 		from jarz_pos.api.manager import get_pos_shift_monitor
 
 		opening_closed = SimpleNamespace(
@@ -1168,10 +1289,15 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.get_doc.side_effect = _get_doc
 		mock_frappe.db.get_value.side_effect = _db_get_value
 
+		def _resolve_account(_company, profile, *_args, **_kwargs):
+			return f"{profile} - J"
+
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
 			 patch("jarz_pos.api.manager._current_user_shift_monitor_profiles", return_value=["Dokki", "Nasr city"]), \
 			 patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki", "Nasr city"]), \
-			 patch("jarz_pos.api.shift._resolve_pos_profile_account", side_effect=["Dokki - J", "Nasr city - J"]):
+			 patch("jarz_pos.services.courier_carry.get_carried_balances", return_value=_EMPTY_COURIER_OUTSTANDING), \
+			 patch("jarz_pos.services.courier_carry.get_shift_carry_stats_bulk", return_value={}), \
+			 patch("jarz_pos.api.shift._resolve_pos_profile_account", side_effect=_resolve_account):
 			result = get_pos_shift_monitor(from_date="2026-06-05", to_date="2026-06-05")
 
 		self.assertTrue(result.get("success"))
@@ -1201,7 +1327,18 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertEqual(open_row["cash_account"], "Nasr city - J")
 
 	def test_get_pos_shift_monitor_applies_closed_status_filter(self):
-		"""Closed filter should exclude open shifts from the response."""
+		"""Closed filter should exclude open shifts from the response.
+
+		Mock repaired, no behaviour change. `_shift_monitor_user_details` also
+		resolves the Employee behind each user, and that call passes a FILTER
+		DICT as the `name` argument (`{"user_id": ...}`) with a field LIST. The
+		old lambda folded every call into a `(doctype, name, fieldname)` tuple
+		key, which raises `TypeError: unhashable type` the moment a dict arrives
+		— the test errored before it could assert anything. The stub now keys on
+		the string lookups and answers the dict-filtered Employee reads
+		separately. `courier_carry` is stubbed for the same hermeticity reason as
+		the sibling test above.
+		"""
 		from jarz_pos.api.manager import get_pos_shift_monitor
 
 		opening = SimpleNamespace(
@@ -1224,15 +1361,29 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.get_all.return_value = [{"name": "POS-OPE-0001"}]
 		mock_frappe.get_doc.side_effect = lambda doctype, name: opening if doctype == "POS Opening Entry" else closing
-		mock_frappe.db.get_value.side_effect = lambda doctype, name, fieldname, *args, **kwargs: {
-			("POS Opening Entry", "POS-OPE-0001", "pos_closing_entry"): "POS-CLO-0001",
-			("User", "opener@example.com", "full_name"): "Omar Opener",
-			("User", "closer@example.com", "full_name"): "Sara Closer",
-		}.get((doctype, name, fieldname))
+		def _db_get_value(doctype, name, fieldname, *args, **kwargs):
+			# Employee is looked up by filter dict, not by name — an unhashable
+			# key, so it has to be handled before the tuple lookup below.
+			if isinstance(name, dict):
+				if doctype == "Employee":
+					return {
+						"opener@example.com": {"name": "EMP-OPEN", "employee_name": "Omar"},
+						"closer@example.com": {"name": "EMP-CLOSE", "employee_name": "Sara"},
+					}.get(name.get("user_id"))
+				return None
+			return {
+				("POS Opening Entry", "POS-OPE-0001", "pos_closing_entry"): "POS-CLO-0001",
+				("User", "opener@example.com", "full_name"): "Omar Opener",
+				("User", "closer@example.com", "full_name"): "Sara Closer",
+			}.get((doctype, name, fieldname))
+
+		mock_frappe.db.get_value.side_effect = _db_get_value
 
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
 			 patch("jarz_pos.api.manager._current_user_shift_monitor_profiles", return_value=["Dokki"]), \
 			 patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki"]), \
+			 patch("jarz_pos.services.courier_carry.get_carried_balances", return_value=_EMPTY_COURIER_OUTSTANDING), \
+			 patch("jarz_pos.services.courier_carry.get_shift_carry_stats_bulk", return_value={}), \
 			 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"):
 			result = get_pos_shift_monitor(status="closed")
 

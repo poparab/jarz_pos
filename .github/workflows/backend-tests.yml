@@ -411,16 +411,22 @@ jobs:
             # The warehouse-alignment gate pair: the read-only report widened to
             # the manager tier so branch managers can watch their own drift, and
             # the regression guard that its bulk REPAIR sibling stayed
-            # administrator-only.
-            #
-            # These live in their own module rather than in `test_api_manager`
-            # deliberately. That module is NOT in this array, and running it
-            # locally shows 7 pre-existing failures (shift monitor, invoice
-            # amendment, update_invoice_branch) that predate this work -- the
-            # exact "a module absent from this array is a module CI never runs"
-            # trap noted above. Adopting it here would turn CI red for reasons
-            # unrelated to this change; it needs its own fix.
+            # administrator-only. Kept in their own module rather than folded
+            # into `test_api_manager`, which is broad enough already.
             test_warehouse_alignment_access
+            # The manager surfaces themselves: shift monitor, invoice amendment
+            # eligibility, and post-submit branch reassignment. Adopted here
+            # after sitting outside this array long enough to rot -- it had
+            # accumulated 7 failures, every one of them a mock still pointed at
+            # `manager.frappe` for a guard or a broadcast that had since moved
+            # into `utils.access_control` / `utils.realtime`, plus one assertion
+            # pinning line-manager DENIAL of the shift monitor that `f3cd807`
+            # deliberately reversed. None was a live defect, which is precisely
+            # the danger: an unrun module drifts silently and cannot tell you
+            # whether the next drift is a stale mock or a real regression.
+            # Two of its shift-monitor cases also read live courier rows off the
+            # site until they were stubbed -- worth knowing if they ever flake.
+            test_api_manager
             # The Woo backlog watcher: detection only, and the load-bearing test
             # is the one that fails loudly if the sweep ever writes to a Sales
             # Invoice. The migration itself stays a supervised manual operation,
