@@ -248,7 +248,15 @@ class TestBuildCoverableLines(unittest.TestCase):
 
         item_codes = [line["item_code"] for line in lines]
         self.assertEqual(item_codes, ["covier", "colored bag"])
-        fake.log_error.assert_any_call(unittest.mock.ANY, "consumable_deduction: no stock")
+        # Keyword form is the point, not a detail: _log() calls
+        # frappe.log_error(title=..., message=...) explicitly, because a
+        # single-line positional first argument becomes the TITLE and lands in
+        # Error Log.method -- varchar(140), which THROWS on overflow. The detail
+        # string here is 155 characters, so as a positional it would have raised
+        # on the very line whose job is to make an unstocked item survivable.
+        fake.log_error.assert_any_call(
+            title="consumable_deduction: no stock", message=unittest.mock.ANY
+        )
 
     def test_line_is_clamped_to_available_stock(self, mock_get_warehouse):
         mock_get_warehouse.return_value = "Consumables - J"
@@ -261,7 +269,8 @@ class TestBuildCoverableLines(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0]["qty"], 2)
         fake.log_error.assert_any_call(
-            unittest.mock.ANY, "consumable_deduction: clamped to available stock"
+            title="consumable_deduction: clamped to available stock",
+            message=unittest.mock.ANY,
         )
 
     def test_unresolvable_warehouse_drops_the_line(self, mock_get_warehouse):
@@ -274,7 +283,8 @@ class TestBuildCoverableLines(unittest.TestCase):
 
         self.assertEqual(lines, [])
         fake.log_error.assert_any_call(
-            unittest.mock.ANY, "consumable_deduction: warehouse unresolved"
+            title="consumable_deduction: warehouse unresolved",
+            message=unittest.mock.ANY,
         )
 
     def test_zero_or_negative_requested_qty_is_skipped_silently(self, mock_get_warehouse):
