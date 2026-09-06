@@ -75,6 +75,15 @@ def _ensure_b2b_access():
         frappe.throw("Not permitted: B2B sales access required.")
 
 
+def _require_doc_permission(doctype, name=None, ptype="read"):
+    """Apply normal Frappe document permissions after the B2B product gate."""
+    if not frappe.has_permission(doctype, ptype=ptype, doc=name):
+        frappe.throw(
+            f"Not permitted: {ptype} access to {doctype} is required.",
+            frappe.PermissionError,
+        )
+
+
 def _doctype_exists(name):
     try:
         return bool(frappe.db.exists("DocType", name))
@@ -109,6 +118,121 @@ def _today():
         return today()
     except Exception:
         return None
+
+
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _can_manage_b2b_relationships():
+    roles = set(frappe.get_roles(frappe.session.user) or [])
+    return bool(roles.intersection(_manager_roles()))
+
+
+def _customer_rows_for_lead(lead_name):
+    """Customers created through ERPNext's standard Lead conversion link."""
+    return frappe.get_all(
+        "Customer",
+        filters={"lead_name": lead_name},
+        fields=["name", "disabled"],
+        order_by="creation asc",
+        limit_page_length=3,
+    ) or []
+
+
+def _resolve_lead_customer(lead_name, *, strict=True):
+    """Resolve both standard Lead->Customer relationship directions.
+
+    ``Lead.customer`` is ERPNext's "From Customer" link for an existing account;
+    ``Customer.lead_name`` is written by the standard Lead conversion.  If legacy
+    data contains two different answers, order taking must stop instead of choosing
+    one and putting an invoice on the wrong account.
+    """
+    direct = frappe.db.get_value("Lead", lead_name, "customer") or None
+    converted_rows = _customer_rows_for_lead(lead_name)
+    converted_names = [str(row.get("name") or "").strip() for row in converted_rows]
+    converted_names = [name for name in converted_names if name]
+
+    if len(set(converted_names)) > 1:
+        if strict:
+            frappe.throw(
+                "Lead relationship conflict: more than one Customer refers to this Lead. "
+                "Ask a manager to repair the Customer.lead_name records before ordering."
+            )
+        return None
+
+    converted = converted_names[0] if converted_names else None
+    if direct and converted and direct != converted:
+        if strict:
+            frappe.throw(
+                "Lead relationship conflict: the Lead and converted Customer point to "
+                "different accounts. Ask a manager to repair the relationship before ordering."
+            )
+        return None
+    return direct or converted
+
+
+def _resolve_opportunity_customer(opportunity, *, strict=True):
+    """Resolve an Opportunity without changing its historical party/origin."""
+    if not opportunity:
+        return None
+    origin = str(opportunity.get("opportunity_from") or "").strip()
+    party_name = str(opportunity.get("party_name") or "").strip()
+    if origin == "Customer":
+        return party_name if party_name and frappe.db.exists("Customer", party_name) else None
+    if origin == "Lead":
+        if not party_name or not frappe.db.exists("Lead", party_name):
+            return None
+        return _resolve_lead_customer(party_name, strict=strict)
+    return None
+
+
+def _assert_enabled_customer(customer):
+    row = frappe.db.get_value(
+        "Customer", customer, ["name", "disabled"], as_dict=True
+    )
+    if not row:
+        frappe.throw(f"Customer '{customer}' not found.")
+    if int(row.get("disabled") or 0):
+        frappe.throw(
+            f"Customer '{customer}' is disabled. Enable it before using it for a B2B order."
+        )
+    return customer
+
+
+def _lead_customer_map(lead_rows):
+    """Resolve a pipeline page in two queries, marking ambiguous links as None."""
+    lead_names = [str(row.get("name") or "").strip() for row in lead_rows]
+    lead_names = [name for name in lead_names if name]
+    converted = {}
+    if lead_names:
+        rows = frappe.get_all(
+            "Customer",
+            filters={"lead_name": ["in", lead_names]},
+            fields=["name", "lead_name"],
+            limit_page_length=0,
+        ) or []
+        for row in rows:
+            converted.setdefault(row.get("lead_name"), []).append(row.get("name"))
+
+    result = {}
+    for row in lead_rows:
+        lead_name = row.get("name")
+        direct = row.get("customer") or None
+        converted_names = {name for name in converted.get(lead_name, []) if name}
+        if len(converted_names) > 1:
+            result[lead_name] = None
+            continue
+        converted_name = next(iter(converted_names), None)
+        result[lead_name] = (
+            None if direct and converted_name and direct != converted_name
+            else direct or converted_name
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +271,7 @@ def get_b2b_pipeline():
     # --- Leads (pre-sample stages only) -----------------------------------
     if _doctype_exists("Lead") and _has_field("Lead", "custom_b2b_stage"):
         lead_fields = ["name", "custom_b2b_stage", "owner", "modified"]
-        for f in ("lead_name", "company_name", "custom_fit_score"):
+        for f in ("lead_name", "company_name", "custom_fit_score", "customer"):
             if _has_field("Lead", f):
                 lead_fields.append(f)
         # Every stage, not just the pre-sample ones: a Lead is only ever a Lead
@@ -175,6 +299,7 @@ def get_b2b_pipeline():
             )
         except Exception:
             leads = []
+        lead_customer_map = _lead_customer_map(leads)
         for row in leads:
             stage = row.get("custom_b2b_stage") or "Lead"
             card = {
@@ -189,7 +314,7 @@ def get_b2b_pipeline():
                 # shows/sorts by the catalog fit score (custom_fit_score), not the
                 # nightly CRM signal score (custom_lead_score).
                 "lead_score": row.get("custom_fit_score"),
-                "customer": None,
+                "customer": lead_customer_map.get(row.get("name")),
                 "last_activity": str(row.get("modified")) if row.get("modified") else None,
             }
             columns.setdefault(stage, []).append(card)
@@ -197,7 +322,7 @@ def get_b2b_pipeline():
     # --- Opportunities (any B2B stage) ------------------------------------
     if _doctype_exists("Opportunity") and _has_field("Opportunity", "custom_b2b_stage"):
         opp_fields = ["name", "custom_b2b_stage", "owner", "modified"]
-        for f in ("party_name", "customer_name"):
+        for f in ("party_name", "customer_name", "opportunity_from"):
             if _has_field("Opportunity", f):
                 opp_fields.append(f)
         try:
@@ -213,7 +338,7 @@ def get_b2b_pipeline():
             stage = row.get("custom_b2b_stage")
             if not stage:
                 continue
-            linked_customer = _resolve_opp_customer(row.get("party_name"))
+            linked_customer = _resolve_opportunity_customer(row, strict=False)
             card = {
                 "doctype": "Opportunity",
                 "name": row.get("name"),
@@ -344,15 +469,10 @@ def _attach_label_alerts(columns):
 
 
 def _resolve_opp_customer(party_name):
-    """Return the Customer name an Opportunity points at, else None. Never raises."""
-    if not party_name:
-        return None
-    try:
-        if frappe.db.exists("Customer", party_name):
-            return party_name
-    except Exception:
-        pass
-    return None
+    """Backward-compatible direct-Customer lookup used by older internal callers."""
+    return _resolve_opportunity_customer(
+        {"opportunity_from": "Customer", "party_name": party_name}, strict=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +480,7 @@ def _resolve_opp_customer(party_name):
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
 def get_account(doctype, name):
-    """Full detail for one pipeline card (Lead or Opportunity).
+    """Full detail for one B2B account (Lead, Opportunity, or Customer).
 
     Shape:
         {
@@ -379,10 +499,11 @@ def get_account(doctype, name):
     """
     _ensure_b2b_access()
 
-    if doctype not in ("Lead", "Opportunity"):
-        frappe.throw("doctype must be 'Lead' or 'Opportunity'.")
+    if doctype not in ("Lead", "Opportunity", "Customer"):
+        frappe.throw("doctype must be 'Lead', 'Opportunity' or 'Customer'.")
     if not _doctype_exists(doctype) or not frappe.db.exists(doctype, name):
         frappe.throw(f"{doctype} '{name}' not found.")
+    _require_doc_permission(doctype, name, "read")
 
     doc = frappe.get_doc(doctype, name)
 
@@ -408,10 +529,16 @@ def get_account(doctype, name):
         "open_todos": [],
     }
 
-    # Resolve a linked Customer (Opportunity.party_name when party is a Customer).
-    customer = None
-    if doctype == "Opportunity":
-        customer = _resolve_opp_customer(getattr(doc, "party_name", None))
+    # Resolve both standard ERPNext Lead relationship directions. Opportunities
+    # originating from a Lead follow that Lead without rewriting their history.
+    if doctype == "Lead":
+        customer = _resolve_lead_customer(name)
+    elif doctype == "Opportunity":
+        customer = _resolve_opportunity_customer(doc)
+    else:
+        customer = name
+    if customer:
+        _require_doc_permission("Customer", customer, "read")
     result["customer"] = customer
 
     # Customer forecast fields + recent B2B invoices.
@@ -1009,6 +1136,209 @@ def get_reorder_due():
 # Sample / order binding helpers (thin — DO NOT create invoices here)
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
+def search_linkable_customers(query, limit=20):
+    """Search enabled Customers that may be linked to a B2B account card.
+
+    Deliberately searches every customer group/type. An existing retail Customer
+    is still the same legal account and must remain linkable rather than being
+    duplicated as a new Company/B2B record.
+    """
+    _ensure_b2b_access()
+    _require_doc_permission("Customer", ptype="read")
+    query = str(query or "").strip()
+    if not query:
+        return []
+    try:
+        limit = max(1, min(int(limit or 20), 50))
+    except (TypeError, ValueError):
+        limit = 20
+
+    fields = [
+        "name", "customer_name", "customer_type", "customer_group",
+        "mobile_no", "territory", "disabled", "customer_primary_address",
+    ]
+    # get_list applies user permissions and match conditions. A global Customer
+    # read bit is not permission to search accounts outside the caller's scope.
+    rows = frappe.get_list(
+        "Customer",
+        filters={"disabled": 0},
+        or_filters={
+            "name": ["like", f"%{query}%"],
+            "customer_name": ["like", f"%{query}%"],
+            "mobile_no": ["like", f"%{query}%"],
+        },
+        fields=fields,
+        order_by="customer_name asc",
+        limit_page_length=limit,
+    ) or []
+
+    names = [row.get("name") for row in rows if row.get("name")]
+    counts = {name: 0 for name in names}
+    if names:
+        links = frappe.get_all(
+            "Dynamic Link",
+            filters={
+                "parenttype": "Address",
+                "link_doctype": "Customer",
+                "link_name": ["in", names],
+            },
+            fields=["link_name", "parent"],
+            limit_page_length=0,
+        ) or []
+        seen = set()
+        for link in links:
+            key = (link.get("link_name"), link.get("parent"))
+            if key in seen:
+                continue
+            seen.add(key)
+            if key[0] in counts:
+                counts[key[0]] += 1
+
+    return [
+        {
+            "name": row.get("name"),
+            "customer_name": row.get("customer_name"),
+            "customer_type": row.get("customer_type"),
+            "customer_group": row.get("customer_group"),
+            "mobile_no": row.get("mobile_no"),
+            "territory": row.get("territory"),
+            "disabled": bool(row.get("disabled")),
+            "address_count": counts.get(row.get("name"), 0),
+            "primary_address": row.get("customer_primary_address"),
+        }
+        for row in rows
+    ]
+
+
+def _lock_relationship_row(doctype, name):
+    """Serialize competing account-link requests for one Lead/Opportunity."""
+    if doctype not in ("Lead", "Opportunity"):
+        frappe.throw("party_doctype must be 'Lead' or 'Opportunity'.")
+    frappe.db.sql(
+        f"SELECT name FROM `tab{doctype}` WHERE name = %s FOR UPDATE",
+        (name,),
+    )
+
+
+def _link_lead_customer(lead_name, customer, expected_customer=None, allow_relink=False):
+    _lock_relationship_row("Lead", lead_name)
+    converted_rows = _customer_rows_for_lead(lead_name)
+    converted_names = {row.get("name") for row in converted_rows if row.get("name")}
+    if len(converted_names) > 1:
+        frappe.throw(
+            "Lead relationship conflict: more than one Customer refers to this Lead. "
+            "Ask a manager to repair the conversion records before linking."
+        )
+    converted = next(iter(converted_names), None)
+    direct = frappe.db.get_value("Lead", lead_name, "customer") or None
+    if direct and converted and direct != converted:
+        frappe.throw(
+            "Lead relationship conflict: the Lead and converted Customer point to "
+            "different accounts. Ask a manager to repair the relationship before linking."
+        )
+    current = direct or converted
+    expected = str(expected_customer or "").strip() or None
+
+    if current == customer:
+        return False
+    if converted and converted != customer:
+        frappe.throw(
+            f"This Lead was already converted to Customer '{converted}'. Its conversion "
+            "history must be repaired before it can be linked to another account."
+        )
+    if expected != current:
+        frappe.throw(
+            "The linked Customer changed while this account was open. Refresh the account "
+            "and try again."
+        )
+    if current and (not allow_relink or not _can_manage_b2b_relationships()):
+        frappe.throw(
+            f"This Lead is already linked to Customer '{current}'. Only a manager may "
+            "replace that link after reviewing the account history."
+        )
+
+    frappe.db.set_value("Lead", lead_name, "customer", customer, update_modified=True)
+    return True
+
+
+@frappe.whitelist()
+def link_existing_customer(
+    party_doctype,
+    party_name,
+    customer,
+    expected_customer=None,
+    allow_relink=0,
+):
+    """Atomically link an existing Customer to a Lead/Opportunity B2B card.
+
+    Opportunities originating from a Lead update that Lead's standard Customer
+    link and retain their original party fields. Customer-origin Opportunities
+    are historical records and cannot be repointed by this endpoint.
+    """
+    _ensure_b2b_access()
+    party_doctype = str(party_doctype or "").strip()
+    party_name = str(party_name or "").strip()
+    customer = str(customer or "").strip()
+    if party_doctype not in ("Lead", "Opportunity"):
+        frappe.throw("party_doctype must be 'Lead' or 'Opportunity'.")
+    if not party_name or not frappe.db.exists(party_doctype, party_name):
+        frappe.throw(f"{party_doctype} '{party_name}' not found.")
+    _require_doc_permission(party_doctype, party_name, "write")
+    _require_doc_permission("Customer", customer, "read")
+    _assert_enabled_customer(customer)
+
+    changed = False
+    linked_via = party_doctype
+    if party_doctype == "Lead":
+        changed = _link_lead_customer(
+            party_name,
+            customer,
+            expected_customer=expected_customer,
+            allow_relink=_truthy(allow_relink),
+        )
+    else:
+        _lock_relationship_row("Opportunity", party_name)
+        opportunity = frappe.db.get_value(
+            "Opportunity",
+            party_name,
+            ["opportunity_from", "party_name"],
+            as_dict=True,
+        ) or {}
+        origin = str(opportunity.get("opportunity_from") or "").strip()
+        current_party = str(opportunity.get("party_name") or "").strip()
+        if origin == "Lead":
+            if not current_party or not frappe.db.exists("Lead", current_party):
+                frappe.throw("This Opportunity's source Lead no longer exists.")
+            _require_doc_permission("Lead", current_party, "write")
+            changed = _link_lead_customer(
+                current_party,
+                customer,
+                expected_customer=expected_customer,
+                allow_relink=_truthy(allow_relink),
+            )
+            linked_via = "Lead"
+        elif origin == "Customer":
+            if current_party != customer:
+                frappe.throw(
+                    f"This Opportunity is historically tied to Customer '{current_party}'. "
+                    "It cannot be repointed from the B2B order flow."
+                )
+        else:
+            frappe.throw(
+                "Only Opportunities originating from a Lead or Customer can be linked."
+            )
+
+    return {
+        "success": True,
+        "party_doctype": party_doctype,
+        "party_name": party_name,
+        "customer": customer,
+        "changed": changed,
+        "linked_via": linked_via,
+    }
+
+
+@frappe.whitelist()
 def request_sample(
     party_doctype,
     party_name,
@@ -1017,6 +1347,7 @@ def request_sample(
     customer_primary_address=None,
     territory_id=None,
     customer_group=None,
+    shipping_address_name=None,
 ):
     """Resolve/create the Company Customer for a card and return the SAMPLE binding.
 
@@ -1036,6 +1367,7 @@ def request_sample(
         customer_primary_address=customer_primary_address,
         territory_id=territory_id,
         customer_group=customer_group,
+        shipping_address_name=shipping_address_name,
     )
 
 
@@ -1048,6 +1380,7 @@ def place_b2b_order(
     customer_primary_address=None,
     territory_id=None,
     customer_group=None,
+    shipping_address_name=None,
 ):
     """Resolve/create the Company Customer for a card and return the B2B order binding.
 
@@ -1064,6 +1397,7 @@ def place_b2b_order(
         customer_primary_address=customer_primary_address,
         territory_id=territory_id,
         customer_group=customer_group,
+        shipping_address_name=shipping_address_name,
     )
 
 
@@ -1076,24 +1410,55 @@ def _resolve_order_binding(
     customer_primary_address=None,
     territory_id=None,
     customer_group=None,
+    shipping_address_name=None,
 ):
     """Resolve the linked Customer (creating a Company customer if needed) and the
     commercial-policy price list for the given order purpose."""
     if party_doctype not in ("Lead", "Opportunity", "Customer"):
         frappe.throw("party_doctype must be 'Lead', 'Opportunity' or 'Customer'.")
 
+    if not party_name or not frappe.db.exists(party_doctype, party_name):
+        frappe.throw(f"{party_doctype} '{party_name}' not found.")
+
+    _require_doc_permission(party_doctype, party_name, "read")
+
     customer = None
+    source_lead = None
 
     if party_doctype == "Customer":
-        if not frappe.db.exists("Customer", party_name):
-            frappe.throw(f"Customer '{party_name}' not found.")
         customer = party_name
+    elif party_doctype == "Lead":
+        _lock_relationship_row("Lead", party_name)
+        source_lead = party_name
+        customer = _resolve_lead_customer(party_name)
     elif party_doctype == "Opportunity":
-        customer = _resolve_opp_customer(
-            frappe.db.get_value("Opportunity", party_name, "party_name")
-            if frappe.db.exists("Opportunity", party_name)
-            else None
+        _lock_relationship_row("Opportunity", party_name)
+        opportunity = frappe.db.get_value(
+            "Opportunity",
+            party_name,
+            ["opportunity_from", "party_name"],
+            as_dict=True,
         )
+        origin = str((opportunity or {}).get("opportunity_from") or "").strip()
+        if origin == "Lead":
+            source_lead = str((opportunity or {}).get("party_name") or "").strip()
+            if not source_lead or not frappe.db.exists("Lead", source_lead):
+                frappe.throw("This Opportunity's source Lead no longer exists.")
+            _require_doc_permission("Lead", source_lead, "read")
+            _lock_relationship_row("Lead", source_lead)
+        elif origin == "Customer":
+            direct_customer = str((opportunity or {}).get("party_name") or "").strip()
+            if not direct_customer or not frappe.db.exists("Customer", direct_customer):
+                frappe.throw(
+                    "This Customer-origin Opportunity no longer points to a valid Customer. "
+                    "Repair its CRM party before placing a B2B order."
+                )
+        else:
+            frappe.throw(
+                "This Opportunity is not linked to a Lead or Customer. Link its CRM party "
+                "before placing a B2B order."
+            )
+        customer = _resolve_opportunity_customer(opportunity)
 
     # No linked Customer yet -> create a Company customer from supplied details.
     if not customer:
@@ -1113,7 +1478,7 @@ def _resolve_order_binding(
             territory_id=territory_id,
             customer_type="Company",
             customer_group=customer_group,
-            source_lead=party_name if party_doctype == "Lead" else None,
+            source_lead=source_lead,
         )
         customer = (
             created.get("name")
@@ -1123,10 +1488,89 @@ def _resolve_order_binding(
         if not customer:
             frappe.throw("Failed to create Customer for B2B order.")
 
-    return {
+        # Customer.lead_name is the durable standard conversion link. Verify it
+        # before returning so a repeated order cannot enter the create path again.
+        if source_lead and _resolve_lead_customer(source_lead) != customer:
+            frappe.throw("Customer was created but its source Lead was not linked.")
+
+    _require_doc_permission("Customer", customer, "read")
+    _assert_enabled_customer(customer)
+
+    result = {
         "customer": customer,
         "order_purpose": order_purpose,
         "price_list": _policy_price_list(order_purpose),
+    }
+    result.update(_order_address_selection(customer, shipping_address_name))
+    return result
+
+
+def _order_address_selection(customer, shipping_address_name=None):
+    """Address-book metadata for the thin binding response.
+
+    A single address can be selected automatically. With zero or multiple
+    addresses the binding stays valid, but the POS must create/select a branch
+    before it submits the invoice.
+    """
+    from jarz_pos.api.customer import _build_customer_shipping_address_book
+    from jarz_pos.utils.customer_address_utils import (
+        preferred_address_was_honoured,
+        resolve_customer_shipping_address,
+    )
+    from jarz_pos.utils.invoice_utils import (
+        _territory_from_address_row,
+        resolve_pos_profile_for_territory,
+    )
+
+    address_book = _build_customer_shipping_address_book(customer)
+    branch_options = list(address_book.get("branch_options") or [])
+    requested = str(shipping_address_name or "").strip()
+    selected = None
+
+    if requested:
+        selected = resolve_customer_shipping_address(
+            customer, preferred_address_name=requested
+        )
+        if not preferred_address_was_honoured(customer, requested, selected):
+            frappe.throw("Selected shipping address does not belong to this customer.")
+    elif len(branch_options) == 1:
+        only_address_name = branch_options[0].get("address_name")
+        selected = resolve_customer_shipping_address(
+            customer, preferred_address_name=only_address_name
+        )
+
+    selected_name = str((selected or {}).get("name") or "").strip() or None
+    effective_territory = None
+    territory_pos_profile = None
+    if selected_name:
+        effective_territory = _territory_from_address_row(selected)
+        if not effective_territory:
+            if requested:
+                frappe.throw(
+                    "Selected branch has no valid territory. Edit the branch address and "
+                    "choose its delivery territory before ordering."
+                )
+            selected = None
+            selected_name = None
+        if effective_territory:
+            territory_pos_profile = resolve_pos_profile_for_territory(effective_territory)
+
+    if selected_name:
+        selection_error = None
+    elif not branch_options:
+        selection_error = "no_shipping_address"
+    elif len(branch_options) > 1:
+        selection_error = "selection_required"
+    else:
+        selection_error = "missing_territory"
+
+    return {
+        "address_book": address_book,
+        "requires_shipping_address_selection": not bool(selected_name),
+        "shipping_address_name": selected_name,
+        "effective_territory": effective_territory,
+        "territory_pos_profile": territory_pos_profile,
+        "address_selection_error": selection_error,
     }
 
 

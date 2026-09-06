@@ -25,6 +25,9 @@ def _address_fields() -> List[str]:
         "address_line1",
         "address_line2",
         "city",
+        "state",
+        "country",
+        "pincode",
         "is_primary_address",
         "is_shipping_address",
         "modified",
@@ -49,6 +52,7 @@ def _normalize_address_text(value: Any) -> str:
 
 def _normalize_address_row(address_row: Dict[str, Any]) -> Dict[str, Any]:
     record = dict(address_row)
+    record["branch_name"] = str(record.get("address_title") or "").strip()
     record["is_primary_address"] = _as_bool(record.get("is_primary_address"))
     record["is_shipping_address"] = _as_bool(record.get("is_shipping_address"))
     record["full_address"] = format_address_text(record)

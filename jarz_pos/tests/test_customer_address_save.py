@@ -22,14 +22,15 @@ FrappeTestCase, for ERPNext v16 CI-safety).
 from __future__ import annotations
 
 import unittest
+import uuid
 
 import frappe
 
-from jarz_pos.api.customer import save_customer_shipping_address
+from jarz_pos.api.customer import (
+    save_customer_shipping_address,
+    update_customer_shipping_address,
+)
 from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
-
-PHONE = "0100999731"
-
 
 def _non_group_territory():
     """Return a leaf Territory name the site seeds (never insert one — nested set)."""
@@ -40,21 +41,65 @@ class TestSaveCustomerShippingAddress(unittest.TestCase):
     def setUp(self):
         self.territory = _non_group_territory()
         self.assertTrue(self.territory, "site must seed at least one non-group Territory")
-        self.customer = frappe.get_doc({
+        suffix = uuid.uuid4().hex[:10]
+        self.phone = "0109" + str(int(suffix, 16))[-7:].zfill(7)
+        payload = {
             "doctype": "Customer",
-            "customer_name": "_TEST Addr Save Customer",
+            "customer_name": f"_TEST Addr Save Customer {suffix}",
             "customer_type": "Individual",
             "territory": self.territory,
-        }).insert(ignore_permissions=True)
+        }
+        if frappe.db.exists("Price List", "B2B Selling"):
+            payload["default_price_list"] = "B2B Selling"
+        payment_terms = frappe.db.get_value("Payment Terms Template", {}, "name")
+        if payment_terms:
+            payload["payment_terms"] = payment_terms
+        self.customer = frappe.get_doc(payload).insert(ignore_permissions=True)
 
     def tearDown(self):
         frappe.db.rollback()
+        if not frappe.db.exists("Customer", self.customer.name):
+            return
+        addresses = frappe.get_all(
+            "Dynamic Link",
+            filters={
+                "parenttype": "Address",
+                "link_doctype": "Customer",
+                "link_name": self.customer.name,
+            },
+            pluck="parent",
+            limit_page_length=0,
+        )
+        contacts = frappe.get_all(
+            "Dynamic Link",
+            filters={
+                "parenttype": "Contact",
+                "link_doctype": "Customer",
+                "link_name": self.customer.name,
+            },
+            pluck="parent",
+            limit_page_length=0,
+        )
+        for address_name in set(addresses):
+            if frappe.db.exists("Address", address_name):
+                frappe.delete_doc(
+                    "Address", address_name, force=True, ignore_permissions=True
+                )
+        for contact_name in set(contacts):
+            if frappe.db.exists("Contact", contact_name):
+                frappe.delete_doc(
+                    "Contact", contact_name, force=True, ignore_permissions=True
+                )
+        frappe.delete_doc(
+            "Customer", self.customer.name, force=True, ignore_permissions=True
+        )
+        frappe.db.commit()
 
     def test_save_succeeds_when_customer_modified_moved(self):
         """A concurrent bump of Customer.modified must not fail the address save."""
         result = save_customer_shipping_address(
             customer=self.customer.name,
-            phone=PHONE,
+            phone=self.phone,
             address="17 Timestamp Street",
             territory=self.territory,
         )
@@ -72,7 +117,7 @@ class TestSaveCustomerShippingAddress(unittest.TestCase):
 
         second = save_customer_shipping_address(
             customer=self.customer.name,
-            phone=PHONE,
+            phone=self.phone,
             address="18 Timestamp Street",
             territory=self.territory,
         )
@@ -86,7 +131,7 @@ class TestSaveCustomerShippingAddress(unittest.TestCase):
         """The kanban path — an address_name, not free text — is the one that broke."""
         first = save_customer_shipping_address(
             customer=self.customer.name,
-            phone=PHONE,
+            phone=self.phone,
             address="21 Reselect Road",
             territory=self.territory,
         )
@@ -95,7 +140,7 @@ class TestSaveCustomerShippingAddress(unittest.TestCase):
 
         again = save_customer_shipping_address(
             customer=self.customer.name,
-            phone=PHONE,
+            phone=self.phone,
             address_name=address_name,
             territory=self.territory,
         )
@@ -110,7 +155,7 @@ class TestSaveCustomerShippingAddress(unittest.TestCase):
         """Contact.set_primary() rebuilds mobile_no from phone_nos — it must find the row."""
         save_customer_shipping_address(
             customer=self.customer.name,
-            phone=PHONE,
+            phone=self.phone,
             address="33 Phone Lane",
             territory=self.territory,
         )
@@ -121,13 +166,91 @@ class TestSaveCustomerShippingAddress(unittest.TestCase):
         self.assertTrue(contact_name, "a primary contact should have been created")
 
         contact = frappe.get_doc("Contact", contact_name)
-        self.assertEqual(contact.mobile_no, PHONE)
-        self.assertIn(PHONE, [str(row.phone or "").strip() for row in contact.phone_nos])
+        self.assertEqual(contact.mobile_no, self.phone)
+        self.assertIn(self.phone, [str(row.phone or "").strip() for row in contact.phone_nos])
         self.assertEqual(
             sum(1 for row in contact.phone_nos if row.is_primary_mobile_no),
             1,
             "exactly one row may be the primary mobile, or Contact.validate() throws",
         )
+
+    def test_named_b2b_branch_does_not_change_primary_or_commercial_fields(self):
+        """A second delivery branch belongs to the same shared Customer account."""
+        before = frappe.db.get_value(
+            "Customer",
+            self.customer.name,
+            [
+                "customer_primary_address",
+                "customer_type",
+                "customer_group",
+                "territory",
+                "default_price_list",
+                "payment_terms",
+            ],
+            as_dict=True,
+        )
+
+        result = save_customer_shipping_address(
+            customer=self.customer.name,
+            phone=self.phone,
+            address="Madinaty All Seasons Park",
+            territory=self.territory,
+            branch_name="ILO - All Seasons",
+            set_as_primary=0,
+        )
+
+        address_name = result["selected_address_name"]
+        self.assertEqual(
+            frappe.db.get_value("Address", address_name, "address_title"),
+            "ILO - All Seasons",
+        )
+        self.assertEqual(result["selected_address"]["branch_name"], "ILO - All Seasons")
+        after = frappe.db.get_value(
+            "Customer",
+            self.customer.name,
+            list(before.keys()),
+            as_dict=True,
+        )
+        self.assertEqual(after, before)
+
+    def test_branch_name_can_be_edited_without_changing_customer_terms(self):
+        created = save_customer_shipping_address(
+            customer=self.customer.name,
+            phone=self.phone,
+            address="Heliopolis Branch",
+            territory=self.territory,
+            branch_name="ILO - Heliopolis",
+            set_as_primary=0,
+        )
+        before = frappe.db.get_value(
+            "Customer",
+            self.customer.name,
+            ["customer_primary_address", "default_price_list", "payment_terms", "territory"],
+            as_dict=True,
+        )
+
+        result = update_customer_shipping_address(
+            customer=self.customer.name,
+            address_name=created["selected_address_name"],
+            branch_name="ILO - Heliopolis Main",
+        )
+
+        self.assertEqual(
+            frappe.db.get_value(
+                "Address", created["selected_address_name"], "address_title"
+            ),
+            "ILO - Heliopolis Main",
+        )
+        option = next(
+            row
+            for row in result["branch_options"]
+            if row["address_name"] == created["selected_address_name"]
+        )
+        self.assertEqual(option["branch_name"], "ILO - Heliopolis Main")
+        after = frappe.db.get_value(
+            "Customer", self.customer.name, list(before.keys()), as_dict=True
+        )
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

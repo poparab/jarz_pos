@@ -79,6 +79,91 @@ def _ensure_b2b_roles(log):
 		)
 
 
+def _ensure_b2b_docperms(log):
+	"""Grant the standard records used by the B2B CRM flow.
+
+	Customer deliberately has read only: reps may find/reuse an account, while a
+	new account is created only through the source-Lead-guarded conversion endpoint.
+	They cannot create arbitrary Customers in Desk or edit commercial terms.
+	``setup_custom_perms`` preserves every shipped role before our additive Custom
+	DocPerm is inserted.
+	"""
+	role_name = "B2B Sales Rep"
+	permission_fields = (
+		"read", "write", "create", "delete", "submit", "cancel", "amend",
+		"report", "export", "import", "share", "print", "email",
+	)
+	read_only = {fieldname: 0 for fieldname in permission_fields}
+	read_only["read"] = 1
+	crm_writer = dict(read_only)
+	crm_writer.update({"write": 1, "create": 1})
+	specs = {
+		"Customer": read_only,
+		"Lead": crm_writer,
+		"Opportunity": crm_writer,
+	}
+	if not frappe.db.exists("Role", role_name):
+		return
+
+	for doctype, required in specs.items():
+		try:
+			if not frappe.db.exists("DocType", doctype):
+				continue
+			from frappe.permissions import setup_custom_perms
+
+			setup_custom_perms(doctype)
+			name = frappe.db.exists(
+				"Custom DocPerm",
+				{
+					"parent": doctype,
+					"role": role_name,
+					"permlevel": 0,
+					"if_owner": 0,
+				},
+			)
+			if name:
+				doc = frappe.get_doc("Custom DocPerm", name)
+				changed = False
+				for fieldname, value in required.items():
+					if int(doc.get(fieldname) or 0) != value:
+						doc.set(fieldname, value)
+						changed = True
+				if changed:
+					doc.save(ignore_permissions=True)
+					log["created"].append(
+						f"Custom DocPerm: updated {role_name} on {doctype}"
+					)
+				else:
+					log["existing"].append(
+						f"Custom DocPerm: {role_name} on {doctype}"
+					)
+			else:
+				payload = {
+					"doctype": "Custom DocPerm",
+					"parent": doctype,
+					"parenttype": "DocType",
+					"parentfield": "permissions",
+					"role": role_name,
+					"permlevel": 0,
+					"if_owner": 0,
+				}
+				payload.update(required)
+				frappe.get_doc(payload).insert(ignore_permissions=True)
+				log["created"].append(
+					f"Custom DocPerm: {role_name} on {doctype}"
+				)
+		except Exception:
+			_logger().error(
+				f"Failed to ensure Custom DocPerm for '{role_name}' on '{doctype}'",
+				exc_info=True,
+			)
+		finally:
+			try:
+				frappe.clear_cache(doctype=doctype)
+			except Exception:
+				pass
+
+
 def _ensure_customer_groups(log):
 	groups = ["B2B", "Distributor", "Employee", "Sample"]
 	parent = "All Customer Groups"
@@ -340,6 +425,7 @@ def ensure_b2b_master_data():
 
 		# Roles/role profile first (no dependency ordering required).
 		_ensure_b2b_roles(log)
+		_ensure_b2b_docperms(log)
 		# Order matters: price lists before the policies that reference them.
 		_ensure_customer_groups(log)
 		_ensure_price_lists(log, currency)

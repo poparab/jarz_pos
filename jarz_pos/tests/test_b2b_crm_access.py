@@ -119,6 +119,16 @@ class TestEndpointAccessGuards(unittest.TestCase):
             with self.assertRaises(Exception):
                 crm.place_b2b_order("Customer", "CUST-0001")
 
+    def test_search_linkable_customers_guarded(self):
+        with self._guarded_non_b2b():
+            with self.assertRaises(Exception):
+                crm.search_linkable_customers("Acme")
+
+    def test_link_existing_customer_guarded(self):
+        with self._guarded_non_b2b():
+            with self.assertRaises(Exception):
+                crm.link_existing_customer("Lead", "LEAD-1", "CUST-1")
+
 
 class TestOrderBindingForB2BUser(unittest.TestCase):
     """request_sample / place_b2b_order return the right purpose binding for a B2B user."""
@@ -127,6 +137,10 @@ class TestOrderBindingForB2BUser(unittest.TestCase):
         with _roles(["B2B Sales Rep"]):
             with patch.object(crm.frappe.db, "exists", return_value=True), patch.object(
                 crm, "_policy_price_list", return_value="B2B Selling"
+            ), patch.object(crm, "_require_doc_permission"), patch.object(
+                crm, "_assert_enabled_customer", return_value="CUST-0001"
+            ), patch.object(
+                crm, "_order_address_selection", return_value={}
             ):
                 out = crm.request_sample("Customer", "CUST-0001")
         self.assertEqual(out["customer"], "CUST-0001")
@@ -137,6 +151,10 @@ class TestOrderBindingForB2BUser(unittest.TestCase):
         with _roles(["B2B Sales Rep"]):
             with patch.object(crm.frappe.db, "exists", return_value=True), patch.object(
                 crm, "_policy_price_list", return_value=None
+            ), patch.object(crm, "_require_doc_permission"), patch.object(
+                crm, "_assert_enabled_customer", return_value="CUST-0001"
+            ), patch.object(
+                crm, "_order_address_selection", return_value={}
             ):
                 out = crm.place_b2b_order("Customer", "CUST-0001")
         self.assertEqual(out["order_purpose"], crm._B2B_ORDER_PURPOSE)

@@ -147,6 +147,10 @@ jobs:
             test_payment_collection_change
             test_pickup_flow
             test_invoice_creation_accounting
+            # Disposable real-stack proof: submits a B2B invoice with a selected
+            # owned branch, verifies territory/rate/price list/payment terms and
+            # Customer-field preservation, then rolls back or exact-name cleans up.
+            test_b2b_branch_invoice_persistence
             test_sales_partner_flow
             test_kanban_settlement
             # Board search. `test_kanban` itself touches the DB in setUpClass and
@@ -162,6 +166,10 @@ jobs:
             test_b2b_customer_search_filter
             test_b2b_lead_contact_guard
             test_b2b_crm_access
+            # Existing-account linking and territory-safe branch selection. This
+            # pins Lead/Opportunity concurrency, disabled/unauthorised accounts,
+            # ILO's legacy duplicate-address projection and least-privilege perms.
+            test_b2b_customer_linking
             test_b2b_reorder_forecast
             test_b2b_pos_bridge_delivery
             test_leads_api

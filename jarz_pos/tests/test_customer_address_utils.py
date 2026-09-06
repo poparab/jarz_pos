@@ -74,6 +74,35 @@ class TestCustomerAddressUtils(unittest.TestCase):
         self.assertEqual(result[0]["full_address"], "Shipping 1, Apt 5, Cairo")
         self.assertEqual(result[2]["full_address"], "Billing 1, Cairo")
 
+    def test_address_book_exposes_branch_label_and_delivery_fields(self):
+        utils = self._load_utils_module()
+        row = {
+            "name": "ADDR-1",
+            "address_title": "ILO - All Seasons",
+            "address_type": "Shipping",
+            "address_line1": "Madinaty All Seasons Park",
+            "address_line2": "",
+            "city": "EGMADINATY",
+            "state": "Cairo",
+            "country": "Egypt",
+            "pincode": "11841",
+            "is_primary_address": 0,
+            "is_shipping_address": 1,
+            "modified": "2026-09-06",
+            "mobile_no": "0100",
+        }
+        with patch.object(
+            utils.frappe,
+            "get_all",
+            side_effect=[[{"parent": "ADDR-1"}], [row]],
+        ), patch.object(utils.frappe.db, "has_column", return_value=True):
+            result = utils.get_customer_shipping_addresses("ILO")
+
+        self.assertEqual(result[0]["branch_name"], "ILO - All Seasons")
+        self.assertEqual(result[0]["state"], "Cairo")
+        self.assertEqual(result[0]["country"], "Egypt")
+        self.assertEqual(result[0]["pincode"], "11841")
+
     def test_get_customer_shipping_addresses_dedupes_equivalent_rows(self):
         utils = self._load_utils_module()
 
