@@ -863,6 +863,53 @@ class TestManagerPricingSupport(unittest.TestCase):
         self.assertEqual(result["original_price_list_rate"], 140.0)
         self.assertEqual(result["discount_percentage"], 5.0)
 
+    def test_process_regular_item_prefers_base_rate_over_discounted_zero(self):
+        with patch("jarz_pos.services.invoice_creation.frappe") as mf, patch(
+            "jarz_pos.services.invoice_creation.get_item_price", return_value=None
+        ):
+            mf.db.exists.return_value = True
+            mf.db.get_value.return_value = None
+            mf.get_doc.return_value = MagicMock(
+                item_name="Sample Item", stock_uom="Nos"
+            )
+
+            from jarz_pos.services.invoice_creation import _process_regular_item
+
+            result = _process_regular_item(
+                {
+                    "item_code": "ITEM-SAMPLE",
+                    "qty": 1,
+                    "rate": 0.0,
+                    "price_list_rate": 120.0,
+                },
+                MagicMock(),
+                price_list="Sample",
+                customer="CUSTOMER-1",
+            )
+
+        self.assertEqual(result["price_list_rate"], 120.0)
+        self.assertEqual(result["rate"], 120.0)
+
+    def test_process_regular_item_keeps_rate_only_fallback(self):
+        with patch("jarz_pos.services.invoice_creation.frappe") as mf, patch(
+            "jarz_pos.services.invoice_creation.get_item_price", return_value=None
+        ):
+            mf.db.exists.return_value = True
+            mf.db.get_value.return_value = None
+            mf.get_doc.return_value = MagicMock(
+                item_name="Ordinary Item", stock_uom="Nos"
+            )
+
+            from jarz_pos.services.invoice_creation import _process_regular_item
+
+            result = _process_regular_item(
+                {"item_code": "ITEM-ORDINARY", "qty": 1, "rate": 77.0},
+                MagicMock(),
+            )
+
+        self.assertEqual(result["price_list_rate"], 77.0)
+        self.assertEqual(result["rate"], 77.0)
+
     def test_create_pos_invoice_rejects_non_manager_pricing_override(self):
         customer = _mock_customer()
         pos_profile = _mock_pos_profile(selling_price_list="Retail Default")

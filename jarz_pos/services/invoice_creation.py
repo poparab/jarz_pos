@@ -1760,7 +1760,12 @@ def _process_regular_item(item_data, logger, price_list=None, customer=None):
     """Process a regular item."""
     item_code = item_data.get("item_code")
     qty = item_data.get("qty", 1)
-    rate = item_data.get("rate", item_data.get("price_list_rate", 0))
+    provided_list_rate = item_data.get("price_list_rate")
+    rate = (
+        provided_list_rate
+        if provided_list_rate not in (None, "")
+        else item_data.get("rate", 0)
+    )
     print(f"      📦 REGULAR ITEM: {item_code}")
     
     # Validate regular item exists
