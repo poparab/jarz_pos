@@ -39,6 +39,8 @@ if "frappe" not in sys.modules:
 	fake_frappe.get_all = lambda *args, **kwargs: []
 	fake_frappe.get_cached_doc = lambda *args, **kwargs: SimpleNamespace()
 	fake_frappe.get_roles = lambda *args, **kwargs: []
+	fake_utils.cint = lambda value: int(value or 0)
+	fake_utils.getdate = lambda value: value
 	fake_utils.strip_html = lambda value: str(value)
 
 	sys.modules["frappe"] = fake_frappe
@@ -49,6 +51,143 @@ from jarz_pos.api import inventory_count
 
 class TestInventoryCountAPI(unittest.TestCase):
 	"""Focused tests for inventory count configuration and item resolution."""
+
+	def test_normalize_count_lines_adds_multiple_uoms_for_one_item(self):
+		"""Four 2.7 Kg boxes plus 1.5 Kg is one 12.3 Kg count row."""
+		def fake_get_all(doctype, **kwargs):
+			self.assertEqual("UOM Conversion Detail", doctype)
+			self.assertEqual("Box", kwargs["filters"]["uom"])
+			return [{"conversion_factor": 2.7}]
+
+		lines = [
+			{
+				"item_code": "BLUEBERRY",
+				"counted_qty": 4,
+				"uom": "Box",
+				"valuation_rate": 80,
+			},
+			{"item_code": "BLUEBERRY", "counted_qty": 1.5, "uom": "Kg"},
+		]
+		with patch.object(
+			inventory_count.frappe.db, "get_value", return_value="Kg"
+		), patch.object(inventory_count.frappe, "get_all", side_effect=fake_get_all):
+			counted, valuation_rates, batches, serials = inventory_count._normalize_count_lines(lines)
+
+		self.assertEqual({"BLUEBERRY": 12.3}, counted)
+		self.assertEqual({"BLUEBERRY": 80.0}, valuation_rates)
+		self.assertEqual({"BLUEBERRY": None}, batches)
+		self.assertEqual({"BLUEBERRY": None}, serials)
+
+	def test_submit_reconciliation_builds_one_row_for_multiple_uom_components(self):
+		class FakeReconciliation:
+			def __init__(self):
+				self.company = None
+				self.flags = SimpleNamespace(ignore_permissions=False)
+				self.name = "MAT-RECO-1"
+				self.items = []
+
+			def append(self, field, row):
+				self.assert_field(field)
+				self.items.append(row)
+
+			def assert_field(self, field):
+				if field != "items":
+					raise AssertionError(field)
+
+			def insert(self):
+				return None
+
+			def submit(self):
+				return None
+
+		doc = FakeReconciliation()
+
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Item" and len(args) >= 2 and args[1] == "stock_uom":
+				return "Kg"
+			if doctype == "Warehouse":
+				return None
+			if doctype == "Item":
+				return 0
+			return None
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "UOM Conversion Detail":
+				return [{"conversion_factor": 2.7}]
+			if doctype == "Company":
+				return []
+			raise AssertionError((doctype, kwargs))
+
+		lines = [
+			{"item_code": "BLUEBERRY", "counted_qty": 4, "uom": "Box", "valuation_rate": 80},
+			{"item_code": "BLUEBERRY", "counted_qty": 1.5, "uom": "Kg", "valuation_rate": 80},
+		]
+		with patch.object(inventory_count, "_ensure_manager_access"), patch.object(
+			inventory_count, "_get_bin_qty_map", return_value={"BLUEBERRY": 0}
+		), patch.object(
+			inventory_count.frappe.db, "get_value", side_effect=fake_get_value
+		), patch.object(
+			inventory_count.frappe.db, "get_single_value", return_value=0
+		), patch.object(
+			inventory_count.frappe.db, "commit", create=True
+		), patch.object(
+			inventory_count.frappe, "get_all", side_effect=fake_get_all
+		), patch.object(
+			inventory_count.frappe, "new_doc", return_value=doc, create=True
+		):
+			result = inventory_count.submit_reconciliation(
+				warehouse="Raw Material - J",
+				posting_date="2026-09-06",
+				lines=lines,
+				enforce_all=0,
+			)
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(1, result["differences"])
+		self.assertEqual(1, len(doc.items))
+		self.assertAlmostEqual(12.3, doc.items[0]["qty"])
+
+	def test_to_stock_qty_rejects_an_unconfigured_uom(self):
+		with patch.object(
+			inventory_count.frappe.db, "get_value", return_value="Kg"
+		), patch.object(inventory_count.frappe, "get_all", return_value=[]):
+			with self.assertRaisesRegex(Exception, "UOM Carton is not configured for Item BLUEBERRY"):
+				inventory_count._to_stock_qty("BLUEBERRY", 2, "Carton")
+
+	def test_to_stock_qty_rejects_non_positive_or_non_finite_conversion(self):
+		for factor in (0, -2, float("nan"), float("inf")):
+			with self.subTest(factor=factor), patch.object(
+				inventory_count.frappe.db, "get_value", return_value="Kg"
+			), patch.object(
+				inventory_count.frappe,
+				"get_all",
+				return_value=[{"conversion_factor": factor}],
+			):
+				with self.assertRaisesRegex(Exception, "invalid conversion factor"):
+					inventory_count._to_stock_qty("BLUEBERRY", 2, "Box")
+
+	def test_to_stock_qty_rejects_negative_or_non_finite_count(self):
+		for quantity in (-1, float("nan"), float("inf"), "not-a-number"):
+			with self.subTest(quantity=quantity), patch.object(
+				inventory_count.frappe.db, "get_value", return_value="Kg"
+			):
+				with self.assertRaisesRegex(Exception, "must be"):
+					inventory_count._to_stock_qty("BLUEBERRY", quantity, "Kg")
+
+	def test_normalize_count_lines_rejects_conflicting_single_row_metadata(self):
+		base = {"item_code": "BLUEBERRY", "counted_qty": 1, "uom": "Kg"}
+		conflicts = (
+			("valuation_rate", 80, 90, "conflicting valuation rates"),
+			("batch_no", "BATCH-1", "BATCH-2", "conflicting batch numbers"),
+			("serial_no", "SERIAL-1", "SERIAL-2", "conflicting serial numbers"),
+		)
+		for field, first, second, error in conflicts:
+			with self.subTest(field=field), patch.object(
+				inventory_count.frappe.db, "get_value", return_value="Kg"
+			):
+				lines = [dict(base, **{field: first}), dict(base, **{field: second})]
+				with self.assertRaisesRegex(Exception, error):
+					inventory_count._normalize_count_lines(lines)
 
 	def test_list_items_for_count_requires_warehouse(self):
 		with patch.object(inventory_count, "_ensure_manager_access"):

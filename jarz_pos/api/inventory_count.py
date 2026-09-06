@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
@@ -27,11 +28,11 @@ def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
     )
     for r in rows:
         try:
-            u = str(r.get("uom"))
-            f = float(r.get("conversion_factor") or 1)
+            u = str(r.get("uom") or "").strip()
+            f = float(r.get("conversion_factor"))
         except Exception:
             continue
-        if not any(c.get("uom") == u for c in convs):
+        if u and math.isfinite(f) and f > 0 and not any(c.get("uom") == u for c in convs):
             convs.append({"uom": u, "conversion_factor": f})
     return convs
 
@@ -371,21 +372,137 @@ def list_items_for_count(
     return out
 
 
-def _to_stock_qty(item_code: str, qty: float, uom: Optional[str]) -> float:
-    if qty is None:
-        return 0.0
+def _to_stock_qty(item_code: str, qty: Any, uom: Optional[str]) -> float:
+    try:
+        value = float(0 if qty is None or qty == "" else qty)
+    except (TypeError, ValueError):
+        frappe.throw(_("Counted quantity for Item {0} must be a number").format(item_code))
+    if not math.isfinite(value) or value < 0:
+        frappe.throw(
+            _("Counted quantity for Item {0} must be a finite, non-negative number").format(
+                item_code
+            )
+        )
+
     stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
-    if not uom or uom == stock_uom:
-        return float(qty)
-    # find factor
+    normalized_uom = str(uom or stock_uom).strip() or stock_uom
+    if normalized_uom == stock_uom:
+        return value
+
     rows = frappe.get_all(
         "UOM Conversion Detail",
-        filters={"parenttype": "Item", "parentfield": "uoms", "parent": item_code, "uom": uom},
+        filters={
+            "parenttype": "Item",
+            "parentfield": "uoms",
+            "parent": item_code,
+            "uom": normalized_uom,
+        },
         fields=["conversion_factor"],
         limit=1,
     )
-    factor = float(rows[0].get("conversion_factor") if rows else 1)
-    return float(qty) * factor
+    if not rows:
+        frappe.throw(
+            _("UOM {0} is not configured for Item {1}").format(normalized_uom, item_code)
+        )
+    try:
+        factor = float(rows[0].get("conversion_factor"))
+    except (TypeError, ValueError):
+        factor = 0.0
+    if not math.isfinite(factor) or factor <= 0:
+        frappe.throw(
+            _("UOM {0} has an invalid conversion factor for Item {1}").format(
+                normalized_uom, item_code
+            )
+        )
+
+    stock_qty = value * factor
+    if not math.isfinite(stock_qty):
+        frappe.throw(_("Converted quantity for Item {0} is too large").format(item_code))
+    return stock_qty
+
+
+def _normalize_count_lines(
+    lines: List[Dict[str, Any]],
+) -> Tuple[
+    Dict[str, float],
+    Dict[str, Optional[float]],
+    Dict[str, Optional[str]],
+    Dict[str, Optional[str]],
+]:
+    """Convert count components to one stock-UOM total per item.
+
+    A physical count may contain the same item more than once in different UOMs,
+    for example ``4 Box`` plus ``1.5 Kg``.  Stock Reconciliation needs one row
+    per item, so every component is converted and summed before the document is
+    built.  Legacy callers that send one row per item keep the same behavior.
+    """
+    counted: Dict[str, float] = {}
+    provided_vr: Dict[str, Optional[float]] = {}
+    provided_batch: Dict[str, Optional[str]] = {}
+    provided_serials: Dict[str, Optional[str]] = {}
+
+    for line in lines:
+        if not isinstance(line, dict):
+            frappe.throw(_("Each line must be an object"))
+        code = str(line.get("item_code") or line.get("item") or "").strip()
+        if not code:
+            frappe.throw(_("Missing item_code in a line"))
+
+        raw_qty = line.get("counted_qty")
+        if raw_qty is None:
+            raw_qty = line.get("qty")
+        component_qty = _to_stock_qty(code, raw_qty, line.get("uom"))
+        total = counted.get(code, 0.0) + component_qty
+        if not math.isfinite(total):
+            frappe.throw(_("Converted quantity for Item {0} is too large").format(code))
+        counted[code] = total
+
+        if line.get("valuation_rate") is not None:
+            try:
+                valuation_rate = float(line.get("valuation_rate"))
+            except (TypeError, ValueError):
+                valuation_rate = None
+            existing_rate = provided_vr.get(code)
+            if (
+                existing_rate is not None
+                and valuation_rate is not None
+                and existing_rate != valuation_rate
+            ):
+                frappe.throw(
+                    _("Count components for Item {0} have conflicting valuation rates").format(code)
+                )
+            if valuation_rate is not None:
+                provided_vr[code] = valuation_rate
+            else:
+                provided_vr.setdefault(code, None)
+        else:
+            provided_vr.setdefault(code, None)
+
+        batch_no = line.get("batch_no")
+        if batch_no:
+            batch_no = str(batch_no)
+            existing_batch = provided_batch.get(code)
+            if existing_batch and existing_batch != batch_no:
+                frappe.throw(
+                    _("Count components for Item {0} have conflicting batch numbers").format(code)
+                )
+            provided_batch[code] = batch_no
+        else:
+            provided_batch.setdefault(code, None)
+
+        serial_no = line.get("serial_no") or line.get("serial_nos")
+        if serial_no:
+            serial_no = str(serial_no)
+            existing_serials = provided_serials.get(code)
+            if existing_serials and existing_serials != serial_no:
+                frappe.throw(
+                    _("Count components for Item {0} have conflicting serial numbers").format(code)
+                )
+            provided_serials[code] = serial_no
+        else:
+            provided_serials.setdefault(code, None)
+
+    return counted, provided_vr, provided_batch, provided_serials
 
 
 def _format_inventory_qty(value: float) -> str:
@@ -435,6 +552,7 @@ def submit_reconciliation(
     """Create a Stock Reconciliation for counted items.
 
     lines: list[{item_code, counted_qty, uom?}]
+    The same item_code may appear more than once; its converted quantities are added.
     If enforce_all=1, require that each item from list_items_for_count(warehouse) is present in lines.
     Only differences are added to the reconciliation to reduce noise.
     """
@@ -460,33 +578,7 @@ def submit_reconciliation(
         if not warehouse:
             frappe.throw(_("warehouse is required"))
 
-        # Build a map of counted qty in stock UOM
-        counted: Dict[str, float] = {}
-        provided_vr: Dict[str, Optional[float]] = {}
-        provided_batch: Dict[str, Optional[str]] = {}
-        provided_serials: Dict[str, Optional[str]] = {}
-        for ln in lines:
-            if not isinstance(ln, dict):
-                frappe.throw(_("Each line must be an object"))
-            code = ln.get("item_code") or ln.get("item")
-            if not code:
-                frappe.throw(_("Missing item_code in a line"))
-            qty = float(ln.get("counted_qty") or ln.get("qty") or 0)
-            uom = ln.get("uom")
-            counted[code] = _to_stock_qty(code, qty, uom)
-            # Optional valuation_rate provided by client
-            try:
-                if ln.get("valuation_rate") is not None:
-                    provided_vr[str(code)] = float(ln.get("valuation_rate"))
-                else:
-                    provided_vr[str(code)] = None
-            except Exception:
-                provided_vr[str(code)] = None
-            # Optional batch/serial
-            bno = ln.get("batch_no")
-            provided_batch[str(code)] = str(bno) if bno else None
-            sno = ln.get("serial_no") or ln.get("serial_nos")
-            provided_serials[str(code)] = str(sno) if sno else None
+        counted, provided_vr, provided_batch, provided_serials = _normalize_count_lines(lines)
 
         # Enforce all items counted (subset: items matching the search criteria we expose)
         if int(enforce_all or 0):
