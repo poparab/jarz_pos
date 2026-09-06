@@ -23,6 +23,17 @@ except ImportError:
     FIREBASE_AVAILABLE = False
     frappe.log_error("firebase-admin package not installed. FCM notifications disabled.", "FCM Import Warning")
 
+# firebase_admin.exceptions.InvalidArgumentError: the SDK-wide base class some
+# firebase-admin versions re-raise messaging errors through. Imported once at
+# module load (alongside messaging above) rather than lazily inside
+# _is_invalid_token_error, so it is resolved from whatever firebase_admin
+# module is in sys.modules at import time — which is also what makes it
+# mockable the same way FIREBASE_AVAILABLE / messaging already are.
+try:
+    from firebase_admin import exceptions as firebase_exceptions
+except ImportError:
+    firebase_exceptions = None
+
 # Module-level state to throttle init-failure Error Log writes (one per process).
 _FIREBASE_INIT_STATE: Dict[str, Any] = {
     "failed_logged": False,
@@ -340,6 +351,17 @@ def get_websocket_debug_info() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 MAX_FCM_TOKENS_PER_BATCH = 500
+
+# Safety cap for _record_fcm_send_error: INVALID_ARGUMENT is the firebase-admin
+# SDK's GENERIC argument error. It fires for a dead registration token, but
+# also for a malformed *message* (non-string data value, oversized payload,
+# bad apns/android config) — and a single send run shares one payload across
+# every token. Without a cap, a payload regression reads as "every token in
+# this batch is dead" and _disable_token silently blacklists the whole fleet
+# in one pass. See _fcm_invalid_token_disable_cap_would_trip.
+FCM_INVALID_TOKEN_DISABLE_CAP_RATIO = 0.5
+FCM_INVALID_TOKEN_DISABLE_CAP_MIN_ATTEMPTED = 2
+
 DEFAULT_WALK_IN_CUSTOMER = "Walk-in"
 DEFAULT_NEW_ORDER_TITLE = "New Order"
 DEFAULT_ITEM_LABEL = "Item"
@@ -1916,24 +1938,56 @@ def _is_invalid_token_error(exc: Exception) -> bool:
     """Return True when *exc* indicates an FCM token is no longer valid.
 
     Checks (in order):
-    1. SDK exception class (UnregisteredError, SenderIdMismatchError).
-    2. error_code / code attribute on the exception.
+    1. SDK exception class (UnregisteredError, SenderIdMismatchError,
+       InvalidArgumentError).
+    2. error_code / code attribute on the exception, normalised so both SDK
+       spellings match.
     3. Case-insensitive substring match against known error strings.
+
+    The code check used to compare directly against a set mixing two
+    conventions — ``{"registration-token-not-registered", "invalid-argument",
+    "NOT_FOUND"}`` — because ``"invalid-argument"`` is the *JavaScript* SDK's
+    spelling. The Python ``firebase-admin`` SDK actually raises
+    ``INVALID_ARGUMENT`` (uppercase, underscored) with message
+    ``"Invalid argument."``, which matched neither the code set nor the
+    message substrings, so a permanently-rejected token was never disabled
+    and kept being retried forever (54 Error Log rows in two days on
+    production). The code is now normalised — uppercased, with ``-`` and
+    ``_`` treated as equivalent — before comparing, so both
+    ``"invalid-argument"`` and ``"INVALID_ARGUMENT"`` match the same rule.
     """
     if FIREBASE_AVAILABLE:
-        for error_class_name in ("UnregisteredError", "SenderIdMismatchError"):
+        error_class_names = ["UnregisteredError", "SenderIdMismatchError"]
+        # Only present on newer firebase-admin releases; the getattr guard
+        # below already makes this optional, but list it explicitly so the
+        # intent (and the class it targets) is visible in one place.
+        error_class_names.append("InvalidArgumentError")
+        for error_class_name in error_class_names:
             error_class = getattr(messaging, error_class_name, None)
             if error_class and isinstance(exc, error_class):
                 return True
+        # firebase_admin.exceptions.InvalidArgumentError is the SDK-wide base
+        # (messaging errors are re-raised through it on some versions).
+        fb_invalid_argument_error = getattr(firebase_exceptions, "InvalidArgumentError", None)
+        if fb_invalid_argument_error and isinstance(exc, fb_invalid_argument_error):
+            return True
+
     code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
-    if code in {"registration-token-not-registered", "invalid-argument", "NOT_FOUND"}:
+    normalised_code = str(code or "").strip().upper().replace("-", "_")
+    if normalised_code in {
+        "REGISTRATION_TOKEN_NOT_REGISTERED",
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+    }:
         return True
+
     msg = str(exc).lower()
     return any(s in msg for s in (
         "notregistered",
         "registration-token-not-registered",
         "requested entity was not found",
         "invalid registration",
+        "invalid argument",
     ))
 
 
@@ -1951,6 +2005,10 @@ def _new_fcm_send_result(tokens: Sequence[str], status: str = "pending") -> Dict
         "unexpected_failure_count": 0,
         "dropped_token_count": 0,
         "duplicate_token_count": 0,
+        # Set once the safety cap in _record_fcm_send_error trips: tokens that
+        # classified as INVALID_ARGUMENT after that point are counted here
+        # (and folded into unexpected_failure_count) instead of being disabled.
+        "suppressed_invalid_token_count": 0,
     }
 
 
@@ -1993,10 +2051,60 @@ def _log_fcm_push_skipped_once(message: str) -> None:
     _FIREBASE_INIT_STATE["push_skipped_logged"] = True
 
 
+def _fcm_invalid_token_disable_cap_would_trip(result: Dict[str, Any]) -> bool:
+    """Would disabling ONE more token push this run over the safety cap?
+
+    Checked prospectively, before the next disable, so the run never disables
+    more than FCM_INVALID_TOKEN_DISABLE_CAP_RATIO of the attempted tokens.
+    Never trips for tiny batches (see FCM_INVALID_TOKEN_DISABLE_CAP_MIN_ATTEMPTED)
+    — a lone token or a pair of tokens both going bad is unremarkable; it is
+    only the fleet-wide pattern that indicates a payload regression rather than
+    dead devices.
+    """
+    attempted = result.get("attempted_count", 0)
+    if attempted <= FCM_INVALID_TOKEN_DISABLE_CAP_MIN_ATTEMPTED:
+        return False
+
+    prospective_invalid = result.get("invalid_token_count", 0) + 1
+    return prospective_invalid > attempted * FCM_INVALID_TOKEN_DISABLE_CAP_RATIO
+
+
+def _log_fcm_invalid_token_disable_cap_tripped(result: Dict[str, Any]) -> None:
+    """One loud Error Log per run when the disable cap trips (not per token)."""
+    attempted = result.get("attempted_count", 0)
+    already_disabled = result.get("invalid_token_count", 0)
+    frappe.log_error(
+        title="FCM invalid-token cap tripped",
+        message=(
+            "More than half of the FCM tokens attempted in this send run "
+            f"({already_disabled} disabled out of {attempted} attempted before the "
+            "cap tripped) reported INVALID_ARGUMENT. That code is the firebase-admin "
+            "SDK's generic argument error: it also fires for a malformed message "
+            "(a non-string data value, an oversized payload, a bad apns/android "
+            "config) and every token in this run shares one payload. Mass "
+            "INVALID_ARGUMENT across a batch is far more likely to be a payload "
+            "regression than every device failing at once, so token disabling was "
+            "suppressed for the remainder of this run; the remaining failures are "
+            "recorded as unexpected instead. Check the outbound FCM message "
+            "(data values, apns/android config) for a recent regression before "
+            "assuming the tokens are dead."
+        ),
+    )
+
+
 def _record_fcm_send_error(token: str, send_err: Exception, result: Dict[str, Any]) -> None:
     result["failure_count"] += 1
 
     if _is_invalid_token_error(send_err):
+        cap_already_tripped = result.get("suppressed_invalid_token_count", 0) > 0
+        if cap_already_tripped or _fcm_invalid_token_disable_cap_would_trip(result):
+            first_trip = not cap_already_tripped
+            result["suppressed_invalid_token_count"] += 1
+            result["unexpected_failure_count"] += 1
+            if first_trip:
+                _log_fcm_invalid_token_disable_cap_tripped(result)
+            return
+
         result["invalid_token_count"] += 1
         _log_fcm_info(f"FCM invalid token (disabling): {str(send_err)}")
         try:

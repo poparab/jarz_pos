@@ -836,8 +836,13 @@ class TestManagerPricingSupport(unittest.TestCase):
     """Verify selected price list, manager guard, and regular-line pricing overrides."""
 
     def test_process_regular_item_uses_selected_price_list_and_custom_rate_override(self):
-        with patch("jarz_pos.services.invoice_creation.frappe") as mf, \
-             patch("jarz_pos.services.invoice_creation.get_item_price", return_value=140.0):
+        # FIX 3c: account_utils.get_item_price() is no longer consulted as a second
+        # "fallback" inside _resolve_item_rate — it ran the IDENTICAL query as the
+        # generic Item Price lookup already tried, so it could never legitimately
+        # return anything different in production. With every Item Price / category
+        # lookup returning None, catalog_rate now comes straight from the cart's own
+        # rate (90.0), not from a mocked get_item_price stand-in.
+        with patch("jarz_pos.services.invoice_creation.frappe") as mf:
             item_doc = MagicMock()
             item_doc.item_name = "Test Item"
             item_doc.stock_uom = "Unit"
@@ -860,7 +865,7 @@ class TestManagerPricingSupport(unittest.TestCase):
 
         self.assertEqual(result["price_list_rate"], 110.0)
         self.assertEqual(result["rate"], 110.0)
-        self.assertEqual(result["original_price_list_rate"], 140.0)
+        self.assertEqual(result["original_price_list_rate"], 90.0)
         self.assertEqual(result["discount_percentage"], 5.0)
 
     def test_process_regular_item_prefers_base_rate_over_discounted_zero(self):

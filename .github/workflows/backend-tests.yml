@@ -340,6 +340,36 @@ jobs:
             # the one place the blind-close figures could leak back to the
             # cashier who just counted, which the manager gate here pins.
             test_module_history
+            # Consumable deduction on Out for Delivery. THE reason this must be
+            # in CI: the handler failed 167/167 times in production for 11 days
+            # and CI stayed green the whole time, because the only cover
+            # (test_branch_fulfilment) asserts the OFD state is WRITTEN so the
+            # hook fires -- never that the Stock Entry actually posts an SLE.
+            # These cases pin the source warehouse (the consumables store, NOT
+            # the branch POS warehouse, which has never stocked a consumable),
+            # the savepoint rollback that stops a failure leaving a submitted
+            # orphan Stock Entry with zero GL, and the per-line coverage check
+            # that keeps one uncoverable item from taking the others down with
+            # it -- ERPNext aborts make_sl_entries for the WHOLE document on
+            # the first row it cannot post.
+            test_consumable_deduction
+            # FCM invalid-token classification across BOTH SDK spellings. The
+            # Python firebase-admin SDK raises code INVALID_ARGUMENT with
+            # message "Invalid argument."; the old set only carried the
+            # JavaScript SDK's "invalid-argument", so a permanently-rejected
+            # token was never disabled and was retried on every notification
+            # forever. The negative case matters as much as the positive ones.
+            test_fcm_invalid_token_normalization
+            # The client-rate trust boundary on create_pos_invoice. Every case
+            # here is a way a wrong number reached a SUBMITTED invoice: a
+            # custom_rate_override of 0 that the manager gate and the audit
+            # marker both read as "unset" while the pricing engine honoured it
+            # (a free line, ungated and with no breadcrumb); a negative qty or
+            # price_list_rate that bypassed the clamps because _process_regular_item
+            # re-reads the raw cart dict; and an Item Price scoped to a DIFFERENT
+            # customer satisfying the coverage check that _resolve_item_rate then
+            # ignores, so a B2B order silently booked the retail rate.
+            test_money_path_pricing_fixes
           )
           rc=0
           for m in "${MODULES[@]}"; do

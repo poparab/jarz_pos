@@ -160,6 +160,13 @@ class WS_EVENTS:
     CUSTOM_SHIPPING_REJECTED = "jarz_pos_custom_shipping_rejected"
     SHIFT_STARTED = "jarz_pos_shift_started"
     SHIFT_ENDED = "jarz_pos_shift_ended"
+    # Consumable deduction could not post for an invoice that reached Out for
+    # Delivery. Raised to a human on purpose: the handler is fire-and-forget
+    # (it must never block fulfilment) and stamp_out_for_delivery_flag closes
+    # the retry door immediately after it, so a failure nobody sees is a
+    # deduction lost for good -- which is how 167 consecutive failures went
+    # unnoticed for 11 days.
+    CONSUMABLE_DEDUCTION_FAILED = "jarz_pos_consumable_deduction_failed"
     # Courier app (see COURIER_CONTRACTS.md §7 — frozen 2026-08-05).
     COURIER_STOP_ARRIVED = "jarz_pos_courier_stop_arrived"
     COURIER_STOP_DELIVERED = "jarz_pos_courier_stop_delivered"

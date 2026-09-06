@@ -80,12 +80,15 @@ class TestItemGroupFallback(unittest.TestCase):
             self.assertEqual(ic._resolve_item_rate(_CODE, _PL, customer=_CUST), 50.0)
 
     def test_fallback_when_no_group_row(self):
-        # No per-item and no category row -> final get_item_price fallback path.
+        # No per-item and no category row -> final CLIENT-supplied fallback_rate path.
+        # FIX 3c: this used to fall through to account_utils.get_item_price(), which
+        # ran the IDENTICAL query as the generic per-item lookup above and so could
+        # never legitimately return anything different in production. That dead call
+        # is gone; the caller's own fallback_rate is now what "no server-side price"
+        # resolves to.
         gv = _make_get_value(scoped=None, generic_item=None, group_rate=None)
-        with patch.object(ic.frappe.db, "get_value", side_effect=gv), patch.object(
-            ic, "get_item_price", return_value=10
-        ):
-            self.assertEqual(ic._resolve_item_rate(_CODE, _PL), 10.0)
+        with patch.object(ic.frappe.db, "get_value", side_effect=gv):
+            self.assertEqual(ic._resolve_item_rate(_CODE, _PL, fallback_rate=10.0), 10.0)
 
     def test_category_lookup_not_consulted_when_per_item_exists(self):
         # Precedence guard: when a per-item generic rate exists, neither the

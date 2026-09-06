@@ -39,6 +39,11 @@ from jarz_pos.utils.customer_address_utils import (
 from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 from jarz_pos.utils.account_utils import (
+    # NOTE: no longer called from this module (see _resolve_item_rate_with_provenance's
+    # docstring, FIX 3c) — it ran the identical query as this module's own generic
+    # Item Price lookup and could never return a different answer. Import kept ONLY
+    # because existing tests patch `jarz_pos.services.invoice_creation.get_item_price`
+    # and `jarz_pos.page.custom_pos.custom_pos` re-exports the real one separately.
     get_item_price,
     get_company_receivable_account,
     ensure_partner_receivable_subaccount,
@@ -275,6 +280,23 @@ def _describe_unresolved_territory_source(
     return "no territory source"
 
 
+def _pricing_field_provided(value) -> bool:
+    """True when the client explicitly SENT a value for this pricing field.
+
+    ``0`` / ``0.0`` is a DELIBERATE zero price (a free line), not "unset" — treating
+    it as absent is how a cashier without manager access could submit a free line
+    with no gate and no audit trail. Only ``None`` and ``""`` mean the client sent
+    nothing at all for this field.
+
+    This is the ONE predicate for "was this pricing field provided" in this module.
+    The manager gate (:func:`_pricing_action_requires_manager`), the audit-marker
+    checks in :func:`create_pos_invoice`, the pricing engine
+    (:func:`_process_regular_item`) and the bundle price override
+    (:func:`_process_bundle_item`) must all use it — they must never diverge again.
+    """
+    return value not in (None, "")
+
+
 def _pricing_action_requires_manager(
     cart_items,
     *,
@@ -300,8 +322,7 @@ def _pricing_action_requires_manager(
         if not isinstance(item, dict):
             continue
         for field in ("custom_rate_override", "discount_amount", "discount_percentage"):
-            value = item.get(field)
-            if value not in (None, "", 0, 0.0):
+            if _pricing_field_provided(item.get(field)):
                 return True
 
     return False
@@ -570,12 +591,23 @@ def _persist_selling_price_list(invoice_doc, effective_price_list, logger) -> No
             pass
 
 
-def _validate_policy_price_list_coverage(policy_decision, effective_price_list, cart_items, logger) -> None:
+def _validate_policy_price_list_coverage(
+    policy_decision, effective_price_list, cart_items, logger, customer: str | None = None
+) -> None:
     """For a MATCHED commercial policy, ensure the resolved price list has a selling
     Item Price for every plain cart item. Gives a clear, actionable error (instead of a
     cryptic failure or a silently zero-priced order) when a B2B/Employee/Sample price
     list has not been populated yet. Standard orders are unaffected (they price from the
-    cart rate as before)."""
+    cart rate as before).
+
+    ``customer`` MUST be the same customer :func:`_resolve_item_rate` will resolve
+    against. Without it this check used to ask "does ANY Item Price exist for this
+    item in this price list" with no customer filter at all — so an Item Price row
+    scoped to a DIFFERENT customer made the item look covered, then
+    ``_resolve_item_rate`` (which correctly excludes other customers' rows) found
+    nothing and silently fell back to trusting the client's own rate. Coverage now
+    counts a row only if it is generic (no customer) OR scoped to THIS customer.
+    """
     if not getattr(policy_decision, "matched", False) or not effective_price_list:
         return
     # Free samples (and any policy that discounts the whole line by 100%) force every net
@@ -601,12 +633,20 @@ def _validate_policy_price_list_coverage(policy_decision, effective_price_list, 
         if not code:
             continue
         # Skip bundles and manually-overridden lines — those don't price off the list.
-        if it.get("is_bundle") or it.get("custom_rate_override") not in (None, "", 0, 0.0):
+        if it.get("is_bundle") or _pricing_field_provided(it.get("custom_rate_override")):
             continue
-        # An item is covered if it has a per-item selling Item Price...
+        # An item is covered if it has a per-item selling Item Price that is either
+        # generic (no customer) or scoped to THIS customer — never one scoped to a
+        # different customer, which _resolve_item_rate would ignore anyway.
+        _coverage_customer_filter = ["in", [None, "", customer]] if customer else ["in", [None, ""]]
         if frappe.db.exists(
             "Item Price",
-            {"item_code": code, "price_list": effective_price_list, "selling": 1},
+            {
+                "item_code": code,
+                "price_list": effective_price_list,
+                "selling": 1,
+                "customer": _coverage_customer_filter,
+            },
         ):
             continue
         # ...OR a category rate for its item_group. Category rates (Jarz Price List
@@ -639,27 +679,67 @@ def _validate_policy_price_list_coverage(policy_decision, effective_price_list, 
         )
 
 
-def _resolve_item_rate(item_code, price_list, fallback_rate=0.0, customer=None) -> float:
+def _resolve_item_rate_with_provenance(
+    item_code, price_list, fallback_rate=0.0, customer=None
+) -> tuple[float, str]:
+    """Resolve a plain item's unit rate AND report where it came from.
+
+    Provenance values, most trustworthy first:
+      - ``"customer_price"``: an Item Price row scoped to THIS exact customer.
+      - ``"item_price"``:     a generic (no-customer) Item Price row in this list.
+      - ``"category"``:       a ``Jarz Price List Category Rate`` row for the
+                               item's item_group.
+      - ``"client"``:         nothing was found server-side; ``fallback_rate`` —
+                               whatever the CALLER supplied, i.e. the cart's own
+                               rate/price_list_rate — was used verbatim.
+
+    ``"client"`` is the dangerous case FIX 3 exists for: on a MATCHED commercial
+    policy that resolved a real (non-default) price list, this used to be
+    reachable via a dead fallback (``account_utils.get_item_price`` ran the
+    IDENTICAL query as the generic-rate lookup above, so it could never return
+    anything different) that made the expression collapse to
+    ``float(fallback_rate or 0.0)`` — i.e. always the client's own number,
+    completely unaudited. That dead call is gone; the caller decides what
+    "client" provenance means for THIS order (see ``_process_regular_item``).
+    """
     if price_list:
         # Per-customer override: an Item Price scoped to this customer in the same price
         # list wins over the generic list rate (special rates for a specific B2B client).
+        # ``selling: 1`` on BOTH lookups is load-bearing, not decoration: it is the
+        # same filter _validate_policy_price_list_coverage uses, and the two queries
+        # must ask the identical question or coverage means nothing. Without it a
+        # buying-only row (selling=0) is invisible to coverage yet returned here as
+        # the selling rate — i.e. an order priced at COST. Production carries 221
+        # such rows today; they all sit in Standard Buying, so nothing selling-side
+        # reaches them right now, but one buying row added to a selling list is all
+        # it would take.
         if customer:
             cust_rate = frappe.db.get_value(
                 "Item Price",
-                {"item_code": item_code, "price_list": price_list, "customer": customer},
+                {
+                    "item_code": item_code,
+                    "price_list": price_list,
+                    "customer": customer,
+                    "selling": 1,
+                },
                 "price_list_rate",
             )
             if cust_rate not in (None, ""):
-                return float(cust_rate)
+                return float(cust_rate), "customer_price"
         # Generic list rate: exclude customer-scoped rows so one customer's special price
         # never leaks into another customer's order.
         rate = frappe.db.get_value(
             "Item Price",
-            {"item_code": item_code, "price_list": price_list, "customer": ["in", [None, ""]]},
+            {
+                "item_code": item_code,
+                "price_list": price_list,
+                "customer": ["in", [None, ""]],
+                "selling": 1,
+            },
             "price_list_rate",
         )
         if rate not in (None, ""):
-            return float(rate)
+            return float(rate), "item_price"
         # Category ("item-group") rate: when the item has no per-item Item Price in this
         # list, fall back to the B2B category price stored in the app-owned
         # ``Jarz Price List Category Rate`` DocType (one row per price_list + item_group,
@@ -675,9 +755,30 @@ def _resolve_item_rate(item_code, price_list, fallback_rate=0.0, customer=None) 
                 "rate",
             )
             if group_rate not in (None, ""):
-                return float(group_rate)
+                return float(group_rate), "category"
 
-    return float(get_item_price(item_code, price_list) or fallback_rate or 0.0)
+    # Nothing server-side backed this rate. NOTE: this deliberately does NOT call
+    # ``account_utils.get_item_price(item_code, price_list)`` — that helper runs the
+    # exact same "generic Item Price in this list" query already tried above, so it
+    # could never legitimately return anything the lookup above did not already find.
+    # Calling it anyway looked like a real second-chance lookup while being
+    # unreachable in production; see the docstring above (FIX 3c).
+    return float(fallback_rate or 0.0), "client"
+
+
+def _resolve_item_rate(item_code, price_list, fallback_rate=0.0, customer=None) -> float:
+    """Backward-compatible wrapper: the rate only, no provenance.
+
+    Kept byte-identical in signature/behaviour for existing callers outside this
+    module (``api/pos.py``, ``api/manager.py`` amendment pricing) and for the
+    existing unit tests pinned on it. New code inside this module that needs to
+    know WHERE the rate came from should call
+    :func:`_resolve_item_rate_with_provenance` directly.
+    """
+    rate, _provenance = _resolve_item_rate_with_provenance(
+        item_code, price_list, fallback_rate=fallback_rate, customer=customer
+    )
+    return rate
 
 
 def _requested_delivery_end():
@@ -1039,9 +1140,30 @@ def create_pos_invoice(
             sales_partner=sales_partner,
         )
         # Fail fast with an actionable message if a policy order's price list is missing
-        # prices (the common "B2B Selling not populated yet" data gap).
+        # prices (the common "B2B Selling not populated yet" data gap). Customer-scoped
+        # so an Item Price that belongs to a DIFFERENT customer is never mistaken for
+        # coverage of THIS order (FIX 3a).
         _validate_policy_price_list_coverage(
-            policy_decision, effective_price_list, cart_items, logger
+            policy_decision,
+            effective_price_list,
+            cart_items,
+            logger,
+            customer=getattr(customer_doc, "name", None),
+        )
+        # FIX 3c: a MATCHED, sub-100%-discount policy already requires the coverage
+        # check above to pass for every plain cart item, so a rate that STILL resolves
+        # from the client afterwards (see _process_regular_item) is refused outright
+        # rather than silently trusted. A 100%-discount policy (free sample) forces the
+        # net to zero regardless of price, so it is exempt exactly like the coverage
+        # check above — same predicate, so the two can never disagree.
+        try:
+            _policy_disc_for_rate_check = float(
+                getattr(policy_decision, "discount_percentage", 0) or 0
+            )
+        except (TypeError, ValueError):
+            _policy_disc_for_rate_check = 0.0
+        enforce_price_list_pricing = (
+            bool(policy_decision.matched) and _policy_disc_for_rate_check < 100
         )
         processed_items = _process_cart_items(
             cart_items,
@@ -1049,6 +1171,7 @@ def create_pos_invoice(
             logger,
             price_list=effective_price_list,
             customer=getattr(customer_doc, "name", None),
+            enforce_price_list_pricing=enforce_price_list_pricing,
         )
 
         # Sample policies may carry a fallback discount %. Apply it to plain item rows
@@ -1093,18 +1216,25 @@ def create_pos_invoice(
                 _append_audit_marker(invoice_doc, f"[PRICE LIST OVERRIDE] {effective_price_list}")
         if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
             _append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
-        if any(item.get("custom_rate_override") not in (None, "", 0, 0.0) for item in processed_items):
+        if any(_pricing_field_provided(item.get("custom_rate_override")) for item in processed_items):
             _append_audit_marker(invoice_doc, "[CUSTOM LINE PRICING]")
         if any(
             (
-                item.get("discount_amount") not in (None, "", 0, 0.0)
-                or item.get("discount_percentage") not in (None, "", 0, 0.0)
+                _pricing_field_provided(item.get("discount_amount"))
+                or _pricing_field_provided(item.get("discount_percentage"))
             )
             and not item.get("is_bundle_parent")
             and not item.get("is_bundle_child")
             for item in processed_items
         ):
             _append_audit_marker(invoice_doc, "[LINE DISCOUNTS]")
+        # FIX 3c: a plain line whose rate came from neither this customer's Item
+        # Price, a generic Item Price, nor a category rate — the client's own number
+        # was trusted (see _process_regular_item / _resolve_item_rate_with_provenance).
+        # Legitimate on a non-policy order (this is how Standard pricing has always
+        # worked), so it is allowed but left as a breadcrumb rather than silent.
+        if any(item.get("_client_priced") for item in processed_items):
+            _append_audit_marker(invoice_doc, "[CLIENT PRICED]")
 
         # STEP 6.A: Resolve and stamp the shipping address explicitly.
         resolved_shipping_address = resolve_customer_shipping_address(
@@ -1627,7 +1757,14 @@ def _parse_delivery_charges(delivery_charges_json, logger):
     return delivery_charges
 
 
-def _process_cart_items(cart_items, pos_profile, logger, price_list=None, customer=None):
+def _process_cart_items(
+    cart_items,
+    pos_profile,
+    logger,
+    price_list=None,
+    customer=None,
+    enforce_price_list_pricing=False,
+):
     """Process all cart items including bundles."""
     logger.debug(f"Processing {len(cart_items)} cart items")
     processed_items = []  # Will contain both regular items and bundle items
@@ -1675,16 +1812,27 @@ def _process_cart_items(cart_items, pos_profile, logger, price_list=None, custom
             print(f"      ❌ Missing item_code, skipping")
             continue
             
+        # FIX 2 (bundle half): these used to CLAMP -- qty<=0 became 1, rate<0
+        # became 0 -- and silently. _process_regular_item now rejects both
+        # outright, but it re-reads the raw item_data dict, so the clamp below
+        # was dead for plain lines and fully live for bundles: a cart line
+        # {"item_code": "BUNDLE-X", "qty": -3, "is_bundle": true} quietly became
+        # qty 1. Reject on both paths, for the same reason: a silent clamp is how
+        # a wrong number reaches a SUBMITTED invoice with nobody the wiser.
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            frappe.throw(f"Invalid quantity for item '{item_code}': {qty}")
         if qty <= 0:
-            logger.warning(f"Item {i} has invalid quantity {qty}, using 1")
-            print(f"      ⚠️ Invalid quantity {qty}, using 1")
-            qty = 1
-            
+            frappe.throw(f"Quantity for item '{item_code}' must be greater than zero")
+
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            frappe.throw(f"Invalid rate for item '{item_code}': {rate}")
         if rate < 0:
-            logger.warning(f"Item {i} has negative rate {rate}, using 0")
-            print(f"      ⚠️ Negative rate {rate}, using 0")
-            rate = 0
-        
+            frappe.throw(f"Rate for item '{item_code}' must be non-negative")
+
         selected_items = item_data.get("selected_items") if hasattr(item_data, "get") else None
 
         if is_bundle:
@@ -1702,7 +1850,13 @@ def _process_cart_items(cart_items, pos_profile, logger, price_list=None, custom
             processed_items.extend(bundle_items)
         else:
             # Process regular item
-            regular_item = _process_regular_item(item_data, logger, price_list=price_list, customer=customer)
+            regular_item = _process_regular_item(
+                item_data,
+                logger,
+                price_list=price_list,
+                customer=customer,
+                enforce_price_list_pricing=enforce_price_list_pricing,
+            )
             processed_items.append(regular_item)
     
     if not processed_items:
@@ -1734,11 +1888,26 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
         target_bundle_price = None
         if isinstance(item_data, dict):
             target_bundle_price = item_data.get("custom_rate_override")
-            if target_bundle_price in (None, ""):
+            if not _pricing_field_provided(target_bundle_price):
                 target_bundle_price = item_data.get("price_list_rate")
-        if target_bundle_price in (None, ""):
+        if not _pricing_field_provided(target_bundle_price):
             target_bundle_price = rate
-        
+
+        # FIX 2 (bundle half): the two reads above come straight from the RAW
+        # item_data dict, so they bypass the caller's rate validation entirely --
+        # a negative custom_rate_override or price_list_rate on a bundle line
+        # reached BundleProcessor unchecked, and process_bundle_for_invoice has
+        # no non-negative guard of its own. Validate here, where the value is
+        # actually chosen.
+        try:
+            target_bundle_price = float(target_bundle_price)
+        except (TypeError, ValueError):
+            frappe.throw(
+                f"Invalid bundle price for '{item_code}': {target_bundle_price}"
+            )
+        if target_bundle_price < 0:
+            frappe.throw(f"Bundle price for '{item_code}' must be non-negative")
+
         # Process bundle using ERPNext item code (not bundle record ID)
         bundle_items = process_bundle_for_invoice(
             item_code,
@@ -1756,7 +1925,13 @@ def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_ite
         frappe.throw(error_msg)
 
 
-def _process_regular_item(item_data, logger, price_list=None, customer=None):
+def _process_regular_item(
+    item_data,
+    logger,
+    price_list=None,
+    customer=None,
+    enforce_price_list_pricing=False,
+):
     """Process a regular item."""
     item_code = item_data.get("item_code")
     qty = item_data.get("qty", 1)
@@ -1767,37 +1942,90 @@ def _process_regular_item(item_data, logger, price_list=None, customer=None):
         else item_data.get("rate", 0)
     )
     print(f"      📦 REGULAR ITEM: {item_code}")
-    
+
+    # FIX 2: _process_cart_items only clamps its OWN local qty/rate; this path is
+    # handed the raw item_data dict and re-reads qty/rate straight from it (see
+    # above), which used to bypass those clamps entirely — a `qty: -1` or a
+    # negative `price_list_rate` sailed straight onto a submitted invoice. Reject
+    # outright instead of clamping: a silent clamp is exactly how a wrong number
+    # reaches a submitted invoice unnoticed.
+    try:
+        qty_value = float(qty)
+    except (TypeError, ValueError):
+        frappe.throw(f"Invalid quantity for item '{item_code}': {qty}")
+    if qty_value <= 0:
+        frappe.throw(f"Quantity for item '{item_code}' must be greater than zero")
+    qty = qty_value
+
+    if provided_list_rate not in (None, ""):
+        try:
+            provided_list_rate_value = float(provided_list_rate)
+        except (TypeError, ValueError):
+            frappe.throw(
+                f"Invalid price_list_rate for item '{item_code}': {provided_list_rate}"
+            )
+        if provided_list_rate_value < 0:
+            frappe.throw(f"Price list rate for item '{item_code}' must be non-negative")
+
+    try:
+        rate_value = float(rate)
+    except (TypeError, ValueError):
+        frappe.throw(f"Invalid rate for item '{item_code}': {rate}")
+    if rate_value < 0:
+        frappe.throw(f"Rate for item '{item_code}' must be non-negative")
+    rate = rate_value
+
     # Validate regular item exists
     if not frappe.db.exists("Item", item_code):
         error_msg = f"Item '{item_code}' does not exist"
         logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
         print(f"         ❌ {error_msg}")
         frappe.throw(error_msg)
-    
+
     # Get item details for regular item
     try:
         item_doc = frappe.get_doc("Item", item_code)
         logger.debug(f"Item validated: {item_doc.item_name}")
         print(f"         ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
 
-        catalog_rate = _resolve_item_rate(item_code, price_list, fallback_rate=rate, customer=customer)
+        catalog_rate, rate_provenance = _resolve_item_rate_with_provenance(
+            item_code, price_list, fallback_rate=rate, customer=customer
+        )
         custom_rate_override = item_data.get("custom_rate_override")
+        custom_rate_provided = _pricing_field_provided(custom_rate_override)
         effective_price_list_rate = float(catalog_rate)
-        if custom_rate_override not in (None, ""):
+        client_priced = False
+        if custom_rate_provided:
             custom_rate_override = float(custom_rate_override)
             if custom_rate_override < 0:
                 frappe.throw(f"Custom rate override for item '{item_code}' must be non-negative")
             effective_price_list_rate = custom_rate_override
+        elif rate_provenance == "client":
+            # FIX 3: nothing server-side (this customer's Item Price, a generic Item
+            # Price, or a category rate) backed this rate — it is whatever the client
+            # sent. A matched, sub-100%-discount commercial policy already requires
+            # price-list coverage for exactly this item
+            # (_validate_policy_price_list_coverage); reaching "client" provenance
+            # anyway means that guard was bypassed, so refuse instead of silently
+            # booking the client's own number. A Standard (non-policy) order has
+            # always priced this way — allowed, but a breadcrumb is left.
+            if enforce_price_list_pricing:
+                frappe.throw(
+                    f"Item '{item_code}' has no price configured in price list "
+                    f"'{price_list}' (generic, category, or for this customer), and "
+                    f"no manual rate override was supplied. Add an Item Price / "
+                    f"category rate for this item, or apply an explicit rate override."
+                )
+            client_priced = True
 
         discount_percentage = item_data.get("discount_percentage")
-        if discount_percentage not in (None, ""):
+        if _pricing_field_provided(discount_percentage):
             discount_percentage = float(discount_percentage)
             if discount_percentage < 0 or discount_percentage > 100:
                 frappe.throw(f"Discount percentage for item '{item_code}' must be between 0 and 100")
 
         discount_amount = item_data.get("discount_amount")
-        if discount_amount not in (None, ""):
+        if _pricing_field_provided(discount_amount):
             discount_amount = float(discount_amount)
             if discount_amount < 0:
                 frappe.throw(f"Discount amount for item '{item_code}' must be non-negative")
@@ -1805,7 +2033,7 @@ def _process_regular_item(item_data, logger, price_list=None, customer=None):
                 frappe.throw(
                     f"Discount amount for item '{item_code}' cannot exceed the effective unit price"
                 )
-        
+
         result = {
             "item_code": item_code,
             "qty": float(qty),
@@ -1814,13 +2042,15 @@ def _process_regular_item(item_data, logger, price_list=None, customer=None):
             "uom": item_data.get("uom") or item_doc.stock_uom,
             "is_bundle_item": False,
         }
-        if custom_rate_override not in (None, ""):
+        if custom_rate_provided:
             result["custom_rate_override"] = float(custom_rate_override)
             result["original_price_list_rate"] = float(catalog_rate)
-        if discount_percentage not in (None, ""):
+        if _pricing_field_provided(discount_percentage):
             result["discount_percentage"] = float(discount_percentage)
-        if discount_amount not in (None, ""):
+        if _pricing_field_provided(discount_amount):
             result["discount_amount"] = float(discount_amount)
+        if client_priced:
+            result["_client_priced"] = True
 
         return result
     except Exception as e:
