@@ -24,6 +24,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import frappe
 
@@ -69,6 +70,23 @@ def _any_territory():
         return "All Territories"
     rows = frappe.get_all("Territory", pluck="name", limit_page_length=1)
     return rows[0] if rows else None
+
+
+class TestLeadMapsEndpointPermission(unittest.TestCase):
+    def test_preview_requires_b2b_access_before_calling_the_service(self):
+        with (
+            patch.object(
+                leads_api,
+                "_ensure_b2b_access",
+                side_effect=frappe.PermissionError,
+            ),
+            patch(
+                "jarz_pos.services.lead_maps.request_preview"
+            ) as request_preview,
+            self.assertRaises(frappe.PermissionError),
+        ):
+            leads_api.preview_maps_link(link="https://www.google.com/maps")
+        request_preview.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -213,17 +231,75 @@ class TestSaveAndGetLead(unittest.TestCase):
         self.assertEqual(doc.custom_b2b_stage, "Lead")
         self.assertEqual(doc.status, "Open")
 
+    def test_empty_category_source_and_territory_explicitly_clear_them(self):
+        territory = _any_territory()
+        name = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Clear Selects",
+                "category": _COFFEE,
+                **({"territory": territory} if territory else {}),
+            }
+        )["name"]
+
+        leads_api.save_lead(
+            {"category": "", "source": "", "territory": ""},
+            name=name,
+        )
+
+        doc = frappe.get_doc("Lead", name)
+        self.assertFalse(doc.custom_lead_category)
+        self.assertFalse(doc.get("source"))
+        self.assertFalse(doc.get("custom_lead_source"))
+        self.assertFalse(doc.get("territory"))
+
+    def test_replacing_or_clearing_maps_url_cannot_keep_stale_coordinates(self):
+        """A new unresolved link must not point at the previous venue's pin."""
+        name = leads_api.save_lead(
+            {
+                "lead_name": "_TEST Replace Map",
+                "maps_url": "https://www.google.com/maps/place/Old/@30.0,31.0,17z",
+                "latitude": 30.0,
+                "longitude": 31.0,
+            }
+        )["name"]
+
+        leads_api.save_lead(
+            {"maps_url": "https://maps.app.goo.gl/NewUnresolved123"}, name=name
+        )
+        replaced = frappe.get_doc("Lead", name)
+        self.assertEqual(replaced.custom_maps_url, "https://maps.app.goo.gl/NewUnresolved123")
+        self.assertFalse(replaced.custom_latitude)
+        self.assertFalse(replaced.custom_longitude)
+        replaced_payload = leads_api.get_lead(name)
+        self.assertIsNone(replaced_payload["latitude"])
+        self.assertIsNone(replaced_payload["longitude"])
+
+        # Explicit empty/null keys are the Flutter clear contract.
+        leads_api.save_lead(
+            {"maps_url": "", "latitude": None, "longitude": None}, name=name
+        )
+        cleared = frappe.get_doc("Lead", name)
+        self.assertEqual(cleared.custom_maps_url, "")
+        self.assertFalse(cleared.custom_latitude)
+        self.assertFalse(cleared.custom_longitude)
+
     def test_update_unknown_lead_throws(self):
         with self.assertRaises(Exception):
             leads_api.save_lead({"tier": "A"}, name="Lead-does-not-exist")
 
     # --- 3) get_lead flat fields + branches + addresses + notes -----------
     def test_get_lead_detail_shape(self):
+        territory = _any_territory()
         name = leads_api.save_lead(
             {
                 "lead_name": "_TEST Detail",
+                "company_name": "_TEST Detail Company",
                 "category": _COFFEE,
+                "phone": "0222222222",
+                "mobile_no": "0100000002",
+                "email_id": "detail@example.com",
                 "notes": "detail notes",
+                **({"territory": territory} if territory else {}),
                 "branches": [
                     {
                         "branch_name": "Main",
@@ -247,6 +323,12 @@ class TestSaveAndGetLead(unittest.TestCase):
         self.assertEqual(detail["category"], _COFFEE)
         self.assertEqual(detail["b2b_stage"], "Lead")
         self.assertEqual(detail["status"], "Open")
+        self.assertEqual(detail["company_name"], "_TEST Detail Company")
+        self.assertEqual(detail["phone"], "0222222222")
+        self.assertEqual(detail["mobile_no"], "0100000002")
+        self.assertEqual(detail["email_id"], "detail@example.com")
+        if territory:
+            self.assertEqual(detail["territory"], territory)
         # Branches mapped from the child table.
         self.assertEqual(len(detail["branches"]), 2)
         self.assertEqual(detail["branches"][0]["branch_name"], "Main")
@@ -262,6 +344,17 @@ class TestSaveAndGetLead(unittest.TestCase):
     def test_get_lead_unknown_throws(self):
         with self.assertRaises(Exception):
             leads_api.get_lead("Lead-does-not-exist")
+
+    def test_detail_phone_is_raw_and_does_not_copy_mobile_fallback(self):
+        name = leads_api.save_lead(
+            {"lead_name": "_TEST Raw Phones", "mobile_no": "0100000003"}
+        )["name"]
+        # ERPNext's Lead validation copies mobile_no into phone. Clear the DB
+        # column directly to exercise the API mapping distinction itself.
+        frappe.db.set_value("Lead", name, "phone", None, update_modified=False)
+        detail = leads_api.get_lead(name)
+        self.assertFalse(detail["phone"])
+        self.assertEqual(detail["mobile_no"], "0100000003")
 
     # --- 4) get_leads list shape + parsed lists + coarse filter -----------
     def test_get_leads_shape_and_category_filter(self):

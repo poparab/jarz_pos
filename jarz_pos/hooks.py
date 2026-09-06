@@ -510,6 +510,7 @@ try:
     from jarz_pos.api import leads as _leads
     _leads.get_leads
     _leads.get_lead
+    _leads.preview_maps_link
     _leads.save_lead
     _leads.set_lead_address
     _leads.get_lead_categories

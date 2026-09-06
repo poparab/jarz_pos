@@ -33,6 +33,7 @@ from jarz_pos.api.crm import (
     _ensure_b2b_access,
     _has_field,
 )
+from jarz_pos.utils import geo
 
 DEFAULT_LEAD_CATEGORY = "Coffee"
 
@@ -304,6 +305,11 @@ def _rating_or_none(value):
 
 def _map_lead_row(row):
     """Map a flat Lead row (dict) to the frozen catalog output shape."""
+    latitude = _float_or_none(row.get("custom_latitude"))
+    longitude = _float_or_none(row.get("custom_longitude"))
+    if not geo.is_valid_coordinate(latitude, longitude):
+        latitude = None
+        longitude = None
     return {
         "name": row.get("name"),
         "source_brand_id": row.get("custom_source_brand_id"),
@@ -352,8 +358,8 @@ def _map_lead_row(row):
         "status": row.get("status"),
         "b2b_stage": row.get("custom_b2b_stage"),
         "last_verified": _str_or_none(row.get("custom_last_verified")),
-        "latitude": _float_or_none(row.get("custom_latitude")),
-        "longitude": _float_or_none(row.get("custom_longitude")),
+        "latitude": latitude,
+        "longitude": longitude,
         # Manual-inspection verdict (see set_lead_suitability).
         "not_suitable": _bool(row.get("custom_not_suitable")),
         "not_suitable_reason": row.get("custom_not_suitable_reason") or "",
@@ -706,6 +712,19 @@ def get_lead(name):
     flat = {f: doc.get(f) for f in _lead_query_fields()}
     flat["name"] = doc.name
     result = _map_lead_row(flat)
+    # Exact editable values. The catalog card's phone intentionally falls back
+    # to mobile_no for display; the edit form must not copy that fallback into
+    # the distinct Lead.phone field when it saves an unchanged record.
+    result.update(
+        {
+            "company_name": doc.get("company_name"),
+            "phone": doc.get("phone"),
+            "mobile_no": doc.get("mobile_no"),
+            "email_id": doc.get("email_id"),
+            "source": doc.get("source") or doc.get("custom_lead_source"),
+            "territory": doc.get("territory"),
+        }
+    )
 
     # Branches (custom_branches child table).
     branches = []
@@ -894,6 +913,52 @@ _LIST_FIELD_MAP = {
 
 
 @frappe.whitelist()
+def preview_maps_link(link=None, request_id=None):
+    """Preview a Google Maps URL as optional, reviewable lead suggestions.
+
+    This call never writes a Lead. The Flutter form applies returned values only
+    to blank fields, and a partial/unresolved result still leaves the pasted URL
+    available to save.
+    """
+    try:
+        _ensure_b2b_access()
+    except frappe.PermissionError:
+        raise
+    except frappe.ValidationError as exc:
+        # The shared historical B2B gate raises ValidationError. This endpoint
+        # exposes a strict permission failure so HTTP clients and release probes
+        # can distinguish access denial from an invalid Maps URL.
+        frappe.throw(str(exc), frappe.PermissionError)
+    try:
+        from jarz_pos.services.lead_maps import request_preview
+
+        return request_preview(
+            link,
+            request_id=request_id,
+            user=frappe.session.user,
+        )
+    except frappe.PermissionError:
+        raise
+    except Exception:
+        frappe.log_error(
+            title="leads.preview_maps_link failed",
+            message=frappe.get_traceback(),
+        )
+        return {
+            "success": False,
+            "pending": False,
+            "url": str(link or "").strip(),
+            "canonical_url": str(link or "").strip(),
+            "resolved": False,
+            "short_link": False,
+            "metadata_source": "none",
+            "warnings": ["Could not inspect this link; it can still be saved manually."],
+            "reason": "preview_failed",
+            "suggestions": {"maps_url": str(link or "").strip()},
+        }
+
+
+@frappe.whitelist()
 def save_lead(payload, name=None):
     """Create (``name`` is None) or update a catalog Lead from a payload dict.
 
@@ -921,6 +986,18 @@ def save_lead(payload, name=None):
             frappe.throw(f"Lead '{name}' not found.")
         doc = frappe.get_doc("Lead", name)
 
+    # A different Maps link cannot safely keep the previous link's coordinates.
+    # Clients normally send all three keys, but this invariant also protects an
+    # older/partial client that sends only the replacement URL.
+    if "maps_url" in payload:
+        old_maps_url = str(doc.get("custom_maps_url") or "").strip()
+        new_maps_url = str(payload.get("maps_url") or "").strip()
+        if new_maps_url != old_maps_url:
+            if "latitude" not in payload:
+                doc.set("custom_latitude", None)
+            if "longitude" not in payload:
+                doc.set("custom_longitude", None)
+
     # Scalar fields.
     for key, field in _SCALAR_FIELD_MAP.items():
         if key in payload:
@@ -944,21 +1021,33 @@ def save_lead(payload, name=None):
     # referenced master record or Select option actually exists, so an unknown
     # value is silently ignored rather than raising. ``email_id`` is handled via
     # ``_SCALAR_FIELD_MAP`` above. Applied on both create and update.
-    source = payload.get("source")
-    if source and _has_field("Lead", "source") and frappe.db.exists(
-        "Lead Source", source
-    ):
-        doc.set("source", source)
-    if source and _has_field("Lead", "custom_lead_source"):
-        if source in _custom_lead_source_options():
-            doc.set("custom_lead_source", source)
-    territory = payload.get("territory")
-    if (
-        territory
-        and _has_field("Lead", "territory")
-        and frappe.db.exists("Territory", territory)
-    ):
-        doc.set("territory", territory)
+    if "source" in payload:
+        source = str(payload.get("source") or "").strip()
+        if not source:
+            if _has_field("Lead", "source"):
+                doc.set("source", None)
+            if _has_field("Lead", "custom_lead_source"):
+                doc.set("custom_lead_source", None)
+        else:
+            if _has_field("Lead", "source") and frappe.db.exists(
+                "Lead Source", source
+            ):
+                doc.set("source", source)
+            if (
+                _has_field("Lead", "custom_lead_source")
+                and source in _custom_lead_source_options()
+            ):
+                doc.set("custom_lead_source", source)
+    if "territory" in payload:
+        territory = str(payload.get("territory") or "").strip()
+        if not territory and _has_field("Lead", "territory"):
+            doc.set("territory", None)
+        elif (
+            territory
+            and _has_field("Lead", "territory")
+            and frappe.db.exists("Territory", territory)
+        ):
+            doc.set("territory", territory)
 
     # Contacts child table (replace wholesale when provided). Omitting the key
     # leaves the existing people untouched, so the catalog importer and every

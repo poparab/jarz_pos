@@ -165,6 +165,7 @@ jobs:
             test_b2b_reorder_forecast
             test_b2b_pos_bridge_delivery
             test_leads_api
+            test_lead_maps
             # Journey notes (the rep's dated field diary). NOTE: this module
             # SKIPS itself until the Jarz Journey Note DocType exists, and this
             # job never migrates — so the first run after it lands is vacuous
