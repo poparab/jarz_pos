@@ -512,7 +512,12 @@ def _resolve_bom_row(bom_name: str) -> Dict[str, Any]:
     return dict(row) if row else {}
 
 
-def _resolve_required_material_rows(bom_name: str, company: str, qty: float) -> List[Dict[str, Any]]:
+def _resolve_required_material_rows(
+    bom_name: str,
+    company: str,
+    qty: float,
+    material_selections: Any = None,
+) -> List[Dict[str, Any]]:
     """Components of one batch, read from ``api/manufacturing``.
 
     Deliberately not a second implementation of the bill read: the transfer that
@@ -530,7 +535,10 @@ def _resolve_required_material_rows(bom_name: str, company: str, qty: float) -> 
     """
     from jarz_pos.api.manufacturing import _get_required_material_rows
 
-    return _get_required_material_rows(bom_name, company, qty, fetch_exploded=0)
+    kwargs: Dict[str, Any] = {"fetch_exploded": 0}
+    if material_selections:
+        kwargs["material_selections"] = material_selections
+    return _get_required_material_rows(bom_name, company, qty, **kwargs)
 
 
 def _component_uom(row: Mapping[str, Any]) -> str:
@@ -733,6 +741,7 @@ def preview_base_batch(
     bom_name: Optional[str] = None,
     batches: Any = 1,
     company: Optional[str] = None,
+    material_selections: Any = None,
 ) -> Dict[str, Any]:
     """What one run of a base would consume, cost and produce.
 
@@ -785,7 +794,9 @@ def preview_base_batch(
     company = _coerce_str(company) or _coerce_str(bom.get("company")) or _resolve_company(None)
     item_qty = batch_count * batch_yield
 
-    rows = _resolve_required_material_rows(bom_name, company, item_qty)
+    rows = _resolve_required_material_rows(
+        bom_name, company, item_qty, material_selections=material_selections
+    )
 
     components: List[Dict[str, Any]] = []
     estimated_cost = 0.0
@@ -810,12 +821,15 @@ def preview_base_batch(
         components.append(
             {
                 "item_code": component_code,
+                "original_item_code": row.get("original_item_code") or component_code,
                 "item_name": row.get("item_name") or component_code,
                 "uom": _component_uom(row),
                 "required_qty": required_qty,
                 "available_qty": available_qty,
                 "shortfall": shortfall,
                 "source_warehouse": row.get("source_warehouse") or None,
+                "valuation_rate": rate,
+                "estimated_amount": rate * required_qty,
             }
         )
 

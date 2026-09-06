@@ -819,8 +819,14 @@ def build_basket_rollup(lines: Sequence[Dict[str, Any]], company: str) -> Dict[s
     for index, line in enumerate(lines or []):
         bom_name = line.get("bom_name")
         line_company = _resolve_bom_company(bom_name) or company
+        kwargs: Dict[str, Any] = {"fetch_exploded": 0}
+        if line.get("material_selections"):
+            kwargs["material_selections"] = line.get("material_selections")
         components = required_rows(
-            bom_name, line_company, float(line.get("item_qty") or 0), fetch_exploded=0
+            bom_name,
+            line_company,
+            float(line.get("item_qty") or 0),
+            **kwargs,
         )
         sets.append(
             {

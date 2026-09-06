@@ -194,6 +194,25 @@ class TestInventoryCountAPI(unittest.TestCase):
 			with self.assertRaises(Exception):
 				inventory_count.list_items_for_count(warehouse="")
 
+	def test_alternative_count_groups_dedupe_overlapping_two_way_links(self):
+		rows = [
+			{"item_code": "ALDIA", "item_name": "Aldia", "stock_uom": "Kg", "current_qty": 3.547},
+			{"item_code": "PURATOS", "item_name": "Puratos", "stock_uom": "Kg", "current_qty": 25},
+			{"item_code": "FUTURE", "item_name": "Future", "stock_uom": "Kg", "current_qty": 2},
+		]
+		links = [
+			{"item_code": "ALDIA", "alternative_item_code": "PURATOS"},
+			{"item_code": "PURATOS", "alternative_item_code": "FUTURE"},
+		]
+		with patch.object(
+			inventory_count.frappe, "get_all", side_effect=[links, links]
+		):
+			inventory_count._attach_alternative_count_groups(rows)
+
+		self.assertEqual({"ALDIA|FUTURE|PURATOS"}, {row["alternative_group_key"] for row in rows})
+		self.assertEqual([30.547] * 3, [row["combined_net_current_qty"] for row in rows])
+		self.assertTrue(all(len(row["linked_items"]) == 3 for row in rows))
+
 	def test_list_items_for_count_applies_resolved_profile_items(self):
 		expected_uoms = [{"uom": "Nos", "conversion_factor": 1.0}]
 

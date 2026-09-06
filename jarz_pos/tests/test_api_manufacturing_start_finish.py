@@ -163,6 +163,16 @@ class TestStartProductionBatch(unittest.TestCase):
         self.assertEqual("FLOUR", result["components"][0]["item_code"])
         self.assertEqual(240.0, result["components"][0]["estimated_amount"])
 
+    def test_selected_alternative_is_applied_only_to_the_material_transfer(self):
+        selections = {"ALDIA": "PURATOS"}
+        mock_se = MagicMock(return_value="STE-TRANSFER")
+
+        _, mock_ensure_wo, _ = self._run(mock_se, material_selections=selections)
+
+        self.assertEqual(selections, mock_ensure_wo.call_args.args[0]["material_selections"])
+        self.assertEqual(selections, mock_se.call_args.kwargs["material_selections"])
+        self.assertEqual("Jarz Co", mock_se.call_args.kwargs["company"])
+
     def test_stamps_who_started_the_batch_and_when(self):
         _, _, mock_stamp = self._run(MagicMock(return_value="STE-TRANSFER"))
 

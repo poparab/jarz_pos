@@ -241,6 +241,48 @@ class TestManufacturingPrecheck(unittest.TestCase):
         mock_set_work_order_actual_dates.assert_called_once_with("WO-0001", scheduled_dt)
         self.assertTrue(result["results"][0]["ok"])
 
+    def test_submit_work_orders_applies_selection_to_transfer_then_finishes_natively(self):
+        from jarz_pos.api import manufacturing
+
+        selections = {"ALDIA": "PURATOS"}
+        line = {
+            "item_code": "CAKE",
+            "bom_name": "BOM-CAKE",
+            "item_qty": 5,
+            "material_selections": selections,
+        }
+        scheduled_dt = datetime(2026, 5, 8, 14, 30, 0)
+        wo_doc = MagicMock(status="Completed")
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_basket_shortages", return_value=[]
+        ), patch(
+            "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.api.manufacturing._assert_material_availability"
+        ), patch(
+            "jarz_pos.api.manufacturing._get_mfg_defaults", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_work_order_warehouses", return_value={}
+        ), patch(
+            "jarz_pos.api.manufacturing._resolve_scheduled_datetime", return_value=scheduled_dt
+        ), patch(
+            "jarz_pos.api.manufacturing._ensure_work_order", return_value="WO-1"
+        ), patch(
+            "jarz_pos.api.manufacturing._make_and_submit_se", side_effect=["STE-1", "STE-2"]
+        ) as mock_se, patch(
+            "jarz_pos.api.manufacturing._set_work_order_actual_dates"
+        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.get_doc.return_value = wo_doc
+            result = manufacturing.submit_work_orders([line])
+
+        first, second = mock_se.call_args_list
+        self.assertEqual("Material Transfer for Manufacture", first.args[1])
+        self.assertEqual(selections, first.kwargs["material_selections"])
+        self.assertEqual("Manufacture", second.args[1])
+        self.assertNotIn("material_selections", second.kwargs)
+        self.assertTrue(result["results"][0]["ok"])
+
     def test_submit_work_orders_reports_resolved_work_order_warehouses(self):
         from jarz_pos.api import manufacturing
 

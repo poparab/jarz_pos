@@ -37,6 +37,77 @@ def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
     return convs
 
 
+def _attach_alternative_count_groups(rows: List[Dict[str, Any]]) -> None:
+    """Annotate explicit two-way Item Alternative networks without merging stock."""
+    by_code = {str(row.get("item_code") or ""): row for row in rows if row.get("item_code")}
+    codes = sorted(by_code)
+    if len(codes) < 2:
+        return
+
+    forward = frappe.get_all(
+        "Item Alternative",
+        filters={"two_way": 1, "item_code": ["in", codes]},
+        fields=["item_code", "alternative_item_code"],
+    )
+    reverse = frappe.get_all(
+        "Item Alternative",
+        filters={"two_way": 1, "alternative_item_code": ["in", codes]},
+        fields=["item_code", "alternative_item_code"],
+    )
+    graph: Dict[str, Set[str]] = {code: set() for code in codes}
+    seen_edges: Set[Tuple[str, str]] = set()
+    for link in [*(forward or []), *(reverse or [])]:
+        left = str(link.get("item_code") or "")
+        right = str(link.get("alternative_item_code") or "")
+        edge = tuple(sorted((left, right)))
+        if not left or not right or edge in seen_edges:
+            continue
+        seen_edges.add(edge)
+        if left not in by_code or right not in by_code:
+            continue
+        if by_code[left].get("stock_uom") != by_code[right].get("stock_uom"):
+            continue
+        graph[left].add(right)
+        graph[right].add(left)
+
+    visited: Set[str] = set()
+    for code in codes:
+        if code in visited or not graph[code]:
+            continue
+        pending = [code]
+        component: Set[str] = set()
+        while pending:
+            member = pending.pop()
+            if member in component:
+                continue
+            component.add(member)
+            pending.extend(graph[member] - component)
+        visited.update(component)
+
+        member_codes = sorted(component)
+        members = [
+            {
+                "item_code": member,
+                "item_name": by_code[member].get("item_name") or member,
+                "brand": by_code[member].get("brand"),
+                "stock_uom": by_code[member].get("stock_uom") or DEFAULT_UOM,
+                "current_qty": float(by_code[member].get("current_qty") or 0),
+                "uoms": by_code[member].get("uoms") or [],
+            }
+            for member in member_codes
+        ]
+        group = {
+            "alternative_group_key": "|".join(member_codes),
+            "linked_items_display": " + ".join(str(member["item_name"]) for member in members),
+            "combined_net_current_qty": sum(
+                float(member["current_qty"]) for member in members
+            ),
+            "linked_items": members,
+        }
+        for member in member_codes:
+            by_code[member].update(group)
+
+
 @frappe.whitelist()
 def list_warehouses(company: Optional[str] = None) -> List[Dict[str, Any]]:
     _ensure_manager_access()
@@ -341,6 +412,7 @@ def list_items_for_count(
         "name as item_code",
         "item_name",
         "item_group",
+        "brand",
         "stock_uom",
         "has_batch_no",
         "has_serial_no",
@@ -362,6 +434,7 @@ def list_items_for_count(
             "item_code": code,
             "item_name": it.get("item_name") or code,
             "item_group": it.get("item_group"),
+            "brand": it.get("brand"),
             "stock_uom": stock_uom,
             "has_batch_no": bool(it.get("has_batch_no") or 0),
             "has_serial_no": bool(it.get("has_serial_no") or 0),
@@ -369,6 +442,7 @@ def list_items_for_count(
             "uoms": _get_uom_conversions(code),
             "valuation_rate": val,
         })
+    _attach_alternative_count_groups(out)
     return out
 
 

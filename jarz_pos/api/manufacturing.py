@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import date as _date_cls, datetime as _datetime_cls
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +43,12 @@ RUNNING_WORK_ORDER_FIELDS = [
 ]
 # Custom fields that only exist once the fixture has migrated.
 JARZ_WORK_ORDER_FIELDS = ["jarz_started_by", "jarz_started_at"]
+
+
+class MaterialSelectionError(frappe.ValidationError):
+    """An explicit Item Alternative is stale or incompatible with this BOM."""
+
+
 try:
     from frappe import _dict as FrappeDict  # type: ignore
 except Exception:  # pragma: no cover
@@ -52,10 +59,16 @@ except Exception:  # pragma: no cover
     class Document:  # type: ignore
         pass
 try:
-    from frappe.utils import get_datetime  # type: ignore
+    from frappe.utils import get_datetime, getdate, now_datetime  # type: ignore
 except Exception:  # pragma: no cover
     def get_datetime(x):  # type: ignore
         return x
+
+    def getdate(x):  # type: ignore
+        return x if isinstance(x, _date_cls) else _date_cls.fromisoformat(str(x))
+
+    def now_datetime():  # type: ignore
+        return _datetime_cls.now()
 
 try:
     # ERPNext helper to build Stock Entry for a Work Order
@@ -338,7 +351,7 @@ def _resolve_wip_available_materials(work_order: str) -> List[Dict[str, Any]]:
 
 
 def _resolve_work_order_source_warehouses(work_order: str) -> Dict[str, str]:
-    """``item_code -> source_warehouse`` from the Work Order Item table."""
+    """Source warehouses for recipe Items and the alternatives actually moved."""
     try:
         rows = frappe.get_all(
             "Work Order Item",
@@ -346,7 +359,7 @@ def _resolve_work_order_source_warehouses(work_order: str) -> Dict[str, str]:
             fields=["item_code", "source_warehouse"],
         )
     except Exception:
-        return {}
+        rows = []
     out: Dict[str, str] = {}
     for row in rows or []:
         try:
@@ -354,6 +367,31 @@ def _resolve_work_order_source_warehouses(work_order: str) -> Dict[str, str]:
                 out[row["item_code"]] = row["source_warehouse"]
         except Exception:
             continue
+
+    # Work Order Item retains the BOM code, while WIP contains the chosen
+    # alternative.  The submitted transfer is the durable bridge between them.
+    try:
+        transfer_rows = frappe.db.sql(
+            """
+            SELECT sed.item_code, sed.original_item, sed.s_warehouse
+            FROM `tabStock Entry Detail` sed
+            INNER JOIN `tabStock Entry` se ON se.name = sed.parent
+            WHERE se.work_order = %(work_order)s
+              AND se.docstatus = 1
+              AND se.purpose = 'Material Transfer for Manufacture'
+            """,
+            {"work_order": work_order},
+            as_dict=True,
+        )
+    except Exception:
+        transfer_rows = []
+    for row in transfer_rows or []:
+        source = row.get("s_warehouse")
+        if not source:
+            continue
+        out[str(row.get("item_code") or "")] = source
+        if row.get("original_item"):
+            out[str(row.get("original_item"))] = source
     return out
 
 
@@ -499,7 +537,11 @@ def _price_batch_components(line: Dict[str, Any], company: str) -> Dict[str, Any
     figure — pricing the explosion instead priced items that never move.
     """
     rows = _get_required_material_rows(
-        line["bom_name"], company, float(line["item_qty"]), fetch_exploded=0
+        line["bom_name"],
+        company,
+        float(line["item_qty"]),
+        fetch_exploded=0,
+        material_selections=line.get("material_selections"),
     )
     priced: List[Dict[str, Any]] = []
     total = 0.0
@@ -690,11 +732,237 @@ def _get_live_stock_qty(item_code: str, warehouse: str) -> float:
         return 0.0
 
 
+def _coerce_material_selections(value: Any) -> Dict[str, str]:
+    """Normalize ``{BOM item: actual stock item}`` from an HTTP argument."""
+    if value in (None, ""):
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            frappe.throw(_("Invalid JSON payload for material_selections"))
+    if not isinstance(value, dict):
+        frappe.throw(_("material_selections must be an object"))
+
+    selections: Dict[str, str] = {}
+    for original, selected in value.items():
+        original_code = _coerce_str(original)
+        selected_code = _coerce_str(selected)
+        if not original_code or not selected_code:
+            frappe.throw(_("material_selections must contain non-empty item codes"))
+        selections[original_code] = selected_code
+    return selections
+
+
+def _get_material_item(item_code: str) -> Optional[Dict[str, Any]]:
+    row = frappe.db.get_value(
+        "Item",
+        item_code,
+        [
+            "name",
+            "item_name",
+            "brand",
+            "stock_uom",
+            "disabled",
+            "is_stock_item",
+            "include_item_in_manufacturing",
+            "allow_alternative_item",
+            "has_batch_no",
+            "has_serial_no",
+            "end_of_life",
+        ],
+        as_dict=True,
+    )
+    return dict(row) if row else None
+
+
+def _direct_two_way_alternative_codes(item_code: str) -> List[str]:
+    """Return direct symmetric links only; directed links never imply a family."""
+    forward = frappe.get_all(
+        "Item Alternative",
+        filters={"item_code": item_code, "two_way": 1},
+        pluck="alternative_item_code",
+    )
+    reverse = frappe.get_all(
+        "Item Alternative",
+        filters={"alternative_item_code": item_code, "two_way": 1},
+        pluck="item_code",
+    )
+    return sorted(
+        {
+            _coerce_str(code)
+            for code in [*(forward or []), *(reverse or [])]
+            if _coerce_str(code) and _coerce_str(code) != item_code
+        }
+    )
+
+
+def _validate_material_selection(
+    original_item: str,
+    selected_item: str,
+    company: str,
+    source_warehouse: Any = None,
+) -> Dict[str, Any]:
+    """Validate an explicit one-for-one recipe substitution at use time."""
+    original_item = _coerce_str(original_item)
+    selected_item = _coerce_str(selected_item)
+    if not original_item or not selected_item:
+        frappe.throw(_("Material selection item codes are required"), MaterialSelectionError)
+
+    original = _get_material_item(original_item)
+    selected = _get_material_item(selected_item)
+    if not original or not selected:
+        frappe.throw(
+            _("Material selection references an Item that does not exist"),
+            MaterialSelectionError,
+        )
+
+    if selected_item != original_item and selected_item not in _direct_two_way_alternative_codes(
+        original_item
+    ):
+        frappe.throw(
+            _("Item {0} is not a direct two-way alternative for {1}").format(
+                selected_item, original_item
+            ),
+            MaterialSelectionError,
+        )
+
+    for row in (original, selected):
+        if int(row.get("disabled") or 0):
+            frappe.throw(
+                _("Item {0} is disabled").format(row.get("name")), MaterialSelectionError
+            )
+        if not int(row.get("is_stock_item") or 0) or not int(
+            row.get("include_item_in_manufacturing") or 0
+        ):
+            frappe.throw(
+                _("Item {0} cannot be consumed in manufacturing").format(row.get("name")),
+                MaterialSelectionError,
+            )
+        end_of_life = row.get("end_of_life")
+        if end_of_life and str(end_of_life) != "0000-00-00":
+            try:
+                expired = getdate(end_of_life) <= now_datetime().date()
+            except (TypeError, ValueError, AttributeError):
+                expired = False
+            if expired:
+                frappe.throw(
+                    _("Item {0} has reached its end of life").format(row.get("name")),
+                    MaterialSelectionError,
+                )
+
+    if selected_item != original_item:
+        if not int(original.get("allow_alternative_item") or 0) or not int(
+            selected.get("allow_alternative_item") or 0
+        ):
+            frappe.throw(_("Both Items must allow alternative items"), MaterialSelectionError)
+        if original.get("stock_uom") != selected.get("stock_uom"):
+            frappe.throw(
+                _("Items {0} and {1} must use the same Stock UOM").format(
+                    original_item, selected_item
+                ),
+                MaterialSelectionError,
+            )
+        for field, label in (("has_batch_no", "batch"), ("has_serial_no", "serial")):
+            if int(original.get(field) or 0) != int(selected.get(field) or 0):
+                frappe.throw(
+                    _("Items {0} and {1} must have matching {2} tracking").format(
+                        original_item, selected_item, label
+                    ),
+                    MaterialSelectionError,
+                )
+        if int(selected.get("has_batch_no") or 0) or int(selected.get("has_serial_no") or 0):
+            frappe.throw(
+                _("Tracked Items cannot be selected as recipe alternatives from Jarz POS yet"),
+                MaterialSelectionError,
+            )
+
+    warehouse = _coerce_str(source_warehouse)
+    if warehouse and _coerce_str(frappe.db.get_value("Warehouse", warehouse, "company")) != company:
+        frappe.throw(
+            _("Source Warehouse {0} does not belong to Company {1}").format(warehouse, company),
+            MaterialSelectionError,
+        )
+    return selected
+
+
+def _apply_material_selections(
+    rows: List[Dict[str, Any]], selections: Any, company: str
+) -> List[Dict[str, Any]]:
+    selections = _coerce_material_selections(selections)
+    if not selections:
+        return rows
+
+    original_codes = {str(row.get("item_code") or "") for row in rows}
+    unknown = sorted(set(selections) - original_codes)
+    if unknown:
+        frappe.throw(
+            _("material_selections contains Items that are not in this BOM: {0}").format(
+                ", ".join(unknown)
+            )
+        )
+
+    selected_rows: List[Dict[str, Any]] = []
+    selected_by_original: Dict[str, str] = {}
+    for row in rows:
+        original_item = str(row.get("item_code") or "")
+        selected_item = selections.get(original_item, original_item)
+        if selected_item != original_item:
+            blocked_reason = _material_selection_uom_error(row)
+            if blocked_reason:
+                frappe.throw(blocked_reason, MaterialSelectionError)
+        previous_original = selected_by_original.get(selected_item)
+        if previous_original and previous_original != original_item:
+            frappe.throw(
+                _(
+                    "Items {0} and {1} cannot both use {2} in one production batch"
+                ).format(previous_original, original_item, selected_item),
+                MaterialSelectionError,
+            )
+        selected_by_original[selected_item] = original_item
+        item = _validate_material_selection(
+            original_item, selected_item, company, row.get("source_warehouse")
+        )
+        selected_row = dict(row)
+        selected_row["original_item_code"] = original_item
+        selected_row["item_code"] = selected_item
+        selected_row["item_name"] = item.get("item_name") or selected_item
+        selected_row["stock_uom"] = item.get("stock_uom")
+        selected_row["uom"] = item.get("stock_uom") or row.get("uom") or DEFAULT_UOM
+        warehouse = selected_row.get("source_warehouse")
+        selected_row["available_qty"] = (
+            _get_live_stock_qty(selected_item, warehouse) if warehouse else 0.0
+        )
+        selected_rows.append(selected_row)
+    return selected_rows
+
+
+def _material_selection_uom_error(row: Dict[str, Any]) -> str:
+    """Explain when core backflush cannot preserve an alternative's stock qty."""
+    bom_uom = _coerce_str(row.get("bom_uom") or row.get("uom"))
+    stock_uom = _coerce_str(row.get("stock_uom") or row.get("uom"))
+    try:
+        conversion_factor = float(row.get("bom_conversion_factor") or 1)
+    except (TypeError, ValueError):
+        conversion_factor = 0.0
+    if (
+        bom_uom == stock_uom
+        and math.isfinite(conversion_factor)
+        and abs(conversion_factor - 1) <= QTY_TOLERANCE
+    ):
+        return ""
+    return _(
+        "Recipe Item {0} must use its Stock UOM {1} with conversion factor 1 "
+        "before an alternative can be selected"
+    ).format(row.get("item_code"), stock_uom or DEFAULT_UOM)
+
+
 def _get_required_material_rows(
     bom_name: str,
     company: str,
     qty: float,
     fetch_exploded: int = 0,
+    material_selections: Any = None,
 ) -> List[Dict[str, Any]]:
     """Required-material rows for a BOM, at either level of the bill.
 
@@ -745,6 +1013,11 @@ def _get_required_material_rows(
                 "item_code": item_code,
                 "item_name": item.get("item_name") or item_code,
                 "uom": component_uom(item),
+                # ERPNext's Manufacture backflush replaces an alternative's
+                # UOM but retains this unconverted BOM quantity.  Preserve the
+                # authored values so we can reject unsafe non-1:1 selections.
+                "bom_uom": item.get("uom") or item.get("stock_uom") or None,
+                "bom_conversion_factor": item.get("conversion_factor") or 1,
                 # Additive: never substituted, never defaulted, so a caller can
                 # tell "no unit was stated" from "the unit really is Nos".
                 "stock_uom": item.get("stock_uom") or None,
@@ -753,7 +1026,7 @@ def _get_required_material_rows(
                 "available_qty": _get_live_stock_qty(item_code, source_warehouse) if source_warehouse else 0.0,
             }
         )
-    return rows
+    return _apply_material_selections(rows, material_selections, company)
 
 
 def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Dict[str, Any]]:
@@ -771,7 +1044,11 @@ def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Di
     """
     issues: List[Dict[str, Any]] = []
     required_rows = _get_required_material_rows(
-        line["bom_name"], company, float(line["item_qty"]), fetch_exploded=0
+        line["bom_name"],
+        company,
+        float(line["item_qty"]),
+        fetch_exploded=0,
+        material_selections=line.get("material_selections"),
     )
     for row in required_rows:
         source_warehouse = row.get("source_warehouse")
@@ -1065,6 +1342,7 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
         "components": [
             {
                 "item_code": c["item_code"],
+                "original_item_code": c.get("original_item_code") or c["item_code"],
                 "item_name": c.get("item_name") or c["item_code"],
                 "uom": c.get("uom") or DEFAULT_UOM,
                 "qty_per_bom": float(c.get("required_qty") or 0),
@@ -1073,6 +1351,86 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
             }
             for c in comps
         ],
+    }
+
+
+@frappe.whitelist()
+def get_material_options(bom_name: str, qty: Any = 1) -> Dict[str, Any]:
+    """Return explicit compatible Item Alternatives for every BOM component."""
+    _ensure_production_view_access()
+    bom_name = _coerce_str(bom_name)
+    if not bom_name:
+        frappe.throw(_("bom_name is required"))
+    try:
+        requested_qty = float(qty or 0)
+    except (TypeError, ValueError):
+        frappe.throw(_("qty must be a finite number greater than zero"))
+    if not math.isfinite(requested_qty) or requested_qty <= 0:
+        frappe.throw(_("qty must be a finite number greater than zero"))
+
+    company = _get_bom_company(bom_name) or _get_default_company()
+    if not company:
+        frappe.throw(_("Company is not configured on BOM and no Default Company set"))
+
+    from jarz_pos.api.inventory_count import _get_uom_conversions
+
+    components: List[Dict[str, Any]] = []
+    for row in _get_required_material_rows(
+        bom_name, company, requested_qty, fetch_exploded=0
+    ):
+        original_item = str(row.get("item_code") or "")
+        blocked_reason = _material_selection_uom_error(row)
+        candidate_codes = [original_item, *_direct_two_way_alternative_codes(original_item)]
+        options: List[Dict[str, Any]] = []
+        for candidate in dict.fromkeys(candidate_codes):
+            if candidate != original_item and blocked_reason:
+                continue
+            try:
+                item = _validate_material_selection(
+                    original_item, candidate, company, row.get("source_warehouse")
+                )
+            except MaterialSelectionError:
+                if candidate == original_item:
+                    raise
+                continue
+            warehouse = row.get("source_warehouse")
+            options.append(
+                {
+                    "item_code": candidate,
+                    "item_name": item.get("item_name") or candidate,
+                    "brand": item.get("brand"),
+                    "stock_uom": item.get("stock_uom") or row.get("uom") or DEFAULT_UOM,
+                    "source_warehouse": warehouse,
+                    "available_qty": (
+                        _get_live_stock_qty(candidate, warehouse) if warehouse else 0.0
+                    ),
+                    "valuation_rate": _resolve_valuation_rate(candidate, warehouse),
+                    "uoms": _get_uom_conversions(candidate),
+                    "is_recipe_item": candidate == original_item,
+                }
+            )
+
+        components.append(
+            {
+                "original_item_code": original_item,
+                "original_item_name": row.get("item_name") or original_item,
+                "required_qty": float(row.get("required_qty") or 0),
+                "stock_uom": row.get("stock_uom") or row.get("uom") or DEFAULT_UOM,
+                "source_warehouse": row.get("source_warehouse"),
+                "combined_available_qty": sum(
+                    max(0.0, float(o["available_qty"])) for o in options
+                ),
+                "linked_items_display": " + ".join(str(o["item_name"]) for o in options),
+                "alternative_selection_blocked_reason": blocked_reason or None,
+                "options": options,
+            }
+        )
+
+    return {
+        "bom_name": bom_name,
+        "company": company,
+        "qty": requested_qty,
+        "components": components,
     }
 
 
@@ -1111,6 +1469,16 @@ def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, s
         # you must change the other, or the floor is checked against a bill of
         # materials no Work Order will ever consume.
         "use_multi_level_bom": 0,
+        # ERPNext only carries ``original_item`` through transfer and finish
+        # when the Work Order explicitly allows alternatives.
+        "allow_alternative_item": int(
+            any(
+                original != selected
+                for original, selected in _coerce_material_selections(
+                    line.get("material_selections")
+                ).items()
+            )
+        ),
         # Set defaults if present
         "wip_warehouse": wip_wh,
         "fg_warehouse": fg_wh,
@@ -1143,7 +1511,94 @@ def _resolve_make_stock_entry():
         return None
 
 
-def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt: Any) -> str:
+def _entry_value(row: Any, field: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(field, default)
+    return getattr(row, field, default)
+
+
+def _set_entry_value(row: Any, field: str, value: Any) -> None:
+    if isinstance(row, dict):
+        row[field] = value
+    else:
+        setattr(row, field, value)
+
+
+def _apply_stock_entry_material_selections(
+    stock_entry: Any,
+    selections: Any,
+    company: str,
+) -> None:
+    """Replace transfer rows while retaining the BOM item in ``original_item``."""
+    selections = _coerce_material_selections(selections)
+    if not selections:
+        return
+
+    rows = _entry_value(stock_entry, "items", []) or []
+    applied: set[str] = set()
+    for row in rows:
+        original_item = _coerce_str(_entry_value(row, "item_code"))
+        selected_item = selections.get(original_item)
+        if not selected_item or selected_item == original_item:
+            continue
+
+        source_warehouse = _entry_value(row, "s_warehouse")
+        selected = _validate_material_selection(
+            original_item, selected_item, company, source_warehouse
+        )
+        conversion_factor = float(_entry_value(row, "conversion_factor", 1) or 1)
+        stock_qty = float(
+            _entry_value(row, "transfer_qty")
+            or (float(_entry_value(row, "qty", 0) or 0) * conversion_factor)
+        )
+
+        _set_entry_value(row, "original_item", original_item)
+        _set_entry_value(row, "item_code", selected_item)
+        _set_entry_value(row, "item_name", selected.get("item_name") or selected_item)
+        _set_entry_value(row, "stock_uom", selected.get("stock_uom"))
+        _set_entry_value(row, "uom", selected.get("stock_uom"))
+        _set_entry_value(row, "conversion_factor", 1)
+        _set_entry_value(row, "qty", stock_qty)
+        _set_entry_value(row, "transfer_qty", stock_qty)
+        _set_entry_value(row, "allow_alternative_item", 1)
+        _set_entry_value(row, "set_basic_rate_manually", 0)
+        for field in (
+            "description",
+            "expense_account",
+            "cost_center",
+            "basic_rate",
+            "basic_amount",
+            "valuation_rate",
+            "amount",
+            "stock_value_difference",
+            "serial_and_batch_bundle",
+            "batch_no",
+            "serial_no",
+        ):
+            _set_entry_value(row, field, None)
+        applied.add(original_item)
+
+    missing = sorted(
+        original
+        for original, selected in selections.items()
+        if original != selected and original not in applied
+    )
+    if missing:
+        frappe.throw(
+            _("Selected alternative Items were not found in the material transfer: {0}").format(
+                ", ".join(missing)
+            )
+        )
+
+
+def _make_and_submit_se(
+    work_order: str,
+    purpose: str,
+    qty: float,
+    scheduled_dt: Any,
+    material_selections: Any = None,
+    company: str = "",
+) -> str:
     creator = _resolve_make_stock_entry()
     if not creator:
         frappe.throw(_("Could not resolve ERPNext make_stock_entry helper"))
@@ -1174,6 +1629,8 @@ def _make_and_submit_se(work_order: str, purpose: str, qty: float, scheduled_dt:
     is_mapping = isinstance(se, (dict, FrappeDict))
     if not is_document and not is_mapping:
         frappe.throw(_("make_stock_entry did not return a Document or dict-like mapping"))
+    if purpose == "Material Transfer for Manufacture" and material_selections:
+        _apply_stock_entry_material_selections(se, material_selections, company)
     _apply_posting_datetime(se, scheduled_dt)
     # Ensure finished qty is set for Manufacture
     # Ensure finished qty is set for Manufacture
@@ -1253,6 +1710,9 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
         for req in ("item_code", "bom_name", "item_qty"):
             if not it.get(req):
                 frappe.throw(_(f"Missing required field {req} in lines[{i}]"))
+        selections = _coerce_material_selections(it.get("material_selections"))
+        if selections:
+            it = dict(it, material_selections=selections)
         out.append(it)
     return out
 
@@ -1331,7 +1791,20 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
                 f"wip={resolved_defaults.get('wip_warehouse')}; fg={resolved_defaults.get('fg_warehouse')}"
             )
             qty = float(ln["item_qty"])
-            se1 = _make_and_submit_se(wo_name, "Material Transfer for Manufacture", qty, scheduled_dt)
+            selections = ln.get("material_selections")
+            if selections:
+                se1 = _make_and_submit_se(
+                    wo_name,
+                    "Material Transfer for Manufacture",
+                    qty,
+                    scheduled_dt,
+                    material_selections=selections,
+                    company=company,
+                )
+            else:
+                se1 = _make_and_submit_se(
+                    wo_name, "Material Transfer for Manufacture", qty, scheduled_dt
+                )
             _debug_log(f"SE1 done for {wo_name}: {se1}")
             se2 = _make_and_submit_se(wo_name, "Manufacture", qty, scheduled_dt)
             _debug_log(f"SE2 done for {wo_name}: {se2}")
@@ -1379,7 +1852,13 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
     return {"results": results}
 
 @frappe.whitelist()
-def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, scheduled_at: str | None = None) -> Dict[str, Any]:
+def submit_single_work_order(
+    item_code: str,
+    bom_name: str,
+    item_qty: float,
+    scheduled_at: str | None = None,
+    material_selections: Any = None,
+) -> Dict[str, Any]:
     _ensure_manager_access()
     line = {
         "item_code": item_code,
@@ -1387,6 +1866,9 @@ def submit_single_work_order(item_code: str, bom_name: str, item_qty: float, sch
         "item_qty": float(item_qty),
         "scheduled_at": scheduled_at,
     }
+    selections = _coerce_material_selections(material_selections)
+    if selections:
+        line["material_selections"] = selections
     # One line cannot conflict with itself, so the aggregate pass would only
     # re-explode the same BOM the per-line precheck already handles.
     out = submit_work_orders([line], strict_basket=False)
@@ -1624,6 +2106,7 @@ def start_production_batch(
     scheduled_at: str | None = None,
     wip_warehouse: str | None = None,
     fg_warehouse: str | None = None,
+    material_selections: Any = None,
 ) -> Dict[str, Any]:
     """Open a batch: create the Work Order and move its materials into WIP.
 
@@ -1652,6 +2135,9 @@ def start_production_batch(
         "wip_warehouse": _coerce_str(wip_warehouse) or None,
         "fg_warehouse": _coerce_str(fg_warehouse) or None,
     }
+    selections = _coerce_material_selections(material_selections)
+    if selections:
+        line["material_selections"] = selections
 
     company = _get_bom_company(bom_name) or _get_default_company()
     if not company:
@@ -1669,9 +2155,19 @@ def start_production_batch(
     wo_name = _ensure_work_order(line, company, defaults, scheduled_dt)
     _debug_log(f"batch start: WO {wo_name} for {item_code} x{qty}")
 
-    material_transfer = _make_and_submit_se(
-        wo_name, "Material Transfer for Manufacture", qty, scheduled_dt
-    )
+    if selections:
+        material_transfer = _make_and_submit_se(
+            wo_name,
+            "Material Transfer for Manufacture",
+            qty,
+            scheduled_dt,
+            material_selections=selections,
+            company=company,
+        )
+    else:
+        material_transfer = _make_and_submit_se(
+            wo_name, "Material Transfer for Manufacture", qty, scheduled_dt
+        )
 
     stamp_values: Dict[str, Any] = {
         "jarz_started_by": _resolve_current_user(),

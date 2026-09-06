@@ -239,6 +239,9 @@ jobs:
             test_invoice_return
             test_api_notifications_return_filters
             test_accounting_guards
+            # Inventory counts accept more than one UOM component for the same
+            # item and must normalize them into one Stock Reconciliation row.
+            test_api_inventory_count
             test_api_manufacturing_precheck
             # The bill-of-materials level. The reader used to default to the
             # EXPLODED bill while every Work Order it created consumed the
@@ -264,6 +267,9 @@ jobs:
             test_subassembly_planning
             test_api_production
             test_api_manufacturing_start_finish
+            # Explicit two-way Item Alternatives: selection validation, chosen
+            # stock/rate/UOM display, transfer trace and cancel return routing.
+            test_ingredient_alternatives
             test_production_permissions
             test_production_costing
             test_sop_rendering
