@@ -3222,13 +3222,18 @@ def get_invoice_warehouse_alignment_report(
     branch: Optional[str] = None,
     limit: Union[int, str] = 100,
 ) -> Dict[str, Any]:
-    """List submitted POS invoices whose item warehouses no longer match the operational branch."""
+    """List submitted POS invoices whose item warehouses no longer match the operational branch.
+
+    Read-only, and gated the same as the rest of the Manager Dashboard
+    (:func:`_ensure_manager_dashboard_access`) rather than the administrator-only
+    tier: this used to require ``ROLES.ADMIN`` on top, which was fine while it was
+    a developer utility but shut out the branch managers the mobile watchlist is
+    for. ``repair_invoice_warehouse_alignment`` — the endpoint that actually
+    rewrites invoice/item warehouses — keeps the stricter admin gate; only the
+    report moved.
+    """
     _ensure_manager_dashboard_access()
     frappe.has_permission("Sales Invoice", throw=True)
-
-    roles = set(frappe.get_roles())
-    if not roles.intersection(ROLES.ADMIN):
-        frappe.throw(_("Not permitted: administrator access required"), frappe.PermissionError)
 
     try:
         limit_value = max(1, min(int(limit or 100), 500))
@@ -3242,7 +3247,15 @@ def get_invoice_warehouse_alignment_report(
     report_rows = frappe.get_all(
         "Sales Invoice",
         filters=filters,
-        fields=["name", "company", "customer", "posting_date", "custom_kanban_profile", "pos_profile"],
+        fields=[
+            "name",
+            "company",
+            "customer",
+            "posting_date",
+            "grand_total",
+            "custom_kanban_profile",
+            "pos_profile",
+        ],
         order_by="modified desc",
         limit_page_length=limit_value,
     ) or []
@@ -3262,6 +3275,9 @@ def get_invoice_warehouse_alignment_report(
         if submitted_delivery_notes:
             continue
 
+        posting_date = inv.get("posting_date")
+        amount = float(inv.get("grand_total") or 0)
+
         if not operational_profile:
             misaligned_invoices.append(
                 {
@@ -3270,6 +3286,8 @@ def get_invoice_warehouse_alignment_report(
                     "customer": inv.get("customer"),
                     "operational_profile": None,
                     "target_warehouse": None,
+                    "posting_date": str(posting_date) if posting_date else None,
+                    "amount": amount,
                     "delivery_notes": [],
                     "issue": "Invoice has no operational POS Profile configured.",
                     "mismatches": [],
@@ -3288,6 +3306,8 @@ def get_invoice_warehouse_alignment_report(
                     "customer": inv.get("customer"),
                     "operational_profile": operational_profile,
                     "target_warehouse": None,
+                    "posting_date": str(posting_date) if posting_date else None,
+                    "amount": amount,
                     "delivery_notes": [],
                     "issue": str(validation_error),
                     "mismatches": [],
@@ -3297,6 +3317,7 @@ def get_invoice_warehouse_alignment_report(
 
         mismatches = _get_invoice_warehouse_mismatches(inv, expected_warehouse)
         if mismatches:
+            actual_warehouses = sorted({m.get("warehouse") for m in mismatches if m.get("warehouse")})
             misaligned_invoices.append(
                 {
                     "invoice_id": inv.name,
@@ -3304,6 +3325,9 @@ def get_invoice_warehouse_alignment_report(
                     "customer": inv.get("customer"),
                     "operational_profile": operational_profile,
                     "target_warehouse": expected_warehouse,
+                    "actual_warehouses": actual_warehouses,
+                    "posting_date": str(posting_date) if posting_date else None,
+                    "amount": amount,
                     "delivery_notes": [],
                     "issue": "Invoice item warehouses do not match the operational branch warehouse.",
                     "mismatches": mismatches,

@@ -1,0 +1,244 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-09-07 00:00:00.000000",
+ "description": "One WooCommerce-originated Sales Invoice sitting in a non-terminal ops state well past when it should have finished. Detection-only: nothing here writes to a Sales Invoice, Payment Entry, Delivery Note, Courier Transaction or any WooCommerce record. See jarz_pos.services.woo_backlog_watch and jarz_pos.scripts.backlog_migration for why.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sales_invoice",
+  "woo_order_id",
+  "posting_date",
+  "column_break_head",
+  "status",
+  "ops_state",
+  "pos_profile",
+  "customer",
+  "section_break_money",
+  "outstanding_amount",
+  "column_break_money",
+  "grand_total",
+  "currency",
+  "section_break_timing",
+  "expected_finish_by",
+  "column_break_timing",
+  "first_detected_on",
+  "last_seen_on",
+  "section_break_detail",
+  "detail",
+  "section_break_resolution",
+  "resolved_on",
+  "column_break_resolution",
+  "resolved_by"
+ ],
+ "fields": [
+  {
+   "description": "The Woo-originated order this row was raised against.",
+   "fieldname": "sales_invoice",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "woo_order_id",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Woo Order ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Posting Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Open",
+   "description": "Open = still stuck as of the last daily sweep. Resolved = the order left its non-terminal ops state (auto-closed) or a human dismissed it.",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Open\nResolved",
+   "search_index": 1
+  },
+  {
+   "description": "Sales Invoice.custom_sales_invoice_state (or the legacy sales_invoice_state) as of the last sweep that saw this order still stuck.",
+   "fieldname": "ops_state",
+   "fieldtype": "Data",
+   "label": "Ops State (last seen)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Branch",
+   "options": "POS Profile",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_money",
+   "fieldtype": "Section Break",
+   "label": "Money"
+  },
+  {
+   "description": "Snapshot as of the last sweep -- the money the customer has not been recorded as paying.",
+   "fieldname": "outstanding_amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Outstanding Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_money",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "grand_total",
+   "fieldtype": "Currency",
+   "label": "Grand Total",
+   "read_only": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_timing",
+   "fieldtype": "Section Break",
+   "label": "Timing"
+  },
+  {
+   "description": "posting_date/posting_time plus the stuck-after-hours threshold. The order is flagged once now() passes this timestamp.",
+   "fieldname": "expected_finish_by",
+   "fieldtype": "Datetime",
+   "label": "Should Have Finished By",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_timing",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "When this order was first flagged. Stable across re-sweeps -- never overwritten once set.",
+   "fieldname": "first_detected_on",
+   "fieldtype": "Datetime",
+   "label": "First Detected On",
+   "read_only": 1
+  },
+  {
+   "description": "When the daily sweep last confirmed this order was still stuck.",
+   "fieldname": "last_seen_on",
+   "fieldtype": "Datetime",
+   "label": "Last Seen Stuck On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_detail",
+   "fieldtype": "Section Break",
+   "label": "Detail"
+  },
+  {
+   "description": "Everything a reviewer needs to triage without opening the invoice.",
+   "fieldname": "detail",
+   "fieldtype": "Small Text",
+   "label": "Detail",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_break_resolution",
+   "fieldtype": "Section Break",
+   "label": "Resolution"
+  },
+  {
+   "fieldname": "resolved_on",
+   "fieldtype": "Datetime",
+   "label": "Resolved On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_resolution",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "resolved_by",
+   "fieldtype": "Link",
+   "label": "Resolved By",
+   "options": "User",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-09-07 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Woo Backlog Exception",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Line Manager"
+  }
+ ],
+ "show_title_field_in_link": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "sales_invoice",
+ "track_changes": 1
+}

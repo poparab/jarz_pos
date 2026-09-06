@@ -21,6 +21,7 @@ from jarz_pos.api.payment_receipts import (
 from jarz_pos.constants import ACCOUNTS, WS_EVENTS
 from jarz_pos.services.courier_carry import (
     mark_settled as mark_courier_transactions_settled,
+    mark_unsettled as mark_courier_transactions_unsettled,
     settlement_stamp as courier_settlement_stamp,
 )
 from jarz_pos.utils.account_utils import (
@@ -5605,6 +5606,442 @@ def _create_settlement_journal_entry(
     je.submit()
 
     return je.name
+
+
+# ---------------------------------------------------------------------------
+# Un-settle — reverse a posted courier settlement
+#
+# Every settlement path above (the batch sweep in ``settle_delivery_party``,
+# the two single-invoice paths, and ``settle_courier_collected_payment``) was
+# otherwise permanent: the only way to undo one has been a developer piping a
+# hand-written Python script into a production bench console. Most recently on
+# 2026-09-02, five Nasr City Courier Transactions were settled from the wrong
+# branch till and had to be corrected that way — this section is what removes
+# that operation from the developer's plate.
+#
+# The owner's accounting call (do not deviate): never touch the original
+# entry. Post an opposite Journal Entry instead, so the audit trail keeps both
+# the mistake and its correction, and flip every Courier Transaction the
+# original entry settled back to Unsettled so the money re-enters the normal
+# settlement flow.
+#
+# The reversal is built by walking the ORIGINAL Journal Entry's own
+# ``accounts`` rows and swapping debit/credit on each — not by recomputing
+# amounts from the Courier Transactions. That is what makes one function work,
+# unmodified, for every settlement shape above: they all post plain account
+# rows (account, optional party_type/party, the two currency amounts) with no
+# JE-type-specific fields, so their exact inverse is always just those same
+# rows flipped.
+# ---------------------------------------------------------------------------
+
+#: Tag type embedded in a reversal JE's ``user_remark`` — see ``_je_dedup_tag``.
+#: The "key" the shared tag helper embeds is the ORIGINAL journal entry's name
+#: rather than an invoice, which is what makes a lookup on this tag double as
+#: the "was this already reversed?" check. No new DocType field is needed, and
+#: Journal Entry is core Frappe, so no schema is touched to make this
+#: idempotent.
+UNSETTLE_JE_TAG_TYPE = "COURIER_SETTLEMENT_REVERSAL"
+
+
+def _unsettle_dedup_tag(original_je: str) -> str:
+    """Stable dedup tag for the reversal of *original_je* (see ``_je_dedup_tag``)."""
+    return _je_dedup_tag(original_je, UNSETTLE_JE_TAG_TYPE)
+
+
+def find_settlement_reversal_je(company: str, original_je: str) -> str | None:
+    """The reversing JE already posted against *original_je*, if any."""
+    tag = _unsettle_dedup_tag(original_je)
+    rows = frappe.get_all(
+        "Journal Entry",
+        filters={"company": company, "docstatus": 1, "user_remark": ["like", f"%{tag}%"]},
+        pluck="name",
+        limit_page_length=1,
+    )
+    return rows[0] if rows else None
+
+
+def _child_row_value(row, fieldname: str):
+    """Read *fieldname* off a JE child row that may be a dict or a Document row."""
+    if isinstance(row, dict):
+        return row.get(fieldname)
+    try:
+        return getattr(row, fieldname)
+    except Exception:
+        getter = getattr(row, "get", None)
+        if callable(getter):
+            try:
+                return getter(fieldname)
+            except Exception:
+                return None
+    return None
+
+
+def _courier_transactions_for_settlement_je(original_je: str) -> list[dict]:
+    """Every Courier Transaction *original_je* settled and that is still Settled.
+
+    Filtering on ``status == "Settled"`` (rather than merely ``journal_entry ==
+    original_je``) is what makes a second call against an already-reversed
+    entry come back empty on its own — the reversal flips every row it
+    touches back to Unsettled, so this becomes the first line of the
+    double-reversal guard, ahead of the JE-tag lookup in
+    :func:`find_settlement_reversal_je`.
+    """
+    original_je = (original_je or "").strip()
+    if not original_je:
+        return []
+    return frappe.get_all(
+        "Courier Transaction",
+        filters={"journal_entry": original_je, "status": "Settled"},
+        fields=[
+            "name", "reference_invoice", "amount", "shipping_amount",
+            "party_type", "party", "is_partner_order",
+        ],
+    )
+
+
+def resolve_settlement_branch(original_je: str, cts: list[dict] | None = None) -> str:
+    """The single branch (POS Profile) whose drawer *original_je* funded.
+
+    Read from the invoices of the Courier Transactions the entry settled — the
+    same source ``settle_delivery_party`` itself filters on — rather than from
+    the caller. A caller-supplied branch is exactly the input the 2026-09-02
+    wrong-branch settlement got wrong; deriving it here means this guard
+    cannot be fooled by it. Returns "" when it cannot be determined (no linked
+    invoices carry a branch), which callers must treat as "refuse", never as
+    "unscoped".
+    """
+    if cts is None:
+        cts = _courier_transactions_for_settlement_je(original_je)
+    invoice_names = [r.get("reference_invoice") for r in cts if r.get("reference_invoice")]
+    if not invoice_names:
+        return ""
+    branches = map_invoice_branches(invoice_names)
+    resolved = {branches.get(name) for name in invoice_names if branches.get(name)}
+    if len(resolved) > 1:
+        frappe.throw(
+            _(
+                "Journal Entry {0} settled Courier Transactions across more than one "
+                "branch ({1}); it cannot be reversed automatically."
+            ).format(original_je, ", ".join(sorted(resolved)))
+        )
+    return next(iter(resolved), "")
+
+
+def build_settlement_reversal_lines(original_je) -> list[dict]:
+    """Mirror ``original_je.accounts`` with debit and credit swapped on every row.
+
+    ``original_je`` is a loaded ``Journal Entry`` document (or, in tests, any
+    object exposing an ``accounts`` list of dict/Document-like rows). Only the
+    fields every settlement builder in this module ever sets are copied across
+    — account, the two currency amounts, and party_type/party when present —
+    matching their own minimal shape rather than inventing new ones.
+    """
+    lines = []
+    for row in original_je.accounts:
+        debit = _child_row_amount(row, "debit_in_account_currency")
+        credit = _child_row_amount(row, "credit_in_account_currency")
+        line = {
+            "account": _child_row_value(row, "account"),
+            "debit_in_account_currency": credit,
+            "credit_in_account_currency": debit,
+        }
+        party_type = _child_row_value(row, "party_type")
+        party = _child_row_value(row, "party")
+        if party_type and party:
+            line["party_type"] = party_type
+            line["party"] = party
+        lines.append(line)
+    return lines
+
+
+def get_unsettle_preview(journal_entry: str) -> dict:
+    """Read-only: exactly what :func:`unsettle_courier_settlement` would do. Posts nothing.
+
+    Returns:
+      {
+        journal_entry, company, pos_profile, posting_date, title, user_remark,
+        courier_transactions: [...], reversal_lines: [...],
+        already_reversed, reversal_journal_entry
+      }
+    """
+    original_je_name = (journal_entry or "").strip()
+    if not original_je_name:
+        frappe.throw(_("journal_entry is required"))
+    if not frappe.db.exists("Journal Entry", original_je_name):
+        frappe.throw(_("Journal Entry {0} was not found").format(original_je_name))
+
+    original_je = frappe.get_doc("Journal Entry", original_je_name)
+    if original_je.docstatus != 1:
+        frappe.throw(
+            _("Journal Entry {0} is not submitted; nothing to reverse.").format(original_je_name)
+        )
+
+    cts = _courier_transactions_for_settlement_je(original_je_name)
+    if not cts:
+        frappe.throw(
+            _(
+                "Journal Entry {0} is not linked to any Settled Courier Transaction. It is "
+                "either not a courier settlement entry, or has already been reversed."
+            ).format(original_je_name)
+        )
+
+    branch = resolve_settlement_branch(original_je_name, cts)
+    existing_reversal = find_settlement_reversal_je(original_je.company, original_je_name)
+
+    return {
+        "journal_entry": original_je_name,
+        "company": original_je.company,
+        "pos_profile": branch,
+        "posting_date": str(original_je.posting_date),
+        "title": original_je.title,
+        "user_remark": original_je.user_remark,
+        "courier_transactions": cts,
+        "reversal_lines": build_settlement_reversal_lines(original_je),
+        "already_reversed": bool(existing_reversal),
+        "reversal_journal_entry": existing_reversal,
+    }
+
+
+def unsettle_courier_settlement(
+    journal_entry: str,
+    *,
+    pos_profile: str | None = None,
+    reason: str | None = None,
+) -> dict:
+    """Reverse a posted courier settlement.
+
+    Posts a REVERSING Journal Entry (never cancels or amends the original —
+    the audit trail must keep both the settlement and its correction) and
+    flips every Courier Transaction the original settled back to Unsettled,
+    so it re-enters the normal settlement flow.
+
+    ``pos_profile``, if supplied, is only CHECKED against the branch derived
+    from the settlement itself (see :func:`resolve_settlement_branch`) — it is
+    never used to pick the branch, so a caller cannot claim a different
+    branch than the one the settlement actually funded.
+
+    Idempotent: refuses outright, rather than posting a second reversing
+    entry, when *journal_entry* has already been reversed (see
+    :func:`_courier_transactions_for_settlement_je` and
+    :func:`find_settlement_reversal_je` — both must agree nothing was found).
+
+    This function applies no access control of its own — callers (see
+    ``jarz_pos.api.couriers.unsettle_courier_settlement``) are expected to
+    gate on role and branch membership before calling it, exactly as every
+    other function in this module leaves the guard to its API wrapper.
+    """
+    original_je_name = (journal_entry or "").strip()
+    if not original_je_name:
+        frappe.throw(_("journal_entry is required"))
+    if not frappe.db.exists("Journal Entry", original_je_name):
+        frappe.throw(_("Journal Entry {0} was not found").format(original_je_name))
+
+    original_je = frappe.get_doc("Journal Entry", original_je_name)
+    if original_je.docstatus != 1:
+        frappe.throw(
+            _("Journal Entry {0} is not submitted; nothing to reverse.").format(original_je_name)
+        )
+
+    cts = _courier_transactions_for_settlement_je(original_je_name)
+    if not cts:
+        frappe.throw(
+            _(
+                "Journal Entry {0} is not linked to any Settled Courier Transaction. It is "
+                "either not a courier settlement entry, or has already been reversed."
+            ).format(original_je_name)
+        )
+
+    branch = resolve_settlement_branch(original_je_name, cts)
+    requested_profile = str(pos_profile or "").strip()
+    if requested_profile and branch and requested_profile != branch:
+        frappe.throw(
+            _(
+                "pos_profile {0} does not match the branch this settlement belongs to ({1})."
+            ).format(requested_profile, branch)
+        )
+
+    existing_reversal = find_settlement_reversal_je(original_je.company, original_je_name)
+    if existing_reversal:
+        frappe.throw(
+            _(
+                "Journal Entry {0} was already reversed by {1}. It cannot be reversed twice."
+            ).format(original_je_name, existing_reversal)
+        )
+
+    reversal_lines = build_settlement_reversal_lines(original_je)
+    if not reversal_lines:
+        frappe.throw(_("Journal Entry {0} has no account lines to reverse.").format(original_je_name))
+
+    frappe.db.savepoint("unsettle_courier_settlement")
+    try:
+        reversal = frappe.new_doc("Journal Entry")
+        reversal.voucher_type = "Journal Entry"
+        reversal.posting_date = frappe.utils.nowdate()
+        reversal.company = original_je.company
+        reversal.title = f"Reversal of Courier Settlement – {original_je_name}"
+        remark = f"Reversal of courier settlement {original_je_name}"
+        if reason:
+            remark = f"{remark} — {str(reason).strip()}"
+        reversal.user_remark = f"{remark} {_unsettle_dedup_tag(original_je_name)}"
+
+        for line in reversal_lines:
+            reversal.append("accounts", line)
+
+        reversal.save(ignore_permissions=True)
+        reversal.submit()
+
+        ct_names = [r["name"] for r in cts]
+        mark_courier_transactions_unsettled(ct_names)
+
+        frappe.db.commit()
+    except Exception:
+        frappe.db.rollback(save_point="unsettle_courier_settlement")
+        raise
+
+    from jarz_pos.utils.realtime import publish_to_branches
+
+    payload = {
+        "journal_entry": original_je_name,
+        "reversal_journal_entry": reversal.name,
+        "pos_profile": branch,
+        "courier_transactions": ct_names,
+        "reason": reason,
+    }
+    publish_to_branches(
+        WS_EVENTS.COURIER_SETTLEMENT_REVERSED, payload, [branch] if branch else []
+    )
+
+    return {
+        "success": True,
+        "journal_entry": original_je_name,
+        "reversal_journal_entry": reversal.name,
+        "pos_profile": branch,
+        "courier_transactions": ct_names,
+    }
+
+
+# ---------------------------------------------------------------------------
+# List recent settlements — how a manager FINDS one to reverse
+#
+# ``unsettle_courier_settlement`` is keyed on a Journal Entry name, which is
+# meaningless to anyone looking at a phone. Nothing else in this module hands
+# one back either: ``CourierBalance`` only ever describes UNSETTLED positions,
+# and every settle call site discards the ``journal_entry`` its own response
+# carries. This is the read-only list that closes that gap — the server-side
+# source of truth the mobile client's on-device settlement cache was standing
+# in for, which cannot help on 2026-09-02: whoever needs to reverse a
+# wrong-branch settlement may not be on the device that made it.
+# ---------------------------------------------------------------------------
+
+
+def list_recent_courier_settlements(
+    pos_profile: str | None = None,
+    limit: int = 50,
+    include_reversed: bool = False,
+) -> list[dict]:
+    """Recent courier settlement Journal Entries the caller may see, newest first.
+
+    A settlement is identified exactly the way :func:`_courier_transactions_for_settlement_je`
+    and :func:`find_settlement_reversal_je` identify one — by the ``journal_entry``
+    a Courier Transaction was settled against — so this list and the un-settle
+    preview never disagree about what counts as a settlement. Unlike that helper,
+    this does NOT filter Courier Transactions on ``status == "Settled"``: per
+    ``services.courier_carry.mark_unsettled``, a reversal flips ``status`` back to
+    Unsettled but never clears ``journal_entry``, and that field surviving is
+    exactly what lets an already-reversed settlement still be found here (for
+    ``include_reversed=True``) instead of vanishing the moment it is undone.
+
+    BRANCH SCOPE mirrors :func:`get_courier_balances`: rows are limited to the
+    branch named by *pos_profile*, or every branch the caller is assigned to
+    when it is omitted, resolved via ``map_invoice_branches`` off the invoices
+    each settlement's Courier Transactions reference. A settlement whose
+    invoices resolve to more than one branch (should not normally happen — see
+    :func:`resolve_settlement_branch`) is treated as unattributable rather than
+    guessed at. An unattributable settlement is shown only to a caller with
+    global POS Profile access, same as an unattributable balance row.
+
+    This function applies no access control of its own — see
+    ``jarz_pos.api.couriers.list_recent_settlements`` for the manager-tier gate.
+    """
+    visible_profiles = set(get_visible_pos_profiles(requested_pos_profile=pos_profile))
+    if not visible_profiles:
+        return []
+
+    limit = max(1, min(frappe.utils.cint(limit) or 50, 200))
+
+    ct_rows = frappe.get_all(
+        "Courier Transaction",
+        filters={"journal_entry": ["not in", ["", None]]},
+        fields=[
+            "name", "journal_entry", "reference_invoice", "amount",
+            "shipping_amount", "party_type", "party",
+        ],
+    )
+    if not ct_rows:
+        return []
+
+    groups: dict[str, list[dict]] = {}
+    for row in ct_rows:
+        groups.setdefault(row["journal_entry"], []).append(row)
+
+    invoice_branches = map_invoice_branches(
+        [r.get("reference_invoice") for r in ct_rows if r.get("reference_invoice")]
+    )
+    show_unscoped = user_has_global_profile_access()
+
+    je_names = list(groups.keys())
+    je_rows = frappe.get_all(
+        "Journal Entry",
+        filters={"name": ["in", je_names], "docstatus": 1},
+        fields=["name", "company", "posting_date"],
+    )
+    je_by_name = {r["name"]: r for r in je_rows}
+
+    out: list[dict] = []
+    for je_name, rows in groups.items():
+        je = je_by_name.get(je_name)
+        if not je:
+            # Draft/cancelled/missing — never a posted settlement.
+            continue
+
+        branches = {invoice_branches.get(r.get("reference_invoice") or "", "") for r in rows}
+        branches.discard("")
+        branch = next(iter(branches)) if len(branches) == 1 else ""
+        if branch:
+            if branch not in visible_profiles:
+                continue
+        elif not show_unscoped:
+            continue
+
+        reversal_je = find_settlement_reversal_je(je["company"], je_name)
+        if reversal_je and not include_reversed:
+            continue
+
+        party_type = (rows[0].get("party_type") or "").strip()
+        party = (rows[0].get("party") or "").strip()
+
+        net_amount = 0.0
+        for r in rows:
+            try:
+                net_amount += float(r.get("amount") or 0) - float(r.get("shipping_amount") or 0)
+            except Exception:
+                continue
+
+        out.append({
+            "journal_entry": je_name,
+            "posting_date": str(je.get("posting_date") or ""),
+            "party_type": party_type,
+            "party": party,
+            "display_name": _resolve_party_display_name(party_type, party) or "<Unknown>",
+            "pos_profile": branch,
+            "net_amount": net_amount,
+            "transaction_count": len(rows),
+            "already_reversed": bool(reversal_je),
+            "reversal_journal_entry": reversal_je,
+        })
+
+    out.sort(key=lambda d: (d["posting_date"], d["journal_entry"]), reverse=True)
+    return out[:limit]
 
 
 # ---------------------------------------------------------------------------

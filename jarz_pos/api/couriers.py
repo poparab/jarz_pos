@@ -25,6 +25,9 @@ from jarz_pos.services.delivery_handling import (
     list_unconfirmed_online_orders as _list_unconfirmed_online_orders,
     confirm_online_payment as _confirm_online_payment,
     convert_online_order_to_cod as _convert_online_order_to_cod,
+    get_unsettle_preview as _get_unsettle_preview,
+    unsettle_courier_settlement as _unsettle_courier_settlement,
+    list_recent_courier_settlements as _list_recent_courier_settlements,
 )
 from jarz_pos.services.delivery_party import create_delivery_party as _create_delivery_party
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
@@ -867,3 +870,196 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
         frappe.db.rollback(save_point="confirm_settlement")
         frappe.log_error(frappe.get_traceback(), "confirm_settlement failed")
         raise
+
+
+# ---------------------------------------------------------------------------
+# Un-settle — reverse a posted courier settlement (Preview + Commit)
+#
+# Before this pair, the only way to undo a courier settlement was a developer
+# piping a hand-written Python script into a production bench console — most
+# recently on 2026-09-02, when five Nasr City Courier Transactions were
+# settled from the wrong branch till. See
+# ``jarz_pos.services.delivery_handling`` (the "Un-settle" section) for the
+# accounting: a REVERSING Journal Entry is posted, the original is never
+# touched, and every Courier Transaction the original settled flips back to
+# Unsettled.
+#
+# Reversing money is manager-tier — mirrors ``_ensure_collection_change_access``
+# immediately above it in this module, the closest existing "a manager undoes
+# a courier money decision" gate. Branch scope is resolved from the
+# settlement itself (never from the caller — see
+# ``services.delivery_handling.resolve_settlement_branch``) and then checked
+# with the same ``_guard_branch_action`` every other branch-wide courier
+# action in this module uses.
+# ---------------------------------------------------------------------------
+
+
+def _ensure_unsettle_access() -> None:
+    roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
+    allowed = ROLES.ADMIN | ROLES.LINE_MANAGER_TIER
+    if not roles.intersection(allowed):
+        frappe.throw(
+            "Not permitted: Manager access required to reverse a courier settlement",
+            frappe.PermissionError,
+        )
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def get_unsettle_preview(journal_entry: str):
+    """Preview reversing a posted courier settlement. Read-only — posts nothing.
+
+    Mints a short-lived ``preview_token`` (3 minutes, the same window
+    :func:`generate_settlement_preview` uses) that :func:`unsettle_courier_settlement`
+    must be called with — the same server-driven preview/confirm pairing every
+    other money-moving courier action in this module follows.
+
+    Returns:
+      {
+        journal_entry, company, pos_profile, posting_date, title, user_remark,
+        courier_transactions: [...], reversal_lines: [...],
+        already_reversed, reversal_journal_entry,
+        preview_token, expires_in
+      }
+    """
+    _ensure_unsettle_access()
+
+    journal_entry = (journal_entry or "").strip()
+    if not journal_entry:
+        frappe.throw("journal_entry is required")
+
+    data = _get_unsettle_preview(journal_entry)
+
+    branch = data.get("pos_profile")
+    if not branch:
+        frappe.throw(
+            f"Could not determine which branch Journal Entry {journal_entry} belongs to; "
+            "refusing to reverse it without a resolvable branch."
+        )
+    # The branch is derived from the settlement itself, never taken from the
+    # caller — this only checks that the CALLER is scoped to it. A preview
+    # posts nothing, so (like generate_settlement_preview) no shift is
+    # required to look.
+    _guard_branch_action(branch, action_label="reversing a courier settlement", require_shift=False)
+
+    if data.get("already_reversed"):
+        frappe.throw(
+            f"Journal Entry {journal_entry} was already reversed by "
+            f"{data.get('reversal_journal_entry')}."
+        )
+
+    token = frappe.generate_hash(length=16)
+    cache_key = f"jarz_pos:unsettle_preview:{token}"
+    frappe.cache().hset(cache_key, "data", {"journal_entry": journal_entry, "pos_profile": branch})
+    frappe.cache().expire(cache_key, 180)
+
+    return {**data, "preview_token": token, "expires_in": 180}
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def unsettle_courier_settlement(journal_entry: str, preview_token: str, reason: str | None = None):
+    """Confirm and perform the reversal previewed by :func:`get_unsettle_preview`.
+
+    Posts a reversing Journal Entry and flips every Courier Transaction the
+    original settlement closed back to Unsettled. Never touches the original
+    entry. Refuses outright — rather than posting a second reversing entry —
+    if this settlement was already reversed.
+    """
+    _ensure_unsettle_access()
+
+    journal_entry = (journal_entry or "").strip()
+    if not journal_entry:
+        frappe.throw("journal_entry is required")
+    if not preview_token:
+        frappe.throw("preview_token is required")
+
+    cache_key = f"jarz_pos:unsettle_preview:{preview_token}"
+    cached = frappe.cache().hget(cache_key, "data")
+    if not cached:
+        frappe.throw("Preview expired or invalid. Please reopen the dialog.")
+    if cached.get("journal_entry") != journal_entry:
+        frappe.throw("Preview does not match journal_entry. Please reopen the dialog.")
+
+    branch = cached.get("pos_profile")
+    if not branch:
+        frappe.throw(
+            f"Could not determine which branch Journal Entry {journal_entry} belongs to; "
+            "refusing to reverse it without a resolvable branch."
+        )
+    # Posts money, so (like confirm_settlement) the branch must actually be open.
+    _guard_branch_action(branch, action_label="reversing a courier settlement", require_shift=True)
+
+    # The service function owns its own savepoint/commit/rollback (mirroring every
+    # other settlement builder in that module) — this wrapper does not double it.
+    try:
+        result = _unsettle_courier_settlement(journal_entry, pos_profile=branch, reason=reason)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "unsettle_courier_settlement failed")
+        raise
+
+    try:
+        frappe.cache().delete_value(cache_key)
+    except Exception:
+        pass
+
+    return result
+
+
+def _coerce_include_reversed(value) -> bool:
+    """Tolerant truthiness for ``include_reversed``.
+
+    Called both from Python (a real ``bool``) and over HTTP, where a query
+    string or form field arrives as text — ``int()`` alone chokes on
+    ``"true"``/``"false"``, which is exactly the shape a browser or a REST
+    client sends for a boolean toggle.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def list_recent_settlements(
+    pos_profile: str | None = None,
+    limit: int = 50,
+    include_reversed: bool = False,
+):
+    """List recent courier settlements so a manager can FIND one to reverse.
+
+    Reversal (:func:`unsettle_courier_settlement`) is keyed on a Journal Entry
+    NAME, which nothing on a phone ever surfaces — ``get_courier_balances`` only
+    ever describes UNSETTLED positions, and every settle call site discards the
+    ``journal_entry`` its own response carries. This is the server-side list
+    that replaces the mobile client's on-device settlement cache, which cannot
+    help the exact case this exists for: on 2026-09-02 five Nasr City Courier
+    Transactions were settled from the wrong branch till, and whoever needs to
+    reverse that may not be on the device that did it.
+
+    Gated with the SAME manager-tier check :func:`unsettle_courier_settlement`
+    itself uses — someone who cannot reverse a settlement has no reason to
+    browse this list. Branch-scoped exactly like :func:`get_courier_balances`:
+    ``pos_profile`` narrows to one branch (and is access-checked), omitting it
+    returns every branch the caller is assigned to, and neither form can reach
+    a branch the caller is not a member of.
+
+    ``include_reversed`` defaults to False, so the list shows only what can
+    still be acted on; pass True to include already-reversed settlements for
+    audit.
+
+    Returns a list of rows, newest first:
+      {
+        journal_entry, posting_date, party_type, party, display_name,
+        pos_profile, net_amount, transaction_count,
+        already_reversed, reversal_journal_entry
+      }
+    """
+    _ensure_unsettle_access()
+    return _list_recent_courier_settlements(
+        pos_profile=pos_profile,
+        limit=limit,
+        include_reversed=_coerce_include_reversed(include_reversed),
+    )

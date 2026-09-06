@@ -146,6 +146,9 @@ class WS_EVENTS:
     COURIER_OUTSTANDING = "jarz_pos_courier_outstanding"
     COURIER_EXPENSE_PAID = "jarz_pos_courier_expense_paid"
     COURIER_SETTLED = "jarz_pos_courier_settled"
+    # A posted courier settlement was reversed (see api.couriers.unsettle_courier_settlement).
+    # No Dart listener exists yet — see the class docstring on Python vs Dart parity.
+    COURIER_SETTLEMENT_REVERSED = "jarz_pos_courier_settlement_reversed"
     SALES_PARTNER_COLLECT_PROMPT = "jarz_pos_sales_partner_collect_prompt"
     SALES_PARTNER_UNPAID_OFD = "jarz_pos_sales_partner_unpaid_ofd"
     SALES_PARTNER_PAID_OFD = "jarz_pos_sales_partner_paid_ofd"

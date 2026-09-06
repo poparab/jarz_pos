@@ -75,6 +75,31 @@ def _create_online_payment_alert_notifications(row: dict, users: list[str], hour
             continue
 
 
+#: Safe fallback when Jarz POS Settings has no (or an invalid) value configured.
+DEFAULT_UNCONFIRMED_ONLINE_PAYMENT_ALERT_HOURS = 6
+
+
+def get_unconfirmed_online_payment_alert_hours() -> int:
+    """Single source of truth for the "how long is too long" threshold used to
+    escalate an unpaid InstaPay/Mobile Wallet order still sitting Out for Delivery.
+
+    Read from Jarz POS Settings (``instapay_unconfirmed_alert_hours``); the mobile
+    reconciliation screen's escalation list must show exactly the same orders this
+    hourly job flags, so both call this helper instead of each keeping their own
+    copy of the threshold lookup.
+    """
+    try:
+        from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
+
+        settings = get_jarz_settings()
+        raw = getattr(settings, "instapay_unconfirmed_alert_hours", None)
+        if raw is not None and int(raw) > 0:
+            return int(raw)
+    except Exception:
+        pass
+    return DEFAULT_UNCONFIRMED_ONLINE_PAYMENT_ALERT_HOURS
+
+
 def escalate_unconfirmed_online_payments():
     """Hourly: alert managers about unpaid InstaPay/Mobile Wallet orders that have sat
     Out for Delivery awaiting payment confirmation past the configured threshold.
@@ -85,17 +110,7 @@ def escalate_unconfirmed_online_payments():
     from jarz_pos.constants import WS_EVENTS
 
     try:
-        # Threshold hours (safe default 6)
-        hours = 6
-        try:
-            from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
-
-            settings = get_jarz_settings()
-            raw = getattr(settings, "instapay_unconfirmed_alert_hours", None)
-            if raw is not None and int(raw) > 0:
-                hours = int(raw)
-        except Exception:
-            hours = 6
+        hours = get_unconfirmed_online_payment_alert_hours()
 
         cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-hours)
 

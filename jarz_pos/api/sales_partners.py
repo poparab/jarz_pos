@@ -26,8 +26,9 @@ from __future__ import annotations
 import hashlib
 
 import frappe
+from frappe import _
 
-from jarz_pos.constants import PAYMENT_MODES
+from jarz_pos.constants import PAYMENT_MODES, ROLES
 from jarz_pos.services.delivery_handling import (
     PARTNER_FEES_VAT_RATE,
     _compute_sales_partner_fees,
@@ -43,6 +44,26 @@ from jarz_pos.utils.account_utils import (
 
 # Stable Journal Entry dedup type embedded in ``user_remark`` (see delivery_handling FIX 3).
 JE_TYPE = "SALES_PARTNER_SETTLEMENT"
+
+
+def _ensure_sales_partner_settlement_access() -> None:
+    """Gate every Sales Partner settlement endpoint at the manager tier.
+
+    ``settle_sales_partner`` posts a batch commission + VAT recognition Journal
+    Entry — company money moving (an expense debited, a partner receivable/payable
+    credited) exactly like ``api/cash_transfer.py``'s transfers, which is why this
+    mirrors ``ROLES.MANAGER`` rather than the line-manager tier. A Sales Partner
+    (Talabat and the like) is a company-wide relationship, not a branch's — there is
+    no floor-supervisor slice of "post the commission JE" to hand down the way
+    ``STOCK_TRANSFER`` widens stock moves to line managers. ``get_sales_partner_balances``
+    is gated the same because it previews the exact totals ``settle_sales_partner`` is
+    about to post; a plain POS user has no business seeing the company's unsettled
+    partner commission either.
+    """
+    roles = set(frappe.get_roles())
+    if not roles.intersection(ROLES.MANAGER):
+        frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
+
 
 _SPT_FIELDS = [
     "name",
@@ -211,6 +232,7 @@ def get_sales_partner_balances(sales_partner: str | None = None):
     commission (``total_base``), VAT (``total_vat``) and combined fee split by payment mode so
     a future UI can preview the settlement JE before posting.
     """
+    _ensure_sales_partner_settlement_access()
     filters = {"status": "Unsettled"}
     if sales_partner:
         filters["sales_partner"] = sales_partner
@@ -288,6 +310,7 @@ def settle_sales_partner(sales_partner: str, pos_profile: str | None = None):
 
     Returns the JE name, the settled transaction list, and per-mode totals.
     """
+    _ensure_sales_partner_settlement_access()
     if not sales_partner:
         frappe.throw("sales_partner is required")
     if not frappe.db.exists("Sales Partner", sales_partner):

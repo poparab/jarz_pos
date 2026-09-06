@@ -385,6 +385,38 @@ def mark_settled(
     return done
 
 
+def mark_unsettled(
+    names: Iterable[str],
+    *,
+    extra: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Flip *names* back to Unsettled — the reversal counterpart to :func:`mark_settled`.
+
+    Used by ``jarz_pos.services.delivery_handling.unsettle_courier_settlement`` when a
+    posted settlement is reversed, so the row re-enters the normal settlement flow
+    instead of a developer piping a hand-written fix into a production console (the
+    2026-09-02 Nasr City incident this function exists to retire).
+
+    Deliberately leaves ``settled_at`` / ``settled_by`` / ``settled_in_shift`` in
+    place rather than clearing them: they recorded a real, once-true fact (who
+    settled it and when) that a reversal supersedes, not erases. ``status`` alone is
+    what every settlement path filters on, so flipping only that is what actually
+    re-opens the row.
+    """
+    values: Dict[str, Any] = {"status": "Unsettled"}
+    if extra:
+        values.update(extra)
+
+    done: List[str] = []
+    for name in names or []:
+        name = str(name or "").strip()
+        if not name:
+            continue
+        frappe.db.set_value("Courier Transaction", name, values, update_modified=True)
+        done.append(name)
+    return done
+
+
 def settlement_stamp(pos_profile: Optional[str] = None) -> Dict[str, Any]:
     """The settlement fields to set on a Courier Transaction *document*.
 

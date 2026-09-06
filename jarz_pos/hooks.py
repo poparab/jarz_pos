@@ -432,6 +432,13 @@ scheduler_events = {
         # HISTORICAL backfill is deliberately NOT here — it is a one-off run by
         # hand via territory_exceptions.backfill_territory_exceptions.
         "jarz_pos.services.territory_exceptions.run_territory_exception_sweep",
+        # WooCommerce backlog watch: detection-only. Flags Woo-linked Sales
+        # Invoices sitting in a non-terminal ops state well past when they
+        # should have finished, and auto-closes rows whose order has since
+        # moved on. Never writes to a Sales Invoice or any WooCommerce record
+        # -- see jarz_pos.services.woo_backlog_watch for why (the migration
+        # that actually fixes these stays a supervised manual operation).
+        "jarz_pos.services.woo_backlog_watch.run_woo_backlog_sweep",
     ],
     "weekly": [
         "jarz_pos.tasks.run_weekly_velocity_update",
@@ -552,6 +559,13 @@ try:
     from jarz_pos.api import tracking as _tracking_api
     _tracking_api.get_public_status
     _tracking_api.get_tracking_link
+except Exception:
+    pass
+
+try:
+    # WooCommerce backlog review queue (read-only manager dashboard feed).
+    from jarz_pos.api import woo_backlog as _woo_backlog_api
+    _woo_backlog_api.get_woo_backlog_queue
 except Exception:
     pass
 

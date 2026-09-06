@@ -25,8 +25,31 @@ import hashlib
 import json
 
 import frappe
+from frappe import _
 
+from jarz_pos.constants import ROLES
 from jarz_pos.services.delivery_handling import create_partner_settlement_je
+
+
+def _ensure_delivery_partner_access() -> None:
+    """Gate every Delivery Partner endpoint at the manager tier.
+
+    A Delivery Partner is a courier COMPANY, and the balance these endpoints read and
+    pay is a company-level payable — accrued at dispatch, cleared by one weekly bank
+    transfer. There is no branch dimension to it at all: unlike courier-settlement
+    reversal (branch-scoped floor work over a rider's cash), no branch "owns" a
+    delivery partner, so there is no floor-supervisor slice of this to hand the
+    line-manager tier the way ``STOCK_TRANSFER`` does. ``settle_delivery_partner``
+    clears the payable and posts a real bank transfer, and its caller-supplied
+    ``extra_charges`` are expensed at payment time — money leaving the company exactly
+    like ``api/cash_transfer.py``'s transfers, which is why this mirrors
+    ``ROLES.MANAGER`` rather than inventing a wider set. The two read endpoints are
+    gated the same because they preview that same payable; a plain POS user has no
+    business seeing what the company owes a courier partner either.
+    """
+    roles = set(frappe.get_roles())
+    if not roles.intersection(ROLES.MANAGER):
+        frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
 def _coerce_rows(value) -> list:
@@ -56,6 +79,7 @@ def get_delivery_partner_balances(delivery_partner: str | None = None):
     total_shipping, unsettled_count, total_shipping_fee, oldest_date}. The last
     three are aliases kept so older dashboards keep rendering.
     """
+    _ensure_delivery_partner_access()
     rows = frappe.db.sql("""
         SELECT
             ct.delivery_partner,
@@ -91,6 +115,7 @@ def get_delivery_partner_unsettled_details(delivery_partner: str):
 
     This is the list you check against the partner's own invoice before paying.
     """
+    _ensure_delivery_partner_access()
     if not delivery_partner:
         frappe.throw("delivery_partner is required")
 
@@ -144,6 +169,7 @@ def settle_delivery_partner(
 
     Returns a summary including the Journal Entry name.
     """
+    _ensure_delivery_partner_access()
     if not delivery_partner:
         frappe.throw("delivery_partner is required")
 

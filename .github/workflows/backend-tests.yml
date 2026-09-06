@@ -386,6 +386,48 @@ jobs:
             # shipped in 985d01f with 29 tests and was never added to this
             # array, so it has never run in CI once.
             test_api_recurring_expenses
+            # Reversing a courier settlement. Until this shipped, every reversal
+            # was a hand-written script piped into a production bench console.
+            # The load-bearing cases are the refusals: an arbitrary Journal
+            # Entry is not a settlement and must never be reversible, a second
+            # reversal must not post a second opposite entry, and a settlement
+            # belonging to another branch must be refused outright.
+            test_unsettle_courier_settlement
+            # The list that makes a settlement findable from a phone. Branch
+            # scoping is the point: a manager must not see another branch's
+            # settlements, and a non-settlement JE must never appear at all.
+            test_list_recent_courier_settlements
+            # Both of these settle endpoints shipped with NO permission guard --
+            # any authenticated user could post the weekly partner bank transfer
+            # or a commission entry. These pin the guard, and pin that it runs
+            # before any query or posting does.
+            test_delivery_partners_access_control
+            test_sales_partners_access_control
+            # Unpaid InstaPay/wallet orders sitting Out For Delivery past the
+            # configured threshold. Pins that the endpoint and the hourly job
+            # read the SAME threshold helper, so the screen can never disagree
+            # with the alert that woke somebody up.
+            test_api_escalations
+            # The warehouse-alignment gate pair: the read-only report widened to
+            # the manager tier so branch managers can watch their own drift, and
+            # the regression guard that its bulk REPAIR sibling stayed
+            # administrator-only.
+            #
+            # These live in their own module rather than in `test_api_manager`
+            # deliberately. That module is NOT in this array, and running it
+            # locally shows 7 pre-existing failures (shift monitor, invoice
+            # amendment, update_invoice_branch) that predate this work -- the
+            # exact "a module absent from this array is a module CI never runs"
+            # trap noted above. Adopting it here would turn CI red for reasons
+            # unrelated to this change; it needs its own fix.
+            test_warehouse_alignment_access
+            # The Woo backlog watcher: detection only, and the load-bearing test
+            # is the one that fails loudly if the sweep ever writes to a Sales
+            # Invoice. The migration itself stays a supervised manual operation,
+            # because re-pushing `completed` to the live store re-emails a
+            # customer whose order arrived months ago.
+            test_woo_backlog_watch
+            test_woo_backlog_api
           )
           rc=0
           for m in "${MODULES[@]}"; do
