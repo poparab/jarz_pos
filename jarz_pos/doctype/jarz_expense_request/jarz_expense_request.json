@@ -24,6 +24,9 @@
   "amount",
   "currency",
   "section_break_details",
+  "expense_kind",
+  "recurring_expense",
+  "employee",
   "reason_account",
   "reason_label",
   "column_break_payment",
@@ -38,6 +41,7 @@
   "requested_by",
   "company",
   "expense_month",
+  "period_month",
   "approved_by",
   "approved_on",
   "rejected_by",
@@ -82,6 +86,28 @@
    "fieldname": "section_break_details",
    "fieldtype": "Section Break",
    "label": "Details"
+  },
+  {
+   "fieldname": "expense_kind",
+   "fieldtype": "Select",
+   "label": "Expense Kind",
+   "options": "Ad-hoc\nRecurring\nSalary",
+   "default": "Ad-hoc",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "recurring_expense",
+   "fieldtype": "Link",
+   "label": "Recurring Expense",
+   "options": "Jarz Recurring Expense",
+   "depends_on": "eval:doc.expense_kind==\"Recurring\""
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "depends_on": "eval:doc.expense_kind==\"Salary\""
   },
   {
    "fieldname": "reason_account",
@@ -178,6 +204,13 @@
    "hidden": 1
   },
   {
+   "fieldname": "period_month",
+   "fieldtype": "Data",
+   "label": "Period (YYYY-MM)",
+   "description": "The month this payment is FOR. Defaults to the expense month; set it explicitly when paying for a past period.",
+   "in_standard_filter": 1
+  },
+  {
    "fieldname": "approved_by",
    "fieldtype": "Link",
    "label": "Approved By",
@@ -234,6 +267,20 @@
    "amend": 1,
    "print": 1,
    "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "JARZ Manager",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0,
+   "submit": 0,
+   "cancel": 0,
+   "amend": 0,
+   "print": 1,
    "share": 1,
    "export": 1,
    "report": 1

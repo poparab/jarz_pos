@@ -65,6 +65,12 @@ class JarzExpenseRequest(Document):
             self.requested_by = frappe.session.user
         if not self.currency:
             self.currency = frappe.defaults.get_global_default("currency")
+        # Every row that existed before the monthly-expenses feature, and every
+        # caller that predates it (jarz_pos.api.expenses.create_expense), is an
+        # ad-hoc payment. Defaulting here keeps the field non-null without
+        # forcing a single existing caller to pass it.
+        if not self.expense_kind:
+            self.expense_kind = "Ad-hoc"
 
     def validate(self):
         try:
@@ -103,6 +109,16 @@ class JarzExpenseRequest(Document):
         if self.expense_date:
             month_key = getdate(self.expense_date).strftime("%Y-%m")
             self.expense_month = month_key
+
+        # `expense_month` is when the money MOVED and is force-derived above on
+        # every save. `period_month` is the month being paid FOR, and the two
+        # differ whenever a bill is settled late: August rent paid on 3 Sept is
+        # expense_month=2026-09, period_month=2026-08. So this must only ever
+        # FILL IN a blank — overwriting it would silently re-file every late
+        # payment under the month it was made and make "what remains for August"
+        # unanswerable.
+        if not self.period_month:
+            self.period_month = self.expense_month
 
         if self.approved_on:
             try:
@@ -221,3 +237,7 @@ class JarzExpenseRequest(Document):
 
 def on_doctype_update():
     frappe.db.add_index("Jarz Expense Request", ["expense_month"])
+    # The monthly-expenses screen queries by the period being paid for, and by
+    # the registry item that was paid, on every load.
+    frappe.db.add_index("Jarz Expense Request", ["period_month"])
+    frappe.db.add_index("Jarz Expense Request", ["recurring_expense"])

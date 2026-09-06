@@ -370,6 +370,22 @@ jobs:
             # customer satisfying the coverage check that _resolve_item_rate then
             # ignores, so a B2B order silently booked the retail rate.
             test_money_path_pricing_fixes
+            # The monthly-expenses money maths: how much of a recurring bill or
+            # a salary is still owed for a given month. Two cases carry the
+            # whole feature. First, attribution — ledger money is credited to an
+            # expense only when exactly ONE due expense could have produced it;
+            # items sharing an account must never have it split between them,
+            # because that invents a per-item match that does not exist.
+            # Second, period vs posting month — the Journal Entry is dated by
+            # when the money MOVED, so August rent paid on 3 September lands in
+            # September's ledger while belonging to August. Scope those two by
+            # the same month and September reads as paid by a payment that was
+            # for August.
+            test_api_monthly_expenses
+            # The Desk recurring-expenses overview these maths build on. It
+            # shipped in 985d01f with 29 tests and was never added to this
+            # array, so it has never run in CI once.
+            test_api_recurring_expenses
           )
           rc=0
           for m in "${MODULES[@]}"; do
