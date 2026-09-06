@@ -1890,9 +1890,7 @@ def _create_invoice_document(logger):
 
 
 def _validate_and_calculate_document(invoice_doc, logger):
-    """Validate and calculate document totals using native ERPNext logic.
-    No custom discount preservation - let ERPNext handle discount_percentage naturally.
-    """
+    """Validate and calculate document totals using native ERPNext logic."""
     logger.debug("Running ERPNext document validation (native discount logic)...")
     try:
         print(f"   📋 Pre-calculation item summary:")
@@ -1902,8 +1900,28 @@ def _validate_and_calculate_document(invoice_doc, logger):
             qty = getattr(item, 'qty', 0) or 0
             print(f"      {idx}. {item.item_code} | qty={qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}")
 
+        # ``set_missing_values`` asks ERPNext's Item Price resolver to populate
+        # every line again. Jarz category/customer rates do not necessarily have
+        # a matching Item Price row, so v16 can replace an already resolved rate
+        # with zero. Preserve the pricing decision made while processing the cart,
+        # including bundle and operator discounts, across that native defaults pass.
+        resolved_pricing = [
+            (
+                float(getattr(item, "price_list_rate", 0) or 0),
+                float(getattr(item, "discount_percentage", 0) or 0),
+            )
+            for item in invoice_doc.items
+        ]
+
         print(f"   Running set_missing_values()...")
         invoice_doc.set_missing_values()
+
+        for item, (price_list_rate, discount_percentage) in zip(
+            invoice_doc.items, resolved_pricing, strict=True
+        ):
+            item.price_list_rate = price_list_rate
+            item.discount_percentage = discount_percentage
+            item.rate = price_list_rate * (1 - discount_percentage / 100.0)
 
         print(f"   Running calculate_taxes_and_totals()...")
         invoice_doc.calculate_taxes_and_totals()

@@ -217,6 +217,56 @@ class TestAddItemsToInvoice(unittest.TestCase):
         self.assertEqual(len(inv.items), 5)
 
 
+class TestResolvedRatePreservation(unittest.TestCase):
+    """Native defaults must not replace rates resolved outside Item Price."""
+
+    def _calculate(self, price_list_rate, discount_percentage):
+        row = SimpleNamespace(
+            item_code="CATEGORY-RATE-ITEM",
+            qty=1,
+            price_list_rate=price_list_rate,
+            discount_percentage=discount_percentage,
+            discount_amount=0,
+            rate=price_list_rate,
+            amount=price_list_rate,
+        )
+        invoice = SimpleNamespace(items=[row], net_total=0, grand_total=0)
+
+        def set_missing_values():
+            # ERPNext v16 does this when there is no matching per-item Item Price,
+            # even though Jarz already resolved a customer/category rate.
+            row.price_list_rate = 0
+            row.discount_percentage = 0
+            row.rate = 0
+
+        def calculate_taxes_and_totals():
+            row.amount = row.rate * row.qty
+            invoice.net_total = row.amount
+            invoice.grand_total = row.amount
+
+        invoice.set_missing_values = set_missing_values
+        invoice.calculate_taxes_and_totals = calculate_taxes_and_totals
+
+        from jarz_pos.services.invoice_creation import _validate_and_calculate_document
+
+        _validate_and_calculate_document(invoice, MagicMock())
+        return row
+
+    def test_sample_category_rate_survives_with_policy_discount(self):
+        row = self._calculate(price_list_rate=120, discount_percentage=100)
+
+        self.assertEqual(row.price_list_rate, 120)
+        self.assertEqual(row.discount_percentage, 100)
+        self.assertEqual(row.rate, 0)
+
+    def test_ordinary_category_rate_survives_without_discount(self):
+        row = self._calculate(price_list_rate=77, discount_percentage=0)
+
+        self.assertEqual(row.price_list_rate, 77)
+        self.assertEqual(row.discount_percentage, 0)
+        self.assertEqual(row.rate, 77)
+
+
 # ===========================================================================
 # TEST: Sales Partner Tax Suppression
 # ===========================================================================
