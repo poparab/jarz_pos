@@ -1907,7 +1907,11 @@ def _capture_resolved_item_pricing(invoice_doc):
 
 def _attach_resolved_item_pricing(invoice_doc, pricing=None):
     pricing = pricing or _capture_resolved_item_pricing(invoice_doc)
-    setattr(invoice_doc.flags, _RESOLVED_PRICING_FLAG, pricing)
+    flags = getattr(invoice_doc, "flags", None)
+    if flags is None:
+        flags = frappe._dict()
+        invoice_doc.flags = flags
+    setattr(flags, _RESOLVED_PRICING_FLAG, pricing)
     return pricing
 
 
