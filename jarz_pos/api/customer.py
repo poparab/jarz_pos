@@ -523,23 +523,35 @@ def save_customer_shipping_address(
         use_as_primary = str(primary_flag).strip().lower() not in {
             "0", "false", "no", "off",
         }
+        reused_address = False
 
         if normalized_address_name:
             linked_names = set(get_linked_customer_address_names(customer))
             if normalized_address_name not in linked_names:
                 frappe.throw(_("Selected address does not belong to this customer."))
-            address_doc = ensure_shipping_address(normalized_address_name)
-            if address_doc is None:
+            if not frappe.db.exists("Address", normalized_address_name):
                 frappe.throw(_("Selected address was not found."))
+            reused_address = True
+            address_doc = (
+                ensure_shipping_address(normalized_address_name)
+                if use_as_primary
+                else frappe.get_doc("Address", normalized_address_name)
+            )
         else:
             if not normalized_address:
                 frappe.throw(_("Address is required."))
 
             matching_address = find_matching_customer_address(customer_doc.name, normalized_address)
             if matching_address:
-                address_doc = ensure_shipping_address(str(matching_address.get("name") or ""))
-                if address_doc is None:
+                matching_address_name = str(matching_address.get("name") or "")
+                if not frappe.db.exists("Address", matching_address_name):
                     frappe.throw(_("Matching customer address was not found."))
+                reused_address = True
+                address_doc = (
+                    ensure_shipping_address(matching_address_name)
+                    if use_as_primary
+                    else frappe.get_doc("Address", matching_address_name)
+                )
             else:
                 address_payload = {
                     "doctype": "Address",
@@ -567,7 +579,8 @@ def save_customer_shipping_address(
         _apply_phone_to_address(address_doc, phone_value)
         address_doc.save(ignore_permissions=True)
 
-        ensure_shipping_address(address_doc.name)
+        if use_as_primary or not reused_address:
+            ensure_shipping_address(address_doc.name)
         if use_as_primary:
             set_customer_primary_shipping_address(customer_doc.name, address_doc.name)
 
@@ -582,22 +595,28 @@ def save_customer_shipping_address(
             geo_source=geo_source,
         )
 
-        # Every write above moves Customer.modified, so finish the Contact side first
-        # and only then read + save the Customer, inside one short window.
-        contact_name = _sync_customer_contact(customer_doc, phone_value)
+        if use_as_primary:
+            # Every write above moves Customer.modified, so finish the Contact side
+            # first and only then read + save the Customer, inside one short window.
+            contact_name = _sync_customer_contact(customer_doc, phone_value)
 
-        def _apply_customer_changes(doc: Document) -> None:
-            if use_as_primary:
+            def _apply_customer_changes(doc: Document) -> None:
                 doc.customer_primary_address = address_doc.name
-            if contact_name:
-                doc.customer_primary_contact = contact_name
-            if phone_value:
-                if frappe.db.has_column("Customer", "mobile_no"):
-                    doc.mobile_no = phone_value
-                if frappe.db.has_column("Customer", "phone"):
-                    doc.phone = phone_value
+                if contact_name:
+                    doc.customer_primary_contact = contact_name
+                if phone_value:
+                    if frappe.db.has_column("Customer", "mobile_no"):
+                        doc.mobile_no = phone_value
+                    if frappe.db.has_column("Customer", "phone"):
+                        doc.phone = phone_value
 
-        customer_doc = _save_customer_fields(customer_doc.name, _apply_customer_changes)
+            customer_doc = _save_customer_fields(customer_doc.name, _apply_customer_changes)
+        else:
+            # A B2B delivery branch belongs to the shared Customer account without
+            # becoming its billing/primary identity.  In particular, do not run the
+            # Customer update hooks: ERPNext re-saves the primary Contact there, and
+            # a B2B-only rep correctly has no broad Contact write permission.
+            customer_doc = frappe.get_doc("Customer", customer_doc.name)
 
         if invoice:
             link_shipping_address_to_invoice(invoice, address_doc.name)
