@@ -398,6 +398,33 @@ def _preview_canonical(
         if hints.get(key) not in (None, ""):
             result[key] = hints[key]
 
+    # Google's neighbourhood component is the exact answer, but it only arrives
+    # with a configured Places key, and neither server has one. Without a
+    # fallback the leads catalog's MAIN filter is simply blank on every lead a
+    # rep adds by pasting a link. Deriving it from the places we have already
+    # classified is inexact and says so -- see jarz_pos.services.lead_area for
+    # the measured accuracy and why the caller gets candidates as well.
+    if not result.get("primary_area") and result.get("resolved"):
+        try:
+            from jarz_pos.services import lead_area
+
+            derived = lead_area.resolve_area(
+                result.get("latitude"), result.get("longitude")
+            )
+        except Exception:
+            derived = {}
+        if derived.get("area"):
+            result["primary_area"] = derived["area"]
+            result["primary_area_source"] = derived.get("source") or "nearby_leads"
+            result["primary_area_confidence"] = derived.get("confidence") or "low"
+            result["area_candidates"] = list(derived.get("candidates") or [])
+            if result["metadata_source"] == "none":
+                result["metadata_source"] = "nearby_leads"
+        # An Egyptian address's city is its governorate. Only ever fill a blank:
+        # a city Google actually returned is better than one we inferred.
+        if derived.get("governorate") and not result.get("city"):
+            result["city"] = derived["governorate"]
+
     suggestions = result["suggestions"]
     if result.get("place_name"):
         suggestions["lead_name"] = result["place_name"]
