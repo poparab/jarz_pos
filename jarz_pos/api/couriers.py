@@ -894,7 +894,48 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
 # ---------------------------------------------------------------------------
 
 
+#: Settlement reversal ships DARK. Set to True only once the defects below are
+#: fixed AND verified against a real database and real concurrency — a mocked
+#: harness cannot see either of them, which is why both survived a green suite.
+#:
+#: 1. ``list_recent_courier_settlements`` filters ``journal_entry`` with
+#:    ``["not in", ["", None]]``. In SQL three-valued logic
+#:    ``x NOT IN ('', NULL)`` is NULL, never TRUE, so the query returns ZERO
+#:    rows on any real database and a manager can never find a settlement.
+#: 2. The non-settlement discriminator is a deny-list holding one tag
+#:    (PARTNER_FEE_ACCRUAL). The collection-change journal entries written by
+#:    ``_apply_collection_change_to_online`` / ``_from_online`` also land in
+#:    ``Courier Transaction.journal_entry``, and a settle path that nets to
+#:    zero marks those rows Settled without overwriting it — so such an entry
+#:    is reversible, which would erase the record of a customer's online
+#:    payment and re-create a receivable against a courier holding nothing.
+#:    The fix is to invert this to an ALLOW-list of settlement tags, which
+#:    first requires tagging ``_create_settlement_journal_entry`` (the batch
+#:    settlement currently writes no tag at all).
+#: 3. ``FOR UPDATE`` serializes the callers but does not refresh MariaDB's
+#:    REPEATABLE READ snapshot, so the guards after the lock still read
+#:    pre-lock state and a second reversal remains reachable. The re-read of
+#:    the Courier Transactions has to be a locking read too.
+UNSETTLE_RELEASED = False
+
+
+def _ensure_unsettle_released() -> None:
+    """Refuse the reversal endpoints while the feature is held back.
+
+    Enforced here rather than only in the client: these endpoints take an
+    arbitrary Journal Entry name, so hiding the button would leave the
+    defects reachable by anyone who can call the API.
+    """
+    if not UNSETTLE_RELEASED:
+        frappe.throw(
+            "Reversing a courier settlement is not available yet. It is held "
+            "back pending verification; reverse it from the backend for now.",
+            frappe.ValidationError,
+        )
+
+
 def _ensure_unsettle_access() -> None:
+    _ensure_unsettle_released()
     roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
     allowed = ROLES.ADMIN | ROLES.LINE_MANAGER_TIER
     if not roles.intersection(allowed):

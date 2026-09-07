@@ -452,6 +452,10 @@ class TestListRecentSettlementsAPI(unittest.TestCase):
             "jarz_pos.api.couriers._list_recent_courier_settlements",
             return_value=[],
         )
+        # The feature ships dark (couriers.UNSETTLE_RELEASED = False). These
+        # cases describe how it behaves once released, so they lift the hold;
+        # the hold itself is pinned by TestUnsettleReleaseHold below.
+        start("jarz_pos.api.couriers.UNSETTLE_RELEASED", new=True)
 
     def tearDown(self):
         for p in reversed(self.patches):
@@ -497,6 +501,41 @@ class TestListRecentSettlementsAPI(unittest.TestCase):
 
         list_recent_settlements()
         self.assertIs(self.service.call_args.kwargs["include_reversed"], False)
+
+
+class TestUnsettleReleaseHold(unittest.TestCase):
+    """Settlement reversal ships dark, and must stay dark until its defects are
+    fixed AND verified against a real database and real concurrency.
+
+    Enforced server-side rather than only by hiding the button, because all
+    three endpoints take an arbitrary Journal Entry name — a hidden button
+    leaves the defects reachable by anyone who can call the API.
+    """
+
+    def test_the_flag_is_off_on_main(self):
+        """Fails loudly if the hold is lifted without anyone meaning to."""
+        from jarz_pos.api import couriers
+
+        self.assertFalse(
+            couriers.UNSETTLE_RELEASED,
+            "Settlement reversal is still held back; see the defect list above "
+            "UNSETTLE_RELEASED in api/couriers.py before flipping this.",
+        )
+
+    def test_every_reversal_endpoint_is_refused_while_held(self):
+        from jarz_pos.api import couriers
+
+        # An administrator — the widest caller there is. The hold must refuse
+        # even them, and must refuse BEFORE the role check, so that lifting it
+        # is the only way through.
+        with patch("frappe.get_roles", return_value=["System Manager"]):
+            for call in (
+                lambda: couriers.list_recent_settlements(),
+                lambda: couriers.get_unsettle_preview("ACC-JV-2026-00001"),
+                lambda: couriers.unsettle_courier_settlement("ACC-JV-2026-00001", "tok"),
+            ):
+                with self.assertRaises(frappe.ValidationError):
+                    call()
 
 
 if __name__ == "__main__":

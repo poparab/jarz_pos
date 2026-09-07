@@ -541,6 +541,20 @@ class TestUnsettleCourierSettlementLockOrdering(unittest.TestCase):
 
 
 class TestEnsureUnsettleAccess(unittest.TestCase):
+    """The ROLE half of the guard, with the release hold lifted.
+
+    `_ensure_unsettle_access` runs the hold FIRST and the role check second, so
+    while the feature ships dark every caller is refused before their roles are
+    even looked at. These cases describe the role tier that applies once it is
+    released; the hold is pinned separately in
+    `test_list_recent_courier_settlements.TestUnsettleReleaseHold`.
+    """
+
+    def setUp(self):
+        self._released = patch("jarz_pos.api.couriers.UNSETTLE_RELEASED", new=True)
+        self._released.start()
+        self.addCleanup(self._released.stop)
+
     def test_ordinary_pos_user_is_refused(self):
         from jarz_pos.api.couriers import _ensure_unsettle_access
 
@@ -590,6 +604,10 @@ class TestGetUnsettlePreviewAPI(unittest.TestCase):
             return p.start()
 
         self.roles = start("frappe.get_roles", return_value=["JARZ Manager"])
+        # The feature ships dark (couriers.UNSETTLE_RELEASED = False). These
+        # cases describe how it behaves once released, so they lift the hold;
+        # the hold itself is pinned in test_list_recent_courier_settlements.
+        start("jarz_pos.api.couriers.UNSETTLE_RELEASED", new=True)
         self.fake_cache = _FakeCache()
         start("frappe.cache", return_value=self.fake_cache)
         self.preview_data = start(
@@ -657,6 +675,10 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
             return p.start()
 
         self.roles = start("frappe.get_roles", return_value=["JARZ Manager"])
+        # The feature ships dark (couriers.UNSETTLE_RELEASED = False). These
+        # cases describe how it behaves once released, so they lift the hold;
+        # the hold itself is pinned in test_list_recent_courier_settlements.
+        start("jarz_pos.api.couriers.UNSETTLE_RELEASED", new=True)
         self.fake_cache = _FakeCache()
         self.fake_cache.hset("jarz_pos:unsettle_preview:TOKEN-1", "data", {
             "journal_entry": "JE-ORIG-001", "pos_profile": "Nasr City",
