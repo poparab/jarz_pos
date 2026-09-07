@@ -13,7 +13,11 @@ from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 # DEFAULT_UOM).  Module scope is safe and is the sanctioned direction:
 # ``production_planning`` is the shared layer and reaches back here only through
 # a deferred import inside a function body, so there is no cycle.
-from jarz_pos.services.production_planning import attach_stock_elsewhere, component_uom
+from jarz_pos.services.production_planning import (
+    attach_stock_elsewhere,
+    component_uom,
+    is_non_sellable_warehouse,
+)
 
 # Fallbacks for the Jarz POS Settings fields the floor flow reads.  The Single
 # row reads empty until somebody saves it after a migrate, so every read has to
@@ -250,6 +254,11 @@ def _resolve_stock_entry_detail_rows(work_order: str, purpose: str) -> List[Dict
             SELECT
                 se.name          AS stock_entry,
                 se.posting_date  AS posting_date,
+                -- Selected, not just ordered by: `_assert_finish_not_before_transfer`
+                -- compares a full datetime, and a missing time silently collapses
+                -- every transfer to midnight — which passes a finish posted at
+                -- 09:00 against material that arrived at 14:00 the same day.
+                se.posting_time  AS posting_time,
                 sed.item_code    AS item_code,
                 sed.item_name    AS item_name,
                 sed.qty          AS qty,
@@ -524,6 +533,47 @@ def _assert_posting_date_allowed(scheduled_dt: Any) -> None:
                 "Backdating more than {0} day(s) requires a System Manager "
                 "(requested {1} days back)"
             ).format(max_days, days_back)
+        )
+
+
+def _assert_finish_not_before_transfer(work_order: str, scheduled_dt: Any) -> None:
+    """A batch cannot come out before its material went in.
+
+    ERPNext orders stock valuation by posting datetime, so a ``Manufacture``
+    entry timed before the ``Material Transfer for Manufacture`` that filled WIP
+    consumes from a warehouse it has not yet seen filled — refused outright for
+    negative stock, or, where negative stock is permitted, posted with the WIP
+    valuation silently inverted. The second outcome is the dangerous one: it
+    books a cost against stock that was not there.
+
+    The client clamps its date picker to the batch's start day, but a clamp in
+    the client is a convenience, not a rule — this is the check that holds, and
+    it is measured against the transfer that actually posted rather than against
+    ``jarz_started_at``, which is a stamp the app writes and a person can be
+    wrong about.
+
+    Never blocks on its own failure: a batch that cannot be finished because a
+    diagnostic query broke is a worse outcome than the misordering it guards.
+    """
+    try:
+        rows = _resolve_stock_entry_detail_rows(work_order, "Material Transfer for Manufacture")
+        stamps = [
+            get_datetime(f"{r.get('posting_date')} {r.get('posting_time') or '00:00:00'}")
+            for r in rows
+            if r.get("posting_date")
+        ]
+    except Exception:
+        return
+    if not stamps:
+        return
+
+    latest = max(stamps)
+    if scheduled_dt is not None and scheduled_dt < latest:
+        frappe.throw(
+            _(
+                "This batch's material was transferred on {0}, so it cannot be "
+                "finished on {1}. Pick that date or later."
+            ).format(latest.strftime("%Y-%m-%d %H:%M"), scheduled_dt.strftime("%Y-%m-%d %H:%M"))
         )
 
 
@@ -1293,6 +1343,7 @@ def _component_demand_warehouses(item_code: str, company: str) -> List[str]:
             JOIN `tabBOM` bom ON bom.name = bi.parent
             WHERE bom.is_active = 1
               AND bom.is_default = 1
+              AND bom.docstatus = 1
               AND bom.company = %(company)s
               AND bi.item_code = %(item_code)s
               AND IFNULL(bi.source_warehouse, '') != ''
@@ -1308,20 +1359,31 @@ def _component_demand_warehouses(item_code: str, company: str) -> List[str]:
         if warehouse and warehouse not in warehouses:
             warehouses.append(warehouse)
 
-    if warehouses:
-        return warehouses
-
-    # No recipe names a source, so every Work Order falls through to the Item
-    # Default — which is the case on this site for all 60 components.
+    # The Item Default is appended UNCONDITIONALLY, not as a fallback.
+    # ``_get_required_material_rows`` resolves per BOM — `source_warehouse or
+    # default_warehouse`, line by line — so when one recipe names a source and
+    # another does not, BOTH answers are live at once. Returning only the named
+    # ones the moment any recipe has one would refuse the item default as a
+    # destination while the board is still measuring a shortage against it, and
+    # the operator lands back at the dead end this endpoint exists to remove.
     fallback = _get_item_default_warehouse(item_code, company)
-    return [fallback] if fallback else []
+    if fallback and fallback not in warehouses:
+        warehouses.append(fallback)
+    return warehouses
 
 
 def _is_bom_component(item_code: str, company: str) -> bool:
-    """True when ``item_code`` is consumed by some active default BOM.
+    """True when ``item_code`` is consumed by some submitted default BOM.
 
     The gate that keeps this endpoint a production tool rather than a general
     stock-moving one: it can only ever touch something a recipe actually eats.
+
+    ``docstatus = 1`` is load-bearing, not decoration. ``is_active`` and
+    ``is_default`` both default to ``"1"`` in the BOM DocType, so a DRAFT BOM
+    somebody is halfway through authoring matches on those two alone — and
+    would silently widen the item allowlist of a write endpoint the floor role
+    can reach. Every sibling query in this app pairs the two flags with
+    ``docstatus``; these were the exceptions.
     """
     try:
         return bool(
@@ -1332,6 +1394,7 @@ def _is_bom_component(item_code: str, company: str) -> bool:
                 JOIN `tabBOM` bom ON bom.name = bi.parent
                 WHERE bom.is_active = 1
                   AND bom.is_default = 1
+                  AND bom.docstatus = 1
                   AND bom.company = %(company)s
                   AND bi.item_code = %(item_code)s
                 LIMIT 1
@@ -1356,6 +1419,38 @@ def _assert_pickable_warehouse(warehouse: str, company: str, label: str) -> None
     if is_group:
         frappe.throw(
             _("{0} warehouse {1} is a group and cannot hold stock").format(label, warehouse)
+        )
+
+
+def _assert_source_is_pickable_stock(warehouse: str) -> None:
+    """Refuse a source whose stock is not anybody's to fetch.
+
+    ``find_stock_elsewhere`` already drops WIP and Rejected warehouses when it
+    builds the list the operator sees, for the reason
+    ``is_non_sellable_warehouse`` states: material already inside a Work Order,
+    or that quality rejected, is not stock another batch can take.
+
+    That rule lived only on the READ path.  The button is driven by that list so
+    the app never offers such a source — but this endpoint is whitelisted and
+    reachable by every ``PRODUCTION_EXECUTE`` holder with an HTTP client, and a
+    UI that does not offer something is not a gate.  Pulling from
+    ``Work In Progress - J`` would empty the bin another operator's open batch
+    is standing on, and that batch then fails its Manufacture entry for negative
+    stock with nothing to explain why.
+    """
+    warehouse = _coerce_str(warehouse)
+    if not warehouse:
+        return
+    try:
+        warehouse_type = frappe.db.get_value("Warehouse", warehouse, "warehouse_type")
+    except Exception:
+        warehouse_type = None
+    if is_non_sellable_warehouse(warehouse, warehouse_type):
+        frappe.throw(
+            _(
+                "{0} holds material that is already committed to a batch or was "
+                "rejected, so it cannot be moved from here"
+            ).format(warehouse)
         )
 
 
@@ -1426,8 +1521,12 @@ def transfer_material_for_production(
     * ``qty`` must exist in ``from_warehouse`` right now.
 
     Nothing here creates or destroys stock: the company owns the same quantity
-    before and after, in a different bin.  That is a strictly smaller commitment
-    than starting a batch, which the same role already makes.
+    before and after, in a different bin, and the destination is one a recipe
+    already draws from.  That — not "it is smaller than starting a batch" — is
+    the safety argument.  Starting a batch is bounded by
+    ``_assert_batch_value_within_threshold``; this endpoint has no value ceiling,
+    so anyone widening it later must not lean on a comparison that was never
+    true.
     """
     _ensure_production_execute_access()
 
@@ -1481,8 +1580,14 @@ def transfer_material_for_production(
 
     _assert_pickable_warehouse(from_warehouse, company, _("Source"))
     _assert_pickable_warehouse(to_warehouse, company, _("Target"))
+    _assert_source_is_pickable_stock(from_warehouse)
 
     qty = _flt(qty)
+    # NaN is the one input shape that slips BOTH bounds checks below — every
+    # comparison against it is False — and would reach the Stock Entry to die
+    # in MariaDB instead of here.
+    if not math.isfinite(qty):
+        frappe.throw(_("Quantity to move must be a number"))
     if qty <= 0:
         frappe.throw(_("Quantity to move must be greater than zero"))
 
@@ -2599,6 +2704,7 @@ def finish_production_batch(
 
     scheduled_dt = _resolve_scheduled_datetime(scheduled_at)
     _assert_posting_date_allowed(scheduled_dt)
+    _assert_finish_not_before_transfer(work_order, scheduled_dt)
 
     # The ACTUAL quantity, never wo.qty.
     manufacture_entry = _make_and_submit_se(work_order, "Manufacture", actual, scheduled_dt)

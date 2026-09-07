@@ -72,6 +72,9 @@ class MoveTestCase(unittest.TestCase):
         self.entry = FakeStockEntry()
         self.invalidate = MagicMock()
         self.stock = {(ITEM, ELSEWHERE): 4.336, (ITEM, HOME): 0.0}
+        # What `Warehouse.warehouse_type` reads back for the source. None is an
+        # ordinary store; the non-sellable cases set it per test.
+        self.warehouse_type = None
 
     def _call(self, *, roles=OPERATOR, demanded=(HOME,), is_component=True, **kwargs):
         from jarz_pos.api import manufacturing
@@ -107,6 +110,15 @@ class MoveTestCase(unittest.TestCase):
         ) as mock_frappe:
             mock_frappe.throw.side_effect = _throw
             mock_frappe.new_doc.return_value = self.entry
+            # `_assert_source_is_pickable_stock` is NOT stubbed -- it is the gate
+            # that stops an operator draining another batch's WIP, so it runs
+            # its real logic. Only the one column it reads is faked. Configured
+            # on the mock rather than as its own patch: the module-wide
+            # `patch("...frappe")` above is applied last and would replace any
+            # separate `frappe.db.get_value` patch.
+            mock_frappe.db.get_value.side_effect = (
+                lambda *a, **k: self.warehouse_type
+            )
             return manufacturing.transfer_material_for_production(**payload)
 
 
@@ -206,6 +218,104 @@ class TestMoveRefusals(MoveTestCase):
             with self.subTest(qty=qty):
                 self.setUp()
                 self._refused(qty=qty)
+
+
+class TestSourceWarehouseIsPickable(MoveTestCase):
+    """The source has to be stock somebody may actually take.
+
+    ``find_stock_elsewhere`` already drops WIP and Rejected when it builds the
+    list the operator sees, so the app never offers one. That is not a gate: the
+    endpoint is whitelisted and every ``PRODUCTION_EXECUTE`` holder can call it
+    directly. Pulling from WIP would empty the bin another operator's open batch
+    is standing on, and that batch then fails its Manufacture entry for negative
+    stock with nothing on screen to explain why.
+    """
+
+    def test_a_work_in_progress_source_is_refused(self):
+        self.warehouse_type = "Work In Progress"
+        with self.assertRaises(Thrown) as ctx:
+            self._call(from_warehouse="Work In Progress - J")
+        self.assertIn("Work In Progress - J", str(ctx.exception))
+        self.assertFalse(self.entry.submitted)
+
+    def test_a_rejected_source_is_refused(self):
+        self.warehouse_type = "Rejected"
+        with self.assertRaises(Thrown):
+            self._call(from_warehouse="Rejected - J")
+        self.assertFalse(self.entry.submitted)
+
+    def test_the_rule_falls_back_to_the_name_when_the_type_is_blank(self):
+        """Sites that never filled in warehouse_type are the common case here,
+        which is why ``is_non_sellable_warehouse`` reads the name too."""
+        self.warehouse_type = ""
+        with self.assertRaises(Thrown):
+            self._call(from_warehouse="Work In Progress - J")
+        self.assertFalse(self.entry.submitted)
+
+    def test_an_ordinary_store_is_still_allowed(self):
+        self.warehouse_type = "Stores"
+        self._call()
+        self.assertTrue(self.entry.submitted)
+
+    def test_an_ordinary_store_with_no_type_at_all_is_still_allowed(self):
+        """The negative control for the name-hint fallback: 'Raw Material - J'
+        must not trip 'wip' / 'rejected' by accident, or the button refuses the
+        one source it exists to offer."""
+        self.warehouse_type = None
+        self._call()
+        self.assertTrue(self.entry.submitted)
+
+
+class TestQuantityEdgeCases(MoveTestCase):
+    def test_nan_is_refused(self):
+        """The one input that slips BOTH bounds checks -- every comparison
+        against NaN is False -- and would otherwise reach MariaDB."""
+        with self.assertRaises(Thrown):
+            self._call(qty=float("nan"))
+        self.assertFalse(self.entry.submitted)
+
+    def test_infinity_is_refused(self):
+        with self.assertRaises(Thrown):
+            self._call(qty=float("inf"))
+        self.assertFalse(self.entry.submitted)
+
+
+class TestDemandWarehouseResolution(unittest.TestCase):
+    """``_component_demand_warehouses`` decides the only destinations this
+    endpoint will accept, so a defect here is a refusal the operator cannot
+    argue with -- or a destination that unblocks nothing.
+    """
+
+    def _call(self, sql_rows, item_default):
+        from jarz_pos.api import manufacturing
+
+        with patch(
+            "jarz_pos.api.manufacturing.frappe.db.sql", return_value=sql_rows
+        ), patch(
+            "jarz_pos.api.manufacturing._get_item_default_warehouse",
+            return_value=item_default,
+        ):
+            return manufacturing._component_demand_warehouses(ITEM, COMPANY)
+
+    def test_the_item_default_is_included_even_when_a_recipe_names_a_source(self):
+        """The defect this pins: a union that short-circuits on the first named
+        source drops the item default for every OTHER recipe of the same
+        component. ``_get_required_material_rows`` resolves per BOM -- one
+        recipe naming a source does not stop another falling through to the
+        item default -- so both are live destinations at once.
+        """
+        out = self._call([{"source_warehouse": "Nasr City Store - J"}], HOME)
+        self.assertIn("Nasr City Store - J", out)
+        self.assertIn(HOME, out)
+
+    def test_no_named_source_falls_through_to_the_item_default(self):
+        self.assertEqual(self._call([], HOME), [HOME])
+
+    def test_no_source_and_no_item_default_is_empty(self):
+        self.assertEqual(self._call([], None), [])
+
+    def test_the_item_default_is_not_duplicated(self):
+        self.assertEqual(self._call([{"source_warehouse": HOME}], HOME), [HOME])
 
 
 class TestProductionPolicy(unittest.TestCase):
