@@ -340,11 +340,27 @@ class TestAndroidGetsDataOnlyMessages(unittest.TestCase):
         self.assertIn("notification", by_token["tok-web"])
         self.assertIn("notification", by_token["tok-ios"])
 
-    def test_non_order_types_keep_the_block_on_android(self):
-        """The native service does not render every type: invoice_cancelled has
-        no branch at all and invoice_accepted only cancels a notification.
-        Making those data-only would replace a tray line with silence."""
-        for msg_type in ("invoice_accepted", "invoice_cancelled", "shift_started"):
+    def test_the_accept_is_data_only_too_so_the_alarm_can_be_stopped(self):
+        """startAlarm and stopAlarm have to travel the same way.
+
+        Once new_invoice is data-only the alarm can START on a backgrounded or
+        killed tablet, which it never could before. invoice_accepted is what
+        calls stopAlarm, and it only reaches onMessageReceived if it is data-only
+        as well — otherwise the SDK draws its tray line, the native service is
+        never invoked, and the tablet rings until someone opens the app. The
+        alert notification is setOngoing/setAutoCancel(false), so it will not
+        clear itself either.
+        """
+        by_token = self._send(
+            ["tok-android"], {"tok-android": "Android"}, msg_type="invoice_accepted"
+        )
+        self.assertNotIn("notification", by_token["tok-android"])
+
+    def test_types_that_do_not_touch_the_alarm_keep_the_block(self):
+        """invoice_cancelled has no branch in the native `when` at all, and the
+        shift events do not touch the alarm — data-only would replace a tray
+        line with silence for nothing."""
+        for msg_type in ("invoice_cancelled", "shift_started", "shift_ended"):
             with self.subTest(msg_type=msg_type):
                 self.sent.clear()
                 by_token = self._send(

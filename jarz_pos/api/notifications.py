@@ -1985,7 +1985,10 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
 
 
 def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
-    tokens = _get_tokens_for_users(recipients)
+    # Platforms are threaded through here for the same reason as the new-invoice
+    # push: this is the message that carries stopAlarm, and it only reaches the
+    # native service if it is shaped data-only for Android.
+    tokens, token_platforms = _get_token_targets_for_users(recipients)
     if not tokens:
         result = _new_fcm_send_result(tokens, "skipped_no_tokens")
         result["ok"] = True
@@ -1995,7 +1998,7 @@ def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -
     _log_fcm_info(
         f"FCM send: invoice_accepted; recipients={len(recipients)}; tokens={len(tokens)}"
     )
-    return _send_fcm_notifications(tokens, data)
+    return _send_fcm_notifications(tokens, data, platforms=token_platforms)
 
 
 def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
@@ -2340,12 +2343,32 @@ def _send_fcm_notifications(
 
         webpush_config = _build_webpush_config(data, title, body)
 
-        # Only new_invoice is reshaped. The other types do NOT need
-        # onMessageReceived -- they need the SDK to draw the tray entry, and the
-        # native service does not render them all: invoice_cancelled has no
-        # branch at all and invoice_accepted only CANCELS a notification. Making
-        # those data-only would replace a tray line with silence.
-        reshape_for_android = msg_type == "new_invoice" and bool(platforms)
+        # Which types must reach onMessageReceived on Android.
+        #
+        # new_invoice: it is what calls startAlarm.
+        # invoice_accepted: it is what calls stopAlarm.
+        #
+        # The second one is not optional, and it is the pair that matters. Once
+        # new_invoice is data-only, the alarm can START on a backgrounded or
+        # killed tablet -- which it never could before. If the accept were left
+        # carrying a notification block, the SDK would draw its tray line and
+        # onMessageReceived would NOT run, so stopAlarm never fires and the
+        # tablet rings until someone physically opens the app. The alert
+        # notification is setOngoing(true)/setAutoCancel(false), so it does not
+        # clear itself either. Shipping the start without the stop would be
+        # worse than shipping neither.
+        #
+        # The cost is the "Order Accepted" tray line: the native handler stops
+        # the alarm and cancels the notification without drawing one. Losing an
+        # informational notice is a fair trade against a tablet that will not
+        # stop ringing, and it needs no app release to fix later.
+        #
+        # invoice_cancelled and the shift events stay as they were. Neither
+        # touches the alarm, and the native service does not render them all --
+        # invoice_cancelled has no branch in the `when` at all -- so making them
+        # data-only would replace a tray line with silence for nothing.
+        ANDROID_DATA_ONLY_TYPES = ("new_invoice", "invoice_accepted")
+        reshape_for_android = msg_type in ANDROID_DATA_ONLY_TYPES and bool(platforms)
 
         # Send to each token and keep per-token accounting for partial failures.
         messages = []
