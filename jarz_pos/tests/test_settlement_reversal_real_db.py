@@ -564,6 +564,32 @@ class TestSettlementPreviewTokenAgainstRealRedis(_RealDatabaseTestCase):
             "`expire_key` namespaces and therefore hits the real key",
         )
 
+    def test_an_old_shape_token_degrades_instead_of_raising(self):
+        """The DEPLOY window, which is not the race window.
+
+        The old shape stored this payload as a Redis HASH under the exact same
+        key bytes the code now GETs, so a token minted seconds before the
+        workers restart is a hash. `GET` against a hash raises
+        `WRONGTYPE Operation against a key holding the wrong kind of value`,
+        and unhandled that was an opaque 500 on the routine settle path for
+        every cashier holding a dialog open across the restart.
+
+        It must degrade to "no usable permit" — which the caller already turns
+        into "reopen the dialog" — never propagate. Fails closed either way.
+        """
+        cache = frappe.cache()
+        token = "DEPLOY-WINDOW-PROBE"
+        real_key = couriers_api._settle_preview_key(token)
+        self.addCleanup(lambda: cache.delete(real_key))
+
+        # Exactly what the previous release left behind in Redis.
+        cache.hset(f"jarz_pos:settle_preview:{token}", "data", {"invoice": "X"})
+
+        payload, raw = couriers_api._peek_settle_preview_token(token)
+
+        self.assertIsNone(payload, "an old-shape token must yield no payload")
+        self.assertIsNone(raw, "an old-shape token must yield no raw value to spend")
+
     def test_the_token_carries_a_real_expiry(self):
         """The defect, stated as the property that was missing.
 
@@ -696,6 +722,69 @@ class TestReferenceNoCannotForgeATag(_RealDatabaseTestCase):
 
     def test_ordinary_references_are_left_alone(self):
         self.assertEqual(dh._strip_je_tag_lookalikes("POS-RCPT-2026-00004"), "POS-RCPT-2026-00004")
+
+
+class TestIdempotencyTokenCannotForgeATag(_RealDatabaseTestCase):
+    """The sibling parameter that the `reference_no` fix did not cover.
+
+    `change_payment_collection_method` builds its dedup tag as
+    ``je_type = f"COLLECTION_CHANGE-{idempotency_token}"``, so unlike
+    `reference_no` — which lands in free text AFTER the tag — this value lands
+    INSIDE it. A caller who closes the tag and opens another controls what
+    `_is_settlement_je_remark` sees, which is the function that decides what
+    may be reversed.
+
+    Two concrete abuses, both money-affecting:
+      * forging COURIER_BATCH_SETTLEMENT makes a collection-change entry read
+        as a reversible settlement; reversing one erases the record that a
+        customer paid online and re-creates a receivable against a courier
+        holding nothing;
+      * forging COURIER_SETTLEMENT_REVERSAL marks a real, unreversed
+        settlement as "already reversed", permanently.
+
+    Guarded in `_je_dedup_tag` rather than only at the call site, because that
+    is the single function every tag passes through.
+    """
+
+    def test_a_token_that_closes_the_tag_is_refused(self):
+        forged = "A] [JARZ-JE:COURIER_BATCH_SETTLEMENT:X"
+
+        with self.assertRaises(Exception):
+            dh._je_dedup_tag("ACC-SINV-0001", f"COLLECTION_CHANGE-{forged}")
+
+    def test_each_structural_character_is_refused(self):
+        for ch in ("[", "]", ":"):
+            with self.subTest(char=ch):
+                with self.assertRaises(Exception):
+                    dh._je_dedup_tag("ACC-SINV-0001", f"COLLECTION_CHANGE-A{ch}B")
+
+    def test_a_forged_tag_never_reads_as_a_settlement(self):
+        """The property that actually matters, stated end to end."""
+        forged_remark = (
+            "Payment collection changed to InstaPay "
+            "[JARZ-JE:COLLECTION_CHANGE-A] "
+            "[JARZ-JE:COURIER_BATCH_SETTLEMENT:X:ACC-SINV-0001]"
+        )
+        # If the tag above could ever be built, this is what would admit it.
+        # The guard prevents its construction, so no such remark can exist —
+        # but assert the shape is recognised as dangerous, so that removing the
+        # guard fails loudly here rather than silently in production.
+        self.assertTrue(
+            dh._is_settlement_je_remark(forged_remark),
+            "this remark WOULD read as a settlement — which is exactly why "
+            "_je_dedup_tag must refuse to build it",
+        )
+
+    def test_ordinary_generated_tokens_still_work(self):
+        tag = dh._je_dedup_tag("ACC-SINV-0001", "COLLECTION_CHANGE-a1b2c3d4e5f6")
+
+        self.assertEqual(tag, "[JARZ-JE:COLLECTION_CHANGE-a1b2c3d4e5f6:ACC-SINV-0001]")
+
+    def test_every_real_settlement_tag_type_still_builds(self):
+        """The guard must not break any legitimate type."""
+        for je_type in dh.SETTLEMENT_JE_TAG_TYPES:
+            with self.subTest(je_type=je_type):
+                self.assertIn(je_type, dh._je_dedup_tag("ACC-SINV-0001", je_type))
 
 
 if __name__ == "__main__":

@@ -660,7 +660,24 @@ def _peek_settle_preview_token(token: str):
     if not presented:
         return None, None
 
-    raw = frappe.cache().get(_settle_preview_key(presented))
+    # Any cache failure here means "no usable permit", never a 500 on the
+    # cashier's confirm.
+    #
+    # The specific case this exists for is the DEPLOY WINDOW, not a Redis
+    # outage. The previous shape stored this payload as a Redis HASH under the
+    # exact same key bytes (`hset` namespaced through `make_key`, which is what
+    # `_settle_preview_key` still produces), so a token minted seconds before
+    # the workers restart is a hash that this `GET` hits with
+    # `WRONGTYPE Operation against a key holding the wrong kind of value`.
+    # Unhandled, that surfaced as an opaque 500 on the routine settle path for
+    # every cashier holding an open dialog across the restart. Degrading to
+    # "expired or invalid" instead sends them back through re-preview, which is
+    # the recovery they already understand and which the caller already
+    # handles. Fails closed either way: no permit, no posting.
+    try:
+        raw = frappe.cache().get(_settle_preview_key(presented))
+    except Exception:
+        return None, None
     if raw is None:
         return None, None
 
@@ -927,9 +944,21 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
     # the commit — check-then-act, so two callers holding one token both passed
     # the read and both went on to settle. The compare-and-delete runs inside
     # Redis, so exactly one of them gets True here and the rest are refused
-    # before any money moves. Everything that can refuse this call for a fixable
-    # reason (the guards, the invoice match) has already run above, so a token
-    # is only burned by a caller that is about to post.
+    # before any money moves.
+    #
+    # The guards and the invoice match have already run, but this is NOT the
+    # same as "a token is only burned by a caller that is about to post" — an
+    # earlier version of this comment claimed that and it is false.
+    # `_dispatch_settlement` below still refuses for user-fixable reasons, most
+    # concretely `_require_partner_fee` ("Enter the partner's delivery cost"),
+    # and a lock-wait timeout or deadlock lands in the same place. The savepoint
+    # rollback restores MariaDB; it does not put the Redis key back, so those
+    # callers lose their permit.
+    #
+    # That is survivable only because no client retries with the same token:
+    # the Kanban board and the invoice card both re-run the preview on every
+    # attempt. If a same-token retry is ever added, re-mint here in the failure
+    # path rather than relying on this note.
     if not _spend_settle_preview_token(preview_token, raw_token):
         frappe.throw("Preview already used or expired. Please reopen the dialog.")
 

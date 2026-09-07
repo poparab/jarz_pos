@@ -3716,6 +3716,19 @@ def change_payment_collection_method(
     receipt_name = (receipt_name or "").strip() or None
     notes = (notes or "").strip() or None
     idempotency_token = (idempotency_token or "").strip() or frappe.generate_hash(length=16)
+    # Validated, not just stripped: this value is interpolated INTO the JE
+    # dedup tag (``je_type = f"COLLECTION_CHANGE-{idempotency_token}"``), and
+    # that tag is what `_is_settlement_je_remark` uses to decide whether an
+    # entry may be reversed. Unvalidated, a caller could close the tag and open
+    # a forged `COURIER_BATCH_SETTLEMENT` one, making a collection-change entry
+    # reversible — which erases the record that a customer paid online.
+    # `_je_dedup_tag` rejects the structural characters too; this is the
+    # earlier, clearer refusal, so the caller is told which argument is wrong.
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", idempotency_token):
+        frappe.throw(
+            "idempotency_token must be 1-64 characters of letters, digits, "
+            "underscore, dot or hyphen."
+        )
 
     if not invoice_name:
         frappe.throw("invoice_name required")
@@ -3958,8 +3971,39 @@ def change_payment_collection_method(
 # stable invoice+type key and dedup on that instead. No schema change required.
 # ---------------------------------------------------------------------------
 
+#: Characters that would let a caller close this tag and open another one.
+_JE_TAG_STRUCTURAL_CHARS = ("[", "]", ":")
+
+
 def _je_dedup_tag(invoice_name: str, je_type: str) -> str:
-    """Return the stable dedup tag embedded in ``Journal Entry.user_remark``."""
+    """Return the stable dedup tag embedded in ``Journal Entry.user_remark``.
+
+    This tag is not decoration: ``_is_settlement_je_remark`` decides whether a
+    Journal Entry may be REVERSED by looking for it, so anyone who can control
+    the bytes inside it can mint a fake settlement.
+
+    That was reachable. ``change_payment_collection_method`` builds
+    ``je_type = f"COLLECTION_CHANGE-{idempotency_token}"`` from a whitelisted
+    parameter that was only ``.strip()``-ed, so a caller passing
+    ``"A] [JARZ-JE:COURIER_BATCH_SETTLEMENT:X"`` produced a remark containing a
+    complete, well-formed batch-settlement tag. The resulting collection-change
+    entry then read as a reversible settlement, and reversing one erases the
+    record that a customer paid online. The same trick against
+    ``COURIER_SETTLEMENT_REVERSAL`` marks a real settlement permanently
+    "already reversed".
+
+    Rejecting the three structural characters here rather than at each call
+    site is deliberate: this is the one function every tag passes through, so
+    no future ``je_type`` can reintroduce the hole. Legitimate types are
+    upper-case words with underscores and hyphens and never contain these.
+    """
+    for ch in _JE_TAG_STRUCTURAL_CHARS:
+        if ch in str(je_type or ""):
+            frappe.throw(
+                f"Invalid journal entry type {je_type!r}: it may not contain "
+                f"{ch!r}. This tag decides what may be reversed, so it cannot "
+                "carry caller-supplied punctuation."
+            )
     return f"[JARZ-JE:{je_type}:{invoice_name}]"
 
 
