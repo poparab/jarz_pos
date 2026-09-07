@@ -60,6 +60,50 @@ class _FakeJournalEntry:
         return getattr(self, fieldname, default)
 
 
+#: Stands in for the Custom Field's own creation, which is the boundary
+#: `_je_tag_legacy_cutoff` draws between "classified by its stamp" and
+#: "classified by its remark because it predates the stamp".
+FIELD_CUTOFF = "2026-09-07 00:00:00"
+
+
+def _classifying(row):
+    """Patch BOTH reads ``_is_settlement_je`` makes, and only those.
+
+    It fetches the entry, and it asks how old the provenance field is. A bare
+    ``patch.object(frappe.db, "get_value")`` answers both with the same value —
+    the cutoff then comes back as the *row*, which compares as a string and
+    quietly makes every remark trusted again. Patching them apart is what keeps
+    these tests testing the rule rather than the mock.
+    """
+    return (
+        patch.object(frappe.db, "get_value", return_value=row),
+        patch.object(delivery_handling, "_je_tag_field_exists", return_value=True),
+        patch.object(delivery_handling, "_je_tag_legacy_cutoff", return_value=FIELD_CUTOFF),
+    )
+
+
+def _je_classification_row(tag, human="Settlement", creation="2026-08-01 00:00:00",
+                           stamped=True, name="JE-1"):
+    """A Journal Entry row as ``_is_settlement_je`` now fetches it.
+
+    Classification stopped being a question about ``user_remark`` on 2026-09-07:
+    it asks ``_trusted_je_tag_source`` first, which trusts the app-written
+    ``custom_jarz_je_tag`` and falls back to the remark only for entries created
+    before that field existed. These fixtures carry BOTH a stamp and a pre-cutoff
+    ``creation`` so they read the same on a migrated site and on one whose
+    Journal Entry has no such column yet.
+
+    ``stamped=False`` models the thing the whole change exists to refuse: an
+    entry this app did not post, whose remark says "settlement" anyway.
+    """
+    return {
+        "name": name,
+        "creation": creation,
+        "user_remark": f"{human} {tag}",
+        "custom_jarz_je_tag": tag if stamped else None,
+    }
+
+
 class _JournalEntryCapture:
     """Stand-in for ``frappe.new_doc("Journal Entry")`` — records appended rows."""
 
@@ -70,9 +114,16 @@ class _JournalEntryCapture:
         self.company = None
         self.title = None
         self.user_remark = None
+        self.custom_jarz_je_tag = None
         self.name = name
         self.saved = False
         self.submitted = False
+
+    def set(self, fieldname, value):
+        """Real Documents have ``.set``, and ``_tag_journal_entry`` writes the
+        dedup tag through it. A double without this diverges from the thing it
+        stands in for and the test fails on the double."""
+        setattr(self, fieldname, value)
 
     def append(self, table, row):
         if table == "accounts":
@@ -231,14 +282,45 @@ class TestCourierTransactionsForSettlementJe(unittest.TestCase):
         "Settled" the Courier Transaction pointing at it is. This must fail loudly
         if the loose ``journal_entry`` + ``status=="Settled"`` filter is ever
         reintroduced on its own."""
-        remark = delivery_handling._je_user_remark(
-            "ACC-SINV-0001",
-            delivery_handling.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE,
-            "Delivery fee owed to Talabat – ACC-SINV-0001",
+        row = _je_classification_row(
+            delivery_handling._je_dedup_tag(
+                "ACC-SINV-0001", delivery_handling.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE
+            ),
+            human="Delivery fee owed to Talabat – ACC-SINV-0001",
         )
-        with patch.object(frappe.db, "get_value", return_value=remark):
+        db, exists, cutoff = _classifying(row)
+        with db, exists, cutoff:
             with patch.object(frappe, "get_all") as mock_get_all:
                 result = delivery_handling._courier_transactions_for_settlement_je("JE-FEE-001")
+
+        self.assertEqual(result, [])
+        mock_get_all.assert_not_called()
+
+    def test_a_forged_settlement_remark_on_a_foreign_entry_is_not_a_settlement(self):
+        """The read-side fix, at the unit level.
+
+        A Journal Entry this app never posted — an expense request, a cash
+        transfer, anything typed in Desk — whose remark happens to contain a
+        well-formed settlement tag. It used to satisfy the lookup, because the
+        lookup asked free text a security question. Now it carries no stamp and
+        was created after the cutoff, so there is nothing to trust and the CT
+        query is never even reached.
+
+        The database-level version of this, with a real foreign entry actually
+        posted, is in ``test_settlement_reversal_real_db``.
+        """
+        row = _je_classification_row(
+            delivery_handling._je_dedup_tag(
+                "COURIER-X", delivery_handling.BATCH_SETTLEMENT_JE_TAG_TYPE
+            ),
+            human="Refund to a supplier, notes:",
+            creation="2099-01-01 00:00:00",
+            stamped=False,
+        )
+        db, exists, cutoff = _classifying(row)
+        with db, exists, cutoff:
+            with patch.object(frappe, "get_all") as mock_get_all:
+                result = delivery_handling._courier_transactions_for_settlement_je("JE-FORGED")
 
         self.assertEqual(result, [])
         mock_get_all.assert_not_called()
@@ -248,10 +330,12 @@ class TestCourierTransactionsForSettlementJe(unittest.TestCase):
         ``Courier Transaction.is_partner_order`` — a partner order settled through
         the ordinary outstanding-settlement flow posts a REAL settlement JE and
         must stay reversible even though its CT carries is_partner_order=1."""
-        remark = delivery_handling._je_user_remark(
-            "ACC-SINV-0002", "COURIER_OUTSTANDING_SETTLEMENT", "Courier Outstanding Settlement"
+        row = _je_classification_row(
+            delivery_handling._je_dedup_tag("ACC-SINV-0002", "COURIER_OUTSTANDING_SETTLEMENT"),
+            human="Courier Outstanding Settlement",
         )
-        with patch.object(frappe.db, "get_value", return_value=remark):
+        db, exists, cutoff = _classifying(row)
+        with db, exists, cutoff:
             with patch.object(
                 frappe, "get_all",
                 return_value=[{
@@ -355,7 +439,17 @@ class TestUnsettleCourierSettlementService(unittest.TestCase):
             return p.start()
 
         self.exists = start("frappe.db.exists", return_value=True)
-        self.lock = start("frappe.db.get_value", return_value=True)
+        # No schema in a mocked run, so the provenance field is simply absent —
+        # stated outright rather than left to `frappe.get_meta` finding whatever
+        # the other mocks happen to return.
+        start(
+            "jarz_pos.services.delivery_handling._je_tag_field_exists", return_value=False
+        )
+        # Existence AND docstatus come from this one locking read now; nothing
+        # is read before it (see the snapshot note in the service).
+        self.lock = start(
+            "frappe.db.get_value", return_value={"name": "JE-ORIG-001", "docstatus": 1}
+        )
         self.original_je = _FakeJournalEntry(accounts=[
             _je_row("Cash - TC", debit=80.0),
             _je_row("Creditors - TC", debit=20.0, party_type="Employee", party="EMP-001"),
@@ -472,10 +566,39 @@ class TestUnsettleCourierSettlementService(unittest.TestCase):
         self.assertTrue(result["success"])
 
     def test_unsubmitted_journal_entry_is_refused(self):
-        self.get_doc.return_value = _FakeJournalEntry(docstatus=0)
+        self.lock.return_value = {"name": "JE-DRAFT", "docstatus": 0}
 
         with self.assertRaises(frappe.ValidationError):
             delivery_handling.unsettle_courier_settlement("JE-DRAFT")
+
+        self.new_doc.assert_not_called()
+
+    def test_missing_journal_entry_is_refused_by_the_locking_read(self):
+        """No separate existence probe. It used to be a plain
+        ``frappe.db.exists`` ABOVE the lock, and that read is what pinned the
+        REPEATABLE READ snapshot — see the next test."""
+        self.lock.return_value = None
+
+        with self.assertRaises(frappe.ValidationError):
+            delivery_handling.unsettle_courier_settlement("JE-NOPE")
+
+        self.new_doc.assert_not_called()
+
+    def test_a_cancellation_inside_the_lock_window_is_seen(self):
+        """The stale-docstatus defect, pinned.
+
+        The loaded document still says submitted — that is exactly what a
+        snapshot read returns for an entry cancelled in Desk after this
+        transaction's first read — while the locking read, served from the
+        latest committed row, says cancelled. The service must believe the
+        locking read; believing the document is how a cancelled settlement got
+        reversed a second time.
+        """
+        self.get_doc.return_value = _FakeJournalEntry(docstatus=1)
+        self.lock.return_value = {"name": "JE-ORIG-001", "docstatus": 2}
+
+        with self.assertRaises(frappe.ValidationError):
+            delivery_handling.unsettle_courier_settlement("JE-ORIG-001")
 
         self.new_doc.assert_not_called()
 
@@ -543,7 +666,13 @@ class TestUnsettleCourierSettlementLockOrdering(unittest.TestCase):
         self.original_je = _FakeJournalEntry(accounts=[_je_row("Cash - TC", debit=80.0)])
 
         start("frappe.db.exists", side_effect=_record("exists", True))
-        self.lock = start("frappe.db.get_value", side_effect=_record("lock", True))
+        start(
+            "jarz_pos.services.delivery_handling._je_tag_field_exists", return_value=False
+        )
+        self.lock = start(
+            "frappe.db.get_value",
+            side_effect=_record("lock", {"name": "JE-ORIG-001", "docstatus": 1}),
+        )
         start("frappe.get_doc", side_effect=_record("get_doc", self.original_je))
         start(
             "jarz_pos.services.delivery_handling._courier_transactions_for_settlement_je",
@@ -572,11 +701,20 @@ class TestUnsettleCourierSettlementLockOrdering(unittest.TestCase):
         for p in reversed(self.patches):
             p.stop()
 
-    def test_lock_is_taken_before_every_other_guard(self):
+    def test_lock_is_taken_before_every_other_read(self):
         delivery_handling.unsettle_courier_settlement("JE-ORIG-001")
 
-        self.assertEqual(self.call_order[0], "exists")
-        self.assertEqual(self.call_order[1], "lock")
+        self.assertEqual(
+            self.call_order[0], "lock",
+            "the locking read must be the transaction's FIRST read. It used to be "
+            "second, behind a plain `frappe.db.exists`, and under REPEATABLE READ "
+            "that first plain read pins the snapshot every later check is served "
+            "from — including the docstatus of the entry being reversed.",
+        )
+        self.assertNotIn(
+            "exists", self.call_order,
+            "the existence probe is gone: existence comes from the locking read",
+        )
         for later in ("get_doc", "cts", "branch", "find_reversal"):
             self.assertLess(
                 self.call_order.index("lock"), self.call_order.index(later),

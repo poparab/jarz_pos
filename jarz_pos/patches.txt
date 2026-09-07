@@ -27,3 +27,8 @@ jarz_pos.Patches.v1_6.backfill_bundle_group_metadata
 # still log it as executed and never run it again. It is wired as an
 # after_migrate hook instead, where the fixture is already synced.
 jarz_pos.Patches.v1_8.dedupe_sales_partner_transactions
+# Copies the [JARZ-JE:...] tag out of Journal Entry.user_remark and into
+# custom_jarz_je_tag, which is what the idempotency and reversal guards now
+# match on. Skipping it leaves every entry posted before 2026-09-07 invisible to
+# its own guard, i.e. a retried dispatch double-posts the freight accrual.
+jarz_pos.Patches.v1_9.backfill_journal_entry_tag_field

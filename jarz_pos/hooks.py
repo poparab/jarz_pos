@@ -63,6 +63,12 @@ before_migrate = [
     # COURIER_CONTRACTS §2 freezes that block at eight fields and a guard test
     # asserts the set.
     "jarz_pos.utils.cleanup.ensure_tracking_fields",
+    # Journal Entry provenance tag. MUST be before_migrate: the backfill patch
+    # (post_model_sync) writes to this column, and post_model_sync runs long
+    # before sync_fixtures(). A fixture here would create the field after the
+    # patch needed it, so the patch would throw and every pre-existing tagged
+    # entry would stay invisible to its own idempotency guard.
+    "jarz_pos.utils.cleanup.ensure_journal_entry_tag_field",
     # Ensure Territory has delivery_income and delivery_expense fields
     "jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
     # Ensure new delivery slot fields exist before fixtures import / migrations

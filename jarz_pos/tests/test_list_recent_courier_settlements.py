@@ -35,7 +35,8 @@ def _ct_row(name, journal_entry, invoice, amount=100.0, shipping=20.0,
     }
 
 
-def _je_row(name, company="Test Company", posting_date="2026-09-01", user_remark=None):
+def _je_row(name, company="Test Company", posting_date="2026-09-01", user_remark=None,
+            creation="2026-08-01 00:00:00", tag=None):
     """A Journal Entry row as the batch fetch returns it.
 
     ``user_remark`` defaults to a real batch-settlement remark, because a JE is
@@ -43,6 +44,14 @@ def _je_row(name, company="Test Company", posting_date="2026-09-01", user_remark
     settlement (an allow-list — see ``SETTLEMENT_JE_TAG_TYPES``). A fixture with
     no remark is not a settlement and must not appear, so the default here has
     to be a genuine one rather than an empty string.
+
+    ``creation`` and ``tag`` are what make the row honest since 2026-09-07: the
+    listing classifies on ``_trusted_je_tag_source``, which reads the app-written
+    ``custom_jarz_je_tag`` and falls back to the remark ONLY for entries that
+    predate that field. The default is a legacy batch settlement — no stamp, a
+    pre-cutoff ``creation`` — which is precisely the 2026-09-02 wrong-branch case
+    this feature exists for, so the default fixture keeps proving it stays
+    listable.
     """
     if user_remark is None:
         user_remark = "Order: 100.0, Shipping: 20.0, Net to branch: 80.0"
@@ -51,6 +60,8 @@ def _je_row(name, company="Test Company", posting_date="2026-09-01", user_remark
         "company": company,
         "posting_date": posting_date,
         "user_remark": user_remark,
+        "creation": creation,
+        "custom_jarz_je_tag": tag,
     }
 
 
@@ -85,6 +96,15 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
         self.find_reversal_bulk = start(
             "jarz_pos.services.delivery_handling._find_settlement_reversal_jes_bulk",
             return_value={},
+        )
+        # State the schema outright: `_je_tag_field_exists` would otherwise load
+        # a real Meta through the very `frappe.get_all` these tests dispatch on.
+        start(
+            "jarz_pos.services.delivery_handling._je_tag_field_exists", return_value=True
+        )
+        start(
+            "jarz_pos.services.delivery_handling._je_tag_legacy_cutoff",
+            return_value="2026-09-07 00:00:00",
         )
         self.get_all = start("frappe.get_all")
 
@@ -334,21 +354,71 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
         from jarz_pos.services import delivery_handling
 
         ct_rows = [_ct_row("CT-1", "JE-FEE-001", "ACC-SINV-0001")]
-        je_rows = [{
-            "name": "JE-FEE-001",
-            "company": "Test Company",
-            "posting_date": "2026-09-01",
-            "user_remark": delivery_handling._je_user_remark(
-                "ACC-SINV-0001",
-                delivery_handling.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE,
-                "Delivery fee owed to Talabat – ACC-SINV-0001",
-            ),
-        }]
+        tag = delivery_handling._je_dedup_tag(
+            "ACC-SINV-0001", delivery_handling.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE
+        )
+        je_rows = [_je_row(
+            "JE-FEE-001",
+            user_remark=f"Delivery fee owed to Talabat – ACC-SINV-0001 {tag}",
+            tag=tag,
+        )]
         self.map_branches.return_value = {"ACC-SINV-0001": "Nasr City"}
 
         result = self._run(ct_rows, je_rows)
 
         self.assertEqual(result, [])
+
+    def test_a_foreign_entry_with_a_forged_settlement_remark_is_not_listed(self):
+        """The read-side fix, at the listing.
+
+        An entry this app never posted whose remark contains a well-formed batch
+        settlement tag. Before 2026-09-07 the listing classified on
+        ``user_remark`` alone, so this appeared in the reversal dialog as
+        something a manager could reverse — and reversing it posts the inverse of
+        an entry that was never a settlement. It carries no app stamp and was
+        created after the cutoff, so there is nothing about it to trust.
+        """
+        from jarz_pos.services import delivery_handling
+
+        forged = delivery_handling._je_dedup_tag(
+            "COURIER-X", delivery_handling.BATCH_SETTLEMENT_JE_TAG_TYPE
+        )
+        ct_rows = [_ct_row("CT-1", "JE-FOREIGN-001", "ACC-SINV-0001")]
+        je_rows = [_je_row(
+            "JE-FOREIGN-001",
+            user_remark=f"Cash transfer, note: {forged}",
+            creation="2099-01-01 00:00:00",
+            tag=None,
+        )]
+        self.map_branches.return_value = {"ACC-SINV-0001": "Nasr City"}
+
+        self.assertEqual(self._run(ct_rows, je_rows), [])
+
+    def test_a_stamped_settlement_is_listed_even_with_an_unhelpful_remark(self):
+        """The other half: provenance is what counts, not the prose.
+
+        The stamp says batch settlement; the remark says nothing recognisable.
+        This is the shape an entry takes once the tag lives in its own field, and
+        it must be listable — otherwise hardening the read side would have made
+        every settlement posted after it unreversable.
+        """
+        from jarz_pos.services import delivery_handling
+
+        tag = delivery_handling._je_dedup_tag(
+            "EMP-001", delivery_handling.BATCH_SETTLEMENT_JE_TAG_TYPE
+        )
+        ct_rows = [_ct_row("CT-1", "JE-STAMPED-001", "ACC-SINV-0001")]
+        je_rows = [_je_row(
+            "JE-STAMPED-001",
+            user_remark="nothing recognisable here",
+            creation="2099-01-01 00:00:00",
+            tag=tag,
+        )]
+        self.map_branches.return_value = {"ACC-SINV-0001": "Nasr City"}
+
+        result = self._run(ct_rows, je_rows)
+
+        self.assertEqual([r["journal_entry"] for r in result], ["JE-STAMPED-001"])
 
     def test_ct_query_applies_a_posting_date_window_and_a_sql_limit(self):
         """Item 5: the Courier Transaction scan must be bounded in SQL — a date
@@ -417,6 +487,32 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
 
 
 class TestFindSettlementReversalJesBulk(unittest.TestCase):
+    """The batched reversal lookup.
+
+    Both halves of it are stated explicitly here — the provenance scan and the
+    bounded legacy-remark scan — because `_je_tag_field_exists` otherwise loads
+    a real Meta, and loading a Meta issues `frappe.get_all` calls of its own
+    straight into the counter these tests assert on.
+    """
+
+    def setUp(self):
+        self.patches = [
+            patch(
+                "jarz_pos.services.delivery_handling._je_tag_field_exists",
+                return_value=True,
+            ),
+            patch(
+                "jarz_pos.services.delivery_handling._je_tag_legacy_cutoff",
+                return_value="2026-09-07 00:00:00",
+            ),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+
     def test_empty_input_short_circuits_without_a_query(self):
         from jarz_pos.services.delivery_handling import _find_settlement_reversal_jes_bulk
 
@@ -442,9 +538,27 @@ class TestFindSettlementReversalJesBulk(unittest.TestCase):
         with patch.object(frappe, "get_all", return_value=candidates) as mock_get_all:
             result = _find_settlement_reversal_jes_bulk(je_by_name)
 
-        mock_get_all.assert_called_once()
+        # One company, so the query count is a small CONSTANT — the provenance
+        # scan plus the bounded legacy-remark scan — never one per settlement,
+        # which is the timeout this batching exists to avoid.
+        self.assertEqual(mock_get_all.call_count, 2)
         self.assertEqual(result, {"JE-1": "JE-REV-1"})
         self.assertNotIn("JE-2", result)
+
+    def test_query_count_does_not_grow_with_the_number_of_settlements(self):
+        """The actual invariant: queries scale with COMPANIES, not settlements."""
+        from jarz_pos.services.delivery_handling import _find_settlement_reversal_jes_bulk
+
+        def _count(n):
+            je_by_name = {
+                f"JE-{i}": {"name": f"JE-{i}", "company": "Test Company"}
+                for i in range(n)
+            }
+            with patch.object(frappe, "get_all", return_value=[]) as mock_get_all:
+                _find_settlement_reversal_jes_bulk(je_by_name)
+            return mock_get_all.call_count
+
+        self.assertEqual(_count(2), _count(50))
 
     def test_one_query_per_distinct_company(self):
         from jarz_pos.services.delivery_handling import _find_settlement_reversal_jes_bulk
@@ -456,7 +570,13 @@ class TestFindSettlementReversalJesBulk(unittest.TestCase):
         with patch.object(frappe, "get_all", return_value=[]) as mock_get_all:
             _find_settlement_reversal_jes_bulk(je_by_name)
 
-        self.assertEqual(mock_get_all.call_count, 2)
+        with patch.object(frappe, "get_all", return_value=[]) as one_company:
+            _find_settlement_reversal_jes_bulk(
+                {"JE-1": {"name": "JE-1", "company": "Company A"}}
+            )
+
+        self.assertEqual(one_company.call_count, 2)
+        self.assertEqual(mock_get_all.call_count, 4)
 
 
 # ---------------------------------------------------------------------------

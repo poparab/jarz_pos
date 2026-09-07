@@ -33,7 +33,7 @@ from jarz_pos.services.delivery_handling import (
     PARTNER_FEES_VAT_RATE,
     _compute_sales_partner_fees,
     _find_existing_je_by_tag,
-    _je_user_remark,
+    _tag_journal_entry,
 )
 from jarz_pos.utils.account_utils import (
     ensure_input_vat_account,
@@ -378,8 +378,8 @@ def settle_sales_partner(sales_partner: str, pos_profile: str | None = None):
         je.posting_date = frappe.utils.nowdate()
         je.company = company
         je.title = title
-        je.user_remark = _je_user_remark(
-            dedup_key, JE_TYPE, f"{title} ({len(settled_names)} txns)"
+        _tag_journal_entry(
+            je, dedup_key, JE_TYPE, f"{title} ({len(settled_names)} txns)"
         )
 
         # Debit: commission expense + recoverable input VAT (combined across both portions)

@@ -61,7 +61,7 @@ from jarz_pos.utils.account_utils import (
 from jarz_pos.services.delivery_handling import (
     _find_existing_je_by_tag,
     _get_courier_outstanding_account,
-    _je_user_remark,
+    _tag_journal_entry,
     update_submitted_sales_invoice_fields,
 )
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
@@ -546,7 +546,7 @@ def _post_return_je(
     je.company = company
     je.posting_date = frappe.utils.nowdate()
     je.title = human[:140]
-    je.user_remark = _je_user_remark(dedup_key, je_type, human)
+    _tag_journal_entry(je, dedup_key, je_type, human)
 
     total_debit = 0.0
     total_credit = 0.0

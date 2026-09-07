@@ -369,6 +369,55 @@ def ensure_courier_delivery_fields() -> None:
         _log(f"ensure_courier_delivery_fields error: {e}")
 
 
+def ensure_journal_entry_tag_field() -> None:
+    """Ensure ``Journal Entry.custom_jarz_je_tag`` exists.
+
+    This is the field the app's Journal Entry idempotency and reversal guards
+    match on with ``=``. Until 2026-09-07 they matched
+    ``user_remark LIKE '%[JARZ-JE:<type>:<key>]%'``, i.e. free text, so any
+    submitted entry in the company whose remark contained the literal answered
+    "yes" to "has this already been posted?" and "may this settlement be
+    reversed?". Four review rounds each closed one more writer that let a caller
+    put such a literal there; this field closes the read side instead, because a
+    remark cannot populate it however it is spelled.
+
+    Created **here**, in ``before_migrate``, not by a fixture. Fixtures sync at
+    the very END of ``bench migrate``, while ``Patches/v1_9/
+    backfill_journal_entry_tag_field`` (post_model_sync, i.e. much earlier) needs
+    the column, and freshly deployed code is already serving. Same reasoning as
+    :func:`ensure_courier_delivery_fields`.
+
+    ``no_copy`` is load-bearing: an amended Journal Entry copying the tag would
+    give two entries the same idempotency key, and the guard would then treat
+    whichever it found first as the one that exists. ``read_only`` keeps it out
+    of the form; it is provenance, not data anyone types.
+    """
+    try:
+        if not frappe:
+            return
+
+        _ensure_custom_field(
+            dt="Journal Entry",
+            fieldname="custom_jarz_je_tag",
+            label="Jarz Dedup Tag",
+            fieldtype="Data",
+            insert_after="user_remark",
+            description=(
+                "Written by Jarz POS only. The idempotency / reversal key for this "
+                "entry, in the form [JARZ-JE:<type>:<key>]. Empty on entries Jarz "
+                "POS did not post."
+            ),
+            length=255,
+            read_only=1,
+            no_copy=1,
+            print_hide=1,
+            search_index=1,
+            translatable=0,
+        )
+    except Exception as e:  # pragma: no cover - defensive, matches siblings
+        _log(f"ensure_journal_entry_tag_field failed: {e}")
+
+
 def ensure_tracking_fields() -> None:
     """Ensure the customer-tracking token exists on Sales Invoice.
 

@@ -47,6 +47,11 @@ COLLECTION_CHANGE_REMARK = (
     "Payment collection changed to Instapay for ACC-SINV-TEST. Reference: POS-RCPT-1"
 )
 
+#: The provenance stamp a batch settlement posted today carries. `SETTLEMENT_REMARK`
+#: alone is the LEGACY shape — an entry from before `custom_jarz_je_tag` existed —
+#: and is now only trusted on entries older than the field itself.
+BATCH_TAG = dh._je_dedup_tag("EMP-TEST-001", dh.BATCH_SETTLEMENT_JE_TAG_TYPE)
+
 
 class _RealDatabaseTestCase(unittest.TestCase):
     """Base class that refuses to run without a database rather than skipping.
@@ -155,12 +160,23 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
                 pass
         frappe.db.commit()
 
-    def _make_je(self, remark, submit=False):
+    def _make_je(self, remark, submit=False, stamp=None):
+        """Post a Journal Entry. ``stamp`` fills ``custom_jarz_je_tag``.
+
+        Since 2026-09-07 an entry is classified by that field, not by its
+        remark, and only entries older than the field itself fall back to the
+        remark — so a fixture standing in for something the app posted TODAY has
+        to carry the stamp, exactly as `_tag_journal_entry` writes it. A fixture
+        with only the remark now models a FOREIGN entry, which is a different
+        test (see TestAForeignJournalEntryCannotSatisfyTheTagLookups).
+        """
         je = frappe.new_doc("Journal Entry")
         je.voucher_type = "Journal Entry"
         je.posting_date = frappe.utils.nowdate()
         je.company = self.company
         je.user_remark = remark
+        if stamp is not None and dh._je_tag_field_exists():
+            je.set(dh._JE_TAG_FIELDNAME, stamp)
         je.append("accounts", {
             "account": self.accounts[0],
             "debit_in_account_currency": 100,
@@ -193,7 +209,7 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
         return ct.name
 
     def test_a_real_settlement_je_yields_its_settled_courier_transaction(self):
-        je = self._make_je(SETTLEMENT_REMARK)
+        je = self._make_je(SETTLEMENT_REMARK, stamp=BATCH_TAG)
         ct = self._make_ct(je)
         rows = dh._courier_transactions_for_settlement_je(je)
 
@@ -209,7 +225,13 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
         record that the customer paid online and re-creating a receivable
         against a courier holding nothing. On production, 14 such rows existed.
         """
-        je = self._make_je(COLLECTION_CHANGE_REMARK)
+        # Stamped with its OWN (collection-change) tag, which is what the app
+        # really writes — so this pins that the allow-list refuses a genuine,
+        # app-posted entry of the wrong KIND, not merely an unstamped one.
+        je = self._make_je(
+            COLLECTION_CHANGE_REMARK,
+            stamp=dh._je_dedup_tag("ACC-SINV-TEST", "COLLECTION_CHANGE-a1b2c3d4e5f6"),
+        )
         ct = self._make_ct(je, status="Settled")
         # The row really is Settled and really does point at this entry...
         self.assertEqual(
@@ -234,7 +256,7 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
                 "whose Courier Transactions carry no branch-bearing invoice"
             )
 
-        je = self._make_je(SETTLEMENT_REMARK, submit=True)
+        je = self._make_je(SETTLEMENT_REMARK, submit=True, stamp=BATCH_TAG)
         self._make_ct(je)
         listed = {row["journal_entry"] for row in dh.list_recent_courier_settlements(limit=200)}
 
@@ -244,7 +266,8 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
         je = self._make_je(
             dh._je_user_remark(
                 "ACC-SINV-TEST", dh.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE, "Delivery fee owed"
-            )
+            ),
+            stamp=dh._je_dedup_tag("ACC-SINV-TEST", dh.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE),
         )
         self._make_ct(je)
         self.assertEqual(dh._courier_transactions_for_settlement_je(je), [])
@@ -282,6 +305,8 @@ class TestReversalIsolationWithTwoConnections(_RealDatabaseTestCase):
         je.posting_date = frappe.utils.nowdate()
         je.company = company
         je.user_remark = SETTLEMENT_REMARK
+        if dh._je_tag_field_exists():
+            je.set(dh._JE_TAG_FIELDNAME, BATCH_TAG)
         je.append("accounts", {
             "account": accounts[0],
             "debit_in_account_currency": 100,
@@ -785,6 +810,273 @@ class TestIdempotencyTokenCannotForgeATag(_RealDatabaseTestCase):
         for je_type in dh.SETTLEMENT_JE_TAG_TYPES:
             with self.subTest(je_type=je_type):
                 self.assertIn(je_type, dh._je_dedup_tag("ACC-SINV-0001", je_type))
+
+
+class TestAForeignJournalEntryCannotSatisfyTheTagLookups(_RealDatabaseTestCase):
+    """The test the whole series was missing.
+
+    Four consecutive adversarial review rounds each found a different
+    caller-supplied string reaching a Journal Entry remark — the reversal
+    `reason`, the payment `reference_no`, the `idempotency_token`, and finally
+    `Jarz Expense Request.remarks` plus `cash_transfer.submit_transfer(remark=)`.
+    Each was sanitised, and each fix bought exactly one round, because the write
+    side is unbounded: every future writer is another chance to reintroduce the
+    hole.
+
+    None of those rounds asked the question this class asks. The three lookups
+    were company-wide `user_remark LIKE '%[JARZ-JE:<type>:<key>]%'` queries, so
+    the property that actually matters is not "can this particular parameter
+    forge a tag" but "can ANY Journal Entry this app did not post satisfy these
+    lookups". That property is testable directly, needs no knowledge of which
+    writers exist, and does not go stale when a new one is added.
+
+    So: post a REAL, submitted, foreign Journal Entry whose remark contains a
+    perfectly well-formed tag — built by the app's own tag builder, so there is
+    nothing malformed to catch — and require all three lookups to ignore it.
+
+    The entry is real on purpose. A mock cannot tell you what
+    `user_remark LIKE '%...%'` matches; only the database can, and matching is
+    the entire subject.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Create the provenance field if this site has not migrated yet, exactly
+        # as `before_migrate` does. Deliberate, not a convenience: the CI job
+        # that runs this module syncs branch code into staging and NEVER
+        # migrates, so without this the test would pass vacuously on every run
+        # before the first deploy — a green result that proves nothing is the
+        # failure mode this whole module exists to prevent. The seeder is
+        # create-only and idempotent, and the field is the one the next deploy
+        # adds anyway.
+        from jarz_pos.utils import cleanup
+
+        cleanup.ensure_journal_entry_tag_field()
+        frappe.clear_cache(doctype="Journal Entry")
+        if not dh._je_tag_field_exists():
+            raise AssertionError(
+                "Journal Entry.custom_jarz_je_tag could not be created, so the tag "
+                "lookups have nothing unforgeable to match on and this test cannot "
+                "assert anything. Fix the field before trusting a green run."
+            )
+
+    def setUp(self):
+        self.made = []
+        self.addCleanup(self._cleanup)
+
+        self.company = frappe.db.get_value("Company", {}, "name")
+        self.assertTrue(self.company, "a Company is required to post a Journal Entry")
+        self.accounts = frappe.get_all(
+            "Account",
+            filters={
+                "company": self.company,
+                "is_group": 0,
+                "account_type": ["not in", ["Receivable", "Payable"]],
+            },
+            pluck="name",
+            limit_page_length=2,
+        )
+        self.assertEqual(len(self.accounts), 2, "two postable accounts are required")
+
+        # The three keys the three lookups are asked about.
+        self.victim_je = "ACC-JV-FORGERY-VICTIM"
+        self.victim_invoice = "ACC-SINV-FORGERY-VICTIM"
+        self.partner = "Forgery Test Partner"
+        self.token = "abc123def456"
+
+    def _cleanup(self):
+        frappe.db.rollback()
+        for name in reversed(self.made):
+            try:
+                frappe.db.sql(
+                    "delete from `tabGL Entry` where voucher_type='Journal Entry' "
+                    "and voucher_no=%s",
+                    (name,),
+                )
+                frappe.db.sql("delete from `tabJournal Entry Account` where parent=%s", (name,))
+                frappe.db.sql("delete from `tabJournal Entry` where name=%s", (name,))
+            except Exception:
+                pass
+        frappe.db.commit()
+
+    def _post_je(self, *, remark, stamp=None):
+        """Post and SUBMIT a Journal Entry. ``stamp`` fills the provenance field."""
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.posting_date = frappe.utils.nowdate()
+        je.company = self.company
+        je.user_remark = remark
+        if stamp is not None:
+            je.set(dh._JE_TAG_FIELDNAME, stamp)
+        je.append("accounts", {
+            "account": self.accounts[0],
+            "debit_in_account_currency": 100,
+            "credit_in_account_currency": 0,
+        })
+        je.append("accounts", {
+            "account": self.accounts[1],
+            "debit_in_account_currency": 0,
+            "credit_in_account_currency": 100,
+        })
+        je.flags.ignore_mandatory = True
+        je.insert(ignore_permissions=True, ignore_mandatory=True)
+        self.made.append(je.name)
+        # Submitted, because every one of the three lookups filters docstatus=1.
+        # An unsubmitted forgery would be excluded for the wrong reason and the
+        # test would pass without exercising anything.
+        je.submit()
+        return je.name
+
+    def _forged_remark(self):
+        """A remark carrying all three well-formed tags at once.
+
+        Built with `_je_dedup_tag` itself, so these are byte-identical to what
+        the app writes — there is no malformation for a validator to catch, and
+        the only thing separating this entry from a real one is that the app did
+        not post it. That is exactly the distinction the fix is about.
+        """
+        return " ".join([
+            "Cash transfer to the safe. Ref:",
+            dh._unsettle_dedup_tag(self.victim_je),
+            dh._je_dedup_tag(self.victim_invoice, "OFD"),
+            dh._partner_settlement_dedup_tag(self.partner, self.token),
+        ])
+
+    # -- the three lookups ----------------------------------------------------
+
+    def test_find_settlement_reversal_je_ignores_a_foreign_entry(self):
+        """A forged reversal tag marks a real settlement "already reversed" —
+        permanently, because nothing ever clears that answer."""
+        self._post_je(remark=self._forged_remark())
+
+        self.assertIsNone(
+            dh.find_settlement_reversal_je(self.company, self.victim_je),
+            "a Journal Entry this app did not post must never answer "
+            "'this settlement was already reversed'",
+        )
+
+    def test_find_existing_je_by_tag_ignores_a_foreign_entry(self):
+        """A forged dedup tag makes the app believe an entry it never posted
+        exists, so the real one is skipped — the freight for that order never
+        reaches the ledger."""
+        self._post_je(remark=self._forged_remark())
+
+        self.assertIsNone(
+            dh._find_existing_je_by_tag(self.company, self.victim_invoice, "OFD"),
+            "a foreign entry must never satisfy an idempotency guard",
+        )
+
+    def test_find_partner_settlement_je_ignores_a_foreign_entry(self):
+        """A forged partner-settlement tag makes the weekly bank transfer look
+        already paid, so the partner is never paid at all."""
+        self._post_je(remark=self._forged_remark())
+
+        self.assertIsNone(
+            dh._find_partner_settlement_je(self.company, self.partner, self.token),
+            "a foreign entry must never answer 'this partner was already paid'",
+        )
+
+    # -- and the classifier the reversal path asks ----------------------------
+
+    def test_a_foreign_entry_is_not_classified_as_a_reversible_settlement(self):
+        forged = self._post_je(
+            remark="Expense: office supplies "
+            + dh._je_dedup_tag("EMP-001", dh.BATCH_SETTLEMENT_JE_TAG_TYPE)
+        )
+
+        self.assertFalse(
+            dh._is_settlement_je(forged),
+            "a foreign entry must not be reversible however its remark reads",
+        )
+        self.assertEqual(dh._courier_transactions_for_settlement_je(forged), [])
+
+    def test_the_bulk_reversal_lookup_ignores_a_foreign_entry(self):
+        """The batched sibling has to agree with the single lookup. If it did
+        not, the reversal dialog and the reversal itself would disagree about
+        whether a settlement had already been reversed."""
+        self._post_je(remark=self._forged_remark())
+
+        result = dh._find_settlement_reversal_jes_bulk(
+            {self.victim_je: {"name": self.victim_je, "company": self.company}}
+        )
+
+        self.assertEqual(result, {})
+
+    # -- the positive controls, so a green run cannot mean "lookups are dead" --
+
+    def test_an_entry_this_app_stamped_IS_found_by_every_lookup(self):
+        """Without this, every assertion above would pass on a build where the
+        lookups simply return nothing."""
+        reversal_tag = dh._unsettle_dedup_tag(self.victim_je)
+        ofd_tag = dh._je_dedup_tag(self.victim_invoice, "OFD")
+        partner_tag = dh._partner_settlement_dedup_tag(self.partner, self.token)
+
+        rev = self._post_je(remark=f"Reversal {reversal_tag}", stamp=reversal_tag)
+        ofd = self._post_je(remark=f"Out For Delivery {ofd_tag}", stamp=ofd_tag)
+        partner = self._post_je(remark=f"Partner settlement {partner_tag}", stamp=partner_tag)
+
+        self.assertEqual(dh.find_settlement_reversal_je(self.company, self.victim_je), rev)
+        self.assertEqual(
+            dh._find_existing_je_by_tag(self.company, self.victim_invoice, "OFD"), ofd
+        )
+        self.assertEqual(
+            dh._find_partner_settlement_je(self.company, self.partner, self.token), partner
+        )
+        self.assertEqual(
+            dh._find_settlement_reversal_jes_bulk(
+                {self.victim_je: {"name": self.victim_je, "company": self.company}}
+            ),
+            {self.victim_je: rev},
+        )
+
+    def test_a_stamped_batch_settlement_is_still_reversible(self):
+        tag = dh._je_dedup_tag("EMP-001", dh.BATCH_SETTLEMENT_JE_TAG_TYPE)
+        je = self._post_je(remark=f"Order: 100.0, Shipping: 10.0, Net to branch: 90.0 {tag}",
+                           stamp=tag)
+
+        self.assertTrue(dh._is_settlement_je(je))
+
+    def test_a_legacy_settlement_that_predates_the_field_stays_reversible(self):
+        """The 2026-09-02 wrong-branch settlement, which is the case this whole
+        feature exists for.
+
+        It was posted long before `custom_jarz_je_tag` existed, so it carries no
+        stamp — only the untagged `Order: ..., Shipping: ..., Net to branch: ...`
+        remark `_create_settlement_journal_entry` has always written. Hardening
+        the read side must not make it, or any of its five production siblings,
+        permanently unreversable. `creation` is forced behind the field's own
+        creation to model an entry from before the column existed; that is the
+        boundary `_je_tag_legacy_cutoff` draws.
+        """
+        je = self._post_je(remark=SETTLEMENT_REMARK)
+        cutoff = dh._je_tag_legacy_cutoff()
+        self.assertIsNotNone(cutoff, "the field exists, so there must be a boundary")
+        frappe.db.set_value(
+            "Journal Entry", je, "creation",
+            frappe.utils.add_to_date(cutoff, days=-30),
+            update_modified=False,
+        )
+
+        self.assertTrue(
+            dh._is_settlement_je(je),
+            "a settlement posted before the field existed must stay reversible",
+        )
+
+    def test_the_same_remark_dated_AFTER_the_field_is_not_a_settlement(self):
+        """The other side of that boundary, and why the legacy path is safe.
+
+        Identical remark, identical shape — only the date differs. An entry
+        created after the column existed and carrying no stamp is not something
+        this app posted, so the legacy allowance must not reach it. Without this
+        the fallback would be a permanently open door wearing a date on it.
+        """
+        je = self._post_je(remark=SETTLEMENT_REMARK)
+
+        self.assertFalse(
+            dh._is_settlement_je(je),
+            "an unstamped entry created after the field existed is not ours",
+        )
 
 
 if __name__ == "__main__":

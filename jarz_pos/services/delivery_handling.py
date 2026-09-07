@@ -2945,7 +2945,7 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
             je.company = company
             je.title = f"Out For Delivery – {inv.name}"
             # FIX 3: carry the dedup key on user_remark (title is not persisted as-is on v16).
-            je.user_remark = _je_user_remark(inv.name, "OFD", f"Out For Delivery – {inv.name}")
+            _tag_journal_entry(je, inv.name, "OFD", f"Out For Delivery – {inv.name}")
             if settlement == "cash_now":
                 # DR Freight, CR Cash (pay courier now)
                 je.append("accounts", {
@@ -3381,7 +3381,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             je.posting_date = frappe.utils.nowdate()
             je.company = company
             je.title = title
-            je.user_remark = _je_user_remark(inv.name, je_type, title)
+            _tag_journal_entry(je, inv.name, je_type, title)
             if order_amount >= shipping_exp:
                 frappe.logger().info(f"DEBUG settle_single_invoice_paid: Case 1 - order_amount({order_amount}) >= shipping_exp({shipping_exp})")
                 # Common case
@@ -3470,7 +3470,7 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             je.posting_date = frappe.utils.nowdate()
             je.company = company
             je.title = title
-            je.user_remark = _je_user_remark(inv.name, je_type, title)
+            _tag_journal_entry(je, inv.name, je_type, title)
             # Always clear previously accrued payable: DR Creditors / CR Cash.
             # (Expense was recognized at Out For Delivery stage.)
             je.append("accounts", {
@@ -3509,6 +3509,16 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
             ct.amount = 0
             ct.shipping_amount = shipping_exp
             ct.status = "Settled"
+            # The entry that settled it. Without this the row was born
+            # "Settled" pointing at NOTHING, so the settlement it records was
+            # permanently unreversable and said so with the wrong message —
+            # `_courier_transactions_for_settlement_je` finds no row for the JE
+            # and the caller is told the entry "is either not a courier
+            # settlement entry, or has already been reversed", neither of which
+            # is true. `je_name` is None only when the freight was zero, i.e.
+            # when there was no entry to point at.
+            if je_name:
+                ct.journal_entry = je_name
             for _field, _value in courier_settlement_stamp(pos_profile).items():
                 ct.set(_field, _value)
             ct.payment_mode = "Cash"
@@ -3646,7 +3656,7 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
         je.posting_date = frappe.utils.nowdate()
         je.company = company
         je.title = title
-        je.user_remark = _je_user_remark(inv.name, je_type, title)
+        _tag_journal_entry(je, inv.name, je_type, title)
         if order_amount >= shipping_exp:
             net_to_branch = order_amount - shipping_exp
             if net_to_branch > 0.0001:
@@ -4027,23 +4037,202 @@ def _je_dedup_tag(invoice_name: str, je_type: str) -> str:
 
 
 def _je_user_remark(invoice_name: str, je_type: str, human: str) -> str:
-    """Compose a human-readable ``user_remark`` that also carries the dedup tag."""
+    """Compose a human-readable ``user_remark`` that also carries the dedup tag.
+
+    Composition only. It is NOT sufficient on its own any more: the tag also has
+    to reach ``custom_jarz_je_tag``, which is where the lookups actually read it
+    from — see :func:`_tag_journal_entry`, the chokepoint every writer uses.
+    """
     return f"{human} {_je_dedup_tag(invoice_name, je_type)}"
+
+
+# ---------------------------------------------------------------------------
+# FIX (2026-09-07): the tag lookups read PROVENANCE, not free text.
+#
+# Everything above hardens the WRITE side — sanitise the reversal reason, the
+# payment reference, the idempotency token, the expense remark, the cash
+# transfer remark; refuse brackets in `_je_dedup_tag`. Four consecutive
+# adversarial review rounds each found one more caller-supplied string reaching
+# a Journal Entry remark, because the write side is unbounded: every future
+# writer is one more chance to reintroduce the hole.
+#
+# The read side is the root cause. All three tag lookups were company-wide
+# `user_remark LIKE %[JARZ-JE:<type>:<key>]%` queries, so ANY submitted Journal
+# Entry in the company whose remark contained that literal satisfied them — an
+# expense request, a cash transfer, a shift discrepancy, an entry posted by hand
+# in Desk. Free text was being asked a security question.
+#
+# The fix is provenance: the tag is now ALSO written to `custom_jarz_je_tag`, a
+# Custom Field only this app ever writes, and the lookups match it with `=`.
+# A remark cannot populate that field however it is spelled, so the read side is
+# closed by construction rather than by the next writer remembering to sanitise.
+#
+# Three options were weighed:
+#
+#   1. This one. Exact match on an app-written field. Unforgeable, indexable
+#      (the LIKE was a leading-wildcard scan of a TEXT column), and it fails
+#      closed. Cost: a Custom Field and a backfill.
+#   2. Anchoring the remark match (tag at a known position). Cheaper, and every
+#      writer really does put the tag at the very end — but `submit_transfer`
+#      and `Jarz Expense Request` control the WHOLE remark, so a suffix match is
+#      forgeable by exactly the callers this is defending against. It would
+#      leave security depending on the writers again, which is the thing that
+#      failed four times.
+#   3. Restricting candidates to entries the app can prove it created. That is
+#      what (1) is; every other proof available (owner, voucher_type, a link
+#      from an app DocType) is either forgeable or absent for most of the tags.
+#
+# Legacy data is handled the way `_LEGACY_BATCH_SETTLEMENT_REMARK` handles
+# pre-tagging settlements: a NARROW, explicitly-bounded fallback. Entries
+# created before the field existed are still matched on their remark; entries
+# created after it are not, so a forged remark posted today matches nothing even
+# on a site that has not migrated yet. `Patches/v1_9/backfill_journal_entry_tag_field`
+# copies the tag off every pre-existing entry, so in practice the fallback finds
+# nothing and exists only so a failed backfill degrades to the old behaviour
+# instead of silently double-posting an OFD entry.
+# ---------------------------------------------------------------------------
+
+#: Custom Field on Journal Entry carrying the dedup tag verbatim. Created in
+#: ``before_migrate`` (``utils.cleanup.ensure_journal_entry_tag_field``) rather
+#: than by a fixture: fixtures sync at the END of ``bench migrate``, while the
+#: backfill patch and freshly deployed code both need the column earlier.
+_JE_TAG_FIELDNAME = "custom_jarz_je_tag"
+
+#: Last-resort boundary if the Custom Field exists but its ``creation`` cannot
+#: be read. Never normally used; see :func:`_je_tag_legacy_cutoff`.
+_JE_TAG_FIELD_RELEASE_CUTOFF = "2026-09-07 00:00:00"
+
+
+def _je_tag_field_exists() -> bool:
+    """True once ``Journal Entry`` actually has the provenance column.
+
+    Querying a column that does not exist raises, and this app is deployed
+    ahead of its own migrate often enough that "the field is not there yet" is a
+    normal state, not an error. ``get_meta`` is cached by Frappe per request.
+
+    Written as a scan of ``meta.fields`` rather than the obvious
+    ``meta.has_field(...)`` on purpose. Half this app's suite replaces the whole
+    ``frappe`` module with a MagicMock, and ``MagicMock().has_field(x)`` is
+    truthy — so ``has_field`` reports the column present on every mocked run,
+    the lookups then issue a query nobody stubbed, and an ordered
+    ``get_all.side_effect`` feeds every later call the wrong rows. Iterating a
+    MagicMock yields nothing, so this spelling answers False where there is no
+    real schema, which is the truth. Do not "simplify" it back.
+    """
+    try:
+        fields = frappe.get_meta("Journal Entry").fields
+        return any(getattr(df, "fieldname", None) == _JE_TAG_FIELDNAME for df in fields)
+    except Exception:
+        return False
+
+
+def _je_tag_legacy_cutoff() -> str | None:
+    """Latest ``creation`` at which an entry may still be classified by its REMARK.
+
+    The Custom Field's own ``creation``: every Journal Entry posted after the
+    column appeared was stamped by running code, so nothing newer than that has
+    any business being matched on free text. It is a tighter and more honest
+    boundary than a hard-coded release date — a site that migrates late gets a
+    late boundary, automatically.
+
+    ``None`` means "no boundary", and is returned only when the column does not
+    exist at all. That case is deliberate: with nowhere to stamp, the remark is
+    the ONLY signal there is, and refusing it would leave freshly deployed code
+    unable to find its own entries — a retried dispatch would post a second
+    freight accrual. Between "exposed for the length of a deploy" and "double
+    posts money entries for the length of a deploy", the first is the lesser
+    harm. The exposure ends at ``bench migrate``, which is not optional.
+    """
+    if not _je_tag_field_exists():
+        return None
+    try:
+        created = frappe.db.get_value(
+            "Custom Field", {"dt": "Journal Entry", "fieldname": _JE_TAG_FIELDNAME}, "creation"
+        )
+    except Exception:
+        created = None
+    return str(created) if created else _JE_TAG_FIELD_RELEASE_CUTOFF
+
+
+def _tag_journal_entry(je, key: str, je_type: str, human: str) -> str:
+    """THE way a Journal Entry gets a Jarz dedup tag. Sets BOTH places.
+
+    ``user_remark`` keeps the tag so the entry stays self-describing to a human
+    reading it in Desk, and so an entry posted by this release is still
+    recognisable if the column is ever dropped; ``custom_jarz_je_tag`` is what
+    every lookup actually matches on. Writers must not set the remark
+    themselves — that is how the two drift apart and an entry becomes invisible
+    to its own idempotency guard.
+    """
+    tag = _je_dedup_tag(key, je_type)
+    if _je_tag_field_exists():
+        je.set(_JE_TAG_FIELDNAME, tag)
+    je.user_remark = f"{human} {tag}"
+    return tag
+
+
+def _find_je_by_tag(company: str, tag: str) -> str | None:
+    """The one submitted Journal Entry THIS APP posted carrying *tag*, if any.
+
+    Exact match on the provenance field, then the bounded legacy remark
+    fallback. Every tag lookup in the app goes through here.
+    """
+    if _je_tag_field_exists():
+        rows = frappe.get_all(
+            "Journal Entry",
+            filters={"company": company, "docstatus": 1, _JE_TAG_FIELDNAME: tag},
+            pluck="name",
+            limit_page_length=1,
+        )
+        if rows:
+            return rows[0]
+
+    filters = {"company": company, "docstatus": 1, "user_remark": ["like", f"%{tag}%"]}
+    cutoff = _je_tag_legacy_cutoff()
+    if cutoff:
+        filters["creation"] = ["<", cutoff]
+    rows = frappe.get_all(
+        "Journal Entry", filters=filters, pluck="name", limit_page_length=1
+    )
+    return rows[0] if rows else None
+
+
+def _trusted_je_tag_source(row: dict) -> str | None:
+    """The text that may be trusted to CLASSIFY *row*, or None if nothing may.
+
+    *row* must carry ``creation``, ``user_remark`` and (when the column exists)
+    ``custom_jarz_je_tag``. Returns the provenance field when this app stamped
+    one, the remark for an entry that predates the field, and None for a modern
+    entry with no stamp — which is any entry this app did not post.
+    """
+    if _je_tag_field_exists():
+        tag = str(row.get(_JE_TAG_FIELDNAME) or "").strip()
+        if tag:
+            return tag
+    cutoff = _je_tag_legacy_cutoff()
+    if cutoff is None:
+        return row.get("user_remark")
+    creation = row.get("creation")
+    if creation and str(creation) < cutoff:
+        return row.get("user_remark")
+    return None
+
+
+def _je_classification_fields() -> list[str]:
+    """Fields :func:`_trusted_je_tag_source` needs, minus any column not there yet."""
+    fields = ["name", "creation", "user_remark"]
+    if _je_tag_field_exists():
+        fields.append(_JE_TAG_FIELDNAME)
+    return fields
 
 
 def _find_existing_je_by_tag(company: str, invoice_name: str, je_type: str) -> str | None:
     """Return a submitted Journal Entry already tagged for this invoice + type, if any.
 
-    Reliable replacement for the broken ``title LIKE`` guards (see FIX 3 note).
+    Reliable replacement for the broken ``title LIKE`` guards (see FIX 3 note),
+    and — since 2026-09-07 — matched on provenance rather than on free text.
     """
-    tag = _je_dedup_tag(invoice_name, je_type)
-    rows = frappe.get_all(
-        "Journal Entry",
-        filters={"company": company, "docstatus": 1, "user_remark": ["like", f"%{tag}%"]},
-        pluck="name",
-        limit_page_length=1,
-    )
-    return rows[0] if rows else None
+    return _find_je_by_tag(company, _je_dedup_tag(invoice_name, je_type))
 
 
 #: Tag type embedded in a partner delivery-fee accrual JE's ``user_remark`` — see
@@ -4100,12 +4289,20 @@ BATCH_SETTLEMENT_JE_TAG_TYPE = "COURIER_BATCH_SETTLEMENT"
 #: order settled through ``settle_single_invoice_paid`` posts a genuine,
 #: reversible settlement against a row that still carries that flag, so the flag
 #: would block real reversals. The JE's own tag is the only precise signal.
+#:
+#: ``DELIVERY_PARTNER_SETTLEMENT`` is deliberately NOT here. It was, and it was
+#: unreachable: that entry is stamped on ``Delivery Partner Settlement``'s own
+#: ``partner_settlement_je`` field, never on ``Courier Transaction.journal_entry``,
+#: so no reversal path has ever reached a JE carrying it. Listing an unreachable
+#: type on an allow-list is worse than useless — it reads as coverage that does
+#: not exist, and it widens what a forged tag could pretend to be. The weekly
+#: partner bank transfer is not reversed through ``unsettle_courier_settlement``
+#: at all; it is a bank payment to a supplier, undone by cancelling it.
 SETTLEMENT_JE_TAG_TYPES = (
     BATCH_SETTLEMENT_JE_TAG_TYPE,
     "COURIER_OUTSTANDING_SETTLEMENT",
     "COURIER_SHIPPING_SETTLEMENT",
     "COURIER_COLLECTED_SETTLEMENT",
-    "DELIVERY_PARTNER_SETTLEMENT",
 )
 
 #: Recognises a batch settlement posted BEFORE ``BATCH_SETTLEMENT_JE_TAG_TYPE``
@@ -4145,10 +4342,22 @@ def _is_settlement_je_remark(user_remark: str | None) -> bool:
 
 
 def _is_settlement_je(je_name: str) -> bool:
-    """Single-JE convenience wrapper around :func:`_is_settlement_je_remark`."""
+    """Is *je_name* a settlement THIS APP posted, and therefore reversible?
+
+    Two questions, and both have to be answered. ``_is_settlement_je_remark``
+    answers "does this text say settlement?"; :func:`_trusted_je_tag_source`
+    answers "is this text something the app wrote, or something a caller typed?".
+    Asking only the first is what let a remark decide whether a courier
+    settlement could be reversed.
+    """
     if not je_name:
         return False
-    return _is_settlement_je_remark(frappe.db.get_value("Journal Entry", je_name, "user_remark"))
+    row = frappe.db.get_value(
+        "Journal Entry", je_name, _je_classification_fields(), as_dict=True
+    )
+    if not row:
+        return False
+    return _is_settlement_je_remark(_trusted_je_tag_source(row))
 
 
 def _get_courier_outstanding_account(company: str) -> str:
@@ -4663,8 +4872,8 @@ def _apply_collection_change_from_online(*, inv, ct, new_method: str, order_amou
         je.posting_date = frappe.utils.nowdate()
         je.company = inv.company
         je.title = f"Payment Collection Change - {inv.name}"
-        je.user_remark = _je_user_remark(
-            inv.name, je_type,
+        _tag_journal_entry(
+            je, inv.name, je_type,
             f"Payment collection changed to {new_method} for {inv.name} (reverses {prior_je}).",
         )
         je.append("accounts", {"account": debit_account, "debit_in_account_currency": order_amount, "credit_in_account_currency": 0})
@@ -5273,7 +5482,7 @@ def _create_shipping_expense_to_creditors_je(inv, shipping_exp: float, creditors
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Courier Expense – {inv.name}"
-    je.user_remark = _je_user_remark(inv.name, "COURIER_EXPENSE", f"Courier Expense – {inv.name}")
+    _tag_journal_entry(je, inv.name, "COURIER_EXPENSE", f"Courier Expense – {inv.name}")
 
     # DR Freight Expense
     je.append("accounts", {
@@ -5450,7 +5659,8 @@ def create_partner_fee_accrual_je(inv, *, delivery_partner: str, fee: float) -> 
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Partner Delivery Fee – {inv.name}"
-    je.user_remark = _je_user_remark(
+    _tag_journal_entry(
+        je,
         inv.name,
         PARTNER_FEE_ACCRUAL_JE_TAG_TYPE,
         f"Delivery fee owed to {delivery_partner} – {inv.name}",
@@ -5474,20 +5684,25 @@ def create_partner_fee_accrual_je(inv, *, delivery_partner: str, fee: float) -> 
     return je.name
 
 
+#: Tag type for the weekly bank transfer that pays a Delivery Partner.
+PARTNER_SETTLEMENT_JE_TAG_TYPE = "DELIVERY_PARTNER_SETTLEMENT"
+
+
 def _partner_settlement_dedup_tag(delivery_partner: str, token: str) -> str:
-    """Stable dedup tag embedded in the settlement JE ``user_remark``."""
-    return f"[JARZ-JE:DELIVERY_PARTNER_SETTLEMENT:{delivery_partner}:{token}]"
+    """Stable dedup tag for the partner settlement JE.
+
+    Built through ``_je_dedup_tag`` rather than by hand. It used to be its own
+    f-string, which meant the one function that validates a tag's bytes — and
+    that every other tag in the module passes through — did not see this one:
+    a Delivery Partner named ``A] [JARZ-JE:...`` would have forged a complete
+    foreign tag straight past the guard. Same string as before, one chokepoint
+    fewer to bypass.
+    """
+    return _je_dedup_tag(f"{delivery_partner}:{token}", PARTNER_SETTLEMENT_JE_TAG_TYPE)
 
 
 def _find_partner_settlement_je(company: str, delivery_partner: str, token: str) -> str | None:
-    tag = _partner_settlement_dedup_tag(delivery_partner, token)
-    rows = frappe.get_all(
-        "Journal Entry",
-        filters={"company": company, "docstatus": 1, "user_remark": ["like", f"%{tag}%"]},
-        pluck="name",
-        limit_page_length=1,
-    )
-    return rows[0] if rows else None
+    return _find_je_by_tag(company, _partner_settlement_dedup_tag(delivery_partner, token))
 
 
 def create_partner_settlement_je(
@@ -5544,7 +5759,6 @@ def create_partner_settlement_je(
     partner_acc = _get_partner_settlement_account(delivery_partner)
     supplier = get_delivery_partner_supplier(delivery_partner)
     freight_acc = get_freight_expense_account(company)
-    tag = _partner_settlement_dedup_tag(delivery_partner, token)
 
     je = frappe.new_doc("Journal Entry")
     # FIX (2026-07-20): use "Journal Entry", not "Bank Entry". v16
@@ -5556,7 +5770,12 @@ def create_partner_settlement_je(
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Delivery Partner Settlement – {delivery_partner}"
-    je.user_remark = f"{human or ('Delivery Partner settlement: ' + delivery_partner)} {tag}"
+    _tag_journal_entry(
+        je,
+        f"{delivery_partner}:{token}",
+        PARTNER_SETTLEMENT_JE_TAG_TYPE,
+        human or ("Delivery Partner settlement: " + delivery_partner),
+    )
 
     # Clear the payable the per-order accruals built up.
     if abs(fees) > 0.005:
@@ -5717,10 +5936,12 @@ def _create_settlement_journal_entry(
     # the courier and no dedup guard reads it. The leading "Order: ..." text is
     # kept verbatim so entries posted before this tag existed still match
     # `_LEGACY_BATCH_SETTLEMENT_REMARK` and stay reversible.
-    je.user_remark = (
+    _tag_journal_entry(
+        je,
+        str(courier),
+        BATCH_SETTLEMENT_JE_TAG_TYPE,
         f"Order: {order_amt}, Shipping: {shipping_amt}, Net to branch: {net_branch}"
-        + (f" | Invoices: {', '.join(invoice_names)}" if invoice_names else "")
-        + f" {_je_dedup_tag(str(courier), BATCH_SETTLEMENT_JE_TAG_TYPE)}"
+        + (f" | Invoices: {', '.join(invoice_names)}" if invoice_names else ""),
     )
 
     tolerance = 0.005
@@ -5832,15 +6053,14 @@ def _unsettle_dedup_tag(original_je: str) -> str:
 
 
 def find_settlement_reversal_je(company: str, original_je: str) -> str | None:
-    """The reversing JE already posted against *original_je*, if any."""
-    tag = _unsettle_dedup_tag(original_je)
-    rows = frappe.get_all(
-        "Journal Entry",
-        filters={"company": company, "docstatus": 1, "user_remark": ["like", f"%{tag}%"]},
-        pluck="name",
-        limit_page_length=1,
-    )
-    return rows[0] if rows else None
+    """The reversing JE already posted against *original_je*, if any.
+
+    Matched on provenance (see :func:`_find_je_by_tag`). A "yes" here refuses a
+    reversal outright, so a stranger's remark being able to produce one meant
+    any submitted entry in the company could mark a real settlement permanently
+    un-reversable.
+    """
+    return _find_je_by_tag(company, _unsettle_dedup_tag(original_je))
 
 
 #: Matches the opening bracket of the dedup tag shape every idempotency guard
@@ -6080,11 +6300,17 @@ def unsettle_courier_settlement(
     A ``FOR UPDATE`` on the Journal Entry alone does NOT achieve that, and the
     first attempt at this guard was wrong for a subtle reason. MariaDB's default
     isolation is REPEATABLE READ, and the transaction's read view is fixed at
-    its FIRST consistent read — here the ``frappe.db.exists`` a few lines below.
-    Every plain ``SELECT`` after the lock therefore still returns the PRE-lock
-    snapshot, so the second caller waits for the lock, acquires it, and then
-    reads the very state that made it decide to proceed. The lock serialized the
-    callers without isolating them.
+    its FIRST consistent read. Every plain ``SELECT`` after the lock therefore
+    still returns the PRE-lock snapshot, so the second caller waits for the
+    lock, acquires it, and then reads the very state that made it decide to
+    proceed. The lock serialized the callers without isolating them.
+
+    That is also why NOTHING is read before the lock any more. This function
+    used to open with a plain ``frappe.db.exists`` — which pinned the snapshot
+    before the lock was taken, so the ``docstatus`` check that followed was
+    reading the entry as it stood beforehand. An entry cancelled in Desk inside
+    that window still read as submitted and was reversed a second time.
+    Existence and ``docstatus`` now both come out of the locking read itself.
 
     What actually closes it is that the DECISIVE guard is itself a locking read:
     the Courier Transaction lookup below passes ``for_update=True``, and a
@@ -6097,18 +6323,30 @@ def unsettle_courier_settlement(
     original_je_name = (journal_entry or "").strip()
     if not original_je_name:
         frappe.throw(_("journal_entry is required"))
-    if not frappe.db.exists("Journal Entry", original_je_name):
+    # Existence AND docstatus come from the SAME locking read, and nothing is
+    # read before it. The previous shape opened with `frappe.db.exists(...)`,
+    # which is a plain SELECT: under REPEATABLE READ that first read PINS the
+    # transaction's snapshot, so the `docstatus` this function then went on to
+    # check was the value as of before the lock was taken. An entry cancelled in
+    # Desk inside that window still read as `docstatus == 1`, and the reversal
+    # posted against a cancelled settlement — double-reversing it. A locking
+    # read is always served from the latest COMMITTED row, so taking existence
+    # and docstatus from it is what makes the check mean anything at all.
+    locked = frappe.db.get_value(
+        "Journal Entry",
+        original_je_name,
+        ["name", "docstatus"],
+        for_update=True,
+        as_dict=True,
+    )
+    if not locked:
         frappe.throw(_("Journal Entry {0} was not found").format(original_je_name))
-
-    # Queue overlapping callers in a defined order. On its own this does NOT
-    # isolate them — see the concurrency note in the docstring.
-    frappe.db.get_value("Journal Entry", original_je_name, "name", for_update=True)
-
-    original_je = frappe.get_doc("Journal Entry", original_je_name)
-    if original_je.docstatus != 1:
+    if frappe.utils.cint(locked.get("docstatus")) != 1:
         frappe.throw(
             _("Journal Entry {0} is not submitted; nothing to reverse.").format(original_je_name)
         )
+
+    original_je = frappe.get_doc("Journal Entry", original_je_name)
 
     # THE decisive guard, and the one that has to escape the REPEATABLE READ
     # snapshot: a locking read reads the latest committed rows, so a caller
@@ -6167,7 +6405,7 @@ def unsettle_courier_settlement(
         remark = f"Reversal of courier settlement {original_je_name}"
         if reason:
             remark = f"{remark} — {str(reason).strip()}"
-        reversal.user_remark = f"{remark} {_unsettle_dedup_tag(original_je_name)}"
+        _tag_journal_entry(reversal, original_je_name, UNSETTLE_JE_TAG_TYPE, remark)
 
         for line in reversal_lines:
             reversal.append("accounts", line)
@@ -6238,20 +6476,41 @@ def _find_settlement_reversal_jes_bulk(je_by_name: dict[str, dict]) -> dict[str,
         by_company.setdefault(row.get("company"), []).append(name)
 
     out: dict[str, str] = {}
+    prefix = f"[JARZ-JE:{UNSETTLE_JE_TAG_TYPE}:"
+    # Same provenance rule as `find_settlement_reversal_je`, batched: the
+    # app-written field first, then the legacy remark shape bounded by the
+    # field's own creation. A forged remark on an entry posted after that
+    # boundary is in neither set, so this list and the single lookup cannot
+    # disagree about whether a settlement was already reversed.
+    field_exists = _je_tag_field_exists()
+    cutoff = _je_tag_legacy_cutoff()
     for company, names in by_company.items():
-        candidates = frappe.get_all(
-            "Journal Entry",
-            filters={
-                "company": company,
-                "docstatus": 1,
-                "user_remark": ["like", f"%[JARZ-JE:{UNSETTLE_JE_TAG_TYPE}:%"],
-            },
-            fields=["name", "user_remark"],
+        candidates: list[dict] = []
+        if field_exists:
+            candidates += frappe.get_all(
+                "Journal Entry",
+                filters={
+                    "company": company,
+                    "docstatus": 1,
+                    _JE_TAG_FIELDNAME: ["like", f"{prefix}%"],
+                },
+                fields=["name", _JE_TAG_FIELDNAME],
+            )
+        legacy_filters = {
+            "company": company,
+            "docstatus": 1,
+            "user_remark": ["like", f"%{prefix}%"],
+        }
+        if cutoff:
+            legacy_filters["creation"] = ["<", cutoff]
+        candidates += frappe.get_all(
+            "Journal Entry", filters=legacy_filters, fields=["name", "user_remark"]
         )
         for original in names:
             tag = _unsettle_dedup_tag(original)
             for row in candidates:
-                if tag in (row.get("user_remark") or ""):
+                haystack = row.get(_JE_TAG_FIELDNAME) or row.get("user_remark") or ""
+                if tag in haystack:
                     out[original] = row["name"]
                     break
     return out
@@ -6345,7 +6604,7 @@ def list_recent_courier_settlements(
     je_rows = frappe.get_all(
         "Journal Entry",
         filters={"name": ["in", je_names], "docstatus": 1},
-        fields=["name", "company", "posting_date", "user_remark"],
+        fields=["company", "posting_date"] + _je_classification_fields(),
     )
     je_by_name = {r["name"]: r for r in je_rows}
 
@@ -6359,7 +6618,7 @@ def list_recent_courier_settlements(
             # Draft/cancelled/missing — never a posted settlement.
             continue
 
-        if not _is_settlement_je_remark(je.get("user_remark")):
+        if not _is_settlement_je_remark(_trusted_je_tag_source(je)):
             # Same allow-list `_courier_transactions_for_settlement_je` applies,
             # so this list and the preview never disagree about what counts as a
             # settlement. On production this drops 14 collection-change entries
@@ -6476,7 +6735,7 @@ def _post_shipping_override_delta_je(
     je.posting_date = frappe.utils.nowdate()
     je.company = company
     je.title = f"Custom Shipping Adjustment – {inv_name}"
-    je.user_remark = _je_user_remark(inv_name, tag_type, human)
+    _tag_journal_entry(je, inv_name, tag_type, human)
 
     freight_line = {
         "account": freight_acc,
