@@ -1262,6 +1262,287 @@ def _assert_basket_material_availability(lines: List[Dict[str, Any]], company: s
         frappe.throw(_format_basket_shortage_message(shortages))
 
 
+# ── Where a component is demanded from, and how to get it there ─────────
+
+
+def _component_demand_warehouses(item_code: str, company: str) -> List[str]:
+    """Every warehouse a Work Order might legitimately draw ``item_code`` from.
+
+    Mirrors ``_get_required_material_rows`` exactly — ``BOM Item.source_warehouse``
+    when a recipe names one, the Item Default when none does — because this list
+    is the *only* set of destinations :func:`transfer_material_for_production`
+    will move stock into.  Resolving it any other way would let the button
+    deposit stock somewhere the shortage was never measured against, which looks
+    like a successful move and changes nothing on the board.
+
+    Usually one entry.  Two recipes naming two different source warehouses for
+    the same component is a real (if unusual) configuration, and both are then
+    valid destinations; the caller says which.
+    """
+    item_code = _coerce_str(item_code)
+    company = _coerce_str(company)
+    if not item_code or not company:
+        return []
+
+    warehouses: List[str] = []
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT DISTINCT bi.source_warehouse
+            FROM `tabBOM Item` bi
+            JOIN `tabBOM` bom ON bom.name = bi.parent
+            WHERE bom.is_active = 1
+              AND bom.is_default = 1
+              AND bom.company = %(company)s
+              AND bi.item_code = %(item_code)s
+              AND IFNULL(bi.source_warehouse, '') != ''
+            """,
+            {"company": company, "item_code": item_code},
+            as_dict=True,
+        )
+    except Exception:
+        rows = []
+
+    for row in rows or []:
+        warehouse = _coerce_str(row.get("source_warehouse"))
+        if warehouse and warehouse not in warehouses:
+            warehouses.append(warehouse)
+
+    if warehouses:
+        return warehouses
+
+    # No recipe names a source, so every Work Order falls through to the Item
+    # Default — which is the case on this site for all 60 components.
+    fallback = _get_item_default_warehouse(item_code, company)
+    return [fallback] if fallback else []
+
+
+def _is_bom_component(item_code: str, company: str) -> bool:
+    """True when ``item_code`` is consumed by some active default BOM.
+
+    The gate that keeps this endpoint a production tool rather than a general
+    stock-moving one: it can only ever touch something a recipe actually eats.
+    """
+    try:
+        return bool(
+            frappe.db.sql(
+                """
+                SELECT 1
+                FROM `tabBOM Item` bi
+                JOIN `tabBOM` bom ON bom.name = bi.parent
+                WHERE bom.is_active = 1
+                  AND bom.is_default = 1
+                  AND bom.company = %(company)s
+                  AND bi.item_code = %(item_code)s
+                LIMIT 1
+                """,
+                {"company": company, "item_code": _coerce_str(item_code)},
+            )
+        )
+    except Exception:
+        return False
+
+
+def _assert_pickable_warehouse(warehouse: str, company: str, label: str) -> None:
+    """A warehouse stock can actually sit in: this company's, and not a group."""
+    if not _warehouse_belongs_to_company(warehouse, company):
+        frappe.throw(
+            _("{0} warehouse {1} does not belong to {2}").format(label, warehouse, company)
+        )
+    try:
+        is_group = int(frappe.db.get_value("Warehouse", warehouse, "is_group") or 0)
+    except Exception:
+        is_group = 0
+    if is_group:
+        frappe.throw(
+            _("{0} warehouse {1} is a group and cannot hold stock").format(label, warehouse)
+        )
+
+
+def _resolve_invalidate_suggestions_cache():
+    """Indirection so a test patches one symbol instead of the cache itself."""
+    from jarz_pos.services.production_planning import invalidate_suggestions_cache
+
+    return invalidate_suggestions_cache
+
+
+@frappe.whitelist()
+def get_production_policy() -> Dict[str, Any]:
+    """What the server will actually accept from *this* user on the board.
+
+    The app used to hardcode its own backdating window while the server read a
+    different one from ``Jarz POS Settings``, and the two disagreed silently:
+    the picker offered yesterday and the post was refused.  On production the
+    setting reads 0 — the Single predates the field, so the DocType's default of
+    3 was never written to it — which made every past date a System-Manager-only
+    action while the picker cheerfully offered three days of them.
+
+    Deliberately its own endpoint rather than a block on
+    ``get_production_suggestions``: that payload is cached for two minutes and
+    shared across users, and every field here is per-user.
+
+    ``server_date`` is included because the gate is evaluated against the
+    server's clock, never the device's — a tablet a day fast would otherwise
+    build a picker whose last selectable day is already "the future".
+    """
+    _ensure_production_view_access()
+
+    roles = _resolve_user_roles()
+    return {
+        "max_backdate_days": max(
+            0, _setting_int("production_max_backdate_days", DEFAULT_MAX_BACKDATE_DAYS)
+        ),
+        "can_backdate": bool(roles.intersection(ROLES.PRODUCTION_BACKDATE)),
+        "can_execute": bool(roles.intersection(ROLES.PRODUCTION_EXECUTE)),
+        # A System Manager is not bound by the day ceiling, only by "not the
+        # future" — so the client must not clamp their picker to it.
+        "unlimited_backdate": ROLES.SYSTEM_MANAGER in roles,
+        "server_date": str(_as_date(_resolve_now_datetime()) or ""),
+    }
+
+
+@frappe.whitelist()
+def transfer_material_for_production(
+    item_code: str,
+    from_warehouse: str,
+    qty: Any,
+    to_warehouse: str | None = None,
+    company: str | None = None,
+) -> Dict[str, Any]:
+    """Move a short component into the warehouse its recipe draws from.
+
+    The board measures a shortage in one warehouse only, so stock received or
+    counted into a different store reads as "none at all".  That was already
+    said out loud (``available_elsewhere``), but saying it was all the screen
+    could do: the fix lived in Desk, and an operator standing at the bench with
+    4.336 Kg of Butter Biscuit one shelf away could not reach it.
+
+    Deliberately **not** a general stock-transfer endpoint, which is what makes
+    it safe on ``ROLES.PRODUCTION_EXECUTE``:
+
+    * ``item_code`` must be consumed by an active default BOM;
+    * ``to_warehouse`` must be a warehouse that component is actually demanded
+      from — so this can only ever move stock *towards* being usable;
+    * ``qty`` must exist in ``from_warehouse`` right now.
+
+    Nothing here creates or destroys stock: the company owns the same quantity
+    before and after, in a different bin.  That is a strictly smaller commitment
+    than starting a batch, which the same role already makes.
+    """
+    _ensure_production_execute_access()
+
+    item_code = _coerce_str(item_code)
+    from_warehouse = _coerce_str(from_warehouse)
+    to_warehouse = _coerce_str(to_warehouse)
+    if not item_code:
+        frappe.throw(_("item_code is required"))
+    if not from_warehouse:
+        frappe.throw(_("from_warehouse is required"))
+
+    company = _coerce_str(company) or _get_default_company()
+    if not company:
+        frappe.throw(_("Company is not configured and no Default Company is set"))
+
+    if not _is_bom_component(item_code, company):
+        frappe.throw(
+            _("{0} is not used by any active recipe, so it cannot be moved from here").format(
+                item_code
+            )
+        )
+
+    demanded_from = _component_demand_warehouses(item_code, company)
+    if not demanded_from:
+        # The other half of the same problem, and a move cannot fix it: nobody
+        # has said where this component is kept, so there is no destination.
+        frappe.throw(
+            _(
+                "No source warehouse is set for {0}, so there is nowhere to move it to. "
+                "Set the item's default warehouse first."
+            ).format(item_code)
+        )
+
+    if not to_warehouse:
+        if len(demanded_from) > 1:
+            frappe.throw(
+                _("{0} is drawn from more than one warehouse ({1}); choose one").format(
+                    item_code, ", ".join(demanded_from)
+                )
+            )
+        to_warehouse = demanded_from[0]
+    elif to_warehouse not in demanded_from:
+        frappe.throw(
+            _("{0} is not drawn from {1}, so moving stock there would not unblock anything").format(
+                item_code, to_warehouse
+            )
+        )
+
+    if from_warehouse == to_warehouse:
+        frappe.throw(_("The stock is already in {0}").format(to_warehouse))
+
+    _assert_pickable_warehouse(from_warehouse, company, _("Source"))
+    _assert_pickable_warehouse(to_warehouse, company, _("Target"))
+
+    qty = _flt(qty)
+    if qty <= 0:
+        frappe.throw(_("Quantity to move must be greater than zero"))
+
+    available = _get_live_stock_qty(item_code, from_warehouse)
+    if qty > available + QTY_TOLERANCE:
+        frappe.throw(
+            _("Only {0} of {1} is in {2}, but {3} was requested").format(
+                _format_qty(available), item_code, from_warehouse, _format_qty(qty)
+            )
+        )
+
+    stock_uom = _get_item_stock_uom(item_code)
+    se = frappe.new_doc("Stock Entry")
+    se.stock_entry_type = "Material Transfer"
+    se.purpose = "Material Transfer"
+    se.company = company
+    se.append(
+        "items",
+        {
+            "item_code": item_code,
+            "uom": stock_uom,
+            "stock_uom": stock_uom,
+            "conversion_factor": 1,
+            "qty": qty,
+            "s_warehouse": from_warehouse,
+            "t_warehouse": to_warehouse,
+        },
+    )
+    # Posted today, always, and no ``scheduled_at`` parameter exists to change
+    # that.  This records a shelf-to-shelf move somebody is making right now;
+    # backdating one would rewrite the stock history that the batch about to be
+    # started is checked against.
+    se.flags.ignore_permissions = True
+    se.insert()
+    se.flags.ignore_permissions = True
+    se.submit()
+
+    _debug_log(
+        f"production transfer: {qty} {stock_uom} {item_code} "
+        f"{from_warehouse} -> {to_warehouse} ({se.name})"
+    )
+
+    # The board caches for two minutes.  Without this the operator moves the
+    # stock, pulls to refresh, still reads "Cannot start", and moves it again.
+    _resolve_invalidate_suggestions_cache()()
+
+    return {
+        "ok": True,
+        "stock_entry": se.name,
+        "item_code": item_code,
+        "qty": qty,
+        "uom": stock_uom,
+        "from_warehouse": from_warehouse,
+        "to_warehouse": to_warehouse,
+        "available_at_target": _get_live_stock_qty(item_code, to_warehouse),
+        "available_at_source": _get_live_stock_qty(item_code, from_warehouse),
+    }
+
+
+
 @frappe.whitelist()
 def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
     """List Items that have a default BOM, with basic info.
@@ -1783,6 +2064,14 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
         try:
             _debug_log(f"start line: {ln}")
             scheduled_dt = _resolve_scheduled_datetime(ln.get("scheduled_at"))
+            # The same posting-date gate the start/finish path applies.  This
+            # one-shot route posts BOTH stock entries at the caller's date, so
+            # leaving it ungated made it the way around the ceiling rather than
+            # a convenience — and it is the route the Batch tab's "Quick
+            # produce" button takes, which is where anybody recording a past
+            # run actually goes.  Inside the loop so a bad date fails its own
+            # line and rolls back to that line's savepoint.
+            _assert_posting_date_allowed(scheduled_dt)
             # Always respect the BOM's company; fallback to default if missing
             company = _get_bom_company(ln["bom_name"]) or _get_default_company()
             if not company:

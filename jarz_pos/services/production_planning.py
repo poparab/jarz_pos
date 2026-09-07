@@ -642,6 +642,35 @@ def _resolve_cache():
     return frappe.cache()
 
 
+# Every ``get_production_suggestions`` payload is stored under this prefix, one
+# key per (company, search, capacity) combination.  Named here rather than in
+# ``api/production.py`` because both the reader and the writers that must
+# invalidate it live on opposite sides of that module.
+SUGGESTIONS_CACHE_PREFIX = "jarz_prod_suggestions:"
+
+
+def invalidate_suggestions_cache() -> None:
+    """Drop every cached board payload.
+
+    The board caches for two minutes, which is right for a page somebody is
+    reading and wrong the instant an action on that page changes the answer.
+    A stock move that unblocks an item has to show up on the next pull, not up
+    to two minutes later — an operator who moves the stock, sees "Cannot start"
+    again and moves it a second time has been taught not to trust the button.
+
+    Best-effort by design: a cache that cannot be cleared degrades to a stale
+    board for up to the TTL, which is the behaviour that existed before. It must
+    never turn a committed stock movement into a failed request.
+    """
+    try:
+        _resolve_cache().delete_keys(SUGGESTIONS_CACHE_PREFIX)
+    except Exception:
+        _log_failure(
+            "JARZ Production - suggestion cache invalidation failed",
+            f"prefix={SUGGESTIONS_CACHE_PREFIX}",
+        )
+
+
 # ── Composition helpers used by api/production.py ───────────────────────
 
 

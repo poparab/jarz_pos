@@ -286,6 +286,11 @@ jobs:
             # stock/rate/UOM display, transfer trace and cancel return routing.
             test_ingredient_alternatives
             test_production_permissions
+            # Moving a short component into the warehouse its recipe draws from.
+            # Reachable by a Production Operator, so every refusal in it is what
+            # keeps the endpoint from being a general "move any stock anywhere"
+            # tool on the widest role the board has.
+            test_production_material_move
             test_production_costing
             test_sop_rendering
             test_api_sop

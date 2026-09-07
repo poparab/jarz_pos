@@ -180,7 +180,9 @@ def get_production_suggestions(
 
     search = (search or "").strip()
     want_capacity = bool(_coerce_int(include_capacity, 1))
-    cache_key = f"jarz_prod_suggestions:{company}:{search}:{int(want_capacity)}"
+    # Prefix owned by ``production_planning`` so a write that invalidates the
+    # board cannot drift away from the key this reader writes.
+    cache_key = f"{planning.SUGGESTIONS_CACHE_PREFIX}{company}:{search}:{int(want_capacity)}"
 
     if not _coerce_int(force_refresh, 0):
         try:
