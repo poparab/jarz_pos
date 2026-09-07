@@ -161,6 +161,55 @@ class TestNotificationGapLogging(unittest.TestCase):
         self.frappe.log_error.side_effect = Exception("Error Log is full")
         self.mod._log_notification_gap("t", "b")  # must not raise
 
+    def test_a_cache_failure_still_writes_the_log(self):
+        """Redis being down is the moment the record matters most.
+
+        Sharing one try with the throttle meant a cache error silently dropped
+        the gap entirely — the exact failure this reporting exists to prevent.
+        """
+        self.frappe.cache.side_effect = Exception("redis down")
+        self.mod._log_notification_gap("t", "b", throttle_key="k")
+        self.assertTrue(self.frappe.log_error.called)
+
+    def test_the_log_is_deferred_out_of_the_invoice_transaction(self):
+        """The send path runs inside Sales Invoice.on_submit, so a direct insert
+        is rolled back with a failed submit — losing the evidence."""
+        self.mod._log_notification_gap("t", "b")
+        self.assertTrue(self.frappe.log_error.call_args.kwargs.get("defer_insert"))
+
+
+class TestNotificationHealthIsManagersOnly(unittest.TestCase):
+    """The answer is a staff roster: who works which branch, their emails, their
+    devices. allow_guest=False alone hands that to every authenticated user on
+    the site — a cashier, a courier — because frappe.get_all ignores permissions.
+    """
+
+    def setUp(self):
+        self.mod, self.frappe = _load_module()
+        self.frappe.PermissionError = type("PermissionError", (Exception,), {})
+        self.frappe.throw = MagicMock(side_effect=Exception("not permitted"))
+
+    def test_a_cashier_is_refused(self):
+        self.frappe.get_roles = MagicMock(return_value=["POS User", "Employee"])
+        with self.assertRaises(Exception):
+            self.mod._ensure_notification_health_access()
+        self.assertTrue(self.frappe.throw.called)
+
+    def test_a_manager_is_allowed(self):
+        self.frappe.get_roles = MagicMock(return_value=["JARZ Manager"])
+        self.mod._ensure_notification_health_access()
+        self.assertFalse(self.frappe.throw.called)
+
+    def test_system_manager_is_allowed(self):
+        self.frappe.get_roles = MagicMock(return_value=["System Manager"])
+        self.mod._ensure_notification_health_access()
+        self.assertFalse(self.frappe.throw.called)
+
+    def test_no_roles_at_all_is_refused(self):
+        self.frappe.get_roles = MagicMock(return_value=[])
+        with self.assertRaises(Exception):
+            self.mod._ensure_notification_health_access()
+
 
 class TestDisabledTokenIsAnnounced(unittest.TestCase):
     def setUp(self):
@@ -237,7 +286,10 @@ class TestAndroidGetsDataOnlyMessages(unittest.TestCase):
             def __init__(_self, **kwargs):
                 _self.kwargs = kwargs
 
-        messaging = sys.modules["firebase_admin.messaging"]
+        # Patch the module's own binding: _load_module swaps sys.modules only
+        # inside its with-block, so notifications.messaging is a different object
+        # by the time this runs.
+        messaging = self.mod.messaging
         messaging.Message = _Message
         messaging.send = lambda message, dry_run=False: self.sent.append(message) or "id"
         messaging.Notification = lambda **kw: ("notification", kw)
@@ -247,52 +299,104 @@ class TestAndroidGetsDataOnlyMessages(unittest.TestCase):
         messaging.WebpushNotification = None
         self.mod._initialize_firebase_app = lambda: True
 
-    def _send(self, tokens, rows):
-        self.frappe.get_all.return_value = rows
+    def _send(self, tokens, platforms, msg_type="new_invoice"):
         self.mod._send_fcm_notifications(
             tokens,
-            {"type": "new_invoice", "invoice_id": "INV-1", "title": "New Order", "body": "b"},
+            {"type": msg_type, "invoice_id": "INV-1", "title": "New Order", "body": "b"},
+            platforms=platforms,
         )
         return {m.kwargs["token"]: m.kwargs for m in self.sent}
 
-    def test_android_token_gets_no_notification_block(self):
-        by_token = self._send(
-            ["tok-android"], [{"token": "tok-android", "platform": "Android"}]
-        )
+    def test_android_order_alert_has_no_notification_block(self):
+        by_token = self._send(["tok-android"], {"tok-android": "Android"})
         self.assertNotIn("notification", by_token["tok-android"])
 
+    def test_android_order_alert_drops_android_notification_too(self):
+        """The top-level block is not the only one that reaches the SDK.
+
+        FCM merges android.notification downstream, so leaving it attached can
+        still hand the message to the display path — and with no title or body
+        in it, the tray entry would be worse than before while the alarm still
+        never fired.
+        """
+        by_token = self._send(["tok-android"], {"tok-android": "Android"})
+        android_cfg = by_token["tok-android"]["android"]
+        self.assertNotIn("notification", android_cfg[1])
+
+    def test_android_order_alert_is_given_a_ttl(self):
+        """A data-only alert rings on arrival, so a stale one is an alarm for an
+        order that already went out. FCM's default hold is four weeks."""
+        by_token = self._send(["tok-android"], {"tok-android": "Android"})
+        self.assertIn("ttl", by_token["tok-android"]["android"][1])
+
     def test_android_token_still_carries_the_data(self):
-        """Data-only is the point: the service reads type/invoice_id from it."""
-        by_token = self._send(
-            ["tok-android"], [{"token": "tok-android", "platform": "Android"}]
-        )
+        by_token = self._send(["tok-android"], {"tok-android": "Android"})
         self.assertEqual(by_token["tok-android"]["data"]["type"], "new_invoice")
 
     def test_web_and_ios_keep_the_notification_block(self):
         by_token = self._send(
-            ["tok-web", "tok-ios"],
-            [
-                {"token": "tok-web", "platform": "Web"},
-                {"token": "tok-ios", "platform": "iOS"},
-            ],
+            ["tok-web", "tok-ios"], {"tok-web": "Web", "tok-ios": "iOS"}
         )
         self.assertIn("notification", by_token["tok-web"])
         self.assertIn("notification", by_token["tok-ios"])
 
-    def test_unknown_platform_keeps_the_old_shape(self):
-        """A token with no row must not silently go dark: falling back to the
-        notification block is the behaviour that at least displays something."""
-        by_token = self._send(["tok-orphan"], [])
+    def test_non_order_types_keep_the_block_on_android(self):
+        """The native service does not render every type: invoice_cancelled has
+        no branch at all and invoice_accepted only cancels a notification.
+        Making those data-only would replace a tray line with silence."""
+        for msg_type in ("invoice_accepted", "invoice_cancelled", "shift_started"):
+            with self.subTest(msg_type=msg_type):
+                self.sent.clear()
+                by_token = self._send(
+                    ["tok-android"], {"tok-android": "Android"}, msg_type=msg_type
+                )
+                self.assertIn("notification", by_token["tok-android"])
+
+    def test_callers_that_pass_no_platforms_are_unchanged(self):
+        """shift.py and the cancel path call without a platform map; they must
+        keep the shape they had rather than being reshaped by accident."""
+        by_token = self._send(["tok-android"], None)
+        self.assertIn("notification", by_token["tok-android"])
+
+    def test_unknown_platform_keeps_the_notification_block(self):
+        by_token = self._send(["tok-orphan"], {"tok-orphan": ""})
         self.assertIn("notification", by_token["tok-orphan"])
 
-    def test_a_failed_platform_lookup_does_not_break_the_send(self):
-        self.frappe.get_all.side_effect = Exception("db down")
-        self.mod._send_fcm_notifications(
-            ["tok-a"],
-            {"type": "new_invoice", "invoice_id": "I", "title": "t", "body": "b"},
-        )
-        self.assertEqual(len(self.sent), 1)
-        self.assertIn("notification", self.sent[0].kwargs)
+
+class TestTokenTargetsComeFromOneQuery(unittest.TestCase):
+    """Platform must ride along with the token, not cost a second lookup.
+
+    `Jarz Mobile Device.token` is Long Text, which MariaDB cannot index, so a
+    `token in (...)` filter over a batch is a full scan — on a path that runs
+    inside Sales Invoice.on_submit.
+    """
+
+    def setUp(self):
+        self.mod, self.frappe = _load_module()
+
+    def test_tokens_and_platforms_come_from_a_single_query(self):
+        self.frappe.get_all.return_value = [
+            {"token": "t1", "platform": "Android"},
+            {"token": "t2", "platform": "Web"},
+        ]
+        tokens, platforms = self.mod._get_token_targets_for_users(["a@b.c"])
+        self.assertEqual(tokens, ["t1", "t2"])
+        self.assertEqual(platforms, {"t1": "Android", "t2": "Web"})
+        self.assertEqual(self.frappe.get_all.call_count, 1)
+
+    def test_duplicate_token_rows_resolve_deterministically(self):
+        self.frappe.get_all.return_value = [
+            {"token": "t1", "platform": "Android"},
+            {"token": "t1", "platform": "Web"},
+        ]
+        tokens, platforms = self.mod._get_token_targets_for_users(["a@b.c"])
+        self.assertEqual(tokens, ["t1"])
+        self.assertEqual(platforms["t1"], "Android")
+
+    def test_no_users_means_no_query(self):
+        tokens, platforms = self.mod._get_token_targets_for_users([])
+        self.assertEqual((tokens, platforms), ([], {}))
+        self.assertFalse(self.frappe.get_all.called)
 
 
 if __name__ == "__main__":

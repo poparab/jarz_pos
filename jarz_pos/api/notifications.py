@@ -352,6 +352,11 @@ def get_websocket_debug_info() -> Dict[str, Any]:
 
 MAX_FCM_TOKENS_PER_BATCH = 500
 
+# How long FCM may hold an undelivered order alert. A data-only alert rings
+# the alarm the moment it arrives, so a stale one is not a late notice --
+# it is an alarm for an order that is already out the door.
+ANDROID_ORDER_ALERT_TTL_SECONDS = 600
+
 # Safety cap for _record_fcm_send_error: INVALID_ARGUMENT is the firebase-admin
 # SDK's GENERIC argument error. It fires for a dead registration token, but
 # also for a malformed *message* (non-string data value, oversized payload,
@@ -491,15 +496,33 @@ def _log_notification_gap(title: str, message: str, throttle_key: Optional[str] 
     like they had stopped after 36 rows when they were still happening on every
     order.
     """
-    try:
-        if throttle_key:
+    # The throttle is best-effort and is deliberately NOT in the same try as the
+    # write: if Redis is what failed, that is the moment the record matters most,
+    # and sharing one try meant a cache error silently dropped the gap entirely.
+    if throttle_key:
+        try:
             cache_key = f"jarz_notification_gap:{throttle_key}"
             if frappe.cache().get_value(cache_key):
                 return
             frappe.cache().set_value(
                 cache_key, "1", expires_in_sec=_NOTIFICATION_GAP_THROTTLE_SECONDS
             )
-        frappe.log_error(message=message, title=title[:140])
+        except Exception:
+            pass
+
+    try:
+        # defer_insert keeps this out of the caller's transaction. The whole send
+        # path runs synchronously inside Sales Invoice.on_submit, so a direct
+        # insert would be rolled back with a failed submit -- losing exactly the
+        # evidence this exists to keep -- and a failing insert could poison the
+        # invoice's own transaction.
+        frappe.log_error(message=message, title=title[:140], defer_insert=True)
+    except TypeError:
+        # Older Frappe without defer_insert.
+        try:
+            frappe.log_error(message=message, title=title[:140])
+        except Exception:
+            pass
     except Exception:
         # Never let reporting a gap become a second failure on the alert path.
         pass
@@ -1837,14 +1860,21 @@ def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[s
 def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
     data = _prepare_invoice_data_payload("new_invoice", payload)
 
+    # Both channels are resolved before either is judged: a branch working
+    # entirely on the web PWA has web-push subscriptions and no Jarz Mobile
+    # Device rows at all, and logging the gap off the FCM count alone reported
+    # it as unreachable on every order -- drowning the real signal in the one
+    # place this reporting exists to keep clear.
+    tokens, token_platforms = _get_token_targets_for_users(recipients)
+    vapid_subs = _get_vapid_subscriptions_for_users(recipients)
+
     # FCM path (Android / iOS native app)
-    tokens = _get_tokens_for_users(recipients)
     if tokens:
         _log_fcm_info(
             f"FCM send: new_invoice; recipients={len(recipients)}; "
             f"tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
         )
-        fcm_result = _send_fcm_notifications(tokens, data)
+        fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
     else:
         _log_fcm_info(f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}")
         fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
@@ -1852,14 +1882,14 @@ def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dic
         # "Nobody on this order has a device" is the branch-got-nothing event.
         # It is the one outcome a complaint is actually made about, and it was
         # the quietest thing in the module: skipped_no_tokens is reported ok.
-        if recipients:
+        if recipients and not vapid_subs:
             _log_notification_gap(
                 "Order alert reached nobody (no live device)",
                 (
                     f"Invoice {payload.get('invoice_id')} for profile "
                     f"{_get_effective_profile_for_payload(payload) or '<none>'} resolved "
-                    f"{len(recipients)} recipient(s) but ZERO enabled push tokens, so no "
-                    f"phone or tablet was alerted. "
+                    f"{len(recipients)} recipient(s) but ZERO enabled push tokens and ZERO "
+                    f"web-push subscriptions, so no phone or tablet was alerted. "
                     f"Recipients: {', '.join(sorted(recipients))}. "
                     "Each of them must reopen and sign in to the Jarz POS app to "
                     "register a device token. Run "
@@ -1870,7 +1900,6 @@ def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dic
             )
 
     # VAPID path (W3C Web Push — iOS Safari PWA, Chrome, Firefox, Edge)
-    vapid_subs = _get_vapid_subscriptions_for_users(recipients)
     if vapid_subs:
         _log_fcm_info(
             f"VAPID send: new_invoice; recipients={len(recipients)}; "
@@ -2219,32 +2248,11 @@ def _is_android_target(platform: Optional[str]) -> bool:
     return (platform or "").strip().lower() == "android"
 
 
-def _get_platforms_for_tokens(tokens: Sequence[str]) -> Dict[str, str]:
-    """Map each token to the platform its row was registered under.
-
-    Needed because the Android message has to be shaped differently from the
-    web/iOS one -- see the comment on the notification block in
-    _send_fcm_notifications. A token with no row (or a failed lookup) maps to
-    nothing, which keeps the previous, notification-carrying shape.
-    """
-    if not tokens:
-        return {}
-
-    try:
-        rows = frappe.get_all(
-            "Jarz Mobile Device",
-            filters={"token": ["in", list(tokens)]},
-            fields=["token", "platform"],
-            limit_page_length=0,
-        )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Failed to resolve device platforms")
-        return {}
-
-    return {r.get("token"): r.get("platform") for r in rows if r.get("token")}
-
-
-def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any]) -> Dict[str, Any]:
+def _send_fcm_notifications(
+    tokens: Sequence[str],
+    data_payload: Dict[str, Any],
+    platforms: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """Send FCM push notifications using Firebase Admin SDK (V1 API)."""
     result = _new_fcm_send_result(tokens)
     normalised_tokens, duplicate_count = _normalise_fcm_tokens(tokens)
@@ -2301,46 +2309,64 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
         android_config_kwargs = {"priority": 'high'}
         if android_notification is not None:
             android_config_kwargs["notification"] = android_notification
+        android_config = messaging.AndroidConfig(**android_config_kwargs)
+
+        # The data-only shape for the Android order alert.
+        #
+        # When an FCM message carries a notification payload and the app is
+        # backgrounded or killed, the Android SDK renders the tray entry itself
+        # and never calls JarzFirebaseMessagingService.onMessageReceived. That
+        # service is the ONLY path that starts the order alarm on Android (Dart
+        # passes triggerNativeEffects:false there) and the only one that draws
+        # the real alert. So the alarm rang in the foreground and nowhere else:
+        # a closed tablet showed a plain tray line with no sound and no
+        # full-screen intent -- the "alerts don't reach the branch" report.
+        #
+        # `android.notification` has to come off as well as the top-level one.
+        # FCM merges it downstream, so leaving it attached can still hand the
+        # message to the SDK display path -- and with no title or body in it,
+        # the tray entry would be WORSE than before while the alarm still never
+        # fired. sound/channel_id/tag only ever applied to an SDK-rendered
+        # notification, which is precisely the path being avoided.
+        #
+        # ttl bounds the replay: a data-only alert runs startAlarm on arrival,
+        # so without it a tablet that was offline for an hour reconnects and
+        # alarms for a dozen orders that were delivered long ago. FCM's default
+        # is four weeks.
+        android_data_only_config = messaging.AndroidConfig(
+            priority="high",
+            ttl=ANDROID_ORDER_ALERT_TTL_SECONDS,
+        )
 
         webpush_config = _build_webpush_config(data, title, body)
 
-        platforms = _get_platforms_for_tokens(batch_tokens)
+        # Only new_invoice is reshaped. The other types do NOT need
+        # onMessageReceived -- they need the SDK to draw the tray entry, and the
+        # native service does not render them all: invoice_cancelled has no
+        # branch at all and invoice_accepted only CANCELS a notification. Making
+        # those data-only would replace a tray line with silence.
+        reshape_for_android = msg_type == "new_invoice" and bool(platforms)
 
         # Send to each token and keep per-token accounting for partial failures.
         messages = []
         for token in batch_tokens:
+            android_target = reshape_for_android and _is_android_target(
+                platforms.get(token)
+            )
             message_kwargs = {
                 "data": data,
-                "android": messaging.AndroidConfig(**android_config_kwargs),
+                "android": android_data_only_config if android_target else android_config,
                 "token": token,
             }
-            # Android gets the payload DATA-ONLY, on purpose.
-            #
-            # When an FCM message carries a `notification` block and the app is
-            # backgrounded or killed, the Android SDK renders the tray entry
-            # itself and never calls JarzFirebaseMessagingService
-            # .onMessageReceived. That service is the ONLY path that starts the
-            # order alarm on Android (Dart passes triggerNativeEffects:false
-            # there) and the only one that draws the real alert notification.
-            # So the alarm rang in the foreground and nowhere else: a closed
-            # tablet showed a plain tray line with no sound and no full-screen
-            # intent, which is exactly the "alerts don't reach the branch"
-            # report. Dropping the block makes the message data-only, so
-            # onMessageReceived runs for a killed app too and startAlarm +
-            # showNotification behave the same whatever the app was doing.
-            # priority=high (set above) is what keeps a data-only message
-            # prompt in Doze. A FORCE-STOPPED app still receives nothing --
-            # that is an OS rule, not something this can reach.
-            #
             # Web and iOS keep the notification block: the service worker and
             # APNs need it to display anything.
-            if notification is not None and not _is_android_target(platforms.get(token)):
+            if notification is not None and not android_target:
                 message_kwargs["notification"] = notification
-            if webpush_config is not None:
+            if webpush_config is not None and not android_target:
                 message_kwargs["webpush"] = webpush_config
             message = messaging.Message(**message_kwargs)
             messages.append(message)
-        
+
         # Send all messages
         if messages:
             # Send individually for now (can batch with MulticastMessage if needed)
@@ -2365,24 +2391,47 @@ def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
         yield items[idx : idx + size]
 
 
-def _get_tokens_for_users(users: Sequence[str]) -> List[str]:
+def _get_token_targets_for_users(
+    users: Sequence[str],
+) -> Tuple[List[str], Dict[str, str]]:
+    """Return the enabled tokens for *users*, and each one's platform.
+
+    Platform comes back from the SAME query as the token rather than a second
+    lookup keyed on the token. `Jarz Mobile Device.token` is Long Text, which
+    MariaDB cannot index, so a `token in (...)` filter over a 500-token batch is
+    a full scan with a ~80KB statement -- on a path that runs synchronously
+    inside Sales Invoice.on_submit. Reading both columns at once also removes
+    the orphan case entirely: every token here provably has a row, because this
+    is the query the tokens came from.
+    """
     if not users:
-        return []
+        return [], {}
 
     rows = frappe.get_all(
         "Jarz Mobile Device",
         filters={"user": ["in", list(users)], "enabled": 1},
-        fields=["token"],
+        fields=["token", "platform"],
+        # Deterministic, so a duplicate row for one token cannot resolve to a
+        # different platform run to run.
+        order_by="modified desc",
     )
-    tokens = [row.get("token") for row in rows if row.get("token")]
+
     # Deduplicate while preserving order
     seen: set[str] = set()
     deduped: List[str] = []
-    for token in tokens:
-        if token not in seen:
-            seen.add(token)
-            deduped.append(token)
-    return deduped
+    platforms: Dict[str, str] = {}
+    for row in rows:
+        token = row.get("token")
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+        platforms[token] = row.get("platform") or ""
+    return deduped, platforms
+
+
+def _get_tokens_for_users(users: Sequence[str]) -> List[str]:
+    return _get_token_targets_for_users(users)[0]
 
 
 def _get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
@@ -2460,9 +2509,22 @@ def _safe_str(value: Any) -> str:
         return ""
     return str(value)
 
+def _ensure_notification_health_access() -> None:
+    roles = set(frappe.get_roles())
+    allowed = set(ROLES.MANAGER) | {ROLES.SYSTEM_MANAGER, ROLES.ADMINISTRATOR}
+    if not roles.intersection(allowed):
+        frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
+
+
 @frappe.whitelist(allow_guest=False)
 def notification_health() -> Dict[str, Any]:
     """Report, per POS profile, who can actually be reached by push.
+
+    Managers only. Every query below uses frappe.get_all, which ignores
+    permissions, and the answer is a staff roster: who works which branch, their
+    email addresses, their device platforms and when each was last used. That is
+    not a cashier's to read, and allow_guest=False alone would have handed it to
+    any authenticated user on the site.
 
     Written after 2026-09-07, when branches reported missing order alerts and
     there was no way to answer "who is reachable right now?" without querying
@@ -2471,18 +2533,19 @@ def notification_health() -> Dict[str, Any]:
     and until this endpoint existed that state was indistinguishable from a
     healthy one.
     """
+    _ensure_notification_health_access()
+
     now = frappe.utils.now_datetime()
     stale_after_days = 30
 
     devices = frappe.get_all(
         "Jarz Mobile Device",
-        fields=["user", "enabled", "platform", "last_seen"],
+        filters={"enabled": 1},
+        fields=["user", "platform", "last_seen"],
         limit_page_length=0,
     )
     live: Dict[str, List[Dict[str, Any]]] = {}
     for row in devices:
-        if not row.get("enabled"):
-            continue
         last_seen = row.get("last_seen")
         age_days = None
         if last_seen:
@@ -2520,20 +2583,30 @@ def notification_health() -> Dict[str, Any]:
             if not entries:
                 unreachable.append(user)
             elif all(e["stale"] for e in entries):
+                # Counted apart from reachable on purpose. Folding stale in made
+                # blackout unreachable-by-construction for the one population
+                # most likely to be dark: a branch whose every token last
+                # checked in months ago read as healthy.
                 stale_only.append(user)
-                reachable.append(user)
             else:
                 reachable.append(user)
         profiles_out.append(
             {
                 "pos_profile": profile.get("name"),
+                "stale_only": len(stale_only),
                 "disabled": bool(profile.get("disabled")),
                 "recipients": len(users),
                 "reachable": len(reachable),
                 "unreachable_users": unreachable,
                 "stale_token_users": stale_only,
                 # The alert for this profile would reach no device at all.
-                "blackout": bool(users) and not reachable,
+                # A disabled profile takes no orders, so it is never a blackout.
+                "blackout": (
+                    bool(users)
+                    and not reachable
+                    and not stale_only
+                    and not profile.get("disabled")
+                ),
             }
         )
 
@@ -2543,5 +2616,8 @@ def notification_health() -> Dict[str, Any]:
         "stale_after_days": stale_after_days,
         "enabled_devices_total": sum(len(v) for v in live.values()),
         "profiles": profiles_out,
-        "firebase": health_check_firebase(),
+        # health_check_firebase() also returns resolved/raw/candidate paths for
+        # the service-account file. Those are server filesystem details and have
+        # no place in a roster report, so only the verdict is carried through.
+        "firebase_ok": bool((health_check_firebase() or {}).get("ok")),
     }
