@@ -3065,27 +3065,43 @@ def cancel_production_batch(work_order: str, reason: str) -> Dict[str, Any]:
 def _stop_work_order(work_order: str) -> None:
     """Move a Work Order to ``Stopped``.
 
-    ERPNext exposes this as ``WorkOrder.stop_unstop(status)``, which does more
-    than write a field: it also cancels the reserved-quantity entries and
-    updates the linked production plan. Calling the method is therefore the
-    correct path and a bare ``db_set('status', 'Stopped')`` is not.
+    Does what ERPNext's own ``stop_unstop`` does, by calling the same two
+    document methods — ``update_status`` (which runs ``update_required_items``
+    and so releases ``reserved_qty_for_production``) and ``update_planned_qty``
+    (which corrects any linked production plan). A bare
+    ``db_set('status', 'Stopped')`` does neither, and leaks the reservation.
 
-    The fallback exists because ``stop_unstop`` has moved between ERPNext
-    versions, and a cancel whose material has ALREADY been returned must not
-    fail on the last step — that would leave the batch on the board with an
+    It does NOT call ``stop_unstop`` itself, for two reasons that both matter:
+
+    * On ERPNext 16 it is a **module-level function**, not a ``WorkOrder``
+      method — ``doc.stop_unstop(...)`` raises ``AttributeError`` every single
+      time. That is not hypothetical: it is what production did on 2026-09-08,
+      which meant the fallback below was the ONLY path this function had ever
+      taken, and every cancel since the Running tab shipped leaked its
+      reservation.
+    * The module function is whitelisted and gates on
+      ``frappe.has_permission("Work Order", "write")``, which a Production
+      Operator does not hold — this endpoint's own gate is
+      ``ROLES.PRODUCTION_EXECUTE`` — and it calls ``frappe.msgprint``, which
+      would surface a dialog in an API response.
+
+    The fallback stays. A cancel whose material has ALREADY been returned must
+    not fail on the last step: that would leave the batch on the board with an
     empty WIP, which reads as "nothing was transferred" and invites a second
-    start. Writing the status directly is a worse outcome than the method call,
+    start. Writing the status directly is a worse outcome than the method calls,
     and a better one than stopping half way.
     """
     try:
         doc = frappe.get_doc("Work Order", work_order)
         doc.flags.ignore_permissions = True
-        doc.stop_unstop("Stopped")
+        doc.update_status("Stopped")
+        doc.update_planned_qty()
+        doc.notify_update()
         return
     except Exception:
         frappe.log_error(
             title="JARZ - work order stop fell back",
-            message=f"stop_unstop failed for {work_order}; writing status directly",
+            message=f"stopping {work_order} via update_status failed; writing status directly",
         )
 
     frappe.db.set_value("Work Order", work_order, "status", "Stopped", update_modified=False)
