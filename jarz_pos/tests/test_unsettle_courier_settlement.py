@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 import frappe
 
+from jarz_pos.api import couriers as couriers_api
 from jarz_pos.services import delivery_handling
 from jarz_pos.utils.access_control import BranchAccessError
 
@@ -176,12 +177,45 @@ class TestResolveSettlementBranch(unittest.TestCase):
 
 class TestCourierTransactionsForSettlementJe(unittest.TestCase):
     def test_filters_on_journal_entry_and_settled_status(self):
-        with patch.object(frappe, "get_all", return_value=[]) as mock_get_all:
+        with patch.object(
+            delivery_handling, "_is_settlement_je", return_value=True
+        ), patch.object(frappe, "get_all", return_value=[]) as mock_get_all:
             delivery_handling._courier_transactions_for_settlement_je("JE-001")
 
         filters = mock_get_all.call_args.kwargs["filters"]
         self.assertEqual(filters["journal_entry"], "JE-001")
         self.assertEqual(filters["status"], "Settled")
+
+    def test_a_journal_entry_that_is_not_a_settlement_is_never_queried(self):
+        """The allow-list runs BEFORE the query, so an entry that is not a
+        recognised settlement costs nothing and can never yield rows."""
+        with patch.object(
+            delivery_handling, "_is_settlement_je", return_value=False
+        ), patch.object(frappe, "get_all") as mock_get_all:
+            result = delivery_handling._courier_transactions_for_settlement_je("JE-001")
+
+        self.assertEqual(result, [])
+        mock_get_all.assert_not_called()
+
+    def test_for_update_takes_a_locking_read_instead_of_get_all(self):
+        """CRITICAL 3: the decisive re-read has to be a LOCKING read.
+
+        ``frappe.get_all`` is a plain SELECT, and under MariaDB's REPEATABLE READ
+        it is served from the snapshot the transaction opened at its first read —
+        so it still reports the settlement as reversible after another
+        transaction has already reversed and committed it. Only a
+        ``SELECT ... FOR UPDATE`` reads the latest committed row. This pins that
+        the locking path is actually taken; that it changes the OUTCOME is what
+        `test_settlement_reversal_real_db` proves against a real database."""
+        with patch.object(
+            delivery_handling, "_is_settlement_je", return_value=True
+        ), patch.object(frappe, "get_all") as mock_get_all, patch.object(
+            frappe.db, "get_values", return_value=[]
+        ) as mock_get_values:
+            delivery_handling._courier_transactions_for_settlement_je("JE-001", for_update=True)
+
+        mock_get_all.assert_not_called()
+        self.assertTrue(mock_get_values.call_args.kwargs["for_update"])
 
     def test_blank_journal_entry_short_circuits(self):
         with patch.object(frappe, "get_all") as mock_get_all:
@@ -357,6 +391,28 @@ class TestUnsettleCourierSettlementService(unittest.TestCase):
     def tearDown(self):
         for p in reversed(self.patches):
             p.stop()
+
+    def test_the_decisive_courier_transaction_read_is_a_locking_read(self):
+        """CRITICAL 3: the guard that decides whether to reverse must NOT be a
+        plain SELECT.
+
+        A ``FOR UPDATE`` on the Journal Entry serializes two callers but does not
+        isolate them: MariaDB's REPEATABLE READ fixes the read view at the
+        transaction's first read (the ``frappe.db.exists`` above the lock), so
+        every plain SELECT afterwards still returns pre-lock state and the second
+        caller re-reads exactly what told it to proceed. Only a locking read is
+        served from the latest committed row.
+
+        This pins that the service asks for one. That it changes the OUTCOME is
+        proved against a real database, with two real connections, in
+        ``test_settlement_reversal_real_db``.
+        """
+        delivery_handling.unsettle_courier_settlement("JE-ORIG-001")
+
+        self.assertTrue(
+            self.cts.call_args.kwargs.get("for_update"),
+            "the Courier Transaction re-read must be a locking read",
+        )
 
     def test_happy_path_posts_flipped_reversal_and_reopens_courier_transactions(self):
         result = delivery_handling.unsettle_courier_settlement("JE-ORIG-001")
@@ -576,22 +632,68 @@ class TestEnsureUnsettleAccess(unittest.TestCase):
 
 
 class _FakeCache:
-    """Minimal stand-in for ``frappe.cache()`` covering hset/expire/hget/delete_value."""
+    """Stand-in for ``frappe.cache()`` modelling the RAW Redis calls the token uses.
+
+    Deliberately models ``make_key`` / ``set(ex=)`` / ``get`` / ``eval`` rather
+    than ``hset`` / ``expire`` / ``hget``, because those are what the preview
+    token actually does now — and because the old trio is precisely what hid two
+    defects. ``expire`` did not apply the ``make_key`` namespace that ``hset``
+    applied, so it set a TTL on a key that did not exist and the token never
+    expired; and a fake that treats GET-then-DELETE as one step cannot express
+    the interleaving that let two callers spend one token.
+
+    A mock still cannot prove atomicity — only the real Redis does, in
+    ``test_settlement_reversal_real_db`` (12 threads racing one token, one winner).
+    What this fake pins is the CONTRACT: namespaced keys, a TTL supplied by the
+    write itself, and a compare-and-delete that only fires on an exact match.
+    """
+
+    TTL_NONE = -1
 
     def __init__(self):
         self.store = {}
+        self.ttls = {}
 
+    # -- namespacing, exactly as RedisWrapper.make_key does ------------------
+    def make_key(self, key, user=None, shared=False):
+        return f"testdb|{key}".encode()
+
+    # -- raw string commands -------------------------------------------------
+    def set(self, name, value, ex=None):
+        self.store[name] = value.encode() if isinstance(value, str) else value
+        self.ttls[name] = ex if ex is not None else self.TTL_NONE
+        return True
+
+    def get(self, name):
+        return self.store.get(name)
+
+    def ttl(self, name):
+        return self.ttls.get(name, -2)
+
+    def eval(self, script, numkeys, *args):
+        """Only the compare-and-delete script is used; model it exactly."""
+        key, expected = args[0], args[1]
+        current = self.store.get(key)
+        if current is not None and current == expected:
+            self.store.pop(key, None)
+            self.ttls.pop(key, None)
+            return 1
+        return 0
+
+    # -- legacy helpers a few older tests still reach for --------------------
     def hset(self, key, field, value):
-        self.store.setdefault(key, {})[field] = value
+        self.store.setdefault(self.make_key(key), {})[field] = value
 
     def expire(self, key, seconds):
-        pass
+        # Faithful to the real bug: `expire` does NOT namespace the key, so it
+        # never finds what `hset` wrote and reports failure.
+        return False
 
     def hget(self, key, field):
-        return self.store.get(key, {}).get(field)
+        return self.store.get(self.make_key(key), {}).get(field)
 
     def delete_value(self, key):
-        self.store.pop(key, None)
+        self.store.pop(self.make_key(key), None)
 
 
 class TestGetUnsettlePreviewAPI(unittest.TestCase):
@@ -680,10 +782,12 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
         # the hold itself is pinned in test_list_recent_courier_settlements.
         start("jarz_pos.api.couriers.UNSETTLE_RELEASED", new=True)
         self.fake_cache = _FakeCache()
-        self.fake_cache.hset("jarz_pos:unsettle_preview:TOKEN-1", "data", {
-            "journal_entry": "JE-ORIG-001", "pos_profile": "Nasr City",
-        })
         start("frappe.cache", return_value=self.fake_cache)
+        # Seed through the real minting path rather than by hand-writing a cache
+        # entry. The token is keyed on the JOURNAL ENTRY now, so a fixture that
+        # hand-rolls the key encodes a shape the code no longer uses — and would
+        # keep passing after a change that broke minting.
+        self.token = couriers_api._mint_unsettle_preview_token("JE-ORIG-001", "Nasr City")
         self.scope_guard = start("jarz_pos.api.couriers.ensure_profile_scoped_invoice_access")
         self.shift_guard = start("jarz_pos.api.couriers.ensure_open_shift")
         self.commit_service = start(
@@ -707,7 +811,7 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
 
         self.roles.return_value = ["POS User"]
         with self.assertRaises(frappe.PermissionError):
-            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+            unsettle_courier_settlement("JE-ORIG-001", self.token)
 
         self.commit_service.assert_not_called()
 
@@ -716,7 +820,7 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
 
         self.scope_guard.side_effect = BranchAccessError("Not permitted: wrong branch")
         with self.assertRaises(BranchAccessError):
-            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+            unsettle_courier_settlement("JE-ORIG-001", self.token)
 
         self.commit_service.assert_not_called()
 
@@ -732,14 +836,14 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
         from jarz_pos.api.couriers import unsettle_courier_settlement
 
         with self.assertRaises(frappe.ValidationError):
-            unsettle_courier_settlement("JE-SOME-OTHER-ENTRY", "TOKEN-1")
+            unsettle_courier_settlement("JE-SOME-OTHER-ENTRY", self.token)
 
         self.commit_service.assert_not_called()
 
     def test_happy_path_delegates_to_the_service_and_clears_the_token(self):
         from jarz_pos.api.couriers import unsettle_courier_settlement
 
-        result = unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1", reason="wrong branch till")
+        result = unsettle_courier_settlement("JE-ORIG-001", self.token, reason="wrong branch till")
 
         self.commit_service.assert_called_once_with(
             "JE-ORIG-001", pos_profile="Nasr City", reason="wrong branch till"
@@ -747,25 +851,25 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["reversal_journal_entry"], "JE-REVERSAL-001")
         # Token is single-use.
-        self.assertIsNone(self.fake_cache.hget("jarz_pos:unsettle_preview:TOKEN-1", "data"))
+        self.assertIsNone(self.fake_cache.get(couriers_api._unsettle_preview_key("JE-ORIG-001")))
 
     def test_double_reversal_reported_by_the_service_propagates(self):
         from jarz_pos.api.couriers import unsettle_courier_settlement
 
         self.commit_service.side_effect = frappe.ValidationError("already reversed by JE-REVERSAL-EXISTING")
         with self.assertRaises(frappe.ValidationError):
-            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+            unsettle_courier_settlement("JE-ORIG-001", self.token)
 
     # -- CRITICAL 2b: the preview token is genuinely single-use -----------------
 
     def test_replaying_the_same_token_after_success_is_refused(self):
         from jarz_pos.api.couriers import unsettle_courier_settlement
 
-        result = unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+        result = unsettle_courier_settlement("JE-ORIG-001", self.token)
         self.assertTrue(result["success"])
 
         with self.assertRaises(frappe.ValidationError):
-            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+            unsettle_courier_settlement("JE-ORIG-001", self.token)
 
         # The replay never reached the service a second time.
         self.commit_service.assert_called_once()
@@ -780,10 +884,10 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
         self.commit_service.side_effect = Exception("posting failed")
 
         with self.assertRaises(Exception) as ctx:
-            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+            unsettle_courier_settlement("JE-ORIG-001", self.token)
 
         self.assertIn("reopen", str(ctx.exception).lower())
-        self.assertIsNone(self.fake_cache.hget("jarz_pos:unsettle_preview:TOKEN-1", "data"))
+        self.assertIsNone(self.fake_cache.get(couriers_api._unsettle_preview_key("JE-ORIG-001")))
 
     def test_guard_failure_does_not_consume_the_token(self):
         """A branch-scope refusal happens BEFORE the token is consumed, so the
@@ -793,9 +897,9 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
 
         self.scope_guard.side_effect = BranchAccessError("Not permitted: wrong branch")
         with self.assertRaises(BranchAccessError):
-            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+            unsettle_courier_settlement("JE-ORIG-001", self.token)
 
-        self.assertIsNotNone(self.fake_cache.hget("jarz_pos:unsettle_preview:TOKEN-1", "data"))
+        self.assertIsNotNone(self.fake_cache.get(couriers_api._unsettle_preview_key("JE-ORIG-001")))
 
 
 if __name__ == "__main__":

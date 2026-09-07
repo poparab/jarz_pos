@@ -397,6 +397,17 @@ jobs:
             # scoping is the point: a manager must not see another branch's
             # settlements, and a non-settlement JE must never appear at all.
             test_list_recent_courier_settlements
+            # The same feature against a REAL database and REAL Redis. The two
+            # modules above are mocked, and three defects walked through them
+            # while they were green -- a filter that only SQL can evaluate
+            # (`['not in', ['', None]]` is UNKNOWN for every row, so the list was
+            # permanently empty, and the mocked test asserted that shape as
+            # correct), a deny-list that admitted the collection-change entries
+            # a real table actually holds, and a double-reversal guard defeated
+            # by MariaDB's REPEATABLE READ snapshot. None of the three is
+            # expressible in a mock, so these run against the site: real rows,
+            # real isolation levels, and a second connection.
+            test_settlement_reversal_real_db
             # Both of these settle endpoints shipped with NO permission guard --
             # any authenticated user could post the weekly partner bank transfer
             # or a commission entry. These pin the guard, and pin that it runs

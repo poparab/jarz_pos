@@ -35,8 +35,23 @@ def _ct_row(name, journal_entry, invoice, amount=100.0, shipping=20.0,
     }
 
 
-def _je_row(name, company="Test Company", posting_date="2026-09-01"):
-    return {"name": name, "company": company, "posting_date": posting_date}
+def _je_row(name, company="Test Company", posting_date="2026-09-01", user_remark=None):
+    """A Journal Entry row as the batch fetch returns it.
+
+    ``user_remark`` defaults to a real batch-settlement remark, because a JE is
+    only listed if :func:`_is_settlement_je_remark` RECOGNISES it as a
+    settlement (an allow-list — see ``SETTLEMENT_JE_TAG_TYPES``). A fixture with
+    no remark is not a settlement and must not appear, so the default here has
+    to be a genuine one rather than an empty string.
+    """
+    if user_remark is None:
+        user_remark = "Order: 100.0, Shipping: 20.0, Net to branch: 80.0"
+    return {
+        "name": name,
+        "company": company,
+        "posting_date": posting_date,
+        "user_remark": user_remark,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +299,18 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
             c for c in self.get_all.call_args_list
             if c.args and c.args[0] == "Courier Transaction"
         )
-        self.assertEqual(ct_filter_call.kwargs["filters"]["journal_entry"], ["not in", ["", None]])
+        # `["is", "set"]`, NOT `["not in", ["", None]]`.
+        #
+        # This assertion used to pin the BROKEN shape as if it were correct, and
+        # that is the whole reason the defect survived a green suite: a mock
+        # records the filter dict without ever handing it to SQL, so the one
+        # thing that mattered — what the database does with it — was never
+        # exercised. Frappe renders the old shape as
+        # `IFNULL(journal_entry,'') NOT IN ('', NULL)`, which is UNKNOWN (never
+        # TRUE) for every row, so the query returned nothing on any real
+        # database. See test_settlement_reversal_real_db for the check that
+        # actually runs this against MariaDB.
+        self.assertEqual(ct_filter_call.kwargs["filters"]["journal_entry"], ["is", "set"])
 
     def test_journal_entry_missing_or_unsubmitted_is_dropped(self):
         """A CT could point at a JE that no longer resolves as posted; skip it, don't crash."""
@@ -476,7 +502,7 @@ class TestListRecentSettlementsAPI(unittest.TestCase):
         list_recent_settlements(pos_profile="Nasr City", limit=10, include_reversed=True)
 
         self.service.assert_called_once_with(
-            pos_profile="Nasr City", limit=10, include_reversed=True
+            pos_profile="Nasr City", limit=10, include_reversed=True, days=90
         )
 
     def test_line_manager_is_permitted(self):
@@ -504,37 +530,64 @@ class TestListRecentSettlementsAPI(unittest.TestCase):
 
 
 class TestUnsettleReleaseHold(unittest.TestCase):
-    """Settlement reversal ships dark, and must stay dark until its defects are
-    fixed AND verified against a real database and real concurrency.
+    """The kill switch itself, which outlived the release it was built for.
 
-    Enforced server-side rather than only by hiding the button, because all
-    three endpoints take an arbitrary Journal Entry name — a hidden button
-    leaves the defects reachable by anyone who can call the API.
+    Settlement reversal shipped dark from 944bf02 and was released on
+    2026-09-07 once its three defects were fixed and verified against a real
+    database and real concurrency. The flag stays, and stays tested, because it
+    is the only way to take these endpoints away again without a deploy: they
+    each accept an arbitrary Journal Entry name, so hiding the mobile button
+    would leave them reachable by anyone who can call the API.
+
+    These tests deliberately pin the MECHANISM rather than the flag's current
+    value. A test asserting `UNSETTLE_RELEASED is False` says nothing about
+    whether the hold works, and has to be deleted the day it matters most.
     """
 
-    def test_the_flag_is_off_on_main(self):
-        """Fails loudly if the hold is lifted without anyone meaning to."""
-        from jarz_pos.api import couriers
-
-        self.assertFalse(
-            couriers.UNSETTLE_RELEASED,
-            "Settlement reversal is still held back; see the defect list above "
-            "UNSETTLE_RELEASED in api/couriers.py before flipping this.",
-        )
-
-    def test_every_reversal_endpoint_is_refused_while_held(self):
+    def test_the_hold_refuses_every_reversal_endpoint_when_it_is_off(self):
         from jarz_pos.api import couriers
 
         # An administrator — the widest caller there is. The hold must refuse
         # even them, and must refuse BEFORE the role check, so that lifting it
         # is the only way through.
-        with patch("frappe.get_roles", return_value=["System Manager"]):
+        with patch("jarz_pos.api.couriers.UNSETTLE_RELEASED", new=False), patch(
+            "frappe.get_roles", return_value=["System Manager"]
+        ):
             for call in (
                 lambda: couriers.list_recent_settlements(),
                 lambda: couriers.get_unsettle_preview("ACC-JV-2026-00001"),
                 lambda: couriers.unsettle_courier_settlement("ACC-JV-2026-00001", "tok"),
             ):
                 with self.assertRaises(frappe.ValidationError):
+                    call()
+
+    def test_the_hold_is_checked_before_the_role_gate(self):
+        """Order matters: the hold must be the outermost guard, so that while it
+        is on there is no caller — of any role — who gets past it."""
+        from jarz_pos.api import couriers
+
+        with patch("jarz_pos.api.couriers.UNSETTLE_RELEASED", new=False), patch(
+            "frappe.get_roles"
+        ) as roles:
+            with self.assertRaises(frappe.ValidationError):
+                couriers.get_unsettle_preview("ACC-JV-2026-00001")
+
+        roles.assert_not_called()
+
+    def test_every_reversal_endpoint_consults_the_hold(self):
+        """A fourth endpoint added later must not quietly bypass the switch."""
+        from jarz_pos.api import couriers
+
+        for call in (
+            lambda: couriers.list_recent_settlements(),
+            lambda: couriers.get_unsettle_preview("ACC-JV-2026-00001"),
+            lambda: couriers.unsettle_courier_settlement("ACC-JV-2026-00001", "tok"),
+        ):
+            with patch(
+                "jarz_pos.api.couriers._ensure_unsettle_released",
+                side_effect=RuntimeError("hold consulted"),
+            ):
+                with self.assertRaises(RuntimeError):
                     call()
 
 

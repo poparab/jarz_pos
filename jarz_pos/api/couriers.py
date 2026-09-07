@@ -6,6 +6,9 @@ delivery handling services.
 
 from __future__ import annotations
 
+import hmac
+import json
+
 import frappe
 
 from jarz_pos.services.delivery_handling import (
@@ -894,29 +897,43 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
 # ---------------------------------------------------------------------------
 
 
-#: Settlement reversal ships DARK. Set to True only once the defects below are
-#: fixed AND verified against a real database and real concurrency — a mocked
-#: harness cannot see either of them, which is why both survived a green suite.
+#: Settlement reversal shipped DARK from 944bf02 until 2026-09-07, held back by
+#: this flag while three defects were fixed. All three were invisible to the
+#: mocked suite, which was green throughout — so none of them was allowed to be
+#: closed by another mocked test. Each was reproduced and then re-checked against
+#: a real database, real Redis and a second real connection
+#: (``tests/test_settlement_reversal_real_db.py``, now in the CI array):
 #:
-#: 1. ``list_recent_courier_settlements`` filters ``journal_entry`` with
-#:    ``["not in", ["", None]]``. In SQL three-valued logic
-#:    ``x NOT IN ('', NULL)`` is NULL, never TRUE, so the query returns ZERO
-#:    rows on any real database and a manager can never find a settlement.
-#: 2. The non-settlement discriminator is a deny-list holding one tag
-#:    (PARTNER_FEE_ACCRUAL). The collection-change journal entries written by
-#:    ``_apply_collection_change_to_online`` / ``_from_online`` also land in
-#:    ``Courier Transaction.journal_entry``, and a settle path that nets to
-#:    zero marks those rows Settled without overwriting it — so such an entry
-#:    is reversible, which would erase the record of a customer's online
-#:    payment and re-create a receivable against a courier holding nothing.
-#:    The fix is to invert this to an ALLOW-list of settlement tags, which
-#:    first requires tagging ``_create_settlement_journal_entry`` (the batch
-#:    settlement currently writes no tag at all).
-#: 3. ``FOR UPDATE`` serializes the callers but does not refresh MariaDB's
-#:    REPEATABLE READ snapshot, so the guards after the lock still read
-#:    pre-lock state and a second reversal remains reachable. The re-read of
-#:    the Courier Transactions has to be a locking read too.
-UNSETTLE_RELEASED = False
+#: 1. DEAD QUERY. ``list_recent_courier_settlements`` filtered ``journal_entry``
+#:    with ``["not in", ["", None]]``, which Frappe renders as
+#:    ``IFNULL(journal_entry,'') NOT IN ('', NULL)`` — UNKNOWN, never TRUE, for
+#:    every row. Confirmed against production: the old filter returned 0 rows
+#:    where the fixed one returns rows out of the 36 Courier Transactions that
+#:    carry a journal entry, so nothing could ever be listed to reverse. Now
+#:    ``["is", "set"]``. The mocked test had ASSERTED the broken shape.
+#: 2. DENY-LIST. The "is this a settlement?" test excluded one tag
+#:    (PARTNER_FEE_ACCRUAL) and admitted everything else that lands in
+#:    ``Courier Transaction.journal_entry`` — including the collection-change
+#:    entries, which really do sit on Settled rows because a settle path that
+#:    nets to zero closes the row without clearing the field. Reversing one
+#:    would erase the record of a customer's online payment and re-create a
+#:    receivable against a courier holding nothing. The production audit found
+#:    14 such entries already attached to Settled rows — 14 of the 22 journal
+#:    entries the dialog would have offered. Now an ALLOW-list
+#:    (``SETTLEMENT_JE_TAG_TYPES``), which required tagging the batch
+#:    settlement; legacy untagged batch entries are recognised by their remark
+#:    shape so history stays reversible.
+#: 3. NO ISOLATION. ``FOR UPDATE`` on the Journal Entry serialized two callers
+#:    but did not isolate them: under MariaDB's REPEATABLE READ the guards after
+#:    the lock were plain SELECTs served from the snapshot opened at the
+#:    transaction's first read, so the second caller re-read the state that told
+#:    it to proceed. Reproduced with two connections — a plain read still
+#:    reported the settlement reversible after the other transaction committed
+#:    the flip. The decisive re-read is now a locking read.
+#:
+#: The production audit also asked whether the tag test failed OPEN for legacy
+#: untagged partner fee accruals: it does not — there are zero of them.
+UNSETTLE_RELEASED = True
 
 
 def _ensure_unsettle_released() -> None:
@@ -932,6 +949,105 @@ def _ensure_unsettle_released() -> None:
             "back pending verification; reverse it from the backend for now.",
             frappe.ValidationError,
         )
+
+
+#: Lifetime of an un-settle preview token, matching generate_settlement_preview.
+UNSETTLE_PREVIEW_TTL = 180
+
+#: Compare-and-delete, executed inside Redis so it cannot interleave.
+#:
+#: A plain GET-then-DELETE (what this used to do, on the way OUT of the
+#: reversal, and then on the way IN) is check-then-act: two callers holding the
+#: same token both pass the GET before either DELETEs, and both go on to post a
+#: reversing entry. GETDEL would fix the atomicity but destroys the value
+#: whatever was presented, so anyone submitting a stale or wrong token would
+#: invalidate the legitimate one. Comparing against the exact bytes we read and
+#: deleting only on a match gives single-use without that side effect: of two
+#: callers with one token exactly one gets 1 back, and a wrong token changes
+#: nothing.
+_UNSETTLE_TOKEN_CONSUME_LUA = (
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+    "redis.call('DEL', KEYS[1]); return 1 else return 0 end"
+)
+
+
+def _unsettle_preview_key(journal_entry: str):
+    """Redis key holding the ONE live preview token for *journal_entry*.
+
+    Keyed on the JOURNAL ENTRY rather than on the token, which is what makes a
+    new preview invalidate every earlier one for the same settlement. Keying on
+    the token (the previous shape) meant every call to
+    :func:`get_unsettle_preview` minted an ADDITIONAL independently-valid permit
+    to reverse the same entry, and they all coexisted.
+
+    ``make_key`` applies the same ``<db_name>|`` namespace prefix
+    ``frappe.cache().hset`` applies, so this stays inside the site's own cache
+    namespace. The value is written and read with raw Redis commands rather than
+    the pickling helpers, because only raw commands can consume it atomically —
+    and because ``hget`` consults ``frappe.local.cache`` first, which can return
+    a token already consumed earlier in the same request.
+    """
+    return frappe.cache().make_key(f"jarz_pos:unsettle_preview:{journal_entry}")
+
+
+def _mint_unsettle_preview_token(journal_entry: str, pos_profile: str) -> str:
+    """Store a fresh single-use token for *journal_entry*, replacing any prior one."""
+    token = frappe.generate_hash(length=32)
+    payload = json.dumps({"token": token, "pos_profile": pos_profile}, sort_keys=True)
+    # One SET carrying its own expiry. The previous shape was `hset` followed by
+    # `expire(cache_key, 180)` — but `hset` namespaces the key through `make_key`
+    # while the inherited `expire` does not, so that call set a TTL on a key that
+    # did not exist and silently returned False. The token it was meant to expire
+    # had NO expiry at all and stayed valid indefinitely.
+    frappe.cache().set(_unsettle_preview_key(journal_entry), payload, ex=UNSETTLE_PREVIEW_TTL)
+    return token
+
+
+def _peek_unsettle_preview_token(journal_entry: str, token: str):
+    """Validate the preview token WITHOUT spending it.
+
+    Returns ``(payload, raw)`` when the token is live and matches, else
+    ``(None, None)``. ``raw`` is the exact stored bytes, and is what
+    :func:`_spend_unsettle_preview_token` compares against — so the pair form a
+    compare-and-swap across the guards that run between them.
+
+    Reading before spending is deliberate: the branch guards need the branch out
+    of the payload, and a caller refused for a fixable reason (their shift is not
+    open yet) should still be holding a usable token afterwards rather than
+    having to re-preview.
+    """
+    key = _unsettle_preview_key(journal_entry)
+    raw = frappe.cache().get(key)
+    if raw is None:
+        return None, None
+
+    try:
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except Exception:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+
+    stored = str(payload.get("token") or "")
+    presented = str(token or "")
+    if not stored or not presented or not hmac.compare_digest(stored, presented):
+        return None, None
+
+    return payload, raw
+
+
+def _spend_unsettle_preview_token(journal_entry: str, raw) -> bool:
+    """Atomically consume the token whose exact bytes are *raw*.
+
+    True only for the caller that actually removed it. Anyone whose value
+    changed in the meantime — because another caller spent it, or because a
+    newer preview replaced it — gets False and must be refused.
+    """
+    return bool(
+        frappe.cache().eval(
+            _UNSETTLE_TOKEN_CONSUME_LUA, 1, _unsettle_preview_key(journal_entry), raw
+        )
+    )
 
 
 def _ensure_unsettle_access() -> None:
@@ -988,12 +1104,9 @@ def get_unsettle_preview(journal_entry: str):
             f"{data.get('reversal_journal_entry')}."
         )
 
-    token = frappe.generate_hash(length=16)
-    cache_key = f"jarz_pos:unsettle_preview:{token}"
-    frappe.cache().hset(cache_key, "data", {"journal_entry": journal_entry, "pos_profile": branch})
-    frappe.cache().expire(cache_key, 180)
+    token = _mint_unsettle_preview_token(journal_entry, branch)
 
-    return {**data, "preview_token": token, "expires_in": 180}
+    return {**data, "preview_token": token, "expires_in": UNSETTLE_PREVIEW_TTL}
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
@@ -1013,12 +1126,12 @@ def unsettle_courier_settlement(journal_entry: str, preview_token: str, reason: 
     if not preview_token:
         frappe.throw("preview_token is required")
 
-    cache_key = f"jarz_pos:unsettle_preview:{preview_token}"
-    cached = frappe.cache().hget(cache_key, "data")
+    # Validate now, spend just before the reversal. There is no separate
+    # journal_entry match to make any more — the key IS the journal entry, so a
+    # token minted for another settlement is simply not found here.
+    cached, raw_token = _peek_unsettle_preview_token(journal_entry, preview_token)
     if not cached:
         frappe.throw("Preview expired or invalid. Please reopen the dialog.")
-    if cached.get("journal_entry") != journal_entry:
-        frappe.throw("Preview does not match journal_entry. Please reopen the dialog.")
 
     branch = cached.get("pos_profile")
     if not branch:
@@ -1029,16 +1142,17 @@ def unsettle_courier_settlement(journal_entry: str, preview_token: str, reason: 
     # Posts money, so (like confirm_settlement) the branch must actually be open.
     _guard_branch_action(branch, action_label="reversing a courier settlement", require_shift=True)
 
-    # Consume the token BEFORE attempting the reversal, not after. The preview
-    # token must be genuinely single-use: deleting it only on the way out (the
-    # old order) leaves a window where two managers holding the same token —
-    # or one manager plus a retried mobile request — both pass the `hget`
-    # check above and both reach the service call before either commits
-    # (CRITICAL 2b, adversarial review 2026-09-07).
-    try:
-        frappe.cache().delete_value(cache_key)
-    except Exception:
-        pass
+    # Spend the token BEFORE the reversal, not after, and spend it INSIDE Redis.
+    # Both halves matter. Consuming up front closes the window in which two
+    # holders of one token both reach the service call; doing it as a
+    # compare-and-delete closes the narrower window in which they both pass a
+    # plain check before either deletes. Whoever loses this is refused here,
+    # having posted nothing.
+    if not _spend_unsettle_preview_token(journal_entry, raw_token):
+        frappe.throw(
+            "This preview was already used, or a newer one replaced it. "
+            "Please reopen the dialog."
+        )
 
     # The service function owns its own savepoint/commit/rollback (mirroring every
     # other settlement builder in that module) — this wrapper does not double it.
@@ -1082,6 +1196,7 @@ def list_recent_settlements(
     pos_profile: str | None = None,
     limit: int = 50,
     include_reversed: bool = False,
+    days: int = 90,
 ):
     """List recent courier settlements so a manager can FIND one to reverse.
 
@@ -1105,6 +1220,12 @@ def list_recent_settlements(
     still be acted on; pass True to include already-reversed settlements for
     audit.
 
+    ``days`` bounds the scan to a posting-date window (default 90, clamped to
+    1..365 by the service). It is forwarded rather than dropped: the service
+    has always taken it, but this wrapper did not accept it, so every caller —
+    including the mobile dialog — was hard-pinned to 90 days with no way to
+    look further back at an older settlement.
+
     Returns a list of rows, newest first:
       {
         journal_entry, posting_date, party_type, party, display_name,
@@ -1117,4 +1238,5 @@ def list_recent_settlements(
         pos_profile=pos_profile,
         limit=limit,
         include_reversed=_coerce_include_reversed(include_reversed),
+        days=days,
     )

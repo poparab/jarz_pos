@@ -3992,32 +3992,100 @@ def _find_existing_je_by_tag(company: str, invoice_name: str, je_type: str) -> s
 #: courier's own balance. Treating it as a settlement and reversing it posts
 #: DR partner payable / CR Freight — silently erasing a real unpaid liability —
 #: and flips the CT back to Unsettled, showing a phantom rider balance for the
-#: full order value (CRITICAL 1, adversarial review 2026-09-07).
+#: full order value.
+#:
+#: This tag used to have a pair of helpers reading it, because "is this a
+#: settlement?" was answered by EXCLUDING this one type. That deny-list is gone
+#: — see :data:`SETTLEMENT_JE_TAG_TYPES` — so a fee accrual is now refused for
+#: the same reason anything else unrecognised is: it is not on the allow-list.
+#: The tag itself stays, as the accrual's idempotency key.
 PARTNER_FEE_ACCRUAL_JE_TAG_TYPE = "PARTNER_FEE_ACCRUAL"
 
 
-def _is_partner_fee_accrual_remark(user_remark: str | None) -> bool:
-    """True when *user_remark* carries the partner fee-accrual dedup tag.
+#: Tag type embedded in the BATCH settlement JE's ``user_remark`` — see
+#: ``_create_settlement_journal_entry``, the sweep behind ``settle_delivery_party``
+#: and by far the most common way a courier is settled. It carried no tag at all
+#: until 2026-09-07, which is precisely what forced the "is this a settlement?"
+#: test to be a deny-list. Unlike every other tag in this module this one is NOT
+#: an idempotency key: the batch path settles a SET of invoices, so there is no
+#: single invoice to key on and no dedup guard has ever been attached to it. The
+#: key is the courier, and the tag exists only to CLASSIFY the entry.
+BATCH_SETTLEMENT_JE_TAG_TYPE = "COURIER_BATCH_SETTLEMENT"
 
-    Deliberately NOT keyed on ``Courier Transaction.is_partner_order``: a
-    partner order that is later settled through the ordinary
-    outstanding-settlement flow (``settle_single_invoice_paid``) posts a REAL,
-    reversible settlement JE (tagged e.g. ``COURIER_OUTSTANDING_SETTLEMENT``)
-    against a Courier Transaction that still carries ``is_partner_order=1`` —
-    so that flag alone is too coarse a test and would wrongly make a genuine
-    settlement permanently unreversable too. The JE's own tag is the only
-    precise signal of what it actually is.
+#: Every tag type that marks a Journal Entry as a courier SETTLEMENT, and
+#: therefore as something ``unsettle_courier_settlement`` may reverse.
+#:
+#: This is an ALLOW-list, and the direction matters. It replaced a deny-list
+#: that excluded exactly one tag (PARTNER_FEE_ACCRUAL) and so admitted anything
+#: else that happened to land in ``Courier Transaction.journal_entry`` —
+#: including the collection-change entries written by
+#: ``_apply_collection_change_to_online`` / ``_from_online``. Those rows really
+#: do reach ``status="Settled"``: a settle path whose totals net to zero closes
+#: the row (see ``settle_single_invoice_paid`` and ``_requires_settlement_entry``)
+#: WITHOUT overwriting ``journal_entry``, so the collection-change entry stays
+#: attached to a Settled row and read as reversible. Reversing one posts the
+#: inverse of ``DR <online ledger> / CR Courier Outstanding`` — erasing the
+#: record that a customer paid online and re-creating a receivable against a
+#: courier who is holding nothing.
+#:
+#: This is not hypothetical. The production audit on 2026-09-07 found 14 such
+#: entries already attached to Settled Courier Transactions — 14 of the 22
+#: journal entries the reversal dialog would have offered, i.e. the MAJORITY of
+#: what a manager would have seen was un-reversable by construction.
+#:
+#: Deliberately NOT keyed on ``Courier Transaction.is_partner_order``: a partner
+#: order settled through ``settle_single_invoice_paid`` posts a genuine,
+#: reversible settlement against a row that still carries that flag, so the flag
+#: would block real reversals. The JE's own tag is the only precise signal.
+SETTLEMENT_JE_TAG_TYPES = (
+    BATCH_SETTLEMENT_JE_TAG_TYPE,
+    "COURIER_OUTSTANDING_SETTLEMENT",
+    "COURIER_SHIPPING_SETTLEMENT",
+    "COURIER_COLLECTED_SETTLEMENT",
+    "DELIVERY_PARTNER_SETTLEMENT",
+)
+
+#: Recognises a batch settlement posted BEFORE ``BATCH_SETTLEMENT_JE_TAG_TYPE``
+#: existed, by the exact literal ``user_remark`` shape
+#: ``_create_settlement_journal_entry`` has always written.
+#:
+#: Without this, an allow-list would make every settlement in the system's
+#: history permanently unreversable — which is the one case this whole feature
+#: was built for (the 2026-09-02 wrong-branch settlement). The production audit
+#: found 5 such legacy entries, and 0 entries that matched neither this shape
+#: nor a tag, so between them the two tests classify 100% of real data.
+#:
+#: The ``^`` anchor is load-bearing, not cosmetic: it is what stops the shape
+#: being forged. The one untagged non-settlement that reaches this test is the
+#: collection-change entry, whose remark always begins "Payment collection
+#: changed to ...", so an anchored match can never accept one however its
+#: free-text tail is manipulated.
+_LEGACY_BATCH_SETTLEMENT_REMARK = re.compile(
+    r"^\s*Order:\s*-?[\d.,]+\s*,\s*Shipping:\s*-?[\d.,]+\s*,\s*Net to branch:\s*-?[\d.,]+",
+    re.IGNORECASE,
+)
+
+
+def _is_settlement_je_remark(user_remark: str | None) -> bool:
+    """True when *user_remark* identifies a REVERSIBLE courier settlement JE.
+
+    Allow-list, not deny-list — see :data:`SETTLEMENT_JE_TAG_TYPES` for why.
+    Anything unrecognised is refused, so a journal entry shape added later
+    fails CLOSED (not reversible until it is deliberately tagged) rather than
+    silently becoming reversible.
     """
-    marker = f"[JARZ-JE:{PARTNER_FEE_ACCRUAL_JE_TAG_TYPE}:"
-    return marker in (user_remark or "")
+    remark = user_remark or ""
+    for tag_type in SETTLEMENT_JE_TAG_TYPES:
+        if f"[JARZ-JE:{tag_type}:" in remark:
+            return True
+    return bool(_LEGACY_BATCH_SETTLEMENT_REMARK.match(remark))
 
 
-def _is_partner_fee_accrual_je(je_name: str) -> bool:
-    """Single-JE convenience wrapper around :func:`_is_partner_fee_accrual_remark`."""
+def _is_settlement_je(je_name: str) -> bool:
+    """Single-JE convenience wrapper around :func:`_is_settlement_je_remark`."""
     if not je_name:
         return False
-    remark = frappe.db.get_value("Journal Entry", je_name, "user_remark")
-    return _is_partner_fee_accrual_remark(remark)
+    return _is_settlement_je_remark(frappe.db.get_value("Journal Entry", je_name, "user_remark"))
 
 
 def _get_courier_outstanding_account(company: str) -> str:
@@ -4617,9 +4685,16 @@ def _apply_collection_change_to_online(*, inv, ct, new_method: str, order_amount
         je.posting_date = frappe.utils.nowdate()
         je.company = inv.company
         je.title = f"Payment Collection Change - {inv.name} - {idempotency_token}"
+        # `reference_no` is free text a cashier types on the phone, and it lands
+        # in the SAME `user_remark` field every idempotency guard in this module
+        # pattern-matches on. Entering a literal `[JARZ-JE:<type>:<key>]` would
+        # forge a tag for an ARBITRARY other document — most sharply
+        # `[JARZ-JE:COURIER_SETTLEMENT_REVERSAL:<je>]`, which permanently makes
+        # that settlement read as already-reversed and refuses to ever reverse
+        # it. Neutralise it exactly as the reversal reason is neutralised.
         je.user_remark = (
             f"Payment collection changed to {new_method} for {inv.name}. "
-            f"Reference: {reference_no or receipt_name or idempotency_token}"
+            f"Reference: {_strip_je_tag_lookalikes(reference_no) or receipt_name or idempotency_token}"
         )
         je.append("accounts", {
             "account": online_account,
@@ -5573,9 +5648,16 @@ def _create_settlement_journal_entry(
     # settlement can be traced back to the orders whose Courier Outstanding it
     # clears. Sorted + de-duplicated so the same set always reads the same.
     invoice_names = sorted({str(i or "").strip() for i in (invoices or []) if str(i or "").strip()})
+    # The tag is what lets `_is_settlement_je_remark` recognise this entry as a
+    # settlement WITHOUT a deny-list. It is a classification marker, not an
+    # idempotency key — the batch path settles a set of invoices, so it keys on
+    # the courier and no dedup guard reads it. The leading "Order: ..." text is
+    # kept verbatim so entries posted before this tag existed still match
+    # `_LEGACY_BATCH_SETTLEMENT_REMARK` and stay reversible.
     je.user_remark = (
         f"Order: {order_amt}, Shipping: {shipping_amt}, Net to branch: {net_branch}"
         + (f" | Invoices: {', '.join(invoice_names)}" if invoice_names else "")
+        + f" {_je_dedup_tag(str(courier), BATCH_SETTLEMENT_JE_TAG_TYPE)}"
     )
 
     tolerance = 0.005
@@ -5704,6 +5786,21 @@ def find_settlement_reversal_je(company: str, original_je: str) -> str | None:
 _JE_TAG_LOOKALIKE = re.compile(r"\[\s*JARZ-JE\s*:", re.IGNORECASE)
 
 
+def _strip_je_tag_lookalikes(text: str | None) -> str | None:
+    """Neutralise anything tag-shaped in free text destined for ``user_remark``.
+
+    The single guard for EVERY user-supplied string this module interpolates
+    into a Journal Entry remark. Two such strings exist: the reversal *reason*
+    (see :func:`_sanitize_reversal_reason`) and the payment *reference_no* a
+    cashier types when changing an order's collection method — the latter was
+    interpolated raw until 2026-09-07, which let a payment reference forge a
+    reversal tag against an arbitrary settlement.
+    """
+    if not text:
+        return text
+    return _JE_TAG_LOOKALIKE.sub("(JARZ-JE:", str(text))
+
+
 def _sanitize_reversal_reason(reason: str | None) -> str | None:
     """Strip anything that could reconstitute a dedup tag out of a free-text *reason*.
 
@@ -5716,9 +5813,7 @@ def _sanitize_reversal_reason(reason: str | None) -> str | None:
     ever reverse it again. Neutralising the opening bracket is enough to break
     the shape while leaving the text readable for audit.
     """
-    if not reason:
-        return reason
-    return _JE_TAG_LOOKALIKE.sub("(JARZ-JE:", str(reason))
+    return _strip_je_tag_lookalikes(reason)
 
 
 def _child_row_value(row, fieldname: str):
@@ -5737,7 +5832,9 @@ def _child_row_value(row, fieldname: str):
     return None
 
 
-def _courier_transactions_for_settlement_je(original_je: str) -> list[dict]:
+def _courier_transactions_for_settlement_je(
+    original_je: str, *, for_update: bool = False
+) -> list[dict]:
     """Every Courier Transaction *original_je* settled and that is still Settled.
 
     Filtering on ``status == "Settled"`` (rather than merely ``journal_entry ==
@@ -5746,25 +5843,40 @@ def _courier_transactions_for_settlement_je(original_je: str) -> list[dict]:
     touches back to Unsettled, so this becomes the first line of the
     double-reversal guard, ahead of the JE-tag lookup in
     :func:`find_settlement_reversal_je`.
+
+    ``for_update`` makes that read a LOCKING read (``SELECT ... FOR UPDATE``).
+    A locking read always sees the latest COMMITTED row rather than the
+    transaction's REPEATABLE READ snapshot, which is the only reason the
+    double-reversal guard actually holds — see the concurrency note in
+    :func:`unsettle_courier_settlement`. Callers that only look (the preview,
+    the list) leave it False.
     """
     original_je = (original_je or "").strip()
     if not original_je:
         return []
-    if _is_partner_fee_accrual_je(original_je):
-        # CRITICAL 1: a partner fee-accrual JE (DR Freight / CR partner payable,
-        # posted at dispatch — see create_partner_fee_accrual_je) is never a
-        # settlement, however "Settled" the CT it is attached to reads. See
-        # _is_partner_fee_accrual_remark for why is_partner_order alone cannot
-        # be used here.
+    if not _is_settlement_je(original_je):
+        # Only a recognised SETTLEMENT entry is reversible. Allow-list, not
+        # deny-list: see SETTLEMENT_JE_TAG_TYPES for the collection-change
+        # entries a deny-list admitted, and why the partner fee accrual still
+        # cannot be excluded by is_partner_order.
         return []
-    return frappe.get_all(
+    fields = [
+        "name", "reference_invoice", "amount", "shipping_amount",
+        "party_type", "party", "is_partner_order",
+    ]
+    if not for_update:
+        return frappe.get_all(
+            "Courier Transaction",
+            filters={"journal_entry": original_je, "status": "Settled"},
+            fields=fields,
+        )
+    return frappe.db.get_values(
         "Courier Transaction",
-        filters={"journal_entry": original_je, "status": "Settled"},
-        fields=[
-            "name", "reference_invoice", "amount", "shipping_amount",
-            "party_type", "party", "is_partner_order",
-        ],
-    )
+        {"journal_entry": original_je, "status": "Settled"},
+        fields,
+        as_dict=True,
+        for_update=True,
+    ) or []
 
 
 def resolve_settlement_branch(original_je: str, cts: list[dict] | None = None) -> str:
@@ -5898,14 +6010,26 @@ def unsettle_courier_settlement(
     gate on role and branch membership before calling it, exactly as every
     other function in this module leaves the guard to its API wrapper.
 
-    Concurrency: a row lock is taken on *journal_entry* BEFORE any guard below
-    runs (existence, docstatus, linked-CT lookup, the reversal-tag check) so
-    that two overlapping calls against the SAME entry — two managers holding
-    valid preview tokens, or one manager plus a retried mobile request — never
-    both read "not yet reversed" and both post a reversing entry (CRITICAL 2a,
-    adversarial review 2026-09-07). The second call blocks on the lock until
-    the first COMMITS (this function commits internally), then re-reads state
-    that already reflects the first reversal and correctly refuses.
+    Concurrency: two overlapping calls against the SAME entry — two managers
+    holding valid preview tokens, or one manager plus a retried mobile request —
+    must never both read "not yet reversed" and both post a reversing entry.
+
+    A ``FOR UPDATE`` on the Journal Entry alone does NOT achieve that, and the
+    first attempt at this guard was wrong for a subtle reason. MariaDB's default
+    isolation is REPEATABLE READ, and the transaction's read view is fixed at
+    its FIRST consistent read — here the ``frappe.db.exists`` a few lines below.
+    Every plain ``SELECT`` after the lock therefore still returns the PRE-lock
+    snapshot, so the second caller waits for the lock, acquires it, and then
+    reads the very state that made it decide to proceed. The lock serialized the
+    callers without isolating them.
+
+    What actually closes it is that the DECISIVE guard is itself a locking read:
+    the Courier Transaction lookup below passes ``for_update=True``, and a
+    locking read is always served from the latest COMMITTED row rather than from
+    the snapshot. The first reversal flips those rows to Unsettled and commits;
+    the second caller's locking read then returns zero Settled rows and it
+    refuses. (The Journal Entry lock is kept ahead of it: it makes the two
+    callers queue in a defined order rather than racing into the CT lock.)
     """
     original_je_name = (journal_entry or "").strip()
     if not original_je_name:
@@ -5913,8 +6037,8 @@ def unsettle_courier_settlement(
     if not frappe.db.exists("Journal Entry", original_je_name):
         frappe.throw(_("Journal Entry {0} was not found").format(original_je_name))
 
-    # Row-lock BEFORE any guard below reads state derived from this entry.
-    # See the concurrency note in the docstring.
+    # Queue overlapping callers in a defined order. On its own this does NOT
+    # isolate them — see the concurrency note in the docstring.
     frappe.db.get_value("Journal Entry", original_je_name, "name", for_update=True)
 
     original_je = frappe.get_doc("Journal Entry", original_je_name)
@@ -5923,7 +6047,10 @@ def unsettle_courier_settlement(
             _("Journal Entry {0} is not submitted; nothing to reverse.").format(original_je_name)
         )
 
-    cts = _courier_transactions_for_settlement_je(original_je_name)
+    # THE decisive guard, and the one that has to escape the REPEATABLE READ
+    # snapshot: a locking read reads the latest committed rows, so a caller
+    # arriving after another reversal committed sees zero Settled rows here.
+    cts = _courier_transactions_for_settlement_je(original_je_name, for_update=True)
     if not cts:
         frappe.throw(
             _(
@@ -6077,10 +6204,9 @@ def list_recent_courier_settlements(
 
     A settlement is identified exactly the way :func:`_courier_transactions_for_settlement_je`
     identifies one — by the ``journal_entry`` a Courier Transaction was settled
-    against, excluding a partner fee-accrual JE the same way (see
-    :func:`_is_partner_fee_accrual_remark`; CRITICAL 1, adversarial review
-    2026-09-07) — so this list and the un-settle preview never disagree about
-    what counts as a settlement. Unlike that helper, this does NOT filter
+    against, admitted only if :func:`_is_settlement_je_remark` recognises it (see
+    :data:`SETTLEMENT_JE_TAG_TYPES`) — so this list and the un-settle preview
+    never disagree about what counts as a settlement. Unlike that helper, this does NOT filter
     Courier Transactions on ``status == "Settled"``: per
     ``services.courier_carry.mark_unsettled``, a reversal flips ``status`` back to
     Unsettled but never clears ``journal_entry``, and that field surviving is
@@ -6117,10 +6243,20 @@ def list_recent_courier_settlements(
     # Bounded in SQL on both axes: a date window (this table only grows) and a
     # page-size cap generous enough to survive the branch/reversed filtering
     # below without starving a legitimate result.
+    # `["is", "set"]`, NOT `["not in", ["", None]]`.
+    #
+    # Frappe renders the latter as `IFNULL(journal_entry,'') NOT IN ('', NULL)`.
+    # In SQL's three-valued logic any comparison against NULL yields UNKNOWN,
+    # and `x NOT IN (a, NULL)` is therefore UNKNOWN — never TRUE — for EVERY
+    # row, whatever the column holds. The filter did not narrow this query, it
+    # emptied it: verified against production on 2026-09-07, where the old
+    # filter returned 0 rows and `["is", "set"]` returned rows out of the 36
+    # Courier Transactions that actually carry a journal entry. The reversal
+    # dialog could never list a single settlement to reverse.
     ct_rows = frappe.get_all(
         "Courier Transaction",
         filters={
-            "journal_entry": ["not in", ["", None]],
+            "journal_entry": ["is", "set"],
             "date": [">=", cutoff],
         },
         fields=[
@@ -6160,8 +6296,11 @@ def list_recent_courier_settlements(
             # Draft/cancelled/missing — never a posted settlement.
             continue
 
-        if _is_partner_fee_accrual_remark(je.get("user_remark")):
-            # CRITICAL 1: a partner fee-accrual JE is never a settlement.
+        if not _is_settlement_je_remark(je.get("user_remark")):
+            # Same allow-list `_courier_transactions_for_settlement_je` applies,
+            # so this list and the preview never disagree about what counts as a
+            # settlement. On production this drops 14 collection-change entries
+            # and 0 genuine settlements.
             continue
 
         branches = {invoice_branches.get(r.get("reference_invoice") or "", "") for r in rows}
