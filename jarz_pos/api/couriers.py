@@ -988,18 +988,32 @@ def unsettle_courier_settlement(journal_entry: str, preview_token: str, reason: 
     # Posts money, so (like confirm_settlement) the branch must actually be open.
     _guard_branch_action(branch, action_label="reversing a courier settlement", require_shift=True)
 
-    # The service function owns its own savepoint/commit/rollback (mirroring every
-    # other settlement builder in that module) — this wrapper does not double it.
-    try:
-        result = _unsettle_courier_settlement(journal_entry, pos_profile=branch, reason=reason)
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "unsettle_courier_settlement failed")
-        raise
-
+    # Consume the token BEFORE attempting the reversal, not after. The preview
+    # token must be genuinely single-use: deleting it only on the way out (the
+    # old order) leaves a window where two managers holding the same token —
+    # or one manager plus a retried mobile request — both pass the `hget`
+    # check above and both reach the service call before either commits
+    # (CRITICAL 2b, adversarial review 2026-09-07).
     try:
         frappe.cache().delete_value(cache_key)
     except Exception:
         pass
+
+    # The service function owns its own savepoint/commit/rollback (mirroring every
+    # other settlement builder in that module) — this wrapper does not double it.
+    try:
+        result = _unsettle_courier_settlement(journal_entry, pos_profile=branch, reason=reason)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "unsettle_courier_settlement failed")
+        # The token is already consumed at this point, so a bare re-raise would
+        # leave the caller stuck retrying with a preview_token that can never
+        # work again. Tell them the clean path explicitly.
+        frappe.throw(
+            f"Reversing Journal Entry {journal_entry} failed and the preview token has "
+            "been consumed. Please reopen the reversal dialog to generate a new preview "
+            "and try again.",
+            exc=e,
+        )
 
     return result
 

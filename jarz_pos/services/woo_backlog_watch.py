@@ -327,6 +327,22 @@ def _terminal_state_sql_list() -> str:
     return ", ".join("'{0}'".format(state.replace("'", "''")) for state in sorted(TERMINAL_STATES))
 
 
+def _has_legacy_state_column() -> bool:
+    """Whether the legacy ``sales_invoice_state`` column still exists on this site.
+
+    Shared by :func:`_state_expr` and :func:`close_resolved_backlog_exceptions`
+    so both guard the same column the same way. The second call site used to
+    request it unconditionally: on a site where the column was dropped, every
+    row raised ``Unknown column``, was swallowed by the per-row ``except``, and
+    the auto-close queue silently never ran again (item 6, adversarial review
+    2026-09-07).
+    """
+    try:
+        return bool(frappe.db.has_column(INVOICE_DOCTYPE, "sales_invoice_state"))
+    except Exception:
+        return False
+
+
 def _state_expr() -> str:
     """The ops-state SQL expression, guarding the legacy column's existence.
 
@@ -334,11 +350,7 @@ def _state_expr() -> str:
     ``custom_sales_invoice_state``, fall back to the legacy
     ``sales_invoice_state`` when that column still exists on this site.
     """
-    try:
-        legacy_exists = bool(frappe.db.has_column(INVOICE_DOCTYPE, "sales_invoice_state"))
-    except Exception:
-        legacy_exists = False
-    if legacy_exists:
+    if _has_legacy_state_column():
         return "COALESCE(NULLIF(custom_sales_invoice_state, ''), sales_invoice_state, '')"
     return "COALESCE(custom_sales_invoice_state, '')"
 
@@ -485,19 +497,21 @@ def close_resolved_backlog_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dict[
 
     now = frappe.utils.now_datetime()
 
+    # Guard the legacy column's existence ONCE, the same way _state_expr does
+    # (item 6) -- requesting it unconditionally raised "Unknown column" on
+    # every row once the column was dropped, and the per-row `except` below
+    # swallowed that silently, forever.
+    invoice_fields = ["docstatus", "custom_sales_invoice_state", "outstanding_amount", "grand_total"]
+    if _has_legacy_state_column():
+        invoice_fields.insert(1, "sales_invoice_state")
+
     for row in rows:
         summary["checked"] += 1
         try:
             invoice = frappe.db.get_value(
                 INVOICE_DOCTYPE,
                 row.get("sales_invoice"),
-                [
-                    "docstatus",
-                    "custom_sales_invoice_state",
-                    "sales_invoice_state",
-                    "outstanding_amount",
-                    "grand_total",
-                ],
+                invoice_fields,
                 as_dict=True,
             )
 

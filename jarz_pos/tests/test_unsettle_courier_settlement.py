@@ -190,6 +190,47 @@ class TestCourierTransactionsForSettlementJe(unittest.TestCase):
         self.assertEqual(result, [])
         mock_get_all.assert_not_called()
 
+    def test_partner_fee_accrual_je_is_never_treated_as_a_settlement(self):
+        """CRITICAL 1: a JE born as ``create_partner_fee_accrual_je``'s DR Freight /
+        CR partner payable entry (see settlement_strategies.py's partner cash-order
+        and prepaid paths) must never be listed or reversed as a settlement, however
+        "Settled" the Courier Transaction pointing at it is. This must fail loudly
+        if the loose ``journal_entry`` + ``status=="Settled"`` filter is ever
+        reintroduced on its own."""
+        remark = delivery_handling._je_user_remark(
+            "ACC-SINV-0001",
+            delivery_handling.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE,
+            "Delivery fee owed to Talabat – ACC-SINV-0001",
+        )
+        with patch.object(frappe.db, "get_value", return_value=remark):
+            with patch.object(frappe, "get_all") as mock_get_all:
+                result = delivery_handling._courier_transactions_for_settlement_je("JE-FEE-001")
+
+        self.assertEqual(result, [])
+        mock_get_all.assert_not_called()
+
+    def test_real_settlement_je_with_is_partner_order_ct_is_still_reversible(self):
+        """The exclusion must key on the JE's OWN tag, not on
+        ``Courier Transaction.is_partner_order`` — a partner order settled through
+        the ordinary outstanding-settlement flow posts a REAL settlement JE and
+        must stay reversible even though its CT carries is_partner_order=1."""
+        remark = delivery_handling._je_user_remark(
+            "ACC-SINV-0002", "COURIER_OUTSTANDING_SETTLEMENT", "Courier Outstanding Settlement"
+        )
+        with patch.object(frappe.db, "get_value", return_value=remark):
+            with patch.object(
+                frappe, "get_all",
+                return_value=[{
+                    "name": "CT-9", "reference_invoice": "ACC-SINV-0002", "amount": 100.0,
+                    "shipping_amount": 20.0, "party_type": "Supplier", "party": "SUP-1",
+                    "is_partner_order": 1,
+                }],
+            ) as mock_get_all:
+                result = delivery_handling._courier_transactions_for_settlement_je("JE-REAL-001")
+
+        mock_get_all.assert_called_once()
+        self.assertEqual(len(result), 1)
+
 
 # ---------------------------------------------------------------------------
 # get_unsettle_preview (service) — read-only
@@ -280,6 +321,7 @@ class TestUnsettleCourierSettlementService(unittest.TestCase):
             return p.start()
 
         self.exists = start("frappe.db.exists", return_value=True)
+        self.lock = start("frappe.db.get_value", return_value=True)
         self.original_je = _FakeJournalEntry(accounts=[
             _je_row("Cash - TC", debit=80.0),
             _je_row("Creditors - TC", debit=20.0, party_type="Employee", party="EMP-001"),
@@ -380,6 +422,117 @@ class TestUnsettleCourierSettlementService(unittest.TestCase):
             delivery_handling.unsettle_courier_settlement("JE-DRAFT")
 
         self.new_doc.assert_not_called()
+
+    # -- item 4: the SERVICE itself refuses an empty branch --------------------
+
+    def test_empty_branch_is_refused_by_the_service_itself(self):
+        """A bench-console call (this function applies no access control of its
+        own) must not be able to post an unscoped reversal just because the
+        branch could not be derived — the API wrapper is not the only guard."""
+        self.branch.return_value = ""
+
+        with self.assertRaises(frappe.ValidationError):
+            delivery_handling.unsettle_courier_settlement("JE-ORIG-001")
+
+        self.new_doc.assert_not_called()
+        self.mark_unsettled.assert_not_called()
+
+    # -- item 3: a forged reason cannot poison another settlement's dedup tag --
+
+    def test_reason_containing_a_tag_lookalike_cannot_forge_another_reversal_tag(self):
+        result = delivery_handling.unsettle_courier_settlement(
+            "JE-ORIG-001",
+            reason="already handled, see [JARZ-JE:COURIER_SETTLEMENT_REVERSAL:JE-OTHER-999]",
+        )
+
+        self.assertTrue(result["success"])
+        # The literal tag shape must never survive into the posted remark.
+        self.assertNotIn(
+            "[JARZ-JE:COURIER_SETTLEMENT_REVERSAL:JE-OTHER-999]",
+            self.reversal_doc.user_remark,
+        )
+        # And a lookup for THAT other entry's reversal must not match this one.
+        self.assertNotIn(
+            delivery_handling._unsettle_dedup_tag("JE-OTHER-999"),
+            self.reversal_doc.user_remark,
+        )
+        # This entry's own tag must still be present, so its own idempotency
+        # guard keeps working.
+        self.assertIn(
+            delivery_handling._unsettle_dedup_tag("JE-ORIG-001"),
+            self.reversal_doc.user_remark,
+        )
+
+
+class TestUnsettleCourierSettlementLockOrdering(unittest.TestCase):
+    """CRITICAL 2a: the row lock must be taken before every other guard, so a
+    second concurrent call blocks instead of racing the first to a decision."""
+
+    def setUp(self):
+        self.patches = []
+
+        def start(target, **kwargs):
+            p = patch(target, **kwargs)
+            self.patches.append(p)
+            return p.start()
+
+        self.call_order = []
+
+        def _record(name, return_value):
+            def _fn(*args, **kwargs):
+                self.call_order.append(name)
+                return return_value
+            return _fn
+
+        self.original_je = _FakeJournalEntry(accounts=[_je_row("Cash - TC", debit=80.0)])
+
+        start("frappe.db.exists", side_effect=_record("exists", True))
+        self.lock = start("frappe.db.get_value", side_effect=_record("lock", True))
+        start("frappe.get_doc", side_effect=_record("get_doc", self.original_je))
+        start(
+            "jarz_pos.services.delivery_handling._courier_transactions_for_settlement_je",
+            side_effect=_record("cts", [{"name": "CT-1", "reference_invoice": "ACC-SINV-0001"}]),
+        )
+        start(
+            "jarz_pos.services.delivery_handling.resolve_settlement_branch",
+            side_effect=_record("branch", "Nasr City"),
+        )
+        start(
+            "jarz_pos.services.delivery_handling.find_settlement_reversal_je",
+            side_effect=_record("find_reversal", None),
+        )
+        self.reversal_doc = _JournalEntryCapture()
+        start("frappe.new_doc", side_effect=_record("new_doc", self.reversal_doc))
+        start(
+            "jarz_pos.services.delivery_handling.mark_courier_transactions_unsettled",
+            side_effect=_record("mark_unsettled", ["CT-1"]),
+        )
+        start("frappe.db.savepoint", return_value=None)
+        start("frappe.db.rollback", return_value=None)
+        start("frappe.db.commit", return_value=None)
+        start("jarz_pos.utils.realtime.publish_to_branches", return_value=[])
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+
+    def test_lock_is_taken_before_every_other_guard(self):
+        delivery_handling.unsettle_courier_settlement("JE-ORIG-001")
+
+        self.assertEqual(self.call_order[0], "exists")
+        self.assertEqual(self.call_order[1], "lock")
+        for later in ("get_doc", "cts", "branch", "find_reversal"):
+            self.assertLess(
+                self.call_order.index("lock"), self.call_order.index(later),
+                f"lock must be taken before {later!r} runs",
+            )
+
+    def test_lock_call_uses_for_update(self):
+        delivery_handling.unsettle_courier_settlement("JE-ORIG-001")
+
+        self.assertTrue(self.lock.called)
+        _, kwargs = self.lock.call_args
+        self.assertTrue(kwargs.get("for_update"))
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +733,47 @@ class TestUnsettleCourierSettlementAPI(unittest.TestCase):
         self.commit_service.side_effect = frappe.ValidationError("already reversed by JE-REVERSAL-EXISTING")
         with self.assertRaises(frappe.ValidationError):
             unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+
+    # -- CRITICAL 2b: the preview token is genuinely single-use -----------------
+
+    def test_replaying_the_same_token_after_success_is_refused(self):
+        from jarz_pos.api.couriers import unsettle_courier_settlement
+
+        result = unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+        self.assertTrue(result["success"])
+
+        with self.assertRaises(frappe.ValidationError):
+            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+
+        # The replay never reached the service a second time.
+        self.commit_service.assert_called_once()
+
+    def test_failed_reversal_still_consumes_the_token_and_tells_the_user_to_reopen(self):
+        """The token must be consumed BEFORE the service call (so a concurrent
+        replay can never slip in), which means a failed reversal leaves the
+        token gone too. The error must say so, so the user has a clean path
+        (re-preview) rather than retrying with a token that can never work."""
+        from jarz_pos.api.couriers import unsettle_courier_settlement
+
+        self.commit_service.side_effect = Exception("posting failed")
+
+        with self.assertRaises(Exception) as ctx:
+            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+
+        self.assertIn("reopen", str(ctx.exception).lower())
+        self.assertIsNone(self.fake_cache.hget("jarz_pos:unsettle_preview:TOKEN-1", "data"))
+
+    def test_guard_failure_does_not_consume_the_token(self):
+        """A branch-scope refusal happens BEFORE the token is consumed, so the
+        caller can still use it once the underlying problem is fixed (e.g. by
+        opening their shift) without having to re-preview."""
+        from jarz_pos.api.couriers import unsettle_courier_settlement
+
+        self.scope_guard.side_effect = BranchAccessError("Not permitted: wrong branch")
+        with self.assertRaises(BranchAccessError):
+            unsettle_courier_settlement("JE-ORIG-001", "TOKEN-1")
+
+        self.assertIsNotNone(self.fake_cache.hget("jarz_pos:unsettle_preview:TOKEN-1", "data"))
 
 
 if __name__ == "__main__":

@@ -65,9 +65,11 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
             "jarz_pos.services.delivery_handling.user_has_global_profile_access",
             return_value=False,
         )
-        self.find_reversal = start(
-            "jarz_pos.services.delivery_handling.find_settlement_reversal_je",
-            return_value=None,
+        # Batched in one call instead of one `user_remark LIKE` per settlement
+        # group — see _find_settlement_reversal_jes_bulk (item 5).
+        self.find_reversal_bulk = start(
+            "jarz_pos.services.delivery_handling._find_settlement_reversal_jes_bulk",
+            return_value={},
         )
         self.get_all = start("frappe.get_all")
 
@@ -78,7 +80,20 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
     def _run(self, ct_rows, je_rows, **kwargs):
         from jarz_pos.services.delivery_handling import list_recent_courier_settlements
 
-        self.get_all.side_effect = [ct_rows, je_rows]
+        # Dispatch on the DocType rather than on call order. A positional
+        # side_effect list silently mis-feeds the function the moment the
+        # implementation gains or loses a query — which is exactly how these
+        # tests broke: the Journal Entry rows arrived where the Courier
+        # Transaction rows were expected and every assertion died on a
+        # KeyError instead of telling us anything about the behaviour.
+        def _dispatch(doctype, *args, **kwargs):
+            if doctype == "Courier Transaction":
+                return ct_rows
+            if doctype == "Journal Entry":
+                return je_rows
+            return []
+
+        self.get_all.side_effect = _dispatch
         return list_recent_courier_settlements(**kwargs)
 
     # -- no visible profiles --------------------------------------------------
@@ -156,7 +171,7 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
         ct_rows = [_ct_row("CT-1", "JE-REVERSED", "ACC-SINV-0001")]
         je_rows = [_je_row("JE-REVERSED")]
         self.map_branches.return_value = {"ACC-SINV-0001": "Nasr City"}
-        self.find_reversal.return_value = "JE-REVERSAL-001"
+        self.find_reversal_bulk.return_value = {"JE-REVERSED": "JE-REVERSAL-001"}
 
         result = self._run(ct_rows, je_rows, include_reversed=False)
 
@@ -166,7 +181,7 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
         ct_rows = [_ct_row("CT-1", "JE-REVERSED", "ACC-SINV-0001")]
         je_rows = [_je_row("JE-REVERSED")]
         self.map_branches.return_value = {"ACC-SINV-0001": "Nasr City"}
-        self.find_reversal.return_value = "JE-REVERSAL-001"
+        self.find_reversal_bulk.return_value = {"JE-REVERSED": "JE-REVERSAL-001"}
 
         result = self._run(ct_rows, je_rows, include_reversed=True)
 
@@ -178,7 +193,7 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
         ct_rows = [_ct_row("CT-1", "JE-LIVE", "ACC-SINV-0001")]
         je_rows = [_je_row("JE-LIVE")]
         self.map_branches.return_value = {"ACC-SINV-0001": "Nasr City"}
-        self.find_reversal.return_value = None
+        self.find_reversal_bulk.return_value = {}
 
         result = self._run(ct_rows, je_rows)
 
@@ -241,7 +256,14 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
         # Frappe's filter form is ``["in", [...]]``, not a bare list — assert the
         # names the query is scoped to, not the literal filter spelling, so this
         # keeps testing the guarantee rather than the query's syntax.
-        je_filter_call = self.get_all.call_args_list[1]
+        # Find the Journal Entry query by its DocType, never by call index:
+        # Frappe makes its own internal `get_all("DocType Link", ...)` calls
+        # whose presence depends on cache state, so any positional index here
+        # is a test that fails for reasons unrelated to the code under test.
+        je_filter_call = next(
+            c for c in self.get_all.call_args_list
+            if c.args and c.args[0] == "Journal Entry"
+        )
         operator, scoped_names = je_filter_call.kwargs["filters"]["name"]
         self.assertEqual(operator, "in")
         self.assertEqual(list(scoped_names), ["JE-REAL-SETTLEMENT"])
@@ -251,10 +273,17 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
     def test_a_courier_transaction_with_no_journal_entry_is_excluded_from_the_query(self):
         from jarz_pos.services.delivery_handling import list_recent_courier_settlements
 
-        self.get_all.side_effect = [[], []]
+        # Return-value, not a positional list: Frappe makes its own internal
+        # get_all calls (DocType Link / DocType Action on System Settings) that
+        # would exhaust a fixed list and raise StopIteration.
+        self.get_all.side_effect = None
+        self.get_all.return_value = []
         list_recent_courier_settlements()
 
-        ct_filter_call = self.get_all.call_args_list[0]
+        ct_filter_call = next(
+            c for c in self.get_all.call_args_list
+            if c.args and c.args[0] == "Courier Transaction"
+        )
         self.assertEqual(ct_filter_call.kwargs["filters"]["journal_entry"], ["not in", ["", None]])
 
     def test_journal_entry_missing_or_unsubmitted_is_dropped(self):
@@ -270,6 +299,60 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
     def test_empty_courier_transaction_table_short_circuits(self):
         result = self._run([], [])
         self.assertEqual(result, [])
+
+    def test_partner_fee_accrual_je_is_excluded_from_the_list(self):
+        """CRITICAL 1: a Courier Transaction born Settled with journal_entry pointing
+        at a partner fee-accrual JE (settlement_strategies.create_partner_fee_accrual_je)
+        must never surface as something a manager could reverse. This must fail
+        loudly if the loose filter is ever reintroduced."""
+        from jarz_pos.services import delivery_handling
+
+        ct_rows = [_ct_row("CT-1", "JE-FEE-001", "ACC-SINV-0001")]
+        je_rows = [{
+            "name": "JE-FEE-001",
+            "company": "Test Company",
+            "posting_date": "2026-09-01",
+            "user_remark": delivery_handling._je_user_remark(
+                "ACC-SINV-0001",
+                delivery_handling.PARTNER_FEE_ACCRUAL_JE_TAG_TYPE,
+                "Delivery fee owed to Talabat – ACC-SINV-0001",
+            ),
+        }]
+        self.map_branches.return_value = {"ACC-SINV-0001": "Nasr City"}
+
+        result = self._run(ct_rows, je_rows)
+
+        self.assertEqual(result, [])
+
+    def test_ct_query_applies_a_posting_date_window_and_a_sql_limit(self):
+        """Item 5: the Courier Transaction scan must be bounded in SQL — a date
+        window and a page-size cap — not pull every row that ever carried a
+        journal_entry and rely on the Python-side `limit` at the very end."""
+        self._run([], [])
+
+        ct_filter_call = self.get_all.call_args_list[0]
+        self.assertIn("date", ct_filter_call.kwargs["filters"])
+        operator, cutoff = ct_filter_call.kwargs["filters"]["date"]
+        self.assertEqual(operator, ">=")
+        self.assertTrue(cutoff)
+        self.assertIn("limit_page_length", ct_filter_call.kwargs)
+        self.assertGreater(ct_filter_call.kwargs["limit_page_length"], 0)
+
+    def test_reversal_lookup_is_batched_into_a_single_call(self):
+        """Item 5: one call to the batched helper covers every settlement group in
+        the page, instead of one `user_remark LIKE` query per group."""
+        ct_rows = [
+            _ct_row("CT-1", "JE-1", "ACC-SINV-0001"),
+            _ct_row("CT-2", "JE-2", "ACC-SINV-0002"),
+        ]
+        je_rows = [_je_row("JE-1"), _je_row("JE-2")]
+        self.map_branches.return_value = {
+            "ACC-SINV-0001": "Nasr City", "ACC-SINV-0002": "Nasr City",
+        }
+
+        self._run(ct_rows, je_rows)
+
+        self.find_reversal_bulk.assert_called_once()
 
     # -- row shape ------------------------------------------------------------------
 
@@ -299,6 +382,55 @@ class TestListRecentCourierSettlementsService(unittest.TestCase):
         self.assertEqual(row["transaction_count"], 2)
         self.assertFalse(row["already_reversed"])
         self.assertIsNone(row["reversal_journal_entry"])
+
+
+# ---------------------------------------------------------------------------
+# _find_settlement_reversal_jes_bulk — the batched replacement for one
+# find_settlement_reversal_je call per settlement group
+# ---------------------------------------------------------------------------
+
+
+class TestFindSettlementReversalJesBulk(unittest.TestCase):
+    def test_empty_input_short_circuits_without_a_query(self):
+        from jarz_pos.services.delivery_handling import _find_settlement_reversal_jes_bulk
+
+        with patch.object(frappe, "get_all") as mock_get_all:
+            result = _find_settlement_reversal_jes_bulk({})
+
+        self.assertEqual(result, {})
+        mock_get_all.assert_not_called()
+
+    def test_matches_are_keyed_by_original_je_name(self):
+        from jarz_pos.services.delivery_handling import (
+            _find_settlement_reversal_jes_bulk,
+            _unsettle_dedup_tag,
+        )
+
+        je_by_name = {
+            "JE-1": {"name": "JE-1", "company": "Test Company"},
+            "JE-2": {"name": "JE-2", "company": "Test Company"},
+        }
+        candidates = [
+            {"name": "JE-REV-1", "user_remark": f"Reversal note {_unsettle_dedup_tag('JE-1')}"},
+        ]
+        with patch.object(frappe, "get_all", return_value=candidates) as mock_get_all:
+            result = _find_settlement_reversal_jes_bulk(je_by_name)
+
+        mock_get_all.assert_called_once()
+        self.assertEqual(result, {"JE-1": "JE-REV-1"})
+        self.assertNotIn("JE-2", result)
+
+    def test_one_query_per_distinct_company(self):
+        from jarz_pos.services.delivery_handling import _find_settlement_reversal_jes_bulk
+
+        je_by_name = {
+            "JE-1": {"name": "JE-1", "company": "Company A"},
+            "JE-2": {"name": "JE-2", "company": "Company B"},
+        }
+        with patch.object(frappe, "get_all", return_value=[]) as mock_get_all:
+            _find_settlement_reversal_jes_bulk(je_by_name)
+
+        self.assertEqual(mock_get_all.call_count, 2)
 
 
 # ---------------------------------------------------------------------------

@@ -522,6 +522,74 @@ class TestCloseResolvedBacklogExceptions(unittest.TestCase):
 
         self.assertNotIn(mod.INVOICE_DOCTYPE, fake.written_doctypes)
 
+    def test_legacy_column_missing_is_never_requested(self):
+        """Item 6, adversarial review 2026-09-07: on a site where the legacy
+        ``sales_invoice_state`` column was dropped, requesting it unconditionally
+        raises 'Unknown column' on EVERY row, which the per-row ``except`` below
+        swallows silently -- the auto-close queue then never runs again. Guard
+        it the same way ``_state_expr`` guards it (``_has_legacy_state_column``),
+        not by requesting it and hoping."""
+        rows = [{"name": "WBLE-1", "sales_invoice": "SI-1"}]
+        invoice_map = {"SI-1": {
+            "docstatus": 1, "custom_sales_invoice_state": "Delivered",
+            "outstanding_amount": 0, "grand_total": 350.0,
+        }}
+
+        def _get_all(doctype, **kwargs):
+            return list(rows) if doctype == mod.EXCEPTION_DOCTYPE else []
+
+        def _get_value(doctype, name=None, fields=None, as_dict=False, **kwargs):
+            if doctype == mod.INVOICE_DOCTYPE:
+                self.assertNotIn(
+                    "sales_invoice_state", fields,
+                    "sales_invoice_state must not be requested once the column is gone",
+                )
+                return invoice_map.get(name)
+            return None
+
+        fake = _fake_frappe(
+            get_all=_get_all,
+            get_value=_get_value,
+            has_column=False,
+            docs={row["name"]: {"detail": "original"} for row in rows},
+        )
+        with patch.object(mod, "frappe", fake):
+            summary = mod.close_resolved_backlog_exceptions()
+
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["closed"], 1)
+
+    def test_legacy_column_present_is_still_requested(self):
+        """The guard must not over-correct: when the column IS there, the
+        legacy fallback in ``still_stuck`` needs it in the fetched fields."""
+        rows = [{"name": "WBLE-1", "sales_invoice": "SI-1"}]
+        invoice_map = {"SI-1": {
+            "docstatus": 1, "custom_sales_invoice_state": "", "sales_invoice_state": "Delivered",
+            "outstanding_amount": 0, "grand_total": 350.0,
+        }}
+
+        def _get_all(doctype, **kwargs):
+            return list(rows) if doctype == mod.EXCEPTION_DOCTYPE else []
+
+        seen_fields = {}
+
+        def _get_value(doctype, name=None, fields=None, as_dict=False, **kwargs):
+            if doctype == mod.INVOICE_DOCTYPE:
+                seen_fields["fields"] = fields
+                return invoice_map.get(name)
+            return None
+
+        fake = _fake_frappe(
+            get_all=_get_all,
+            get_value=_get_value,
+            has_column=True,
+            docs={row["name"]: {"detail": "original"} for row in rows},
+        )
+        with patch.object(mod, "frappe", fake):
+            mod.close_resolved_backlog_exceptions()
+
+        self.assertIn("sales_invoice_state", seen_fields["fields"])
+
 
 if __name__ == "__main__":
     unittest.main()

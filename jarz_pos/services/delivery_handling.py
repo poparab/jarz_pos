@@ -6,6 +6,7 @@ including outstanding management, expense tracking, and settlement.
 """
 
 import json
+import re
 from contextlib import contextmanager
 
 import frappe
@@ -3982,6 +3983,43 @@ def _find_existing_je_by_tag(company: str, invoice_name: str, je_type: str) -> s
     return rows[0] if rows else None
 
 
+#: Tag type embedded in a partner delivery-fee accrual JE's ``user_remark`` — see
+#: ``create_partner_fee_accrual_je``. A Courier Transaction born
+#: ``status="Settled"`` with ``journal_entry`` pointing at one of these (the
+#: partner cash-order and prepaid paths in ``settlement_strategies.py``) is NOT a
+#: settlement: the JE only records what the delivery PARTNER company is owed (DR
+#: Freight / CR partner payable), never a movement of the branch's own cash or a
+#: courier's own balance. Treating it as a settlement and reversing it posts
+#: DR partner payable / CR Freight — silently erasing a real unpaid liability —
+#: and flips the CT back to Unsettled, showing a phantom rider balance for the
+#: full order value (CRITICAL 1, adversarial review 2026-09-07).
+PARTNER_FEE_ACCRUAL_JE_TAG_TYPE = "PARTNER_FEE_ACCRUAL"
+
+
+def _is_partner_fee_accrual_remark(user_remark: str | None) -> bool:
+    """True when *user_remark* carries the partner fee-accrual dedup tag.
+
+    Deliberately NOT keyed on ``Courier Transaction.is_partner_order``: a
+    partner order that is later settled through the ordinary
+    outstanding-settlement flow (``settle_single_invoice_paid``) posts a REAL,
+    reversible settlement JE (tagged e.g. ``COURIER_OUTSTANDING_SETTLEMENT``)
+    against a Courier Transaction that still carries ``is_partner_order=1`` —
+    so that flag alone is too coarse a test and would wrongly make a genuine
+    settlement permanently unreversable too. The JE's own tag is the only
+    precise signal of what it actually is.
+    """
+    marker = f"[JARZ-JE:{PARTNER_FEE_ACCRUAL_JE_TAG_TYPE}:"
+    return marker in (user_remark or "")
+
+
+def _is_partner_fee_accrual_je(je_name: str) -> bool:
+    """Single-JE convenience wrapper around :func:`_is_partner_fee_accrual_remark`."""
+    if not je_name:
+        return False
+    remark = frappe.db.get_value("Journal Entry", je_name, "user_remark")
+    return _is_partner_fee_accrual_remark(remark)
+
+
 def _get_courier_outstanding_account(company: str) -> str:
     """Return the 'Courier Outstanding' ledger for the given company."""
     acc = frappe.db.get_value(
@@ -5259,7 +5297,7 @@ def create_partner_fee_accrual_je(inv, *, delivery_partner: str, fee: float) -> 
     s = round(float(fee or 0), 2)
     if s <= 0.005:
         return None
-    existing = _find_existing_je_by_tag(company, inv.name, "PARTNER_FEE_ACCRUAL")
+    existing = _find_existing_je_by_tag(company, inv.name, PARTNER_FEE_ACCRUAL_JE_TAG_TYPE)
     if existing:
         return existing
 
@@ -5276,7 +5314,7 @@ def create_partner_fee_accrual_je(inv, *, delivery_partner: str, fee: float) -> 
     je.title = f"Partner Delivery Fee – {inv.name}"
     je.user_remark = _je_user_remark(
         inv.name,
-        "PARTNER_FEE_ACCRUAL",
+        PARTNER_FEE_ACCRUAL_JE_TAG_TYPE,
         f"Delivery fee owed to {delivery_partner} – {inv.name}",
     )
 
@@ -5660,6 +5698,29 @@ def find_settlement_reversal_je(company: str, original_je: str) -> str | None:
     return rows[0] if rows else None
 
 
+#: Matches the opening bracket of the dedup tag shape every idempotency guard
+#: in this module keys on: ``[JARZ-JE:<type>:<key>]``. Case-insensitive and
+#: tolerant of stray whitespace so a caller cannot dodge it with "[ jarz-je:".
+_JE_TAG_LOOKALIKE = re.compile(r"\[\s*JARZ-JE\s*:", re.IGNORECASE)
+
+
+def _sanitize_reversal_reason(reason: str | None) -> str | None:
+    """Strip anything that could reconstitute a dedup tag out of a free-text *reason*.
+
+    ``find_settlement_reversal_je`` — and every sibling idempotency guard in
+    this module — matches on the literal substring ``[JARZ-JE:<type>:<key>]``
+    inside ``user_remark``. ``reason`` is interpolated into the SAME field
+    verbatim, so a manager typing (or pasting) text that happens to contain
+    that substring can forge a tag for an ARBITRARY other Journal Entry —
+    permanently and falsely marking it "already reversed" and refusing to
+    ever reverse it again. Neutralising the opening bracket is enough to break
+    the shape while leaving the text readable for audit.
+    """
+    if not reason:
+        return reason
+    return _JE_TAG_LOOKALIKE.sub("(JARZ-JE:", str(reason))
+
+
 def _child_row_value(row, fieldname: str):
     """Read *fieldname* off a JE child row that may be a dict or a Document row."""
     if isinstance(row, dict):
@@ -5688,6 +5749,13 @@ def _courier_transactions_for_settlement_je(original_je: str) -> list[dict]:
     """
     original_je = (original_je or "").strip()
     if not original_je:
+        return []
+    if _is_partner_fee_accrual_je(original_je):
+        # CRITICAL 1: a partner fee-accrual JE (DR Freight / CR partner payable,
+        # posted at dispatch — see create_partner_fee_accrual_je) is never a
+        # settlement, however "Settled" the CT it is attached to reads. See
+        # _is_partner_fee_accrual_remark for why is_partner_order alone cannot
+        # be used here.
         return []
     return frappe.get_all(
         "Courier Transaction",
@@ -5829,12 +5897,25 @@ def unsettle_courier_settlement(
     ``jarz_pos.api.couriers.unsettle_courier_settlement``) are expected to
     gate on role and branch membership before calling it, exactly as every
     other function in this module leaves the guard to its API wrapper.
+
+    Concurrency: a row lock is taken on *journal_entry* BEFORE any guard below
+    runs (existence, docstatus, linked-CT lookup, the reversal-tag check) so
+    that two overlapping calls against the SAME entry — two managers holding
+    valid preview tokens, or one manager plus a retried mobile request — never
+    both read "not yet reversed" and both post a reversing entry (CRITICAL 2a,
+    adversarial review 2026-09-07). The second call blocks on the lock until
+    the first COMMITS (this function commits internally), then re-reads state
+    that already reflects the first reversal and correctly refuses.
     """
     original_je_name = (journal_entry or "").strip()
     if not original_je_name:
         frappe.throw(_("journal_entry is required"))
     if not frappe.db.exists("Journal Entry", original_je_name):
         frappe.throw(_("Journal Entry {0} was not found").format(original_je_name))
+
+    # Row-lock BEFORE any guard below reads state derived from this entry.
+    # See the concurrency note in the docstring.
+    frappe.db.get_value("Journal Entry", original_je_name, "name", for_update=True)
 
     original_je = frappe.get_doc("Journal Entry", original_je_name)
     if original_je.docstatus != 1:
@@ -5852,8 +5933,20 @@ def unsettle_courier_settlement(
         )
 
     branch = resolve_settlement_branch(original_je_name, cts)
+    if not branch:
+        # Refuse HERE, in the service itself — not only in the API wrapper —
+        # so a bench-console call (this function is importable and applies no
+        # access control of its own) cannot post an unscoped reversal just
+        # because the caller omitted pos_profile (item 4, adversarial review
+        # 2026-09-07).
+        frappe.throw(
+            _(
+                "Could not determine which branch Journal Entry {0} belongs to; "
+                "refusing to reverse it without a resolvable branch."
+            ).format(original_je_name)
+        )
     requested_profile = str(pos_profile or "").strip()
-    if requested_profile and branch and requested_profile != branch:
+    if requested_profile and requested_profile != branch:
         frappe.throw(
             _(
                 "pos_profile {0} does not match the branch this settlement belongs to ({1})."
@@ -5871,6 +5964,8 @@ def unsettle_courier_settlement(
     reversal_lines = build_settlement_reversal_lines(original_je)
     if not reversal_lines:
         frappe.throw(_("Journal Entry {0} has no account lines to reverse.").format(original_je_name))
+
+    reason = _sanitize_reversal_reason(reason)
 
     frappe.db.savepoint("unsettle_courier_settlement")
     try:
@@ -5934,18 +6029,59 @@ def unsettle_courier_settlement(
 # ---------------------------------------------------------------------------
 
 
+def _find_settlement_reversal_jes_bulk(je_by_name: dict[str, dict]) -> dict[str, str]:
+    """Map original JE name -> its reversal JE name, for every JE in *je_by_name*.
+
+    Replaces one ``user_remark LIKE '%...%'`` lookup PER settlement (see
+    :func:`find_settlement_reversal_je`) — each a leading-wildcard scan of a
+    TEXT column — with one query per distinct company (in practice a single
+    query, since this app is single-company). Item 5, adversarial review
+    2026-09-07: from a mobile screen, doing this once per row in
+    :func:`list_recent_courier_settlements` times out as the Journal Entry
+    table grows.
+    """
+    if not je_by_name:
+        return {}
+
+    by_company: dict[str, list[str]] = {}
+    for name, row in je_by_name.items():
+        by_company.setdefault(row.get("company"), []).append(name)
+
+    out: dict[str, str] = {}
+    for company, names in by_company.items():
+        candidates = frappe.get_all(
+            "Journal Entry",
+            filters={
+                "company": company,
+                "docstatus": 1,
+                "user_remark": ["like", f"%[JARZ-JE:{UNSETTLE_JE_TAG_TYPE}:%"],
+            },
+            fields=["name", "user_remark"],
+        )
+        for original in names:
+            tag = _unsettle_dedup_tag(original)
+            for row in candidates:
+                if tag in (row.get("user_remark") or ""):
+                    out[original] = row["name"]
+                    break
+    return out
+
+
 def list_recent_courier_settlements(
     pos_profile: str | None = None,
     limit: int = 50,
     include_reversed: bool = False,
+    days: int = 90,
 ) -> list[dict]:
     """Recent courier settlement Journal Entries the caller may see, newest first.
 
     A settlement is identified exactly the way :func:`_courier_transactions_for_settlement_je`
-    and :func:`find_settlement_reversal_je` identify one — by the ``journal_entry``
-    a Courier Transaction was settled against — so this list and the un-settle
-    preview never disagree about what counts as a settlement. Unlike that helper,
-    this does NOT filter Courier Transactions on ``status == "Settled"``: per
+    identifies one — by the ``journal_entry`` a Courier Transaction was settled
+    against, excluding a partner fee-accrual JE the same way (see
+    :func:`_is_partner_fee_accrual_remark`; CRITICAL 1, adversarial review
+    2026-09-07) — so this list and the un-settle preview never disagree about
+    what counts as a settlement. Unlike that helper, this does NOT filter
+    Courier Transactions on ``status == "Settled"``: per
     ``services.courier_carry.mark_unsettled``, a reversal flips ``status`` back to
     Unsettled but never clears ``journal_entry``, and that field surviving is
     exactly what lets an already-reversed settlement still be found here (for
@@ -5960,6 +6096,13 @@ def list_recent_courier_settlements(
     guessed at. An unattributable settlement is shown only to a caller with
     global POS Profile access, same as an unattributable balance row.
 
+    ``days`` bounds the Courier Transaction scan to a posting-date window
+    (default 90, clamped to 1..365) with a matching SQL ``LIMIT`` — the
+    previous shape pulled EVERY Courier Transaction that ever carried a
+    ``journal_entry``, unbounded, and applied *limit* only in Python
+    afterwards, which times out as the table grows (item 5, adversarial
+    review 2026-09-07).
+
     This function applies no access control of its own — see
     ``jarz_pos.api.couriers.list_recent_settlements`` for the manager-tier gate.
     """
@@ -5968,14 +6111,24 @@ def list_recent_courier_settlements(
         return []
 
     limit = max(1, min(frappe.utils.cint(limit) or 50, 200))
+    days = max(1, min(frappe.utils.cint(days) or 90, 365))
+    cutoff = frappe.utils.add_days(frappe.utils.nowdate(), -days)
 
+    # Bounded in SQL on both axes: a date window (this table only grows) and a
+    # page-size cap generous enough to survive the branch/reversed filtering
+    # below without starving a legitimate result.
     ct_rows = frappe.get_all(
         "Courier Transaction",
-        filters={"journal_entry": ["not in", ["", None]]},
+        filters={
+            "journal_entry": ["not in", ["", None]],
+            "date": [">=", cutoff],
+        },
         fields=[
             "name", "journal_entry", "reference_invoice", "amount",
             "shipping_amount", "party_type", "party",
         ],
+        order_by="date desc",
+        limit_page_length=limit * 20,
     )
     if not ct_rows:
         return []
@@ -5993,15 +6146,22 @@ def list_recent_courier_settlements(
     je_rows = frappe.get_all(
         "Journal Entry",
         filters={"name": ["in", je_names], "docstatus": 1},
-        fields=["name", "company", "posting_date"],
+        fields=["name", "company", "posting_date", "user_remark"],
     )
     je_by_name = {r["name"]: r for r in je_rows}
+
+    # One batched lookup instead of one `user_remark LIKE` per settlement.
+    reversal_by_je = _find_settlement_reversal_jes_bulk(je_by_name)
 
     out: list[dict] = []
     for je_name, rows in groups.items():
         je = je_by_name.get(je_name)
         if not je:
             # Draft/cancelled/missing — never a posted settlement.
+            continue
+
+        if _is_partner_fee_accrual_remark(je.get("user_remark")):
+            # CRITICAL 1: a partner fee-accrual JE is never a settlement.
             continue
 
         branches = {invoice_branches.get(r.get("reference_invoice") or "", "") for r in rows}
@@ -6013,7 +6173,7 @@ def list_recent_courier_settlements(
         elif not show_unscoped:
             continue
 
-        reversal_je = find_settlement_reversal_je(je["company"], je_name)
+        reversal_je = reversal_by_je.get(je_name)
         if reversal_je and not include_reversed:
             continue
 
