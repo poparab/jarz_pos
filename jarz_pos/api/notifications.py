@@ -474,6 +474,37 @@ def _log_fcm_info(message: str) -> None:
         pass
 
 
+# Delivery gaps have to survive the trip to a server. Everything else in this
+# module reports through _log_fcm_info -> frappe.logger().info(), which is
+# discarded on both hosts, so a branch losing push produced no evidence at all
+# and was only ever found by someone complaining. These two events are the ones
+# that mean "a human did not get told", so they go to Error Log, which persists.
+_NOTIFICATION_GAP_THROTTLE_SECONDS = 900
+
+
+def _log_notification_gap(title: str, message: str, throttle_key: Optional[str] = None) -> None:
+    """Record a delivery gap in Error Log, throttled so volume cannot drown it.
+
+    ``throttle_key`` is shared across workers through the Redis cache rather
+    than a per-process set, because the per-process dedup on the send-error path
+    (_FCM_LOGGED_ERROR_TOKENS) is exactly what made the 2026-09-05 failures look
+    like they had stopped after 36 rows when they were still happening on every
+    order.
+    """
+    try:
+        if throttle_key:
+            cache_key = f"jarz_notification_gap:{throttle_key}"
+            if frappe.cache().get_value(cache_key):
+                return
+            frappe.cache().set_value(
+                cache_key, "1", expires_in_sec=_NOTIFICATION_GAP_THROTTLE_SECONDS
+            )
+        frappe.log_error(message=message, title=title[:140])
+    except Exception:
+        # Never let reporting a gap become a second failure on the alert path.
+        pass
+
+
 def _get_bench_path() -> Optional[str]:
     try:
         site_path = frappe.get_site_path()
@@ -757,7 +788,7 @@ def _disable_token(token: str) -> None:
     devices = frappe.get_all(
         "Jarz Mobile Device",
         filters={"token": token},
-        fields=["name", "enabled"],
+        fields=["name", "enabled", "user", "platform", "last_seen"],
     )
     if not devices:
         return
@@ -780,6 +811,33 @@ def _disable_token(token: str) -> None:
             update_modified=False,
         )
         frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
+
+        # This is the moment a person stops being reachable. It used to be
+        # announced only through frappe.logger().info(), which the servers
+        # discard, so the fleet shrank invisibly: two accounts lost push on
+        # 2026-09-07 and the only trace was the row itself. Record who, and
+        # whether they are still working, so the gap is answerable later.
+        user = row.get("user") or "<unknown>"
+        remaining = frappe.db.count(
+            "Jarz Mobile Device", {"user": user, "enabled": 1}
+        )
+        _log_notification_gap(
+            f"Push token disabled for {user}",
+            (
+                f"FCM rejected the token for {user} "
+                f"(platform={row.get('platform')}, device={docname}, "
+                f"last_seen={row.get('last_seen')}), so it was disabled. "
+                f"That user now has {remaining} enabled device(s). "
+                + (
+                    "They can no longer be reached by push at all until the app "
+                    "re-registers a token — which only happens when they reopen "
+                    "and sign in to the app."
+                    if remaining == 0
+                    else "Other devices remain reachable."
+                )
+            ),
+            throttle_key=f"disable:{docname}",
+        )
 
 
 def _get_mobile_device_rows_by_token(token: str) -> List[Dict[str, Any]]:
@@ -1791,6 +1849,25 @@ def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dic
         _log_fcm_info(f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}")
         fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
         fcm_result["ok"] = True
+        # "Nobody on this order has a device" is the branch-got-nothing event.
+        # It is the one outcome a complaint is actually made about, and it was
+        # the quietest thing in the module: skipped_no_tokens is reported ok.
+        if recipients:
+            _log_notification_gap(
+                "Order alert reached nobody (no live device)",
+                (
+                    f"Invoice {payload.get('invoice_id')} for profile "
+                    f"{_get_effective_profile_for_payload(payload) or '<none>'} resolved "
+                    f"{len(recipients)} recipient(s) but ZERO enabled push tokens, so no "
+                    f"phone or tablet was alerted. "
+                    f"Recipients: {', '.join(sorted(recipients))}. "
+                    "Each of them must reopen and sign in to the Jarz POS app to "
+                    "register a device token. Run "
+                    "jarz_pos.api.notifications.notification_health for the full "
+                    "per-branch picture."
+                ),
+                throttle_key=f"notokens:{_get_effective_profile_for_payload(payload)}",
+            )
 
     # VAPID path (W3C Web Push — iOS Safari PWA, Chrome, Firefox, Edge)
     vapid_subs = _get_vapid_subscriptions_for_users(recipients)
@@ -2331,3 +2408,89 @@ def _safe_str(value: Any) -> str:
     if value in (None, ""):
         return ""
     return str(value)
+
+@frappe.whitelist(allow_guest=False)
+def notification_health() -> Dict[str, Any]:
+    """Report, per POS profile, who can actually be reached by push.
+
+    Written after 2026-09-07, when branches reported missing order alerts and
+    there was no way to answer "who is reachable right now?" without querying
+    the database by hand. Coverage is the number that matters: a profile whose
+    recipients hold no enabled device is a branch that will be told nothing,
+    and until this endpoint existed that state was indistinguishable from a
+    healthy one.
+    """
+    now = frappe.utils.now_datetime()
+    stale_after_days = 30
+
+    devices = frappe.get_all(
+        "Jarz Mobile Device",
+        fields=["user", "enabled", "platform", "last_seen"],
+        limit_page_length=0,
+    )
+    live: Dict[str, List[Dict[str, Any]]] = {}
+    for row in devices:
+        if not row.get("enabled"):
+            continue
+        last_seen = row.get("last_seen")
+        age_days = None
+        if last_seen:
+            try:
+                age_days = (now - last_seen).days
+            except Exception:
+                age_days = None
+        live.setdefault(row.get("user"), []).append(
+            {
+                "platform": row.get("platform"),
+                "last_seen": str(last_seen) if last_seen else None,
+                "age_days": age_days,
+                "stale": age_days is not None and age_days > stale_after_days,
+            }
+        )
+
+    memberships = frappe.get_all(
+        "POS Profile User",
+        filters={"parenttype": "POS Profile"},
+        fields=["parent", "user"],
+        limit_page_length=0,
+    )
+    by_profile: Dict[str, List[str]] = {}
+    for row in memberships:
+        by_profile.setdefault(row.get("parent"), []).append(row.get("user"))
+
+    profiles_out: List[Dict[str, Any]] = []
+    for profile in frappe.get_all(
+        "POS Profile", fields=["name", "disabled"], limit_page_length=0
+    ):
+        users = sorted(set(by_profile.get(profile.get("name"), [])))
+        reachable, unreachable, stale_only = [], [], []
+        for user in users:
+            entries = live.get(user) or []
+            if not entries:
+                unreachable.append(user)
+            elif all(e["stale"] for e in entries):
+                stale_only.append(user)
+                reachable.append(user)
+            else:
+                reachable.append(user)
+        profiles_out.append(
+            {
+                "pos_profile": profile.get("name"),
+                "disabled": bool(profile.get("disabled")),
+                "recipients": len(users),
+                "reachable": len(reachable),
+                "unreachable_users": unreachable,
+                "stale_token_users": stale_only,
+                # The alert for this profile would reach no device at all.
+                "blackout": bool(users) and not reachable,
+            }
+        )
+
+    return {
+        "success": True,
+        "generated_at": now.isoformat(),
+        "stale_after_days": stale_after_days,
+        "enabled_devices_total": sum(len(v) for v in live.values()),
+        "profiles": profiles_out,
+        "firebase": health_check_firebase(),
+    }

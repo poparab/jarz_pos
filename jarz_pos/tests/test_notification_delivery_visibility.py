@@ -1,0 +1,222 @@
+"""Tests: a push that reaches nobody has to leave evidence.
+
+Branches reported missing order alerts on 2026-09-07. Every diagnostic on the
+path went through ``frappe.logger().info()``, which both servers discard, so
+the two states that mean "a human was not told" were indistinguishable from a
+healthy send:
+
+* a token FCM rejects is disabled -- announced only to the dropped logger, so
+  the reachable fleet shrank invisibly (two accounts lost push that day and the
+  only trace was the row itself);
+* a new-invoice alert that resolves recipients but ZERO enabled tokens returns
+  ``status="skipped_no_tokens"`` with ``ok=True``.
+
+These cover the reporting, not the sending: the assertion is that Error Log --
+the only sink that survives on the servers -- receives the event, and that the
+throttle cannot silently swallow a *different* gap.
+
+Same "mock frappe + firebase_admin, import fresh" harness as
+``test_fcm_invalid_token_normalization``, so it runs without a site (the CI
+logic gate runs before ``bench migrate``).
+"""
+
+import importlib
+import sys
+import types
+import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+
+class _FakeCache:
+    """Stands in for frappe.cache(): the throttle must be cross-worker."""
+
+    def __init__(self):
+        self.store = {}
+
+    def get_value(self, key):
+        return self.store.get(key)
+
+    def set_value(self, key, value, expires_in_sec=None):
+        self.store[key] = value
+
+
+def _load_module():
+    fake_frappe = types.ModuleType("frappe")
+    fake_frappe._ = lambda x: x
+    fake_frappe.whitelist = lambda *a, **kw: (lambda fn: fn)
+    fake_frappe.throw = MagicMock(side_effect=Exception)
+    fake_frappe.log_error = MagicMock()
+    fake_frappe.get_traceback = MagicMock(return_value="traceback")
+    fake_frappe.logger = MagicMock(return_value=SimpleNamespace(info=MagicMock()))
+    fake_frappe.get_all = MagicMock(return_value=[])
+    fake_frappe.get_doc = MagicMock()
+    fake_frappe.db = SimpleNamespace(
+        set_value=MagicMock(), count=MagicMock(return_value=0)
+    )
+    fake_frappe.cache = MagicMock(return_value=_FakeCache())
+    fake_frappe.session = SimpleNamespace(user="admin@example.com")
+    fake_frappe.utils = SimpleNamespace(
+        now_datetime=MagicMock(return_value="2026-09-07T00:00:00"),
+        now=MagicMock(return_value="2026-09-07 00:00:00"),
+        today=MagicMock(return_value="2026-09-07"),
+        nowtime=MagicMock(return_value="00:00:00"),
+        add_to_date=MagicMock(return_value="2026-09-07 00:00:00"),
+        get_datetime=MagicMock(return_value="2026-09-07 00:00:00"),
+    )
+    fake_frappe.conf = {}
+    fake_frappe.local = SimpleNamespace(conf={}, site="frontend")
+    fake_frappe.get_site_path = MagicMock(return_value="/site/private/files")
+    fake_frappe.publish_realtime = MagicMock()
+    fake_frappe.msgprint = MagicMock()
+
+    fake_firebase = types.ModuleType("firebase_admin")
+    fake_firebase.get_app = MagicMock(side_effect=ValueError("not initialized"))
+    fake_firebase.initialize_app = MagicMock()
+
+    class _UnregisteredError(Exception):
+        pass
+
+    class _InvalidArgumentError(Exception):
+        pass
+
+    fake_messaging = types.ModuleType("firebase_admin.messaging")
+    fake_messaging.UnregisteredError = _UnregisteredError
+    fake_messaging.SenderIdMismatchError = type("_SenderIdMismatch", (Exception,), {})
+    for attr in (
+        "Notification",
+        "AndroidNotification",
+        "AndroidConfig",
+        "Message",
+        "send",
+        "WebpushConfig",
+        "WebpushNotification",
+        "WebpushFCMOptions",
+    ):
+        setattr(fake_messaging, attr, MagicMock())
+
+    fake_creds = types.ModuleType("firebase_admin.credentials")
+    fake_creds.Certificate = MagicMock(return_value=MagicMock())
+    fake_exceptions = types.ModuleType("firebase_admin.exceptions")
+    fake_exceptions.InvalidArgumentError = _InvalidArgumentError
+
+    fake_firebase.credentials = fake_creds
+    fake_firebase.messaging = fake_messaging
+    fake_firebase.exceptions = fake_exceptions
+
+    patches = {
+        "frappe": fake_frappe,
+        "firebase_admin": fake_firebase,
+        "firebase_admin.credentials": fake_creds,
+        "firebase_admin.messaging": fake_messaging,
+        "firebase_admin.exceptions": fake_exceptions,
+    }
+    with patch.dict(sys.modules, patches):
+        sys.modules.pop("jarz_pos.api.notifications", None)
+        mod = importlib.import_module("jarz_pos.api.notifications")
+        importlib.reload(mod)
+
+    return mod, fake_frappe
+
+
+class TestNotificationGapLogging(unittest.TestCase):
+    def setUp(self):
+        self.mod, self.frappe = _load_module()
+
+    def test_gap_reaches_error_log(self):
+        """Error Log is the only sink that survives on the servers."""
+        self.mod._log_notification_gap("Push token disabled", "body")
+        self.assertTrue(self.frappe.log_error.called)
+
+    def test_repeat_of_same_key_is_throttled(self):
+        """Order volume must not drown the signal."""
+        self.mod._log_notification_gap("t", "b", throttle_key="profile-a")
+        self.mod._log_notification_gap("t", "b", throttle_key="profile-a")
+        self.assertEqual(self.frappe.log_error.call_count, 1)
+
+    def test_a_different_key_is_not_throttled(self):
+        """A second branch going dark is a separate event, not a duplicate."""
+        self.mod._log_notification_gap("t", "b", throttle_key="profile-a")
+        self.mod._log_notification_gap("t", "b", throttle_key="profile-b")
+        self.assertEqual(self.frappe.log_error.call_count, 2)
+
+    def test_throttle_is_shared_not_per_process(self):
+        """The per-process dedup on the send-error path is what made the
+        2026-09-05 failures look like they had stopped after 36 rows when they
+        were still happening on every order. This one goes through the cache."""
+        self.mod._log_notification_gap("t", "b", throttle_key="k")
+        self.assertTrue(self.frappe.cache.called)
+
+    def test_title_is_truncated_to_the_column_width(self):
+        """Error Log.method is Data/varchar(140) and validates with a THROW.
+
+        Reporting a gap must never become a second failure on the alert path.
+        """
+        self.mod._log_notification_gap("T" * 400, "body")
+        title = self.frappe.log_error.call_args.kwargs["title"]
+        self.assertLessEqual(len(title), 140)
+
+    def test_reporting_failure_is_swallowed(self):
+        """A broken sink must not take the notification down with it."""
+        self.frappe.log_error.side_effect = Exception("Error Log is full")
+        self.mod._log_notification_gap("t", "b")  # must not raise
+
+
+class TestDisabledTokenIsAnnounced(unittest.TestCase):
+    def setUp(self):
+        self.mod, self.frappe = _load_module()
+
+    def _one_row(self, enabled=1, user="branch@orderjarz.com", last_seen=None):
+        return [
+            {
+                "name": "DEV-1",
+                "enabled": enabled,
+                "user": user,
+                "platform": "Android",
+                "last_seen": last_seen,
+            }
+        ]
+
+    def test_disabling_a_token_writes_an_error_log(self):
+        self.frappe.get_all.return_value = self._one_row()
+        self.frappe.get_doc.return_value = SimpleNamespace(enabled=1)
+        self.frappe.db.count.return_value = 0
+
+        self.mod._disable_token("dead-token")
+
+        self.assertTrue(self.frappe.log_error.called)
+        message = self.frappe.log_error.call_args.kwargs["message"]
+        self.assertIn("branch@orderjarz.com", message)
+
+    def test_message_says_when_the_user_is_now_unreachable(self):
+        """0 remaining devices is the difference between degraded and dark."""
+        self.frappe.get_all.return_value = self._one_row()
+        self.frappe.get_doc.return_value = SimpleNamespace(enabled=1)
+        self.frappe.db.count.return_value = 0
+
+        self.mod._disable_token("dead-token")
+
+        message = self.frappe.log_error.call_args.kwargs["message"]
+        self.assertIn("no longer be reached", message)
+
+    def test_message_does_not_cry_blackout_when_another_device_remains(self):
+        self.frappe.get_all.return_value = self._one_row()
+        self.frappe.get_doc.return_value = SimpleNamespace(enabled=1)
+        self.frappe.db.count.return_value = 2
+
+        self.mod._disable_token("dead-token")
+
+        message = self.frappe.log_error.call_args.kwargs["message"]
+        self.assertIn("Other devices remain reachable", message)
+
+    def test_an_already_disabled_row_is_not_re_announced(self):
+        self.frappe.get_all.return_value = self._one_row(enabled=0)
+        self.frappe.get_doc.return_value = SimpleNamespace(enabled=0)
+
+        self.mod._disable_token("dead-token")
+
+        self.assertFalse(self.frappe.log_error.called)
+
+
+if __name__ == "__main__":
+    unittest.main()
