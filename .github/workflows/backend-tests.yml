@@ -375,6 +375,30 @@ jobs:
             # token was never disabled and was retried on every notification
             # forever. The negative case matters as much as the positive ones.
             test_fcm_invalid_token_normalization
+            # The two states that mean "a human was not told", and the message
+            # shape the Android alarm depends on. Branches reported missing
+            # order alerts on 2026-09-07 with nothing in Error Log to show for
+            # it: a disabled token and a send that resolves staff but zero
+            # devices were both announced only through frappe.logger().info(),
+            # which the servers discard, and the second returns ok=True. These
+            # assert the gap reaches Error Log, that the throttle is a shared
+            # cache key rather than the per-process set that made the
+            # 2026-09-05 failures look like they had stopped, and that
+            # notification_health stays managers-only -- allow_guest=False is
+            # not a gate when every query is frappe.get_all.
+            # The shaping cases are the load-bearing ones: an FCM message
+            # carrying a notification block is drawn by the Android SDK itself
+            # when the app is backgrounded, so onMessageReceived -- the ONLY
+            # path that starts the order alarm -- never runs. new_invoice and
+            # invoice_accepted must therefore go data-only, and as a PAIR:
+            # the accept is what calls stopAlarm, and shipping the start
+            # without the stop leaves a closed tablet ringing until someone
+            # picks it up. android.notification has to come off too, not just
+            # the top-level block, or FCM can still hand it to the display
+            # path. invoice_cancelled and the shift events keep the block --
+            # neither touches the alarm and the native service has no branch
+            # for a cancel at all.
+            test_notification_delivery_visibility
             # The client-rate trust boundary on create_pos_invoice. Every case
             # here is a way a wrong number reached a SUBMITTED invoice: a
             # custom_rate_override of 0 that the manager gate and the audit
