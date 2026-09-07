@@ -580,6 +580,111 @@ def _latest_payment_info(inv_name: str) -> dict | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Preview tokens — the single-use permits that let a confirm post money
+# ---------------------------------------------------------------------------
+
+#: Compare-and-delete, executed inside Redis so it cannot interleave.
+#:
+#: A plain GET-then-DELETE (what both preview flows used to do) is
+#: check-then-act: two callers holding the same token both pass the GET before
+#: either DELETEs, and both go on to post. GETDEL would fix the atomicity but
+#: destroys the value whatever was presented, so anyone submitting a stale or
+#: wrong token would invalidate the legitimate one. Comparing against the exact
+#: bytes we read and deleting only on a match gives single-use without that
+#: side effect: of two callers with one token exactly one gets 1 back, and a
+#: wrong token changes nothing.
+_PREVIEW_TOKEN_CONSUME_LUA = (
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+    "redis.call('DEL', KEYS[1]); return 1 else return 0 end"
+)
+
+#: Lifetime of a settlement preview token, matching UNSETTLE_PREVIEW_TTL.
+SETTLE_PREVIEW_TTL = 180
+
+
+def _settle_preview_key(token: str):
+    """Redis key holding the preview payload for *token*.
+
+    Keyed on the token rather than on the invoice — unlike
+    :func:`_unsettle_preview_key`. Settling is the routine cashier action and
+    the dialog is opened constantly, often from two devices looking at the same
+    order; invalidating an open dialog's permit because someone else glanced at
+    the invoice would turn a fix into a daily "Preview expired". Each token is
+    independently short-lived and single-use, and ``confirm_settlement`` still
+    has to get past the branch, shift and dispatch guards plus the invoice's own
+    state, so coexisting previews are not coexisting permits to double-post.
+
+    ``make_key`` applies the same ``<db_name>|`` namespace prefix the pickling
+    helpers apply, keeping this inside the site's own cache namespace. The value
+    is written and read with raw Redis commands rather than those helpers,
+    because only raw commands can consume it atomically — and because ``hget``
+    consults ``frappe.local.cache`` first, which can return a token already
+    consumed earlier in the same request.
+    """
+    # Normalised here rather than at each call site so peek and spend cannot
+    # address different keys for the same presented token.
+    return frappe.cache().make_key(f"jarz_pos:settle_preview:{str(token or '').strip()}")
+
+
+def _mint_settle_preview_token(data: dict) -> str:
+    """Store *data* under a fresh single-use token and return the token."""
+    token = frappe.generate_hash(length=32)
+    # One SET carrying its own expiry. The previous shape was `hset` followed by
+    # `expire(cache_key, 180)` — but `hset` namespaces the key through `make_key`
+    # while the inherited `expire` does not, so that call set a TTL on a key that
+    # did not exist and silently returned False. The token it was meant to expire
+    # had NO expiry at all: verified against real Redis on 2026-09-07, `expire()`
+    # returned False and `TTL` on the real key was -1. A permit to post money was
+    # immortal, replayable long after the state it described had changed.
+    frappe.cache().set(
+        _settle_preview_key(token), json.dumps(data, sort_keys=True), ex=SETTLE_PREVIEW_TTL
+    )
+    return token
+
+
+def _peek_settle_preview_token(token: str):
+    """Validate the preview token WITHOUT spending it.
+
+    Returns ``(payload, raw)`` when the token is live, else ``(None, None)``.
+    ``raw`` is the exact stored bytes and is what
+    :func:`_spend_settle_preview_token` compares against — so the pair form a
+    compare-and-swap across the validation that runs between them.
+
+    Reading before spending is deliberate: the caller needs the previewed
+    amounts to decide anything, and a request refused for a fixable reason
+    (wrong invoice, closed shift) should leave the token usable rather than
+    forcing a re-preview.
+    """
+    presented = str(token or "").strip()
+    if not presented:
+        return None, None
+
+    raw = frappe.cache().get(_settle_preview_key(presented))
+    if raw is None:
+        return None, None
+
+    try:
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except Exception:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+
+    return payload, raw
+
+
+def _spend_settle_preview_token(token: str, raw) -> bool:
+    """Atomically consume the token whose exact bytes are *raw*.
+
+    True only for the caller that actually removed it; anyone whose value
+    changed in the meantime must be refused.
+    """
+    return bool(
+        frappe.cache().eval(_PREVIEW_TOKEN_CONSUME_LUA, 1, _settle_preview_key(token), raw)
+    )
+
+
 @frappe.whitelist()  # type: ignore[attr-defined]
 def generate_settlement_preview(invoice: str, party_type: str | None = None, party: str | None = None, mode: str = "pay_now", recent_payment_seconds: int = 30):
     """Produce a settlement preview and mint a short-lived token to be used on confirmation.
@@ -724,11 +829,7 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
             party_type = existing_party[0].get("party_type")
             party = existing_party[0].get("party")
 
-    token = frappe.generate_hash(length=16)
-    cache_key = f"jarz_pos:settle_preview:{token}"
-    frappe.cache().hset(
-        cache_key,
-        "data",
+    token = _mint_settle_preview_token(
         {
             "invoice": inv.name,
             "party_type": party_type,
@@ -743,10 +844,8 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
             "delivery_partner": _dp,
             "partner_fee": partner_fee,
             "is_online_unconfirmed": is_online_unconfirmed,
-        },
+        }
     )
-    # expire after 3 minutes
-    frappe.cache().expire(cache_key, 180)
 
     return {
         "invoice": inv.name,
@@ -760,7 +859,7 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
         "is_unpaid_effective": is_unpaid_effective,
         "last_payment_seconds": last_pe_seconds,
         "preview_token": token,
-        "expires_in": 180,
+        "expires_in": SETTLE_PREVIEW_TTL,
         "is_partner_order": is_partner_order,
         "delivery_partner": _dp,
         "partner_fee": partner_fee,
@@ -799,8 +898,7 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
     _guard_invoice_action(invoice, action_label="confirm a settlement")
     _guard_dispatch(invoice, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
 
-    cache_key = f"jarz_pos:settle_preview:{preview_token}"
-    data = frappe.cache().hget(cache_key, "data")
+    data, raw_token = _peek_settle_preview_token(preview_token)
     if not data:
         frappe.throw("Preview expired or invalid. Please reopen the dialog.")
     if data.get("invoice") != invoice:
@@ -825,6 +923,16 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
             pass
         return p
 
+    # Spend the permit BEFORE posting anything. This used to be a delete after
+    # the commit — check-then-act, so two callers holding one token both passed
+    # the read and both went on to settle. The compare-and-delete runs inside
+    # Redis, so exactly one of them gets True here and the rest are refused
+    # before any money moves. Everything that can refuse this call for a fixable
+    # reason (the guards, the invoice match) has already run above, so a token
+    # is only burned by a caller that is about to post.
+    if not _spend_settle_preview_token(preview_token, raw_token):
+        frappe.throw("Preview already used or expired. Please reopen the dialog.")
+
     try:
         frappe.db.savepoint("confirm_settlement")
         # Map preview mode to our strategy mode keys
@@ -847,11 +955,6 @@ def confirm_settlement(invoice: str, preview_token: str, mode: str, pos_profile:
         )
 
         frappe.db.commit()
-        # Invalidate token to prevent replays
-        try:
-            frappe.cache().delete_value(cache_key)
-        except Exception:
-            pass
 
         base = {
             "success": True,
@@ -954,21 +1057,10 @@ def _ensure_unsettle_released() -> None:
 #: Lifetime of an un-settle preview token, matching generate_settlement_preview.
 UNSETTLE_PREVIEW_TTL = 180
 
-#: Compare-and-delete, executed inside Redis so it cannot interleave.
-#:
-#: A plain GET-then-DELETE (what this used to do, on the way OUT of the
-#: reversal, and then on the way IN) is check-then-act: two callers holding the
-#: same token both pass the GET before either DELETEs, and both go on to post a
-#: reversing entry. GETDEL would fix the atomicity but destroys the value
-#: whatever was presented, so anyone submitting a stale or wrong token would
-#: invalidate the legitimate one. Comparing against the exact bytes we read and
-#: deleting only on a match gives single-use without that side effect: of two
-#: callers with one token exactly one gets 1 back, and a wrong token changes
-#: nothing.
-_UNSETTLE_TOKEN_CONSUME_LUA = (
-    "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-    "redis.call('DEL', KEYS[1]); return 1 else return 0 end"
-)
+#: The reversal consumes its token with the same compare-and-delete the
+#: settlement preview uses — see :data:`_PREVIEW_TOKEN_CONSUME_LUA` for why a
+#: GET-then-DELETE cannot give single-use and why GETDEL is the wrong fix.
+_UNSETTLE_TOKEN_CONSUME_LUA = _PREVIEW_TOKEN_CONSUME_LUA
 
 
 def _unsettle_preview_key(journal_entry: str):

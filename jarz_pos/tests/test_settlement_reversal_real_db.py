@@ -20,8 +20,16 @@ they were about:
    very state that told it to proceed. Isolation levels do not exist inside a
    mock.
 
-So these tests use the database and the cache, and one of them uses a second
-real connection. They are slower than the mocked suite on purpose; they are the
+A fourth defect, same shape, was found on 2026-09-07 in the FORWARD half of the
+pair — ``generate_settlement_preview`` / ``confirm_settlement``. Its token was
+minted with ``hset`` followed by ``expire`` on the un-namespaced name, so it had
+no expiry at all, and it was consumed with a ``hget`` … post … ``delete_value``
+that two callers could both pass. A dict-backed fake cache has neither a
+namespace nor a TTL nor concurrency, which is precisely why both survived a
+green mocked suite. See ``TestSettlementPreviewTokenAgainstRealRedis``.
+
+So these tests use the database and the cache, and two of them use additional
+real connections. They are slower than the mocked suite on purpose; they are the
 only ones that can fail for the right reason.
 """
 
@@ -479,6 +487,193 @@ class TestPreviewTokenAgainstRealRedis(_RealDatabaseTestCase):
 
         self.assertEqual(payload.get("pos_profile"), "Nasr City")
         self.assertEqual(json.loads(raw).get("token"), token)
+
+
+class TestSettlementPreviewTokenAgainstRealRedis(_RealDatabaseTestCase):
+    """The FORWARD preview token — the permit ``confirm_settlement`` posts on.
+
+    The reversal's token was fixed in 446a0f1; the settlement preview that
+    shipped alongside it kept the original broken shape for another two weeks,
+    for exactly the reason this file exists: every test around it was mocked,
+    and a dict-backed fake cache has no namespace and no TTL, so neither the
+    dead ``expire`` nor the check-then-act consume could fail there.
+    """
+
+    def setUp(self):
+        self.minted = []
+        self.addCleanup(self._cleanup)
+
+    def _mint(self, **overrides):
+        data = {
+            "invoice": "ACC-SINV-REDIS-TOKEN-TEST",
+            "party_type": "Employee",
+            "party": "HR-EMP-TEST",
+            "mode": "pay_now",
+            "order_amount": 100.5,
+            "shipping_amount": 10.0,
+            "net_amount": 90.5,
+            "is_unpaid_effective": True,
+            "last_payment_seconds": None,
+            "is_partner_order": False,
+            "delivery_partner": None,
+            "partner_fee": 0.0,
+            "is_online_unconfirmed": False,
+        }
+        data.update(overrides)
+        token = couriers_api._mint_settle_preview_token(data)
+        self.minted.append(token)
+        return token
+
+    def _cleanup(self):
+        for token in self.minted:
+            try:
+                frappe.cache().delete(couriers_api._settle_preview_key(token))
+            except Exception:
+                pass
+
+    def test_frappes_expire_really_does_not_namespace_the_key(self):
+        """Pin the Redis semantics that made the old token immortal.
+
+        ``hset`` pushes the name through ``make_key`` (``<db_name>|…``);
+        ``expire`` is inherited raw from ``redis.Redis`` and does not. So
+        ``hset(k, …)`` then ``expire(k, 180)`` sets a TTL on a key that does not
+        exist — it returns False — and the real hash keeps no expiry at all.
+        If this test ever fails, Frappe changed the behaviour and the comment on
+        ``_mint_settle_preview_token`` needs revisiting. ``expire_key`` is the
+        namespacing helper the old code should have reached for.
+        """
+        cache = frappe.cache()
+        raw_name = "jarz_pos:settle_preview:OLD-SHAPE-PROBE"
+        real_key = cache.make_key(raw_name)
+        self.addCleanup(lambda: cache.delete(real_key))
+        self.addCleanup(lambda: cache.delete(raw_name))
+
+        cache.hset(raw_name, "data", {"invoice": "X"})
+        expired = cache.expire(raw_name, 180)
+
+        self.assertFalse(
+            expired,
+            "`expire` on the un-namespaced name must miss — it is the whole bug",
+        )
+        self.assertEqual(
+            cache.ttl(real_key), -1,
+            "the hash that actually holds the token must be shown to have NO expiry",
+        )
+        self.assertTrue(
+            cache.expire_key(raw_name, 180),
+            "`expire_key` namespaces and therefore hits the real key",
+        )
+
+    def test_the_token_carries_a_real_expiry(self):
+        """The defect, stated as the property that was missing.
+
+        Verified against real Redis on 2026-09-07: before the fix, `expire()`
+        returned False and `TTL` on the real key was -1 — a permit to post money
+        that never expired and could be replayed long after the state it
+        described had changed.
+        """
+        token = self._mint()
+
+        ttl = frappe.cache().ttl(couriers_api._settle_preview_key(token))
+
+        self.assertGreater(ttl, 0, "the token must expire")
+        self.assertLessEqual(ttl, couriers_api.SETTLE_PREVIEW_TTL)
+
+    def test_the_payload_round_trips(self):
+        """JSON replaced pickled hash fields; the values confirm reads must survive."""
+        token = self._mint(partner_fee=12.25, is_partner_order=True, delivery_partner="DP-1")
+
+        payload, raw = couriers_api._peek_settle_preview_token(token)
+
+        self.assertEqual(payload.get("invoice"), "ACC-SINV-REDIS-TOKEN-TEST")
+        self.assertEqual(payload.get("order_amount"), 100.5)
+        self.assertEqual(payload.get("partner_fee"), 12.25)
+        self.assertIs(payload.get("is_partner_order"), True)
+        self.assertIs(payload.get("is_unpaid_effective"), True)
+        self.assertIsNone(payload.get("last_payment_seconds"))
+        self.assertEqual(json.loads(raw).get("invoice"), "ACC-SINV-REDIS-TOKEN-TEST")
+
+    def test_peeking_does_not_spend(self):
+        """The guards and the invoice check run between peek and spend; a caller
+        refused there must still hold a usable token."""
+        token = self._mint()
+
+        self.assertIsNotNone(couriers_api._peek_settle_preview_token(token)[0])
+        self.assertIsNotNone(couriers_api._peek_settle_preview_token(token)[0])
+
+    def test_an_unknown_token_is_refused_and_disturbs_nothing(self):
+        token = self._mint()
+
+        payload, raw = couriers_api._peek_settle_preview_token("nope-not-a-token")
+        self.assertIsNone(payload)
+        self.assertIsNone(raw)
+
+        self.assertIsNotNone(
+            couriers_api._peek_settle_preview_token(token)[0],
+            "a bad guess must not invalidate a live token",
+        )
+
+    def test_a_token_cannot_be_spent_twice(self):
+        token = self._mint()
+        payload, raw = couriers_api._peek_settle_preview_token(token)
+        self.assertIsNotNone(payload)
+
+        self.assertTrue(couriers_api._spend_settle_preview_token(token, raw))
+        self.assertFalse(couriers_api._spend_settle_preview_token(token, raw))
+        self.assertIsNone(
+            couriers_api._peek_settle_preview_token(token)[0],
+            "a spent token must not read back as live",
+        )
+
+    def test_concurrent_spenders_of_one_token_produce_exactly_one_winner(self):
+        """The property the old check-then-act consume could not give.
+
+        ``confirm_settlement`` used to ``hget`` the payload, post the money,
+        commit, and only then ``delete_value`` the key. Every thread here peeks
+        the same live token — the interleaving in which two clients both passed
+        that read — and then races to spend it. Exactly one may win; the rest
+        are refused before anything is posted.
+        """
+        token = self._mint()
+        _payload, raw = couriers_api._peek_settle_preview_token(token)
+
+        self.site = frappe.local.site
+        start = threading.Event()
+        wins = []
+        lock = threading.Lock()
+
+        def racer():
+            frappe.init(self.site)
+            frappe.connect()
+            try:
+                start.wait(30)
+                won = couriers_api._spend_settle_preview_token(token, raw)
+                with lock:
+                    wins.append(bool(won))
+            finally:
+                frappe.destroy()
+
+        threads = [threading.Thread(target=racer) for _ in range(12)]
+        for t in threads:
+            t.start()
+        start.set()
+        for t in threads:
+            t.join(60)
+
+        self.assertEqual(
+            wins.count(True), 1,
+            f"exactly one of {len(wins)} concurrent spenders may win, got {wins.count(True)}",
+        )
+
+    def test_the_local_request_cache_cannot_resurrect_a_spent_token(self):
+        """``hget`` consults ``frappe.local.cache`` before Redis, so the old shape
+        could hand a token back inside the same request after it was consumed.
+        The raw GET this fix uses talks to Redis only."""
+        token = self._mint()
+        _payload, raw = couriers_api._peek_settle_preview_token(token)
+        self.assertTrue(couriers_api._spend_settle_preview_token(token, raw))
+
+        self.assertIsNone(couriers_api._peek_settle_preview_token(token)[0])
 
 
 class TestReferenceNoCannotForgeATag(_RealDatabaseTestCase):
