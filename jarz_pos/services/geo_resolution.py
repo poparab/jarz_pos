@@ -39,6 +39,8 @@ handing it a ``TimestampMismatchError``.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Dict, Optional
 
 import frappe
@@ -528,4 +530,237 @@ def resolve_short_link_job(
     result["expanded_url"] = expanded
     result["precision"] = precision
     frappe.db.commit()
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Read-only link preview — ticket + poll
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The POS "paste a Maps link" field needs an answer for the link staff actually
+# have, and the share sheet hands them a shortener every time. A long URL parses
+# with no I/O and is answered inline; a short one carries no coordinates at all,
+# so the only route to an answer is the redirect chain — which must not be
+# followed inside the request (see ``geo.expand_short_link``).
+#
+# So the endpoint hands back a ticket and the client polls it, exactly as
+# ``services.lead_maps`` does for the leads editor. Before this existed the
+# endpoint reported every short link as unresolved, which is why the field said
+# "could not read a location from this link" for the one input it gets most.
+
+#: How long a preview ticket survives. Generous: the client gives up long
+#: before this, and a stale ticket costs one small Redis key.
+PREVIEW_TICKET_TTL_SEC = 5 * 60
+
+#: Per-user budget on *background* expansions. Polling is free — only creating a
+#: new ticket spends from it.
+PREVIEW_RATE_WINDOW_SEC = 60
+PREVIEW_RATE_MAX_REQUESTS = 12
+
+#: Ticket ids are generated here; the pattern is what a *poll* is checked
+#: against, so a hand-made id cannot be used to probe the cache namespace.
+_PREVIEW_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9]{32}$")
+
+
+def _preview_ticket_key(request_id: str) -> str:
+    return f"jarz_pos:geo_preview:ticket:{request_id}"
+
+
+def _preview_cache_set(key: str, value: Dict[str, Any]) -> bool:
+    try:
+        frappe.cache().set_value(
+            key, json.dumps(value), expires_in_sec=PREVIEW_TICKET_TTL_SEC
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _preview_cache_get(key: str) -> Dict[str, Any]:
+    try:
+        # ``use_local_cache=False`` deliberately: a poll and the worker's write
+        # can land in the same Frappe request during a harness sweep, and the
+        # request-local copy would hide the completed result.
+        raw = frappe.cache().get_value(key, use_local_cache=False)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        value = json.loads(raw) if isinstance(raw, str) else raw
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _consume_preview_budget(user: str) -> bool:
+    """Bound background expansions per user. Fails **closed** without Redis.
+
+    Failing closed costs only the short-link path: a long URL never reaches
+    here, and a client that cannot get a ticket is told the link is unresolved
+    rather than left waiting on a job nobody will run.
+    """
+    try:
+        cache = frappe.cache()
+        key = cache.make_key(f"jarz_pos:geo_preview:rate:{user}")
+        count = int(cache.incrby(key, 1))
+        if count == 1:
+            cache.expire(key, PREVIEW_RATE_WINDOW_SEC)
+        return count <= PREVIEW_RATE_MAX_REQUESTS
+    except Exception:
+        return False
+
+
+def _preview_resolved(link: str, parsed: Any) -> Dict[str, Any]:
+    latitude, longitude, precision = parsed
+    return {
+        "success": True,
+        "resolved": True,
+        "pending": False,
+        "short_link": False,
+        "url": link,
+        "latitude": latitude,
+        "longitude": longitude,
+        "precision": precision,
+        "accuracy_m": geo.accuracy_for_precision(precision),
+    }
+
+
+def _preview_unresolved(link: str, reason: str, *, short_link: bool) -> Dict[str, Any]:
+    return {
+        "success": True,
+        "resolved": False,
+        "pending": False,
+        "short_link": short_link,
+        "reason": reason,
+        "url": link,
+    }
+
+
+def _preview_failed(reason: str) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "resolved": False,
+        "pending": False,
+        "reason": reason,
+        "url": "",
+    }
+
+
+def _preview_poll(request_id: object, user: str) -> Dict[str, Any]:
+    token = str(request_id or "").strip()
+    if not _PREVIEW_REQUEST_ID_RE.fullmatch(token):
+        return _preview_failed("invalid_request_id")
+
+    ticket = _preview_cache_get(_preview_ticket_key(token))
+    # The owner check is what stops one session polling another's ticket, and
+    # what makes a guessed id useless.
+    if not ticket or ticket.get("user") != user:
+        return _preview_failed("request_expired")
+
+    result = ticket.get("result")
+    if isinstance(result, dict):
+        return {**result, "request_id": token, "pending": False}
+
+    return {
+        **_preview_unresolved(
+            str(ticket.get("url") or ""), "short_link_pending", short_link=True
+        ),
+        "pending": True,
+        "request_id": token,
+        "retry_after_ms": 500,
+        "expires_in": PREVIEW_TICKET_TTL_SEC,
+    }
+
+
+def preview_link(
+    link: object = None, *, request_id: object = None, user: str = ""
+) -> Dict[str, Any]:
+    """Resolve a pasted Maps link to a point. Reads and writes no document.
+
+    Three outcomes, and a caller must handle all three:
+
+    * a long URL parses inline and comes back ``resolved``;
+    * a short link comes back ``pending`` with a ``request_id`` to poll, its
+      expansion having been queued;
+    * anything else comes back ``resolved=False`` with a ``reason``.
+    """
+    owner = str(user or getattr(frappe.session, "user", "") or "").strip()
+    if request_id not in (None, ""):
+        return _preview_poll(request_id, owner)
+
+    text = str(link or "").strip()
+    if not text:
+        return {**_preview_failed("missing_link"), "error": _("A maps link is required")}
+
+    parsed = geo.parse_maps_link(text)
+    if parsed:
+        return _preview_resolved(text, parsed)
+
+    if not geo.is_short_maps_link(text):
+        return _preview_unresolved(text, "no_coordinates_in_link", short_link=False)
+
+    if not _consume_preview_budget(owner):
+        return _preview_unresolved(text, "rate_limited", short_link=True)
+
+    token = frappe.generate_hash(length=32)
+    if not _preview_cache_set(
+        _preview_ticket_key(token), {"user": owner, "url": text, "result": None}
+    ):
+        return _preview_unresolved(text, "short_link_unqueued", short_link=True)
+
+    try:
+        frappe.enqueue(
+            "jarz_pos.services.geo_resolution.preview_short_link_job",
+            queue="short",
+            timeout=30,
+            request_id=token,
+            url=text,
+            user=owner,
+        )
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(), "geo_resolution: could not enqueue link preview"
+        )
+        return _preview_unresolved(text, "short_link_unqueued", short_link=True)
+
+    return {
+        **_preview_unresolved(text, "short_link_pending", short_link=True),
+        "pending": True,
+        "request_id": token,
+        "retry_after_ms": 500,
+        "expires_in": PREVIEW_TICKET_TTL_SEC,
+    }
+
+
+def preview_short_link_job(request_id: str, url: str, user: str = "") -> Dict[str, Any]:
+    """Background worker: expand one short link and park the answer on its ticket.
+
+    Never raises. A shortener being slow or down is an ordinary outcome of a
+    paste, not something worth a traceback in the Error Log — the client sees
+    the ticket resolve to ``short_link_unresolved`` and says so inline.
+    """
+    token = str(request_id or "").strip()
+    link = str(url or "").strip()
+    if not _PREVIEW_REQUEST_ID_RE.fullmatch(token) or not link:
+        return {"success": False, "reason": "invalid_request"}
+
+    key = _preview_ticket_key(token)
+    ticket = _preview_cache_get(key)
+    # A ticket that expired mid-flight is not an error, but there is nowhere
+    # left to put the answer, so do not spend the network call.
+    if not ticket:
+        return {"success": False, "reason": "request_expired"}
+
+    expanded = geo.expand_short_link(link)
+    if not expanded:
+        result = _preview_unresolved(link, "short_link_unresolved", short_link=True)
+    else:
+        parsed = geo.parse_maps_link(expanded)
+        if parsed:
+            result = _preview_resolved(link, parsed)
+        else:
+            result = _preview_unresolved(
+                link, "no_coordinates_in_expanded_link", short_link=True
+            )
+        result["expanded_url"] = expanded
+
+    _preview_cache_set(key, {**ticket, "result": result})
     return result

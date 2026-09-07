@@ -315,6 +315,12 @@ jobs:
             test_courier_custom_fields
             test_state_options_frozen
             test_geo_parser
+            # The paste-a-Maps-link preview. The reason this must be in CI: the
+            # share sheet only ever produces a shortener, so the ticket flow IS
+            # the feature, and expansion follows redirect targets a remote
+            # server chooses — the allowlist cases are what keep that from
+            # becoming a fetch of an arbitrary URL.
+            test_geo_preview
             test_geo_ladder
             test_courier_delivery_transitions
             # A6 — the OFD pin gate. The "both call sites enforce it" cases are

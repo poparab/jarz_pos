@@ -36,8 +36,9 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from typing import Dict, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 try:  # pragma: no cover - during static analysis or docs build
     import frappe
@@ -151,7 +152,32 @@ PRECISION_ACCURACY_M: Dict[str, float] = {
 }
 
 #: Hosts whose links carry no coordinates at all until expanded over HTTP.
-SHORT_LINK_HOSTS = frozenset({"maps.app.goo.gl", "app.goo.gl", "goo.gl", "g.co"})
+#:
+#: ``share.google`` is the shortener the current Android share sheet emits. It
+#: was missing here, so every link staff produced the normal way (share -> copy)
+#: failed the "is this expandable?" check and was reported as an unreadable
+#: link rather than queued for expansion.
+SHORT_LINK_HOSTS = frozenset(
+    {"maps.app.goo.gl", "app.goo.gl", "goo.gl", "g.co", "share.google"}
+)
+
+#: Hosts a redirect chain may land on. Expansion follows hops one at a time and
+#: re-checks the target against this set plus :data:`SHORT_LINK_HOSTS`, so a
+#: shortener that has been made to point somewhere else cannot turn a POS
+#: request into a fetch of an arbitrary URL.
+MAPS_LINK_HOSTS = frozenset(
+    {
+        "google.com",
+        "www.google.com",
+        "maps.google.com",
+        "google.com.eg",
+        "www.google.com.eg",
+        "maps.google.com.eg",
+        "consent.google.com",
+        "plus.codes",
+        "www.plus.codes",
+    }
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,46 +516,122 @@ def distance_m_or_none(
 # Short-link expansion — BACKGROUND JOBS ONLY
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _hop_is_permitted(url: str) -> bool:
+    """True when *url* is an HTTPS address on a host expansion may fetch."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if (parsed.scheme or "").lower() != "https":
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    return (
+        host in SHORT_LINK_HOSTS
+        or host in MAPS_LINK_HOSTS
+        or host.endswith(".app.goo.gl")
+    )
+
+
+def _https_upgraded(url: str) -> str:
+    """Rewrite a plain-HTTP shortener to HTTPS. Never downgrades.
+
+    The legacy ``address_line2`` corpus still holds ``http://goo.gl/maps/...``
+    links from before the shorteners moved. Refusing them outright would drop
+    rows the backfill can still resolve, and every one of these hosts serves the
+    same redirect over TLS.
+    """
+    if not url.lower().startswith("http://"):
+        return url
+    upgraded = "https://" + url[len("http://") :]
+    return upgraded if _hop_is_permitted(upgraded) else url
+
+
+def _redirect_status_and_headers(url: str, method: str, timeout: float):
+    """One request, redirects NOT followed, body never read."""
+    import urllib.error
+    import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    request = urllib.request.Request(
+        url, method=method, headers={"User-Agent": "jarz-pos-geo/1.0"}
+    )
+    try:
+        response = urllib.request.build_opener(_NoRedirect).open(
+            request, timeout=timeout
+        )
+        try:
+            return int(getattr(response, "status", 200)), response.headers
+        finally:
+            response.close()
+    except urllib.error.HTTPError as exc:
+        try:
+            return int(exc.code), dict(exc.headers or {})
+        finally:
+            exc.close()
+
+
 def expand_short_link(url: object, *, timeout: float = 5.0, max_hops: int = 5) -> str:
-    """Follow a ``maps.app.goo.gl`` redirect chain to the real URL.
+    """Follow a Maps shortener's redirect chain to the real URL.
 
     **Never call this from a whitelisted endpoint or a document hook.** It makes
     a blocking HTTP request; inline, it hands any caller a way to occupy a
     gunicorn worker for the length of the timeout, and one slow shortener
     becomes a site-wide stall. ``services.geo_resolution`` enqueues it instead.
 
+    Redirects are followed **one hop at a time** and every hop is re-checked
+    against :func:`_hop_is_permitted`, rather than handed to urllib's automatic
+    follower. The starting host is constrained by the caller, but the hops are
+    chosen by a remote server: letting urllib chase them turns "expand this
+    short link" into "fetch whatever Google's shortener now points at", which is
+    a server-side request forgery with a POS user's session behind it. The body
+    is never read for the same reason — only the ``Location`` header matters.
+
     Returns the expanded URL, or ``""`` on any failure. Never raises.
     """
-    text = str(url or "").strip()
-    if not text or not text.lower().startswith(("http://", "https://")):
+    current = _https_upgraded(str(url or "").strip())
+    if not _hop_is_permitted(current):
         return ""
 
-    try:
-        import urllib.request
+    # One deadline for the whole chain, not per hop: five hops each granted the
+    # full timeout is a 25-second job holding a worker in the short queue.
+    deadline = time.monotonic() + max(0.25, min(float(timeout), 8.0))
 
-        request = urllib.request.Request(
-            text,
-            method="HEAD",
-            headers={"User-Agent": "jarz-pos-geo/1.0"},
-        )
-
-        class _Limited(urllib.request.HTTPRedirectHandler):
-            max_redirections = max_hops
-
-        opener = urllib.request.build_opener(_Limited)
-        with opener.open(request, timeout=timeout) as response:
-            final = getattr(response, "url", "") or response.geturl()
-        return str(final or "")
-    except Exception:
-        # HEAD is refused by some shorteners; retry once with GET before giving
-        # up, since the redirect header is all we need either way.
+    for _ in range(max(1, min(int(max_hops), 8)) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ""
         try:
-            import urllib.request
-
-            request = urllib.request.Request(
-                text, headers={"User-Agent": "jarz-pos-geo/1.0"}
-            )
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return str(getattr(response, "url", "") or response.geturl() or "")
+            status, headers = _redirect_status_and_headers(current, "HEAD", remaining)
+            # Some shorteners refuse HEAD outright; the redirect header is all
+            # we need either way, so retry the same hop with GET.
+            if status in (405, 501):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return ""
+                status, headers = _redirect_status_and_headers(
+                    current, "GET", remaining
+                )
         except Exception:
             return ""
+
+        if 300 <= status < 400:
+            location = str((headers or {}).get("Location") or "").strip()
+            if not location:
+                return ""
+            nxt = urljoin(current, location)
+            if not _hop_is_permitted(nxt):
+                return ""
+            current = nxt
+            continue
+
+        if not (200 <= status < 300):
+            return ""
+        # Landing back on a shortener means the chain never resolved.
+        return "" if is_short_maps_link(current) else current
+
+    return ""

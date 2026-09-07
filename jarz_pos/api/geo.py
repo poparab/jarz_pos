@@ -44,7 +44,9 @@ def _ensure_geo_write_permission() -> None:
 
 @frappe.whitelist(allow_guest=False)
 def preview_maps_link(
-    link: Optional[str] = None, url: Optional[str] = None
+    link: Optional[str] = None,
+    url: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Parse *link* and report the coordinates it yields. Reads no document.
 
@@ -58,42 +60,20 @@ def preview_maps_link(
     vanishes and the endpoint raises ``TypeError`` on a missing positional, so
     the feature simply never works.
 
-    Deliberately does no network I/O: a short link comes back as
-    ``short_link=True`` with no coordinates, and the caller is expected to save
-    it (which queues a background expand) rather than block on a redirect chain
-    inside a request.
+    Still does no network I/O **in the request**. A short link (which is what the
+    Android share sheet produces, so it is the common case rather than the edge
+    one) comes back ``pending`` with a ``request_id``: the redirect chain is
+    followed in a background job and the client polls this same endpoint with
+    ``request_id`` until the ticket carries a result. Blocking on the chain here
+    would let any caller pin a gunicorn worker for the length of the timeout.
     """
     _ensure_geo_read_permission()
     try:
-        link = str(link or url or "").strip()
-        if not link:
-            return {"success": False, "error": _("A maps link is required")}
-
-        parsed = _geo.parse_maps_link(link)
-        if not parsed:
-            return {
-                "success": True,
-                "resolved": False,
-                "short_link": _geo.is_short_maps_link(link),
-                "reason": (
-                    "short_link_needs_expansion"
-                    if _geo.is_short_maps_link(link)
-                    else "no_coordinates_in_link"
-                ),
-                "url": link,
-            }
-
-        latitude, longitude, precision = parsed
-        return {
-            "success": True,
-            "resolved": True,
-            "url": link,
-            "latitude": latitude,
-            "longitude": longitude,
-            "precision": precision,
-            "accuracy_m": _geo.accuracy_for_precision(precision),
-            "short_link": False,
-        }
+        return _geo_service.preview_link(
+            link or url,
+            request_id=request_id,
+            user=frappe.session.user,
+        )
     except frappe.PermissionError:
         raise
     except Exception as exc:
