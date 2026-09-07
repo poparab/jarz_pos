@@ -254,6 +254,17 @@ jobs:
             test_invoice_return
             test_api_notifications_return_filters
             test_accounting_guards
+            # The operator-chosen posting date AND time. One shared splitter
+            # feeds every write that lets the till pick a moment (transfers,
+            # counts, purchases, cash transfers, expenses, advances), so a
+            # regression here is not local to one screen. Two cases carry it:
+            # a date-only value must still raise `set_posting_time` — without
+            # that flag ERPNext's validate_posting_time replaces posting_date
+            # with now(), so dropping it deletes backdating rather than
+            # preserving the old behaviour — and a time that cannot be honoured
+            # must be refused or logged, never silently discarded, since the
+            # document still posts and only the hour is wrong.
+            test_posting_datetime
             # Inventory counts accept more than one UOM component for the same
             # item and must normalize them into one Stock Reconciliation row.
             test_api_inventory_count
@@ -436,6 +447,15 @@ jobs:
             # shipped in 985d01f with 29 tests and was never added to this
             # array, so it has never run in CI once.
             test_api_recurring_expenses
+            # The posting TIME a POS user picks. It must be in CI because the
+            # failure it guards is invisible at runtime: Journal Entry, Payment
+            # Entry and GL Entry have no posting_time field, so the old
+            # `set_posting_time = 1` silently discarded the user's choice while
+            # reading as though it honoured it. The cases pin that the time
+            # lands on custom_jarz_posting_time instead, that a site missing
+            # that field still posts the expense, and that expense_month stays
+            # derived from the date alone.
+            test_expense_posting_time
             # Reversing a courier settlement. Until this shipped, every reversal
             # was a hand-written script piped into a production bench console.
             # The load-bearing cases are the refusals: an arbitrary Journal

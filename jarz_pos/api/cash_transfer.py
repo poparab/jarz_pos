@@ -6,6 +6,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, getdate
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.posting_datetime import apply_ledger_posting_datetime
 
 
 def _ensure_manager_access() -> None:
@@ -239,13 +240,19 @@ def submit_transfer(from_account: str, to_account: str, amount: float, posting_d
         je.company = company_from or frappe.defaults.get_user_default("Company")
     except Exception:
         pass
-    # Ensure posting_date is set (DocType may require it)
+    # Ensure posting_date is set (DocType may require it). The value may now
+    # carry a time ("YYYY-MM-DD HH:MM:SS"); a date-only value is the legacy
+    # shape and is unchanged.
+    #
+    # There is deliberately no `je.set_posting_time = 1` here any more. Journal
+    # Entry has no posting_time field and no such column — nor does GL Entry —
+    # so that assignment was a no-op that merely looked load-bearing. The
+    # chosen time is recorded in `custom_jarz_posting_time` instead.
     if posting_date:
-        je.posting_date = posting_date
+        apply_ledger_posting_datetime(je, posting_date)
     else:
         from frappe.utils import today
         je.posting_date = today()
-    je.set_posting_time = 1
     if remark:
         # Sanitised for the same reason as the expense remark: the JE tag
         # lookups are company-wide `user_remark LIKE` queries, so free text on

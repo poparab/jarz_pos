@@ -6,6 +6,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, getdate
 from jarz_pos.constants import DEFAULT_UOM, ROLES
+from jarz_pos.utils.posting_datetime import apply_stock_posting_datetime
 
 
 def _ensure_transfer_access() -> None:
@@ -236,9 +237,9 @@ def submit_transfer(
 
     se = frappe.new_doc("Stock Entry")
     se.stock_entry_type = "Material Transfer"
-    if posting_date:
-        se.posting_date = posting_date
-        se.set_posting_time = 1
+    # ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"). Date-only is
+    # the legacy shape and still leaves ``posting_time`` untouched.
+    apply_stock_posting_datetime(se, posting_date)
 
     for ln in lines:
         if not isinstance(ln, dict):

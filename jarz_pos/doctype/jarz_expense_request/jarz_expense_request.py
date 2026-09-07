@@ -188,7 +188,42 @@ class JarzExpenseRequest(Document):
             _strip_je_tag_lookalikes(self.remarks)
             or _("Expense {0}").format(self.name)
         )
-        je.set_posting_time = 1
+        # `je.set_posting_time = 1` used to sit here and did nothing at all.
+        # That flag only unlocks a `posting_time` field, and ERPNext's Journal
+        # Entry has none — neither do Payment Entry and GL Entry. The general
+        # ledger is DATE-granular: two entries on the same day have no defined
+        # order, whatever time the requester picked, so the flag was a no-op that
+        # read as though the choice had been honoured.
+        #
+        # The chosen time is recorded on `custom_jarz_posting_time` instead
+        # (seeded by utils.cleanup.ensure_posting_time_fields in before_migrate).
+        # It is provenance for the app's own expense-history screens — "who spent
+        # what, when" — NOT ledger ordering, and nothing in accounting reads it.
+        # `expense_date` above remains the only thing deciding where this lands
+        # in the books, and via `expense_month` which month it is filed under.
+        #
+        # Routed through utils.posting_datetime rather than assigned by hand, so
+        # this doctype and every other ledger writer share ONE definition of the
+        # field and ONE existence guard (`frappe.get_meta(dt).get_field(...)`, in
+        # `_ledger_time_field_exists`). Two things that would otherwise be
+        # re-implemented here and get silently wrong: a `Time` column comes back
+        # from the DB as a `datetime.timedelta`, not a string; and a site that has
+        # not migrated since this release must still post the expense, with the
+        # dropped time LOGGED rather than swallowed.
+        #
+        # `getattr` on the read side because a Document only carries attributes
+        # for fields in its meta: plain `self.expense_time` would raise
+        # AttributeError before the DocType has synced, turning a missing display
+        # field into a failed expense.
+        from jarz_pos.utils.posting_datetime import (
+            apply_ledger_posting_datetime,
+            join_posting_datetime,
+        )
+
+        apply_ledger_posting_datetime(
+            je,
+            join_posting_datetime(self.expense_date, getattr(self, "expense_time", None)),
+        )
 
         amount = flt(self.amount)
         je.append(

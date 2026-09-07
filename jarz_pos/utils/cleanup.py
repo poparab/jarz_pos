@@ -418,6 +418,73 @@ def ensure_journal_entry_tag_field() -> None:
         _log(f"ensure_journal_entry_tag_field failed: {e}")
 
 
+#: The ledger documents that carry a Jarz-chosen posting time. Verified on
+#: staging: neither ``tabJournal Entry`` nor ``tabPayment Entry`` nor
+#: ``tabGL Entry`` has a ``posting_time`` field or column — only stock-bearing
+#: documents (Sales Invoice, Stock Entry, Delivery Note) do. So for these two
+#: there is nowhere in core to put the time the user picked.
+_POSTING_TIME_DOCTYPES = ("Journal Entry", "Payment Entry")
+
+#: One definition, seeded onto both doctypes, so they cannot drift apart.
+_POSTING_TIME_DESCRIPTION = (
+    "Written by Jarz POS only. ERPNext's Journal Entry, Payment Entry and GL "
+    "Entry carry no posting_time field, so the general ledger is ordered by "
+    "posting_date alone. This records the time the user chose in the Jarz POS "
+    "app, for display and audit only — it does NOT affect GL ordering, "
+    "balances, or any report that reads the ledger. Empty on entries Jarz POS "
+    "did not post."
+)
+
+
+def ensure_posting_time_fields() -> None:
+    """Ensure ``custom_jarz_posting_time`` exists on Journal Entry and Payment Entry.
+
+    POS users pick a posting date **and** a time. The date lands on the core
+    ``posting_date``; the time has nowhere to go, because ERPNext's ledger
+    documents have no ``posting_time`` — Journal Entry, Payment Entry and GL
+    Entry were all checked on staging and none has the field or the column.
+    Setting ``set_posting_time = 1`` on such a document is therefore a no-op,
+    not a fix: there is no field for that flag to unlock. This field is where
+    the chosen time is actually kept.
+
+    Created **here**, in ``before_migrate``, not by a fixture, for the same
+    reason as :func:`ensure_journal_entry_tag_field`: fixtures sync at the very
+    END of ``bench migrate``, while the freshly deployed code that writes this
+    field is already serving requests. A fixture would leave a window in which
+    every write silently went nowhere.
+
+    ``no_copy`` is deliberate: an amended entry describes the same money moving,
+    but the time on the original describes when the ORIGINAL event was recorded.
+    Copying it forward would attach a timestamp to an entry that was not posted
+    then, and the app's history screens would show it as fact.
+
+    Deliberately **not** ``read_only``, unlike ``custom_jarz_je_tag``. That tag
+    is machine provenance nobody should ever type; this is user-meaningful data
+    the operator entered by hand and may well have entered wrong, so a manager
+    must be able to correct it in Desk. Making it read-only would mean the only
+    route to a fix is a developer, for a field that changes nothing in the
+    ledger.
+    """
+    try:
+        if not frappe:
+            return
+
+        for dt in _POSTING_TIME_DOCTYPES:
+            _ensure_custom_field(
+                dt=dt,
+                fieldname="custom_jarz_posting_time",
+                label="Jarz Posting Time",
+                fieldtype="Time",
+                insert_after="posting_date",
+                description=_POSTING_TIME_DESCRIPTION,
+                no_copy=1,
+                print_hide=1,
+                translatable=0,
+            )
+    except Exception as e:  # pragma: no cover - defensive, matches siblings
+        _log(f"ensure_posting_time_fields failed: {e}")
+
+
 def ensure_tracking_fields() -> None:
     """Ensure the customer-tracking token exists on Sales Invoice.
 

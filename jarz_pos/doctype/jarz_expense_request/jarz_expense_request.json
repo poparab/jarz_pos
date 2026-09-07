@@ -7,6 +7,7 @@
  "editable_grid": 0,
  "track_changes": 1,
  "track_seen": 1,
+ "modified": "2026-09-08 00:00:00.000000",
  "sort_field": "modified",
  "sort_order": "DESC",
  "naming_rule": "Naming Series",
@@ -21,6 +22,7 @@
  "field_order": [
   "naming_series",
   "expense_date",
+  "expense_time",
   "amount",
   "currency",
   "section_break_details",
@@ -65,6 +67,12 @@
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1
+  },
+  {
+   "fieldname": "expense_time",
+   "fieldtype": "Time",
+   "label": "Expense Time",
+   "description": "Time of day the money moved, as picked in the Jarz POS app. Optional: every row filed before this field existed has none, and expense_month is derived from expense_date alone, so the ledger is unaffected either way."
   },
   {
    "fieldname": "amount",

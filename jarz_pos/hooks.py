@@ -69,6 +69,18 @@ before_migrate = [
     # patch needed it, so the patch would throw and every pre-existing tagged
     # entry would stay invisible to its own idempotency guard.
     "jarz_pos.utils.cleanup.ensure_journal_entry_tag_field",
+    # Journal Entry / Payment Entry posting TIME. Also before_migrate, and for
+    # the same reason as the tag above: fixtures sync at the very end of a
+    # migrate, while the freshly deployed code that writes this field is already
+    # serving. Neither doctype (nor GL Entry) has a core posting_time, so
+    # without this the time the POS user picked has nowhere to land and the
+    # write is dropped in silence.
+    #
+    # Like every seeder in this block, it must stay AFTER
+    # remove_colliding_custom_fields_for_fixtures: that sweep deletes any Custom
+    # Field whose name differs from the fixture's, so seeding first would only
+    # hand it something to delete.
+    "jarz_pos.utils.cleanup.ensure_posting_time_fields",
     # Ensure Territory has delivery_income and delivery_expense fields
     "jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
     # Ensure new delivery slot fields exist before fixtures import / migrations

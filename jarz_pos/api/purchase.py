@@ -6,6 +6,10 @@ from typing import List, Dict, Any, Optional
 
 from jarz_pos.constants import ACCOUNTS, PAYMENT_MODES, PRICE_LISTS, ROLES
 from jarz_pos.utils.warehouse_utils import resolve_purchase_warehouse
+from jarz_pos.utils.posting_datetime import (
+    apply_ledger_posting_datetime,
+    apply_stock_posting_datetime,
+)
 
 STANDARD_BUYING = PRICE_LISTS.STANDARD_BUYING
 
@@ -623,9 +627,11 @@ def create_purchase_invoice(
     pi.cash_bank_account = None
     pi.company = resolved_company
     pi.supplier = supplier
-    if posting_date:
-        pi.posting_date = posting_date
-        pi.set_posting_time = 1
+    # ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"); a date-only
+    # value behaves exactly as before. The time matters here beyond bookkeeping
+    # because update_stock=1 makes this invoice a stock movement, and valuation
+    # orders movements within a day by posting_time.
+    apply_stock_posting_datetime(pi, posting_date)
     pi.update_stock = 1
     if idempotency_key:
         pi.custom_jarz_idempotency_key = idempotency_key
@@ -1163,8 +1169,9 @@ def pay_purchase_invoice(
         bank_account=account,
     )
     pe.mode_of_payment = mode
-    if posting_date:
-        pe.posting_date = posting_date
+    # Payment Entry has no posting_time column, so a time suffix on
+    # ``posting_date`` is recorded in custom_jarz_posting_time instead.
+    apply_ledger_posting_datetime(pe, posting_date)
     pe.flags.ignore_permissions = True
     pe.insert()
     pe.submit()
@@ -1216,9 +1223,8 @@ def return_purchase_invoice(
     from erpnext.controllers.sales_and_purchase_return import make_return_doc
 
     ret = make_return_doc("Purchase Invoice", purchase_invoice)
-    if posting_date:
-        ret.posting_date = posting_date
-        ret.set_posting_time = 1
+    # Optional time suffix, same contract as the purchase itself.
+    apply_stock_posting_datetime(ret, posting_date)
     if reason:
         ret.remarks = reason
 

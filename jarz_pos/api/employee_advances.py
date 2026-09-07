@@ -80,6 +80,11 @@ from jarz_pos.utils.employee_link import (
     hrms_available,
     list_active_employees,
 )
+from jarz_pos.utils.posting_datetime import (
+    apply_ledger_posting_datetime,
+    join_posting_datetime,
+    split_posting_datetime,
+)
 
 # ── The jarz_pos-owned columns on Employee Advance ───────────────────────────
 # Seeded by ``jarz_pos.setup.employee_link_setup.ensure_employee_link_fields``.
@@ -101,6 +106,18 @@ JARZ_FIELDS = (
     F_APPROVED_ON,
     F_PAYMENT_ENTRY,
 )
+
+#: The time of day the requester chose, parked on the advance between the
+#: request and the payout. Employee Advance has `posting_date` and no
+#: `posting_time` — same shape as Journal Entry and Payment Entry — so the same
+#: fieldname `utils.cleanup` seeds on those two is reused here and read through
+#: `utils.posting_datetime`.
+#:
+#: Deliberately NOT in ``JARZ_FIELDS``: that tuple feeds the list query whose
+#: serialized shape is a fixed contract the Flutter model is generated from.
+#: This value is internal plumbing between two requests, not something the
+#: client reads back.
+F_POSTING_TIME = "custom_jarz_posting_time"
 
 #: Columns read straight off ``Employee Advance``. ``status`` is READ-ONLY and
 #: derived by ``EmployeeAdvance.set_status()`` — it is read, never written.
@@ -933,7 +950,18 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
     if pos_profile and not frappe.db.exists("POS Profile", pos_profile):
         frappe.throw(_("POS Profile {0} does not exist.").format(pos_profile))
 
-    posting_date = str(data.get("posting_date") or "").strip() or today()
+    # ``posting_date`` may now carry a time ("YYYY-MM-DD HH:MM:SS"). It MUST be
+    # split before it reaches the document: Employee Advance's ``posting_date``
+    # is a Date column, and handing it a datetime string fails the insert.
+    #
+    # The time cannot simply be discarded either, and it cannot go on the
+    # Payment Entry here — there is no Payment Entry yet. Filing the request and
+    # releasing the cash are two separate calls (see `approve_employee_advance`),
+    # so the chosen time is parked on the advance and picked up there.
+    posting_date, posting_time = split_posting_datetime(
+        str(data.get("posting_date") or "").strip()
+    )
+    posting_date = posting_date or today()
 
     # ``currency`` is reqd on Employee Advance and normally fetched from
     # ``employee.salary_currency``. Plenty of Employee records here have that
@@ -960,6 +988,9 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
         F_PAYING_ACCOUNT: paying_account,
         F_POS_PROFILE: pos_profile or None,
         F_REQUESTED_BY: frappe.session.user,
+        # None on a date-only request, which leaves the Time field empty rather
+        # than claiming midnight.
+        F_POSTING_TIME: posting_time,
     }
     for fieldname, value in stamps.items():
         if _advance_has_field(fieldname):
@@ -1022,6 +1053,26 @@ def _build_and_submit_payment_entry(advance: Any, paying_account: str) -> Any:
             mode_of_payment = _mode_of_payment_for_account(advance.company, paying_account)
             if mode_of_payment:
                 pe.mode_of_payment = mode_of_payment
+
+        # The moment the requester chose, if they chose one. Payment Entry has
+        # no posting_time column, so the time lands on custom_jarz_posting_time
+        # and the date comes along with it.
+        #
+        # Gated on a time actually having been stored, and that is the whole
+        # point of the condition: for every request that names only a date —
+        # which is every request until the mobile patch ships, and every legacy
+        # one after — the Payment Entry keeps the posting date ERPNext's builder
+        # gave it (today, the day the cash was handed over). Applying the
+        # advance's date unconditionally would silently start backdating payouts
+        # that have always posted on the approval day.
+        #
+        # A `Time` column comes back from the database as a `datetime.timedelta`;
+        # `join_posting_datetime` is what knows that.
+        chosen_time = advance.get(F_POSTING_TIME) if _advance_has_field(F_POSTING_TIME) else None
+        if chosen_time:
+            apply_ledger_posting_datetime(
+                pe, join_posting_datetime(advance.posting_date, chosen_time)
+            )
 
         pe.flags.ignore_permissions = True
         pe.insert(ignore_permissions=True)

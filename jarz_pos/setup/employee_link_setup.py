@@ -169,6 +169,30 @@ ADVANCE_FIELDS: List[Dict[str, Any]] = [
         "module": "jarz pos",
         "description": "Payment Entry that actually moved the cash out of the branch account.",
     },
+    {
+        "fieldname": "custom_jarz_posting_time",
+        "label": "Jarz Posting Time",
+        "fieldtype": "Time",
+        "insert_after": "custom_jarz_payment_entry",
+        "module": "jarz pos",
+        # Employee Advance is a ledger document: it has `posting_date` and no
+        # `posting_time`, exactly like Journal Entry and Payment Entry. Same
+        # fieldname as the one utils.cleanup seeds on those two, because it
+        # carries the same thing and utils.posting_datetime reads it by one
+        # constant.
+        #
+        # It exists here, on the ADVANCE, because the request and the payout are
+        # two separate HTTP calls: the operator picks the moment when filing the
+        # request, and the Payment Entry that spends the money is not built until
+        # a manager approves it. Without somewhere to park it in between, the
+        # chosen time has nowhere to survive and the payout falls back to the
+        # wall clock of whenever approval happened to be tapped.
+        "description": (
+            "Time of day the requester chose for this advance. Employee Advance "
+            "has no posting_time column; this carries the choice to the Payment "
+            "Entry raised at approval."
+        ),
+    },
 ]
 
 

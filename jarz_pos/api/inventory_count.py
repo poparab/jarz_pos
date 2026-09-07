@@ -7,6 +7,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, getdate, strip_html
 from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
+from jarz_pos.utils.posting_datetime import apply_stock_posting_datetime
 
 
 def _ensure_manager_access() -> None:
@@ -741,7 +742,9 @@ def submit_reconciliation(
         if wh_company:
             sr.company = wh_company
         if posting_date:
-            sr.posting_date = posting_date
+            # ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"); a
+            # date-only value keeps behaving exactly as it did before.
+            apply_stock_posting_datetime(sr, posting_date)
         else:
             from frappe.utils import today
             sr.posting_date = today()

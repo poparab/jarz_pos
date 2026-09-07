@@ -10,6 +10,7 @@ from frappe.utils import flt, formatdate, getdate, now_datetime
 
 from jarz_pos.api.pos import get_pos_profiles
 from jarz_pos.constants import ACCOUNTS, ROLES, STATUS
+from jarz_pos.utils.posting_datetime import split_posting_datetime
 
 
 @dataclass
@@ -628,7 +629,15 @@ def create_expense(payload: Optional[str] = None, **kwargs):
     if not reason_account:
         frappe.throw(_("Reason (expense account) is required."))
 
-    expense_date = data.get("expense_date") or formatdate(getdate(), "yyyy-MM-dd")
+    # ``expense_date`` may now arrive as "YYYY-MM-DD HH:MM:SS". It has to be
+    # split rather than passed through whole: ``Jarz Expense Request.expense_date``
+    # is a Date field and ``expense_month`` is derived from it with
+    # ``getdate(...).strftime("%Y-%m")``, so the filing month must not depend on
+    # the time of day. The time goes to the sibling ``expense_time`` field, which
+    # ``on_submit`` carries onto the Journal Entry's custom_jarz_posting_time.
+    expense_date, expense_time = split_posting_datetime(
+        data.get("expense_date") or formatdate(getdate(), "yyyy-MM-dd")
+    )
     remarks = data.get("remarks")
 
     is_manager = _is_manager()
@@ -662,6 +671,9 @@ def create_expense(payload: Optional[str] = None, **kwargs):
         {
             "doctype": "Jarz Expense Request",
             "expense_date": expense_date,
+            # ``None`` when the caller named no time — an empty Time field, not
+            # midnight, so a date-only request records no claim about the hour.
+            "expense_time": expense_time,
             "amount": amount,
             "reason_account": reason_account,
             "paying_account": paying_account,

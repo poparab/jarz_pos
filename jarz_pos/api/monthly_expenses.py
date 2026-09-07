@@ -57,6 +57,7 @@ from jarz_pos.api.recurring_expenses import (
     _month_bounds,
     _payroll_expense_accounts,
 )
+from jarz_pos.utils.posting_datetime import split_posting_datetime
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -1354,11 +1355,17 @@ def _create_payment(
     payment_label = (
         frappe.db.get_value("Account", paying_account, "account_name") or paying_account
     )
+    # ``payment_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"). Split it: the
+    # date half decides ``expense_month`` (and so which month this payment is
+    # reported in), which must never depend on the hour; the time half is
+    # provenance, carried by ``on_submit`` onto the Journal Entry.
+    expense_date, expense_time = split_posting_datetime(payment_date or today())
     doc = frappe.get_doc(
         {
             "doctype": "Jarz Expense Request",
             "company": company,
-            "expense_date": payment_date or today(),
+            "expense_date": expense_date,
+            "expense_time": expense_time,
             "amount": flt(amount),
             "reason_account": reason_account,
             "paying_account": paying_account,
