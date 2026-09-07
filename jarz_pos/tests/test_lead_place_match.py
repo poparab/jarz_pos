@@ -206,6 +206,38 @@ class TestMatching(unittest.TestCase):
         self.assertFalse(result["matched"])
 
 
+class TestAMatchMustBeAbleToNameItsLead(unittest.TestCase):
+    """A match nobody can name still prefills the form. That is the danger."""
+
+    def test_an_orphaned_branch_row_is_not_reported_as_a_match(self):
+        # The branch's parent Lead is gone, so `lead` would come back "". The
+        # client suppresses the duplicate banner when it cannot name the lead,
+        # while the caller still copies that row's phone and website into the
+        # new form -- so the rep saves a NEW lead wearing another one's contacts.
+        orphan = {"parent": "LEAD-GONE", "branch_name": "Ghost", "phone": "+20 1"}
+        index = {
+            "by_cid": {"42": {"lead": None, "branch": {"branch_name": "Ghost"}}},
+            "by_lead": {},
+            "points": [
+                (30.05, 31.20, "", match_mod.normalise_name("Ghost"), orphan)
+            ],
+        }
+
+        with patch.object(match_mod, "index", return_value=index):
+            by_cid = match_mod.match(url="https://maps.google.com/?cid=42")
+            by_name = match_mod.match(
+                url="https://www.google.com/maps/place/Ghost/@30.05,31.20,17z",
+                latitude=30.05,
+                longitude=31.20,
+                place_name="Ghost",
+            )
+
+        self.assertFalse(by_cid["matched"])
+        self.assertEqual(by_cid["known"], {})
+        self.assertFalse(by_name["matched"])
+        self.assertEqual(by_name["known"], {})
+
+
 class TestSchemaResilience(unittest.TestCase):
     def test_columns_are_filtered_against_the_live_schema_before_selecting(self):
         # Code deploys before `bench migrate` finishes. A SELECT naming a column

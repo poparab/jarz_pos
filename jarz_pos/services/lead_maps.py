@@ -705,6 +705,41 @@ def request_preview(
     return _enqueue_preview(original, owner)
 
 
+def _degraded(
+    original: str,
+    initial: dict[str, Any] | None,
+    *,
+    is_short: bool,
+    reason: str,
+    warning: str,
+) -> dict[str, Any]:
+    """Answer with what we already know when the background pass cannot run.
+
+    For a LONG link ``initial`` is a complete preview -- pin, area vote, catalog
+    match -- computed synchronously before we ever tried to queue anything. The
+    job would only have ADDED an OSM address. Returning ``success: False``
+    because that optional extra could not be scheduled is a real loss: the
+    client treats a failed preview as terminal (it only imports on ``success``
+    and keeps no point), so the lead is saved with no coordinates at all.
+
+    For a SHORT link there is no ``initial`` -- the URL has not been expanded --
+    and a failure genuinely is a failure, so the old shape stands.
+    """
+    if initial:
+        result = dict(initial)
+        result["pending"] = False
+        result["reason"] = reason
+        result["warnings"] = list(result.get("warnings") or []) + [warning]
+        return result
+    return _base(
+        original,
+        success=False,
+        short_link=is_short,
+        reason=reason,
+        warnings=[warning],
+    )
+
+
 def _enqueue_preview(
     original: str,
     owner: str,
@@ -722,12 +757,12 @@ def _enqueue_preview(
         if current.get("reason") != "request_expired":
             return current
     if not _consume_enqueue_budget(owner):
-        return _base(
+        return _degraded(
             original,
-            success=False,
-            short_link=is_short,
+            initial,
+            is_short=is_short,
             reason="preview_rate_limited",
-            warnings=["Too many map previews; keep the link or try again shortly."],
+            warning="Too many map previews; the address was not looked up.",
         )
 
     token = frappe.generate_hash(length=32)
@@ -740,11 +775,12 @@ def _enqueue_preview(
     if not _cache_set(_ticket_key(token), ticket) or not _cache_set(
         dedupe, {"request_id": token}, DEDUPE_TTL_SEC
     ):
-        return _base(
+        return _degraded(
             original,
-            success=False,
-            short_link=is_short,
+            initial,
+            is_short=is_short,
             reason="preview_unavailable",
+            warning="Could not schedule the address lookup.",
         )
     try:
         frappe.enqueue(
@@ -757,12 +793,12 @@ def _enqueue_preview(
             user=owner,
         )
     except Exception:
-        failed = _base(
+        failed = _degraded(
             original,
-            success=False,
-            short_link=is_short,
+            initial,
+            is_short=is_short,
             reason="queue_unavailable",
-            warnings=["Could not inspect this link; it can still be saved manually."],
+            warning="Could not inspect this link; it can still be saved manually.",
         )
         ticket["result"] = failed
         _cache_set(_ticket_key(token), ticket)
@@ -803,6 +839,13 @@ def resolve_preview_job(request_id: str, link: str, user: str) -> dict[str, Any]
         result = _preview_canonical(
             original, expanded, include_place_details=True
         )
+        # Publish what we have BEFORE reaching for the address. The client polls
+        # for 7.5s total; expansion can take 5s and Nominatim another 6, so
+        # waiting for an optional extra before answering pushes a preview that
+        # was ready past the poll window and the rep loses the pin. The second
+        # write below upgrades the same ticket if OSM answers in time.
+        ticket["result"] = result
+        _cache_set(_ticket_key(token), ticket)
         _enrich_with_osm(result)
     else:
         result = _base(

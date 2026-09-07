@@ -41,8 +41,11 @@ NOMINATIM_CAFE = {
 
 
 class _Cache:
+    """Redis stand-in with real SET NX semantics -- the gate depends on them."""
+
     def __init__(self):
         self.values = {}
+        self.atomic = {}
 
     def set_value(self, key, value, **_kwargs):
         self.values[key] = value
@@ -52,6 +55,12 @@ class _Cache:
 
     def make_key(self, key):
         return key
+
+    def set(self, key, value, nx=False, **_kwargs):
+        if nx and key in self.atomic:
+            return None
+        self.atomic[key] = value
+        return True
 
 
 class _NoCache:
@@ -65,6 +74,9 @@ class _NoCache:
 
     def make_key(self, key):
         return key
+
+    def set(self, *_a, **_k):
+        raise RuntimeError("redis down")
 
 
 class TestReverseMapping(unittest.TestCase):
@@ -182,11 +194,35 @@ class TestUsagePolicy(unittest.TestCase):
         cache = _Cache()
         with patch.object(osm_places, "enabled", return_value=True), patch.object(
             osm_places.frappe, "cache", return_value=cache
-        ), patch.object(osm_places, "_request", side_effect=OSError("timeout")):
+        ), patch.object(
+            osm_places, "_request", side_effect=OSError("timeout")
+        ), patch.object(osm_places, "_note_failure"):
             self.assertEqual(osm_places.reverse(*CAIRO), {})
 
         stored = [k for k in cache.values if k.startswith("jarz_pos:osm:reverse:3")]
         self.assertEqual(stored, [], "a failure must not be cached as an answer")
+
+    def test_a_failing_lookup_is_logged_once_an_hour_not_once_per_lead(self):
+        # Every path here swallows its exception, so without a log a Nominatim
+        # block would present as "addresses quietly stopped filling". Throttled,
+        # because a busy day must not fill the error log with one outage.
+        cache = _Cache()
+        with patch.object(osm_places.frappe, "cache", return_value=cache), patch.object(
+            osm_places.frappe, "log_error"
+        ) as log_error, patch.object(
+            osm_places.frappe, "get_traceback", return_value="boom"
+        ):
+            osm_places._note_failure()
+            osm_places._note_failure()
+            osm_places._note_failure()
+
+        self.assertEqual(log_error.call_count, 1)
+
+    def test_a_logger_that_itself_raises_cannot_break_the_lookup(self):
+        with patch.object(osm_places.frappe, "cache", return_value=_Cache()), patch.object(
+            osm_places.frappe, "log_error", side_effect=RuntimeError("db gone")
+        ), patch.object(osm_places.frappe, "get_traceback", return_value="boom"):
+            osm_places._note_failure()  # must not raise
 
     def test_a_cached_empty_answer_is_honoured_rather_than_retried(self):
         cache = _Cache()
@@ -220,6 +256,97 @@ class TestUsagePolicy(unittest.TestCase):
         # Nominatim's policy requires it; an anonymous agent gets blocked.
         with patch.object(osm_places.frappe, "conf", {}):
             self.assertIn("jarz", osm_places._user_agent().lower())
+
+class TestRateSlotIsAtomic(unittest.TestCase):
+    """Two workers entering in the same millisecond must not both get through."""
+
+    def test_only_one_of_two_simultaneous_workers_claims_the_slot(self):
+        # A read-compare-write gate passes both; SET NX passes exactly one.
+        cache = _Cache()
+        with patch.object(osm_places.frappe, "cache", return_value=cache):
+            first = osm_places._claim_rate_slot()
+            second = osm_places._claim_rate_slot()
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+
+    def test_the_claim_is_bounded_so_the_slot_frees_itself(self):
+        recorded = {}
+
+        class _Recording(_Cache):
+            def set(self, key, value, nx=False, **kwargs):
+                recorded.update(kwargs)
+                return super().set(key, value, nx=nx)
+
+        with patch.object(osm_places.frappe, "cache", return_value=_Recording()):
+            osm_places._claim_rate_slot()
+
+        self.assertEqual(recorded.get("px"), osm_places.MIN_INTERVAL_MS)
+
+
+class TestEnvironmentIdentity(unittest.TestCase):
+    def test_staging_and_production_do_not_present_as_one_application(self):
+        # Both sites are named `frontend` (staging is an AMI clone), and each
+        # has its own Redis -- so the 1/sec gate is per environment. If the UA
+        # were one constant, Nominatim would see 2 req/s from one application.
+        def agent_for(host):
+            with patch.object(osm_places.frappe, "conf", {}), patch(
+                "frappe.utils.get_url", return_value="https://" + host
+            ):
+                return osm_places._user_agent()
+
+        production = agent_for("erp.orderjarz.com")
+        staging = agent_for("erpstg.orderjarz.com")
+
+        self.assertNotEqual(production, staging)
+        self.assertIn("erp.orderjarz.com", production)
+        self.assertIn("erpstg.orderjarz.com", staging)
+        self.assertIn("jarz", staging.lower())
+
+    def test_an_explicit_agent_in_site_config_always_wins(self):
+        with patch.object(
+            osm_places.frappe, "conf", {"osm_user_agent": "custom-agent/2.0"}
+        ):
+            self.assertEqual(osm_places._user_agent(), "custom-agent/2.0")
+
+
+class TestEmptyAnswersAreNotCachedForAMonth(unittest.TestCase):
+    def test_an_empty_result_gets_the_short_ttl(self):
+        # Nominatim reports "unable to geocode" as a 200 with an error body,
+        # which is indistinguishable from a transient upstream problem.
+        seen = {}
+
+        class _Recording(_Cache):
+            def set_value(self, key, value, **kwargs):
+                seen[key] = kwargs.get("expires_in_sec")
+                super().set_value(key, value)
+
+        cache = _Recording()
+        with patch.object(osm_places, "enabled", return_value=True), patch.object(
+            osm_places.frappe, "cache", return_value=cache
+        ), patch.object(osm_places, "_request", return_value={"error": "nope"}):
+            osm_places.reverse(*CAIRO)
+
+        ttl = seen.get(osm_places._cache_key(*CAIRO))
+        self.assertEqual(ttl, osm_places.EMPTY_CACHE_TTL_SEC)
+        self.assertLess(ttl, osm_places.CACHE_TTL_SEC)
+
+    def test_a_real_answer_still_gets_the_long_ttl(self):
+        seen = {}
+
+        class _Recording(_Cache):
+            def set_value(self, key, value, **kwargs):
+                seen[key] = kwargs.get("expires_in_sec")
+                super().set_value(key, value)
+
+        with patch.object(osm_places, "enabled", return_value=True), patch.object(
+            osm_places.frappe, "cache", return_value=_Recording()
+        ), patch.object(osm_places, "_request", return_value=NOMINATIM_CAFE):
+            osm_places.reverse(*CAIRO)
+
+        self.assertEqual(
+            seen.get(osm_places._cache_key(*CAIRO)), osm_places.CACHE_TTL_SEC
+        )
 
 
 if __name__ == "__main__":

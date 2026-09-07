@@ -312,11 +312,14 @@ def match(
         if hit:
             lead = hit.get("lead") or {}
             branch = hit.get("branch") or {}
+            name = lead.get("name") or (branch.get("parent") if branch else "") or ""
+            if not name:
+                return miss
             return {
                 "matched": True,
                 "how": "cid",
                 "confidence": "exact",
-                "lead": lead.get("name") or (branch.get("parent") if branch else ""),
+                "lead": name,
                 "branch_name": branch.get("branch_name") or "",
                 "distance_m": 0,
                 "known": _known_fields(lead, branch),
@@ -348,11 +351,19 @@ def match(
 
     lead_key, branch = best
     lead = data["by_lead"].get(lead_key) or {}
+    name = lead.get("name") or lead_key
+    if not name:
+        # An orphaned branch row (its parent Lead is gone) would otherwise be a
+        # match with an empty `lead`. The client suppresses the duplicate banner
+        # when it cannot name the lead, but the caller still prefills that row's
+        # phone and website -- so the rep would silently save a NEW lead wearing
+        # another one's contact details. No name, no match.
+        return miss
     return {
         "matched": True,
         "how": "proximity",
         "confidence": "likely",
-        "lead": lead.get("name") or lead_key,
+        "lead": name,
         "branch_name": (branch or {}).get("branch_name") or "",
         "distance_m": round(best_distance),
         "known": _known_fields(lead, branch),

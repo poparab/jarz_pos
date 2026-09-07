@@ -386,3 +386,100 @@ class TestCatalogAndOsmEnrichment(unittest.TestCase):
 
     def test_nothing_is_queued_for_a_link_that_never_resolved_a_pin(self):
         self.assertFalse(lead_maps._needs_lookup(lead_maps._base("x", resolved=False)))
+
+
+class TestBackgroundPassNeverCostsTheForeground(unittest.TestCase):
+    """Regressions found in review: the optional extra must stay optional."""
+
+    LINK = (
+        "https://www.google.com/maps/place/Cilantro/"
+        "data=!4m2!3d30.0538921!4d31.2013923"
+    )
+
+    def _initial(self):
+        return lead_maps._base(
+            self.LINK,
+            resolved=True,
+            latitude=30.0538921,
+            longitude=31.2013923,
+            primary_area="Mohandessin",
+            suggestions={"maps_url": self.LINK, "latitude": 30.0538921},
+        )
+
+    def test_a_rate_limited_lookup_keeps_the_pin_it_already_had(self):
+        # The 9th paste in a minute used to come back success=False, and the
+        # client treats that as terminal -- so the lead saved with NO location
+        # even though the backend had the coordinates in hand.
+        initial = self._initial()
+        with patch.object(lead_maps, "_cache_get", return_value={}), patch.object(
+            lead_maps, "_consume_enqueue_budget", return_value=False
+        ):
+            result = lead_maps._enqueue_preview(self.LINK, "rep@jarz", initial=initial)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["latitude"], 30.0538921)
+        self.assertEqual(result["primary_area"], "Mohandessin")
+        self.assertFalse(result["pending"])
+        self.assertEqual(result["reason"], "preview_rate_limited")
+        self.assertTrue(result["warnings"])
+
+    def test_a_dead_queue_keeps_the_pin_too(self):
+        initial = self._initial()
+        with patch.object(lead_maps, "_cache_get", return_value={}), patch.object(
+            lead_maps, "_consume_enqueue_budget", return_value=True
+        ), patch.object(lead_maps, "_cache_set", return_value=True), patch.object(
+            lead_maps.frappe, "generate_hash", return_value="a" * 32
+        ), patch.object(
+            lead_maps.frappe, "enqueue", side_effect=RuntimeError("no redis")
+        ):
+            result = lead_maps._enqueue_preview(self.LINK, "rep@jarz", initial=initial)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["latitude"], 30.0538921)
+        self.assertEqual(result["reason"], "queue_unavailable")
+
+    def test_a_short_link_with_nothing_computed_still_reports_failure(self):
+        # No `initial` means the URL was never expanded: there is genuinely
+        # nothing to hand back, and pretending otherwise would be worse.
+        with patch.object(lead_maps, "_cache_get", return_value={}), patch.object(
+            lead_maps, "_consume_enqueue_budget", return_value=False
+        ):
+            result = lead_maps._enqueue_preview(
+                "https://maps.app.goo.gl/abc", "rep@jarz"
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["reason"], "preview_rate_limited")
+
+    def test_the_ticket_is_published_before_the_address_lookup_runs(self):
+        # The client polls for 7.5s; expansion can take 5s and Nominatim 6 more.
+        # Waiting for the optional extra pushed a ready preview past the window.
+        published = []
+
+        def record(key, value, ttl=None):
+            result = (value or {}).get("result")
+            published.append(dict(result) if isinstance(result, dict) else None)
+            return True
+
+        canonical = lead_maps._base(
+            self.LINK, resolved=True, latitude=30.05, longitude=31.20
+        )
+        with patch.object(
+            lead_maps,
+            "_cache_get",
+            return_value={"user": "rep@jarz", "canonical_url": self.LINK},
+        ), patch.object(lead_maps, "_cache_set", side_effect=record), patch.object(
+            lead_maps, "_preview_canonical", return_value=canonical
+        ), patch.object(
+            lead_maps, "_enrich_with_osm"
+        ) as enrich:
+            lead_maps.resolve_preview_job("b" * 32, self.LINK, "rep@jarz")
+
+        self.assertTrue(
+            published and published[0] is not None,
+            "a usable result must be published before the address lookup",
+        )
+        self.assertTrue(published[0]["resolved"])
+        enrich.assert_called_once()
+
