@@ -2215,6 +2215,35 @@ def _finalise_fcm_send_result(result: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _is_android_target(platform: Optional[str]) -> bool:
+    return (platform or "").strip().lower() == "android"
+
+
+def _get_platforms_for_tokens(tokens: Sequence[str]) -> Dict[str, str]:
+    """Map each token to the platform its row was registered under.
+
+    Needed because the Android message has to be shaped differently from the
+    web/iOS one -- see the comment on the notification block in
+    _send_fcm_notifications. A token with no row (or a failed lookup) maps to
+    nothing, which keeps the previous, notification-carrying shape.
+    """
+    if not tokens:
+        return {}
+
+    try:
+        rows = frappe.get_all(
+            "Jarz Mobile Device",
+            filters={"token": ["in", list(tokens)]},
+            fields=["token", "platform"],
+            limit_page_length=0,
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Failed to resolve device platforms")
+        return {}
+
+    return {r.get("token"): r.get("platform") for r in rows if r.get("token")}
+
+
 def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any]) -> Dict[str, Any]:
     """Send FCM push notifications using Firebase Admin SDK (V1 API)."""
     result = _new_fcm_send_result(tokens)
@@ -2275,6 +2304,8 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
 
         webpush_config = _build_webpush_config(data, title, body)
 
+        platforms = _get_platforms_for_tokens(batch_tokens)
+
         # Send to each token and keep per-token accounting for partial failures.
         messages = []
         for token in batch_tokens:
@@ -2283,7 +2314,27 @@ def _send_fcm_notifications(tokens: Sequence[str], data_payload: Dict[str, Any])
                 "android": messaging.AndroidConfig(**android_config_kwargs),
                 "token": token,
             }
-            if notification is not None:
+            # Android gets the payload DATA-ONLY, on purpose.
+            #
+            # When an FCM message carries a `notification` block and the app is
+            # backgrounded or killed, the Android SDK renders the tray entry
+            # itself and never calls JarzFirebaseMessagingService
+            # .onMessageReceived. That service is the ONLY path that starts the
+            # order alarm on Android (Dart passes triggerNativeEffects:false
+            # there) and the only one that draws the real alert notification.
+            # So the alarm rang in the foreground and nowhere else: a closed
+            # tablet showed a plain tray line with no sound and no full-screen
+            # intent, which is exactly the "alerts don't reach the branch"
+            # report. Dropping the block makes the message data-only, so
+            # onMessageReceived runs for a killed app too and startAlarm +
+            # showNotification behave the same whatever the app was doing.
+            # priority=high (set above) is what keeps a data-only message
+            # prompt in Doze. A FORCE-STOPPED app still receives nothing --
+            # that is an OS rule, not something this can reach.
+            #
+            # Web and iOS keep the notification block: the service worker and
+            # APNs need it to display anything.
+            if notification is not None and not _is_android_target(platforms.get(token)):
                 message_kwargs["notification"] = notification
             if webpush_config is not None:
                 message_kwargs["webpush"] = webpush_config

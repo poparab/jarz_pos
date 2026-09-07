@@ -218,5 +218,82 @@ class TestDisabledTokenIsAnnounced(unittest.TestCase):
         self.assertFalse(self.frappe.log_error.called)
 
 
+class TestAndroidGetsDataOnlyMessages(unittest.TestCase):
+    """The closed-tablet half of the same 2026-09-07 report.
+
+    An FCM message carrying a ``notification`` block is rendered by the Android
+    SDK itself when the app is backgrounded or killed, and
+    ``JarzFirebaseMessagingService.onMessageReceived`` is never called. That
+    service is the only path that starts the order alarm on Android, so the
+    alarm rang in the foreground and nowhere else. Android therefore has to be
+    sent data-only; web and iOS must keep the block or they display nothing.
+    """
+
+    def setUp(self):
+        self.mod, self.frappe = _load_module()
+        self.sent = []
+
+        class _Message:
+            def __init__(_self, **kwargs):
+                _self.kwargs = kwargs
+
+        messaging = sys.modules["firebase_admin.messaging"]
+        messaging.Message = _Message
+        messaging.send = lambda message, dry_run=False: self.sent.append(message) or "id"
+        messaging.Notification = lambda **kw: ("notification", kw)
+        messaging.AndroidNotification = lambda **kw: ("android_notification", kw)
+        messaging.AndroidConfig = lambda **kw: ("android_config", kw)
+        messaging.WebpushConfig = None
+        messaging.WebpushNotification = None
+        self.mod._initialize_firebase_app = lambda: True
+
+    def _send(self, tokens, rows):
+        self.frappe.get_all.return_value = rows
+        self.mod._send_fcm_notifications(
+            tokens,
+            {"type": "new_invoice", "invoice_id": "INV-1", "title": "New Order", "body": "b"},
+        )
+        return {m.kwargs["token"]: m.kwargs for m in self.sent}
+
+    def test_android_token_gets_no_notification_block(self):
+        by_token = self._send(
+            ["tok-android"], [{"token": "tok-android", "platform": "Android"}]
+        )
+        self.assertNotIn("notification", by_token["tok-android"])
+
+    def test_android_token_still_carries_the_data(self):
+        """Data-only is the point: the service reads type/invoice_id from it."""
+        by_token = self._send(
+            ["tok-android"], [{"token": "tok-android", "platform": "Android"}]
+        )
+        self.assertEqual(by_token["tok-android"]["data"]["type"], "new_invoice")
+
+    def test_web_and_ios_keep_the_notification_block(self):
+        by_token = self._send(
+            ["tok-web", "tok-ios"],
+            [
+                {"token": "tok-web", "platform": "Web"},
+                {"token": "tok-ios", "platform": "iOS"},
+            ],
+        )
+        self.assertIn("notification", by_token["tok-web"])
+        self.assertIn("notification", by_token["tok-ios"])
+
+    def test_unknown_platform_keeps_the_old_shape(self):
+        """A token with no row must not silently go dark: falling back to the
+        notification block is the behaviour that at least displays something."""
+        by_token = self._send(["tok-orphan"], [])
+        self.assertIn("notification", by_token["tok-orphan"])
+
+    def test_a_failed_platform_lookup_does_not_break_the_send(self):
+        self.frappe.get_all.side_effect = Exception("db down")
+        self.mod._send_fcm_notifications(
+            ["tok-a"],
+            {"type": "new_invoice", "invoice_id": "I", "title": "t", "body": "b"},
+        )
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("notification", self.sent[0].kwargs)
+
+
 if __name__ == "__main__":
     unittest.main()
