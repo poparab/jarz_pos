@@ -120,13 +120,20 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
         self.accounts = accounts
 
     def _cleanup(self):
+        """Roll back, then sweep — belt and braces on a site holding real data.
+
+        Nothing in this class is ever committed: the rows only have to be
+        visible to THIS connection, and one of these tests posts a real Journal
+        Entry with real GL rows. So the rollback alone should undo everything
+        and the deletes below should find nothing. They stay anyway, because a
+        stray submitted entry left behind on the CI site would silently skew
+        account balances, and that is not a risk worth carrying to save four
+        lines.
+        """
         frappe.db.rollback()
         for doctype, name in reversed(self.made):
             try:
                 if doctype == "Journal Entry":
-                    # A submitted entry also wrote GL rows; leaving those behind
-                    # would skew real account balances on the site these tests
-                    # run against.
                     frappe.db.sql(
                         "delete from `tabGL Entry` where voucher_type='Journal Entry' "
                         "and voucher_no=%s",
@@ -180,8 +187,6 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
     def test_a_real_settlement_je_yields_its_settled_courier_transaction(self):
         je = self._make_je(SETTLEMENT_REMARK)
         ct = self._make_ct(je)
-        frappe.db.commit()
-
         rows = dh._courier_transactions_for_settlement_je(je)
 
         self.assertEqual([r["name"] for r in rows], [ct])
@@ -198,8 +203,6 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
         """
         je = self._make_je(COLLECTION_CHANGE_REMARK)
         ct = self._make_ct(je, status="Settled")
-        frappe.db.commit()
-
         # The row really is Settled and really does point at this entry...
         self.assertEqual(
             frappe.db.get_value("Courier Transaction", ct, "status"), "Settled"
@@ -225,8 +228,6 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
 
         je = self._make_je(SETTLEMENT_REMARK, submit=True)
         self._make_ct(je)
-        frappe.db.commit()
-
         listed = {row["journal_entry"] for row in dh.list_recent_courier_settlements(limit=200)}
 
         self.assertIn(je, listed, "a real settlement must be findable in the real list")
@@ -238,8 +239,6 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
             )
         )
         self._make_ct(je)
-        frappe.db.commit()
-
         self.assertEqual(dh._courier_transactions_for_settlement_je(je), [])
 
 
