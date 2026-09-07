@@ -274,3 +274,115 @@ class TestLeadMapsAsyncPreview(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCatalogAndOsmEnrichment(unittest.TestCase):
+    """What a pasted link yields when there is no Google Places key at all."""
+
+    CAFE_LINK = (
+        "https://www.google.com/maps/place/Cilantro/"
+        "data=!4m2!3d30.0538921!4d31.2013923"
+        "!1s0x1458413a6bccb49d:0x70aab26eb6a5265b"
+    )
+
+    def _preview(self, *, match=None, area=None):
+        from jarz_pos.services import lead_area, lead_place_match
+
+        with patch.object(lead_maps, "_places_key", return_value=""), patch.object(
+            lead_place_match, "match", return_value=match or {"matched": False}
+        ), patch.object(
+            lead_area, "resolve_area", return_value=area or {"area": ""}
+        ):
+            return lead_maps.preview(self.CAFE_LINK)
+
+    def test_a_known_place_is_flagged_and_lends_what_the_catalog_holds(self):
+        result = self._preview(
+            match={
+                "matched": True,
+                "how": "cid",
+                "confidence": "exact",
+                "lead": "LEAD-0007",
+                "branch_name": "Cilantro Gameat El Dewal",
+                "distance_m": 0,
+                "known": {
+                    "phone": "+20 2 87654321",
+                    "primary_area": "Mohandessin",
+                    "opening_hours": "07:00-01:00",
+                    "rating": 4.5,
+                    "category": "Coffee",
+                },
+            }
+        )
+
+        self.assertEqual(result["duplicate"]["lead"], "LEAD-0007")
+        self.assertEqual(result["duplicate"]["how"], "cid")
+        self.assertEqual(result["metadata_source"], "lead_catalog")
+        self.assertEqual(result["phone"], "+20 2 87654321")
+        self.assertEqual(result["primary_area"], "Mohandessin")
+        # And the form has to be able to see them.
+        self.assertEqual(result["suggestions"]["opening_hours"], "07:00-01:00")
+        self.assertEqual(result["suggestions"]["rating"], 4.5)
+        self.assertEqual(result["suggestions"]["category"], "Coffee")
+
+    def test_an_unknown_place_carries_no_duplicate_block(self):
+        result = self._preview()
+
+        self.assertNotIn("duplicate", result)
+
+    def test_the_web_request_never_reaches_openstreetmap(self):
+        # The invariant this module exists to keep: no network in a web worker.
+        from jarz_pos.services import osm_places
+
+        with patch.object(osm_places, "reverse") as reverse:
+            self._preview()
+
+        reverse.assert_not_called()
+
+    def test_the_background_pass_fills_only_what_is_still_blank(self):
+        result = lead_maps._base("x", resolved=True, latitude=30.05, longitude=31.20)
+        result["city"] = "Cairo"          # already known, must survive
+        result["phone"] = "+20 100 000"   # already known, must survive
+
+        from jarz_pos.services import osm_places
+
+        with patch.object(
+            osm_places,
+            "reverse",
+            return_value={
+                "address_line1": "44 Al Sadat Axis",
+                "city": "Alexandria",
+                "phone": "01119660266",
+                "pincode": "11865",
+            },
+        ):
+            lead_maps._enrich_with_osm(result)
+
+        self.assertEqual(result["address_line1"], "44 Al Sadat Axis")
+        self.assertEqual(result["pincode"], "11865")
+        self.assertEqual(result["city"], "Cairo")
+        self.assertEqual(result["phone"], "+20 100 000")
+        self.assertEqual(sorted(result["osm_filled"]), ["address_line1", "pincode"])
+        self.assertEqual(result["suggestions"]["pincode"], "11865")
+
+    def test_a_link_with_no_pin_is_never_reverse_geocoded(self):
+        result = lead_maps._base("x", resolved=False)
+
+        from jarz_pos.services import osm_places
+
+        with patch.object(osm_places, "reverse") as reverse:
+            lead_maps._enrich_with_osm(result)
+
+        reverse.assert_not_called()
+
+    def test_a_complete_address_does_not_spend_the_rate_limited_slot(self):
+        complete = lead_maps._base(
+            "x", resolved=True, address_line1="1 Nile St", city="Cairo", pincode="11511"
+        )
+        self.assertFalse(lead_maps._needs_lookup(complete))
+
+        missing = lead_maps._base("x", resolved=True, city="Cairo")
+        with patch("jarz_pos.services.osm_places.enabled", return_value=True):
+            self.assertTrue(lead_maps._needs_lookup(missing))
+
+    def test_nothing_is_queued_for_a_link_that_never_resolved_a_pin(self):
+        self.assertFalse(lead_maps._needs_lookup(lead_maps._base("x", resolved=False)))

@@ -180,6 +180,15 @@ jobs:
             # without a site. The area is the catalog's MAIN filter, so a
             # regression here makes new leads unfindable rather than noisy.
             test_lead_area
+            # Free enrichment for a pasted Maps link, both pure mocks:
+            # test_lead_place_match pins the FTID->CID join that recognises a
+            # link as an already-swept place (and the name+distance rule that
+            # keeps 14 Costa doors as 14 branches); test_osm_places pins the
+            # Nominatim usage policy -- 1 req/sec, cached, fail-closed without
+            # Redis. Breaking that policy risks the block that would take the
+            # address lookup away entirely, so it is CI's business.
+            test_lead_place_match
+            test_osm_places
             # Journey notes (the rep's dated field diary). NOTE: this module
             # SKIPS itself until the Jarz Journey Note DocType exists, and this
             # job never migrates — so the first run after it lands is vacuous

@@ -329,8 +329,122 @@ def _map_place_details(details: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in result.items() if value not in (None, "")}
 
 
+#: Catalog values worth offering when a pasted link turns out to be a place we
+#: already swept. Deliberately excludes identity fields a rep is choosing right
+#: now (``place_name`` stays whatever the link said) and anything that would
+#: silently re-import a lead rather than suggest a value.
+_CATALOG_SUGGESTABLE = frozenset(
+    {
+        "phone",
+        "website",
+        "instagram",
+        "formatted_address",
+        "primary_area",
+        "region",
+        "governorate",
+        "rating",
+        "reviews",
+        "price_band",
+        "opening_hours",
+        "category",
+    }
+)
+
+#: OSM answers addresses well and business contacts rarely. Both only ever fill
+#: a blank -- Google's data and the catalog's own outrank a crowd-sourced map.
+_OSM_FILLABLE = (
+    "address_line1",
+    "address_line2",
+    "formatted_address",
+    "city",
+    "state",
+    "country",
+    "pincode",
+    "phone",
+    "website",
+    "opening_hours",
+    "cuisine",
+)
+
+
+#: How much a source actually tells us, worst to best. ``metadata_source`` is a
+#: single label on a result several sources contributed to, so it must name the
+#: richest one -- and a later contributor must never demote an earlier, better
+#: one. Comparing ranks is the only way that holds as sources are added.
+_SOURCE_RANK = {
+    "none": 0,
+    "url": 1,
+    "nearby_leads": 2,
+    "openstreetmap": 3,
+    "lead_catalog": 4,
+    "google_places": 5,
+}
+
+
+def _upgrade_source(result: dict[str, Any], source: str) -> None:
+    current = _SOURCE_RANK.get(result.get("metadata_source") or "none", 0)
+    if _SOURCE_RANK.get(source, 0) > current:
+        result["metadata_source"] = source
+
+
+def _apply_osm(result: dict[str, Any], osm: dict[str, Any]) -> None:
+    """Merge an OpenStreetMap reverse-geocode into a preview, blanks only."""
+    filled = []
+    for key in _OSM_FILLABLE:
+        value = osm.get(key)
+        if value and result.get(key) in (None, ""):
+            result[key] = value
+            filled.append(key)
+    if filled:
+        result["osm_filled"] = filled
+        _upgrade_source(result, "openstreetmap")
+
+
+def _merge_suggestions(result: dict[str, Any]) -> dict[str, Any]:
+    """Project the resolved fields onto the map the lead form actually reads.
+
+    Separate from :func:`_preview_canonical` so the background job can add an
+    OpenStreetMap address and re-project, instead of re-parsing the URL and
+    paying for a second Places call to get back to the same place.
+    """
+    suggestions = result.setdefault("suggestions", {})
+    if result.get("place_name"):
+        suggestions["lead_name"] = result["place_name"]
+        suggestions["place_name"] = result["place_name"]
+    for key in (
+        "latitude",
+        "longitude",
+        "phone",
+        "website",
+        "instagram",
+        "formatted_address",
+        "address_line1",
+        "address_line2",
+        "primary_area",
+        "region",
+        "governorate",
+        "city",
+        "state",
+        "country",
+        "pincode",
+        "opening_hours",
+        "cuisine",
+        "rating",
+        "reviews",
+        "price_band",
+        "category",
+    ):
+        if result.get(key) not in (None, ""):
+            suggestions[key] = result[key]
+    return result
+
+
 def _preview_canonical(
-    original: str, canonical: str, *, include_place_details: bool = False
+    original: str,
+    canonical: str,
+    *,
+    include_place_details: bool = False,
+    osm: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _base(
         original, canonical_url=canonical, short_link=_is_short_url(original)
@@ -418,32 +532,47 @@ def _preview_canonical(
             result["primary_area_source"] = derived.get("source") or "nearby_leads"
             result["primary_area_confidence"] = derived.get("confidence") or "low"
             result["area_candidates"] = list(derived.get("candidates") or [])
-            if result["metadata_source"] == "none":
-                result["metadata_source"] = "nearby_leads"
+            _upgrade_source(result, "nearby_leads")
         # An Egyptian address's city is its governorate. Only ever fill a blank:
         # a city Google actually returned is better than one we inferred.
         if derived.get("governorate") and not result.get("city"):
             result["city"] = derived["governorate"]
 
-    suggestions = result["suggestions"]
-    if result.get("place_name"):
-        suggestions["lead_name"] = result["place_name"]
-        suggestions["place_name"] = result["place_name"]
-    for key in (
-        "latitude",
-        "longitude",
-        "phone",
-        "website",
-        "formatted_address",
-        "address_line1",
-        "primary_area",
-        "city",
-        "state",
-        "country",
-        "pincode",
-    ):
-        if result.get(key) not in (None, ""):
-            suggestions[key] = result[key]
+    # Is this a place the catalog already holds? The richest source of detail
+    # about a pasted link is not Google or OSM but the 2,433 swept Leads and
+    # 3,009 branches, whose phone, website, rating and hours are already known
+    # and exact. It is also the only way to stop a rep re-creating a lead that
+    # exists. No I/O: the index is in-process.
+    try:
+        from jarz_pos.services import lead_place_match
+
+        found = lead_place_match.match(
+            url=canonical,
+            latitude=result.get("latitude"),
+            longitude=result.get("longitude"),
+            place_name=result.get("place_name"),
+        )
+    except Exception:
+        found = {}
+    if found.get("matched"):
+        result["duplicate"] = {
+            "lead": found.get("lead") or "",
+            "branch_name": found.get("branch_name") or "",
+            "how": found.get("how") or "",
+            "confidence": found.get("confidence") or "",
+            "distance_m": found.get("distance_m"),
+        }
+        # Offer what we already know, but never over a value Google returned or
+        # the rep has seen: these are suggestions for a form, not a merge.
+        for key, value in (found.get("known") or {}).items():
+            if key in _CATALOG_SUGGESTABLE and result.get(key) in (None, ""):
+                result[key] = value
+        _upgrade_source(result, "lead_catalog")
+
+    if osm:
+        _apply_osm(result, osm)
+
+    _merge_suggestions(result)
     return result
 
 
@@ -525,6 +654,31 @@ def _poll(request_id: object, user: str) -> dict[str, Any]:
     }
 
 
+def _needs_lookup(initial: dict[str, Any]) -> bool:
+    """True when a background pass could still add something worth waiting for.
+
+    Both lookups are network calls, so neither may run in the web worker -- the
+    same rule that keeps short-link expansion in a job. The check is what the
+    lookup would *add*: a preview whose address is already complete has nothing
+    to gain from OSM, and asking anyway would spend the application's one
+    request per second on a place we can already describe.
+    """
+    if initial.get("place_id") and _places_key():
+        return True
+    if not initial.get("resolved"):
+        return False
+    try:
+        from jarz_pos.services import osm_places
+
+        if not osm_places.enabled():
+            return False
+    except Exception:
+        return False
+    return any(
+        not initial.get(key) for key in ("address_line1", "city", "pincode")
+    )
+
+
 def request_preview(
     link: object = None, *, request_id: object = None, user: str = ""
 ) -> dict[str, Any]:
@@ -539,7 +693,7 @@ def request_preview(
         return _base(original, success=False, reason="invalid_maps_url")
     if not _is_short_url(safe_url):
         initial = _preview_canonical(original, safe_url)
-        if initial.get("place_id") and _places_key():
+        if _needs_lookup(initial):
             return _enqueue_preview(
                 original,
                 owner,
@@ -616,6 +770,25 @@ def _enqueue_preview(
     return _poll(token, owner)
 
 
+def _enrich_with_osm(result: dict[str, Any]) -> None:
+    """Fill whatever the address is still missing from OpenStreetMap.
+
+    Job-only. Everything it can add is optional, so a slow or unavailable
+    Nominatim costs the preview nothing but the fields it would have filled.
+    """
+    if not result.get("resolved"):
+        return
+    try:
+        from jarz_pos.services import osm_places
+
+        found = osm_places.reverse(result.get("latitude"), result.get("longitude"))
+    except Exception:
+        return
+    if found:
+        _apply_osm(result, found)
+        _merge_suggestions(result)
+
+
 def resolve_preview_job(request_id: str, link: str, user: str) -> dict[str, Any]:
     """Background worker for one validated short Maps URL."""
     token = str(request_id or "").strip()
@@ -630,6 +803,7 @@ def resolve_preview_job(request_id: str, link: str, user: str) -> dict[str, Any]
         result = _preview_canonical(
             original, expanded, include_place_details=True
         )
+        _enrich_with_osm(result)
     else:
         result = _base(
             original,
