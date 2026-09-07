@@ -174,7 +174,20 @@ class JarzExpenseRequest(Document):
         je.voucher_type = "Journal Entry"
         je.company = company
         je.posting_date = self.expense_date or today()
-        je.user_remark = self.remarks or _("Expense {0}").format(self.name)
+        # Sanitised, not passed through. Every `[JARZ-JE:<type>:<key>]` lookup
+        # in this app is a company-wide `user_remark LIKE '%<tag>%'`, so ANY
+        # submitted Journal Entry in the company whose remark contains that
+        # literal satisfies them — including this one, whose remark is free
+        # text the requester typed. An expense remark reading
+        # `[JARZ-JE:COURIER_SETTLEMENT_REVERSAL:<je>]` makes a real settlement
+        # permanently un-reversable; one reading `[JARZ-JE:OFD:<invoice>]` gets
+        # this entry cancelled and hard-deleted by the dispatch path.
+        from jarz_pos.services.delivery_handling import _strip_je_tag_lookalikes
+
+        je.user_remark = (
+            _strip_je_tag_lookalikes(self.remarks)
+            or _("Expense {0}").format(self.name)
+        )
         je.set_posting_time = 1
 
         amount = flt(self.amount)

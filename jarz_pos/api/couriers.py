@@ -584,6 +584,26 @@ def _latest_payment_info(inv_name: str) -> dict | None:
 # Preview tokens — the single-use permits that let a confirm post money
 # ---------------------------------------------------------------------------
 
+def _log_preview_cache_failure(which: str) -> None:
+    """Record a preview-cache read failure without ever becoming the new 500.
+
+    The read is deliberately degraded to "no usable permit", but silently
+    swallowing it means a genuine cache misconfiguration — wrong Redis URL,
+    cache container down, auth failure — presents to every cashier as
+    "Preview expired, reopen the dialog", forever, with no server-side signal
+    that anything is wrong. Nothing would distinguish that from an ordinary
+    stale token.
+
+    Wrapped because `frappe.log_error` can itself raise (see the logging notes
+    in this repo), and a logging failure must not resurrect the crash this
+    handler exists to prevent.
+    """
+    try:
+        frappe.log_error(frappe.get_traceback(), f"{which} preview cache read failed")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 #: Compare-and-delete, executed inside Redis so it cannot interleave.
 #:
 #: A plain GET-then-DELETE (what both preview flows used to do) is
@@ -677,6 +697,7 @@ def _peek_settle_preview_token(token: str):
     try:
         raw = frappe.cache().get(_settle_preview_key(presented))
     except Exception:
+        _log_preview_cache_failure("settle")
         return None, None
     if raw is None:
         return None, None
@@ -1138,7 +1159,16 @@ def _peek_unsettle_preview_token(journal_entry: str, token: str):
     having to re-preview.
     """
     key = _unsettle_preview_key(journal_entry)
-    raw = frappe.cache().get(key)
+    # Same deploy-window hazard as the settle path, and worse here: the old
+    # shape wrote a HASH at these exact key bytes AND its TTL never applied, so
+    # a stale hash does not age out — it survives until a new preview SETs over
+    # it. `GET` against a hash raises WRONGTYPE, which unhandled was a 500 on a
+    # manager reversing a wrong-branch settlement. Degrade to "no permit".
+    try:
+        raw = frappe.cache().get(key)
+    except Exception:
+        _log_preview_cache_failure("unsettle")
+        return None, None
     if raw is None:
         return None, None
 

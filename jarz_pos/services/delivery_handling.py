@@ -4004,6 +4004,25 @@ def _je_dedup_tag(invoice_name: str, je_type: str) -> str:
                 f"{ch!r}. This tag decides what may be reversed, so it cannot "
                 "carry caller-supplied punctuation."
             )
+    # The KEY half is validated too, and on brackets only.
+    #
+    # It is not always a docname the app controls: the batch settlement passes
+    # the courier LABEL, which is a Supplier or Employee name, and
+    # `create_delivery_party` is whitelisted. Frappe's own `validate_name`
+    # rejects only `<` and `>`, so a party named
+    # `A] [JARZ-JE:COURIER_SETTLEMENT_REVERSAL:<je>` would forge a complete tag
+    # through this very function.
+    #
+    # Colons are allowed here, unlike in the type: several legitimate keys are
+    # composites that contain one (`{sales_partner}:{token}`,
+    # `{delivery_partner}:{token}`). Brackets are what actually let a caller
+    # close this tag and open another, so they are the precise thing to refuse.
+    for ch in ("[", "]"):
+        if ch in str(invoice_name or ""):
+            frappe.throw(
+                f"Invalid journal entry tag key {invoice_name!r}: it may not "
+                f"contain {ch!r}."
+            )
     return f"[JARZ-JE:{je_type}:{invoice_name}]"
 
 

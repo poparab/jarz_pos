@@ -247,7 +247,14 @@ def submit_transfer(from_account: str, to_account: str, amount: float, posting_d
         je.posting_date = today()
     je.set_posting_time = 1
     if remark:
-        je.user_remark = remark
+        # Sanitised for the same reason as the expense remark: the JE tag
+        # lookups are company-wide `user_remark LIKE` queries, so free text on
+        # any submitted entry in the company can satisfy a guard that decides
+        # whether a courier settlement may be reversed, or whether an order has
+        # already been dispatched.
+        from jarz_pos.services.delivery_handling import _strip_je_tag_lookalikes
+
+        je.user_remark = _strip_je_tag_lookalikes(remark)
 
     # Credit from_account, Debit to_account
     je.append("accounts", {"account": from_account, "credit_in_account_currency": amount})
