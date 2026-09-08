@@ -478,8 +478,8 @@ class TestFinishProductionBatch(unittest.TestCase):
         self.assertEqual(47.0, run.result["produced_qty"])
         self.assertEqual("Completed", run.result["status"])
 
-    def test_leftover_goes_home_by_itself(self):
-        """Finishing short must clear its own WIP.
+    def test_leftover_goes_home_when_the_operator_asks(self):
+        """Finishing short can clear its own WIP, without a manager.
 
         The fallback — a manager calling ``return_wip_to_store`` — is how 11
         production Work Orders ended up Stopped with material transferred and
@@ -489,20 +489,66 @@ class TestFinishProductionBatch(unittest.TestCase):
             wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
             refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
             actual_qty=47,
+            return_leftover=1,
         )
 
         run.wip_return.assert_called_once()
         self.assertEqual("WO-0001", run.wip_return.call_args.args[1])
         remarks = run.wip_return.call_args.kwargs["remarks"]
-        self.assertIn("automatic", remarks.lower())
+        self.assertIn("returned", remarks.lower())
         self.assertIn("WO-0001", remarks)
 
         self.assertEqual(WIP_RETURN, run.result["wip_returned"])
         # Before the return, so "there was leftover and it went home" stays
         # distinguishable from "there was no leftover".
         self.assertEqual(3.0, run.result["wip_leftover_qty"])
-        self.assertEqual(3.0, run.result["wip_leftover_returned_qty"])
         self.assertNotIn("wip_return_error", run.result)
+
+    def test_a_partial_finish_keeps_its_material_in_wip(self):
+        """The reason the return is opt-in rather than automatic.
+
+        Finishing in several goes is a supported flow: ``remaining`` is
+        ``transferred - produced_before``, and a Work Order under its planned
+        quantity stays In Process on the Running tab. So a batch that yielded
+        47 of 50 and a batch that has only emptied its first tray are the same
+        call with the same numbers. Returning by default would empty WIP under
+        a batch still in the mixer, and the next finish would post against
+        material that is no longer there.
+        """
+        run = self._run(
+            wo=work_order(qty=100.0, material_transferred_for_manufacturing=100.0),
+            refreshed=SimpleNamespace(status="In Process", produced_qty=40.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=40,
+        )
+
+        run.wip_return.assert_not_called()
+        self.assertEqual(60.0, run.result["wip_leftover_qty"])
+        self.assertNotIn("wip_returned", run.result)
+        self.assertNotIn("wip_return_error", run.result)
+
+    def test_the_returned_quantity_is_what_actually_moved(self):
+        """Not what the Work Order claims was outstanding.
+
+        ``material_transferred_for_manufacturing`` never decreases, so after an
+        earlier partial return the two disagree, and reporting the Work Order's
+        figure would over-state this return by exactly what already went home.
+        """
+        run = self._run(
+            wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
+            refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=47,
+            return_leftover=1,
+            wip_return=MagicMock(
+                return_value={
+                    "work_order": "WO-0001",
+                    "stock_entry": "STE-RETURN",
+                    "returned_items": [{"item_code": "FLOUR", "qty": 1.25}],
+                }
+            ),
+        )
+
+        self.assertEqual(3.0, run.result["wip_leftover_qty"])
+        self.assertEqual(1.25, run.result["wip_leftover_returned_qty"])
 
     def test_the_return_happens_after_the_manufacture_entry(self):
         """Order matters: the goods are booked first, then the remainder moves."""
@@ -510,6 +556,7 @@ class TestFinishProductionBatch(unittest.TestCase):
             wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
             refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
             actual_qty=47,
+            return_leftover=1,
         )
 
         kinds = [entry[0] for entry in run.order]
@@ -525,6 +572,7 @@ class TestFinishProductionBatch(unittest.TestCase):
             wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
             refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
             actual_qty=47,
+            return_leftover=1,
             wip_return=MagicMock(side_effect=RuntimeError("no source warehouse for FLOUR")),
         )
 
@@ -543,6 +591,7 @@ class TestFinishProductionBatch(unittest.TestCase):
             wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
             refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
             actual_qty=47,
+            return_leftover=1,
             wip_return=MagicMock(side_effect=RuntimeError("boom")),
         )
 
@@ -550,8 +599,8 @@ class TestFinishProductionBatch(unittest.TestCase):
         run.frappe.db.rollback.assert_called_once_with(save_point=save_point)
 
     def test_return_leftover_off_leaves_the_material_in_wip(self):
-        """Opting out is still possible, and posts nothing."""
-        for flag in (0, "0", False, "false"):
+        """The default, and every spelling of it that arrives over HTTP."""
+        for flag in (0, "0", False, "false", None):
             with self.subTest(return_leftover=flag):
                 run = self._run(
                     wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
@@ -573,6 +622,7 @@ class TestFinishProductionBatch(unittest.TestCase):
             wo=work_order(qty=50.0, material_transferred_for_manufacturing=47.0),
             refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
             actual_qty=47,
+            return_leftover=1,
         )
 
         run.wip_return.assert_not_called()
@@ -592,6 +642,7 @@ class TestFinishProductionBatch(unittest.TestCase):
             wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
             refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
             actual_qty=47,
+            return_leftover=1,
             wip_rows=[],
         )
 
@@ -644,12 +695,26 @@ class TestListRunningWorkOrders(unittest.TestCase):
         "jarz_started_at": datetime(2026, 8, 2, 8, 0, 0),
     }
 
-    def _run(self, rows, limit=50):
+    def _run(self, rows, limit=50, wip_rows=None):
+        """``wip_rows`` is what the bins hold, which the listing prefers.
+
+        ``None`` means "the lookup itself failed", which is a different answer
+        from an empty list: the first falls back to the Work Order's own
+        arithmetic, the second means the material genuinely went home.
+        """
         from jarz_pos.api import manufacturing
+
+        leftover = (
+            MagicMock(side_effect=RuntimeError("no stock entry rows"))
+            if wip_rows is None
+            else MagicMock(return_value=wip_rows)
+        )
 
         with patch("jarz_pos.api.manufacturing._ensure_production_view_access"), patch(
             "jarz_pos.api.manufacturing._fetch_running_work_orders", return_value=rows
         ) as mock_fetch, patch(
+            "jarz_pos.api.manufacturing._get_wip_leftover_rows", leftover
+        ), patch(
             "jarz_pos.api.manufacturing._resolve_now_datetime",
             return_value=datetime(2026, 8, 2, 9, 30, 0),
         ), patch("jarz_pos.api.manufacturing.frappe"):
@@ -667,13 +732,35 @@ class TestListRunningWorkOrders(unittest.TestCase):
         self.assertEqual([">", 0], filters["material_transferred_for_manufacturing"])
 
     def test_reports_elapsed_time_and_stranded_wip(self):
-        out, _ = self._run([dict(self.ROW, produced_qty=20.0)])
+        out, _ = self._run(
+            [dict(self.ROW, produced_qty=20.0)],
+            wip_rows=[{"item_code": "FLOUR", "qty": 30.0}],
+        )
 
         self.assertEqual(1, len(out))
         self.assertEqual(90.0, out[0]["elapsed_minutes"])
         self.assertEqual(30.0, out[0]["wip_leftover_qty"])
         self.assertEqual("ops@jarz.test", out[0]["jarz_started_by"])
         self.assertEqual("Nos", out[0]["stock_uom"])
+
+    def test_material_already_returned_stops_being_advertised(self):
+        """The banner counts this number, so a phantom here is a phantom there.
+
+        ``material_transferred_for_manufacturing`` never decreases, so a batch
+        whose leftover has gone home would otherwise sit In Process for ever
+        still claiming it.
+        """
+        out, _ = self._run([dict(self.ROW, produced_qty=20.0)], wip_rows=[])
+
+        self.assertEqual(0.0, out[0]["wip_leftover_qty"])
+        # Still reported for what it is: the transfer really did happen.
+        self.assertEqual(50.0, out[0]["material_transferred_qty"])
+
+    def test_an_unreadable_bin_falls_back_to_the_work_order(self):
+        """Over-reporting beats reporting nothing for a stranded-material figure."""
+        out, _ = self._run([dict(self.ROW, produced_qty=20.0)], wip_rows=None)
+
+        self.assertEqual(30.0, out[0]["wip_leftover_qty"])
 
     def test_a_batch_with_no_start_stamp_reports_no_elapsed_time(self):
         """Rather than a bogus zero — the stamp is best-effort by design."""
@@ -843,7 +930,9 @@ SHORTAGE = [
 ]
 
 
-def run_one_shot(endpoint, lines=None, gate=None, shortages=None, cap=None, **kwargs):
+def run_one_shot(
+    endpoint, lines=None, gate=None, shortages=None, cap=None, sop_stamp="SOP-0001#3", **kwargs
+):
     """Drive a one-shot produce endpoint end to end through the shared impl.
 
     Patches only the database seams, never ``_submit_work_orders_impl`` — the
@@ -882,13 +971,57 @@ def run_one_shot(endpoint, lines=None, gate=None, shortages=None, cap=None, **kw
     ), patch(
         "jarz_pos.api.manufacturing._make_and_submit_se", side_effect=["STE-1", "STE-2"]
     ) as mock_se, patch(
+        "jarz_pos.api.manufacturing._stamp_work_order"
+    ) as mock_stamp, patch(
+        "jarz_pos.api.manufacturing._resolve_current_user", return_value="ops@jarz.test"
+    ), patch(
+        "jarz_pos.api.manufacturing._resolve_active_sop_stamp", return_value=sop_stamp
+    ), patch(
         "jarz_pos.api.manufacturing._set_work_order_actual_dates"
     ), passthrough_translate(), patch("jarz_pos.api.manufacturing.frappe"):
         out = getattr(manufacturing, endpoint)(
             list(lines if lines is not None else [dict(LINE)]), **kwargs
         )
 
-    return SimpleNamespace(result=out, se=mock_se, basket=mock_basket, cap=mock_cap)
+    return SimpleNamespace(
+        result=out, se=mock_se, basket=mock_basket, cap=mock_cap, stamp=mock_stamp
+    )
+
+
+class TestOneShotStampsTheBatch(unittest.TestCase):
+    """The one-shot route used to leave no trace of who or by which method.
+
+    Survivable while it was manager-only. It is now the floor's primary action,
+    and an unstamped Work Order has no operator against it and no pinned SOP
+    version -- so `get_sop_for_work_order` later answers with whatever SOP is
+    active then, and `Jarz SOP`'s "already used in production" guard, which
+    matches on the stamp, never fires.
+    """
+
+    def test_produce_now_records_the_operator_and_the_sop_version(self):
+        run = run_one_shot("produce_now")
+
+        run.stamp.assert_called_once()
+        work_order_name, values = run.stamp.call_args.args
+        self.assertEqual("WO-0001", work_order_name)
+        self.assertEqual("ops@jarz.test", values["jarz_started_by"])
+        self.assertEqual("ops@jarz.test", values["jarz_finished_by"])
+        self.assertEqual(SCHEDULED, values["jarz_started_at"])
+        self.assertEqual(SCHEDULED, values["jarz_finished_at"])
+        self.assertEqual("SOP-0001#3", values["jarz_sop_version"])
+
+    def test_the_manager_door_is_stamped_the_same_way(self):
+        run = run_one_shot("submit_work_orders")
+
+        run.stamp.assert_called_once()
+
+    def test_an_item_with_no_active_sop_is_still_stamped_with_the_operator(self):
+        """An unstamped SOP degrades to the active one; a missing operator does not."""
+        run = run_one_shot("produce_now", sop_stamp="")
+
+        _, values = run.stamp.call_args.args
+        self.assertNotIn("jarz_sop_version", values)
+        self.assertEqual("ops@jarz.test", values["jarz_started_by"])
 
 
 class TestProduceNowKeepsTheOperatorCap(unittest.TestCase):

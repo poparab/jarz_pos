@@ -2325,6 +2325,26 @@ def _submit_work_orders_impl(
             _debug_log(f"SE1 done for {wo_name}: {se1}")
             se2 = _make_and_submit_se(wo_name, "Manufacture", qty, scheduled_dt)
             _debug_log(f"SE2 done for {wo_name}: {se2}")
+            # Same stamps the split start/finish path writes, for the same
+            # reasons. This route used to be manager-only and unstamped, which
+            # was survivable; it is now the floor's primary action, and an
+            # unstamped batch has no operator against it and — the one that
+            # actually corrupts history — no pinned SOP version, so
+            # `get_sop_for_work_order` falls back to whatever is active when
+            # somebody later asks how this batch was made, and `Jarz SOP`'s
+            # "already used in production" guard never fires. `_stamp_work_order`
+            # logs and swallows, so a stamp can never fail a batch that is
+            # already in the ledger.
+            one_shot_stamps: Dict[str, Any] = {
+                "jarz_started_by": _resolve_current_user(),
+                "jarz_started_at": scheduled_dt,
+                "jarz_finished_by": _resolve_current_user(),
+                "jarz_finished_at": scheduled_dt,
+            }
+            sop_stamp = _resolve_active_sop_stamp(ln["item_code"])
+            if sop_stamp:
+                one_shot_stamps["jarz_sop_version"] = sop_stamp
+            _stamp_work_order(wo_name, one_shot_stamps)
             # Refresh WO status; after Manufacture entry, it should be Completed when produced qty >= planned qty
             try:
                 _set_work_order_actual_dates(wo_name, scheduled_dt)
@@ -2743,7 +2763,7 @@ def finish_production_batch(
     scrap_qty: Any = 0,
     scheduled_at: str | None = None,
     notes: str | None = None,
-    return_leftover: Any = 1,
+    return_leftover: Any = 0,
 ) -> Dict[str, Any]:
     """Close a batch: post the Manufacture entry for what was ACTUALLY made.
 
@@ -2756,30 +2776,37 @@ def finish_production_batch(
       posts no stock: routing it to a scrap warehouse needs per-item scrap items
       that do not exist, and inventing them silently would be worse than a
       number an operator can be asked about.
-    * Material transferred but not consumed is sent back out of WIP by this
-      call itself, unless ``return_leftover`` is switched off.  It used to just
-      sit there, surfaced as ``wip_leftover_qty``, with
-      :func:`return_wip_to_store` as the only way home — and that route is
-      manager-gated.  On production this left 11 Work Orders Stopped with
-      material transferred and nothing produced, because clearing WIP needed a
-      manager who was never asked.  Cleaning up after your own batch is now the
-      default; ``return_wip_to_store`` is the fallback for the batches that were
-      finished before this existed, and stays manager-only as a standalone stock
-      correction.
+    * Material transferred but not consumed stays in WIP and is surfaced as
+      ``wip_leftover_qty``, unless the CALLER asks for it back by passing
+      ``return_leftover``.  Opting in is the whole point, and it defaults off:
+      this endpoint supports finishing a batch in several goes — ``remaining``
+      above is ``transferred - produced_before``, and a Work Order with
+      ``produced_qty < qty`` stays ``In Process`` on the Running tab — so a
+      short finish and a partial one are the same call with the same numbers.
+      Returning automatically would empty WIP under a batch that is still in
+      the mixer, and the next finish would then post a Manufacture entry
+      against material that is no longer there.  Nothing on this side can tell
+      the two apart; only the person holding the tray can, which is why they
+      are asked.
 
-    The automatic return is BEST EFFORT and never rolls back the Manufacture
-    entry: the goods are made, and that fact must survive a failed return.  A
-    failure is logged and reported as ``wip_return_error`` in the response
-    rather than raised.
+    When it IS asked for, the return is BEST EFFORT and never rolls back the
+    Manufacture entry: the goods are made, and that fact must survive a failed
+    return.  A failure is logged and reported as ``wip_return_error`` in the
+    response rather than raised.  :func:`return_wip_to_store` remains the
+    manager's route for clearing a batch somebody else left behind.
 
     Response keys for the leftover, which a caller must be able to tell apart:
 
-    * ``wip_leftover_qty`` — what was left BEFORE the return (0 means there was
-      nothing to send home in the first place).
-    * ``wip_leftover_returned_qty`` + ``wip_returned`` — present only when a
-      return was actually posted, carrying the Stock Entry.
-    * ``wip_return_error`` — leftover existed, the return was attempted and it
-      failed.  The material is still in WIP.
+    * ``wip_leftover_qty`` — what the Work Order says is left, before any
+      return (0 means there was nothing to send home in the first place).
+    * ``wip_returned`` + ``wip_leftover_returned_qty`` — a return was posted;
+      the quantity is what the Stock Entry actually moved, which can be less
+      than ``wip_leftover_qty`` when an earlier return already took some.
+    * ``wip_return_skipped`` — a return was asked for, but the bins held
+      nothing.  ``wip_leftover_returned_qty`` is ``0.0`` alongside it, so key
+      on ``wip_returned`` rather than on the quantity's presence.
+    * ``wip_return_error`` — material was there, the return was attempted and
+      it failed.  It is still in WIP.
     """
     _ensure_production_execute_access()
 
@@ -2897,7 +2924,7 @@ def finish_production_batch(
         "cost": _compute_batch_cost(work_order, produced_qty=produced_after, bom_no=bom_no),
     }
 
-    if _coerce_flag(return_leftover, default=True) and wip_leftover_qty > 0:
+    if _coerce_flag(return_leftover, default=False) and wip_leftover_qty > QTY_TOLERANCE:
         _return_leftover_on_finish(out, wo, work_order, wip_leftover_qty)
 
     return out
@@ -2941,14 +2968,22 @@ def _return_leftover_on_finish(
         save_point = ""
 
     try:
-        out["wip_returned"] = _post_wip_return(
+        returned = _post_wip_return(
             wo,
             work_order,
             remarks=(
-                f"Jarz: automatic WIP return on finishing Work Order {work_order}"
+                f"Jarz: WIP returned on finishing Work Order {work_order}"
             ),
         )
-        out["wip_leftover_returned_qty"] = leftover_qty
+        out["wip_returned"] = returned
+        # What the Stock Entry actually moved, not what the Work Order claims
+        # was outstanding.  `_get_wip_leftover_rows` nets earlier returns off
+        # and `material_transferred_for_manufacturing` does not, so reporting
+        # `leftover_qty` here would over-state the return by exactly whatever a
+        # manager had already taken home.
+        out["wip_leftover_returned_qty"] = sum(
+            _flt(row.get("qty")) for row in (returned.get("returned_items") or [])
+        )
     except Exception as exc:
         if save_point:
             try:
@@ -3025,10 +3060,41 @@ def list_running_work_orders(limit: Any = 50) -> List[Dict[str, Any]]:
                 "material_transferred_qty": transferred,
                 # What is still sitting in WIP against this batch — the number
                 # that turns stranded material into something visible.
-                "wip_leftover_qty": max(0.0, transferred - produced),
+                #
+                # Netted against returns actually posted, not derived from the
+                # Work Order alone: `material_transferred_for_manufacturing`
+                # never decreases, so a batch whose leftover has already gone
+                # home would otherwise sit here advertising material that is
+                # back on the shelf — for ever, since a short batch stays
+                # `In Process`. That is the number the Today screen's
+                # open-batches banner counts, and a banner full of phantoms is
+                # worse than no banner.
+                "wip_leftover_qty": _running_wip_leftover(
+                    r.get("name"), transferred, produced
+                ),
             }
         )
     return out
+
+
+def _running_wip_leftover(work_order: Any, transferred: float, produced: float) -> float:
+    """Material still physically in WIP for one running batch.
+
+    Prefers the bins, which net earlier returns off, and falls back to the
+    Work Order's own arithmetic when that lookup fails — a listing that cannot
+    reach the Stock Entry rows must still report something, and over-reporting
+    is the safer direction for a number whose job is to make stranded material
+    visible.
+    """
+    name = _coerce_str(work_order)
+    if name:
+        try:
+            rows = _get_wip_leftover_rows(name)
+        except Exception:
+            rows = None
+        if rows is not None:
+            return max(0.0, sum(_flt(row.get("qty")) for row in rows))
+    return max(0.0, transferred - produced)
 
 
 def _fetch_running_work_orders(filters: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
