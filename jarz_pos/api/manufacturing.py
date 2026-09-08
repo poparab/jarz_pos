@@ -2188,6 +2188,69 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
     Returns per-line results with created names or error.
     """
     _ensure_manager_access()
+    return _submit_work_orders_impl(lines, strict_basket)
+
+
+@frappe.whitelist()
+def produce_now(lines: Any, strict_basket: Any = 1) -> Dict[str, Any]:
+    """One-shot produce for the floor: identical work, a wider gate.
+
+    Does exactly what :func:`submit_work_orders` does — same Work Orders, same
+    ``Material Transfer for Manufacture`` + ``Manufacture`` pair per line, same
+    basket-wide shortage precheck, same per-line savepoints — because it calls
+    the same implementation.  The ONLY difference is who may call it:
+
+    * ``submit_work_orders`` is gated on ``ROLES.MANUFACTURING``, which excludes
+      ``Production Operator``.
+    * this is gated on ``ROLES.PRODUCTION_EXECUTE``, which is the correct gate
+      for "start and finish a batch on the floor".
+
+    It exists as a separate entry point rather than as a loosened gate on the
+    manager route so that the manager route keeps its own meaning: recording
+    what the floor actually made must not require a manager role, but the
+    manager-only planning endpoints must not quietly widen along with it.
+    Splitting the gate is what lets the Today screen offer one primary action to
+    the person holding the tray.
+
+    It books the quantity it is given.  The caller is expected to send what was
+    ACTUALLY produced, not a morning target — a planned figure posted here
+    becomes finished-goods stock that was never made.
+
+    Args:
+      lines: JSON/list of objects with keys: item_code, bom_name, item_qty,
+        scheduled_at (optional ISO)
+      strict_basket: when true (default), reject the whole batch up front if the
+        lines are collectively short on a raw material.
+    Returns per-line results with created names or error.
+    """
+    _ensure_production_execute_access()
+    return _submit_work_orders_impl(
+        lines,
+        _coerce_flag(strict_basket, default=True),
+        enforce_operator_cap=True,
+    )
+
+
+def _submit_work_orders_impl(
+    lines: Any, strict_basket: Any, enforce_operator_cap: bool = False
+) -> Dict[str, Any]:
+    """The whole one-shot produce, with no access gate of its own.
+
+    Shared verbatim by :func:`submit_work_orders` (manager) and
+    :func:`produce_now` (floor).  Every caller MUST have run its own gate first
+    — this function deliberately has none, so it is never whitelisted.
+
+    ``enforce_operator_cap`` applies the same per-batch material value ceiling
+    :func:`start_production_batch` puts on a floor operator.  It is a flag
+    rather than an unconditional call because the two doors differ: everyone who
+    can reach ``submit_work_orders`` is in ``ROLES.MANUFACTURING``, which
+    :func:`_assert_batch_value_within_threshold` waves through by design, so on
+    that route the check can never fire and would only buy a
+    ``_price_batch_components`` explosion per line.  On the ``produce_now``
+    route it can fire, and must: widening the gate to ``PRODUCTION_EXECUTE``
+    without it would hand an operator an uncapped one-shot produce while the
+    split start/finish path still capped them.
+    """
     lines = _coerce_lines(lines)
 
     # Aggregate check first.  The per-line prechecks inside the loop below each
@@ -2231,6 +2294,11 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
             if not company:
                 frappe.throw(_("Company is not configured on BOM and no Default Company set"))
             _assert_material_availability(ln, company)
+            # Before anything exists for this line, so a refusal rolls back to
+            # this line's savepoint like every other per-line failure rather
+            # than leaving a Work Order behind with no stock against it.
+            if enforce_operator_cap:
+                _assert_batch_value_within_threshold(ln, company)
             defaults = _get_mfg_defaults(company)
             resolved_defaults = _resolve_work_order_warehouses(ln, company, defaults)
 
@@ -2675,6 +2743,7 @@ def finish_production_batch(
     scrap_qty: Any = 0,
     scheduled_at: str | None = None,
     notes: str | None = None,
+    return_leftover: Any = 1,
 ) -> Dict[str, Any]:
     """Close a batch: post the Manufacture entry for what was ACTUALLY made.
 
@@ -2687,8 +2756,30 @@ def finish_production_batch(
       posts no stock: routing it to a scrap warehouse needs per-item scrap items
       that do not exist, and inventing them silently would be worse than a
       number an operator can be asked about.
-    * Material transferred but not consumed stays in WIP and is surfaced as
-      ``wip_leftover_qty``.  :func:`return_wip_to_store` is how it gets home.
+    * Material transferred but not consumed is sent back out of WIP by this
+      call itself, unless ``return_leftover`` is switched off.  It used to just
+      sit there, surfaced as ``wip_leftover_qty``, with
+      :func:`return_wip_to_store` as the only way home — and that route is
+      manager-gated.  On production this left 11 Work Orders Stopped with
+      material transferred and nothing produced, because clearing WIP needed a
+      manager who was never asked.  Cleaning up after your own batch is now the
+      default; ``return_wip_to_store`` is the fallback for the batches that were
+      finished before this existed, and stays manager-only as a standalone stock
+      correction.
+
+    The automatic return is BEST EFFORT and never rolls back the Manufacture
+    entry: the goods are made, and that fact must survive a failed return.  A
+    failure is logged and reported as ``wip_return_error`` in the response
+    rather than raised.
+
+    Response keys for the leftover, which a caller must be able to tell apart:
+
+    * ``wip_leftover_qty`` — what was left BEFORE the return (0 means there was
+      nothing to send home in the first place).
+    * ``wip_leftover_returned_qty`` + ``wip_returned`` — present only when a
+      return was actually posted, carrying the Stock Entry.
+    * ``wip_return_error`` — leftover existed, the return was attempted and it
+      failed.  The material is still in WIP.
     """
     _ensure_production_execute_access()
 
@@ -2789,7 +2880,9 @@ def finish_production_batch(
     produced_after = _flt(getattr(refreshed, "produced_qty", None)) or (produced_before + actual)
     bom_no = getattr(refreshed, "bom_no", None) or getattr(wo, "bom_no", None)
 
-    return {
+    wip_leftover_qty = max(0.0, transferred - produced_after)
+
+    out: Dict[str, Any] = {
         "work_order": work_order,
         "manufacture_entry": manufacture_entry,
         "actual_qty": actual,
@@ -2797,9 +2890,92 @@ def finish_production_batch(
         "status": getattr(refreshed, "status", None) or getattr(wo, "status", None),
         "planned_qty": planned,
         "produced_qty": produced_after,
-        "wip_leftover_qty": max(0.0, transferred - produced_after),
+        # Deliberately what was left BEFORE any automatic return: "there was
+        # leftover and it went home" and "there was no leftover" have to stay
+        # distinguishable from the response alone.
+        "wip_leftover_qty": wip_leftover_qty,
         "cost": _compute_batch_cost(work_order, produced_qty=produced_after, bom_no=bom_no),
     }
+
+    if _coerce_flag(return_leftover, default=True) and wip_leftover_qty > 0:
+        _return_leftover_on_finish(out, wo, work_order, wip_leftover_qty)
+
+    return out
+
+
+def _return_leftover_on_finish(
+    out: Dict[str, Any], wo: Any, work_order: str, leftover_qty: float
+) -> None:
+    """Send the unconsumed material home, without ever risking the finish.
+
+    Runs inside its own savepoint on purpose.  The Manufacture entry is already
+    posted when this is reached, and a half-written return must not take it down
+    with it — the goods exist whether or not the leftover made it back to the
+    shelf.  A failure is logged and surfaced as ``wip_return_error``; it is
+    never raised, and never swallowed silently either.
+
+    The bins are probed first.  ``leftover_qty`` comes off the Work Order's
+    ``material_transferred_for_manufacturing``, which never decreases, while
+    :func:`_get_wip_leftover_rows` nets previous returns off — so a manager who
+    already ran :func:`return_wip_to_store` leaves the two disagreeing.  That is
+    a benign case, not a failure, and reporting it as ``wip_return_error`` would
+    teach the floor to ignore the one message that means real material is
+    stranded.
+    """
+    try:
+        if not _get_wip_leftover_rows(work_order):
+            out["wip_leftover_returned_qty"] = 0.0
+            out["wip_return_skipped"] = (
+                "The Work Order still shows leftover, but nothing is left in WIP"
+            )
+            return
+    except Exception:
+        # A failed probe is not an answer either way; fall through and let the
+        # return itself report what happens.
+        pass
+
+    save_point = "jarz_wip_return_on_finish"
+    try:
+        frappe.db.savepoint(save_point)
+    except Exception:
+        save_point = ""
+
+    try:
+        out["wip_returned"] = _post_wip_return(
+            wo,
+            work_order,
+            remarks=(
+                f"Jarz: automatic WIP return on finishing Work Order {work_order}"
+            ),
+        )
+        out["wip_leftover_returned_qty"] = leftover_qty
+    except Exception as exc:
+        if save_point:
+            try:
+                frappe.db.rollback(save_point=save_point)
+            except Exception:
+                pass
+        try:
+            frappe.log_error(
+                title="JARZ – WIP return on finish failed",
+                message=(
+                    f"work_order={work_order}\n"
+                    f"leftover_qty={leftover_qty}\n"
+                    f"Error: {exc}"
+                ),
+            )
+        except Exception:
+            # frappe.log_error can itself raise; a failed log must not be the
+            # thing that hides a successful Manufacture entry.
+            pass
+        out["wip_return_error"] = str(exc)
+    else:
+        release = getattr(frappe.db, "release_savepoint", None)
+        if save_point and callable(release):
+            try:
+                release(save_point)
+            except Exception:
+                pass
 
 
 @frappe.whitelist()

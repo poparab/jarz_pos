@@ -232,13 +232,42 @@ class TestStartProductionBatch(unittest.TestCase):
                 mock_se.assert_not_called()
 
 
+WIP_RETURN = {
+    "work_order": "WO-0001",
+    "stock_entry": "STE-RETURN",
+    "returned_items": [
+        {"item_code": "FLOUR", "qty": 4.0, "s_warehouse": "WIP - J", "t_warehouse": "Raw Material - J"}
+    ],
+}
+
+
 class TestFinishProductionBatch(unittest.TestCase):
-    def _run(self, wo=None, refreshed=None, allow_over=False, order=None, **kwargs):
+    def _run(
+        self,
+        wo=None,
+        refreshed=None,
+        allow_over=False,
+        order=None,
+        wip_return=None,
+        wip_rows=None,
+        **kwargs,
+    ):
         """Drive ``finish_production_batch`` and record the call order.
 
         Deliberately does NOT swallow ``Thrown`` — a helper that ate the
         rejection would turn every guard test into a false pass.  Callers that
         need the trace of a rejected run pass their own ``order`` list in.
+
+        ``_post_wip_return`` is patched here rather than in the leftover tests
+        alone: finishing short now returns the leftover by default, so leaving
+        it unpatched would let every ordinary finish reach the real WIP query
+        through the frappe mock.
+
+        ``wip_rows`` is what the bins say is physically left, which the return
+        probes before posting.  It defaults to one row so an ordinary short
+        finish behaves as it does in production; pass ``[]`` for the case where
+        the Work Order still shows leftover but the material has already gone
+        home.
         """
         from jarz_pos.api import manufacturing
 
@@ -252,6 +281,13 @@ class TestFinishProductionBatch(unittest.TestCase):
         def _se(*args, **_kw):
             order.append(("stock_entry", args[1], args[2]))
             return "STE-MANUFACTURE"
+
+        if wip_return is None:
+            wip_return = MagicMock(return_value=dict(WIP_RETURN))
+
+        def _return(*args, **kw):
+            order.append(("wip_return", args[1] if len(args) > 1 else None))
+            return wip_return(*args, **kw)
 
         call = {"work_order": "WO-0001", "actual_qty": 47}
         call.update(kwargs)
@@ -277,6 +313,11 @@ class TestFinishProductionBatch(unittest.TestCase):
             return_value=refreshed,
         ) as mock_status, patch(
             "jarz_pos.api.manufacturing._compute_batch_cost", return_value={"material_cost": 900.0}
+        ), patch(
+            "jarz_pos.api.manufacturing._post_wip_return", side_effect=_return
+        ), patch(
+            "jarz_pos.api.manufacturing._get_wip_leftover_rows",
+            return_value=[{"item_code": "RM-FLOUR", "qty": 4.5}] if wip_rows is None else wip_rows,
         ), passthrough_translate(), patch(
             "jarz_pos.api.manufacturing.frappe"
         ) as mock_frappe:
@@ -291,6 +332,8 @@ class TestFinishProductionBatch(unittest.TestCase):
             stamp=mock_stamp,
             dates=mock_dates,
             status=mock_status,
+            wip_return=wip_return,
+            frappe=mock_frappe,
         )
 
     def test_posts_the_actual_quantity_not_the_planned_one(self):
@@ -434,6 +477,132 @@ class TestFinishProductionBatch(unittest.TestCase):
         self.assertEqual(3.0, run.result["wip_leftover_qty"])
         self.assertEqual(47.0, run.result["produced_qty"])
         self.assertEqual("Completed", run.result["status"])
+
+    def test_leftover_goes_home_by_itself(self):
+        """Finishing short must clear its own WIP.
+
+        The fallback — a manager calling ``return_wip_to_store`` — is how 11
+        production Work Orders ended up Stopped with material transferred and
+        nothing produced: the manager was never asked.
+        """
+        run = self._run(
+            wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
+            refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=47,
+        )
+
+        run.wip_return.assert_called_once()
+        self.assertEqual("WO-0001", run.wip_return.call_args.args[1])
+        remarks = run.wip_return.call_args.kwargs["remarks"]
+        self.assertIn("automatic", remarks.lower())
+        self.assertIn("WO-0001", remarks)
+
+        self.assertEqual(WIP_RETURN, run.result["wip_returned"])
+        # Before the return, so "there was leftover and it went home" stays
+        # distinguishable from "there was no leftover".
+        self.assertEqual(3.0, run.result["wip_leftover_qty"])
+        self.assertEqual(3.0, run.result["wip_leftover_returned_qty"])
+        self.assertNotIn("wip_return_error", run.result)
+
+    def test_the_return_happens_after_the_manufacture_entry(self):
+        """Order matters: the goods are booked first, then the remainder moves."""
+        run = self._run(
+            wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
+            refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=47,
+        )
+
+        kinds = [entry[0] for entry in run.order]
+        self.assertEqual(["lock", "stock_entry", "wip_return"], kinds)
+
+    def test_a_failing_return_still_reports_a_successful_finish(self):
+        """The goods are made; that fact must survive a failed return.
+
+        Rolling back here — or letting the exception out — would unpost a
+        Manufacture entry for product that is physically on the rack.
+        """
+        run = self._run(
+            wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
+            refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=47,
+            wip_return=MagicMock(side_effect=RuntimeError("no source warehouse for FLOUR")),
+        )
+
+        self.assertEqual("STE-MANUFACTURE", run.result["manufacture_entry"])
+        self.assertEqual(47.0, run.result["produced_qty"])
+        self.assertEqual(3.0, run.result["wip_leftover_qty"])
+        self.assertIn("no source warehouse", run.result["wip_return_error"])
+        self.assertNotIn("wip_returned", run.result)
+        self.assertNotIn("wip_leftover_returned_qty", run.result)
+        # Visible, not swallowed: a bare except here is how stranded WIP hides.
+        run.frappe.log_error.assert_called_once()
+
+    def test_a_failing_return_rolls_back_only_itself(self):
+        """The savepoint is what keeps a half-written return off the finish."""
+        run = self._run(
+            wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
+            refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=47,
+            wip_return=MagicMock(side_effect=RuntimeError("boom")),
+        )
+
+        save_point = run.frappe.db.savepoint.call_args.args[0]
+        run.frappe.db.rollback.assert_called_once_with(save_point=save_point)
+
+    def test_return_leftover_off_leaves_the_material_in_wip(self):
+        """Opting out is still possible, and posts nothing."""
+        for flag in (0, "0", False, "false"):
+            with self.subTest(return_leftover=flag):
+                run = self._run(
+                    wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
+                    refreshed=SimpleNamespace(
+                        status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"
+                    ),
+                    actual_qty=47,
+                    return_leftover=flag,
+                )
+
+                run.wip_return.assert_not_called()
+                self.assertEqual(3.0, run.result["wip_leftover_qty"])
+                self.assertNotIn("wip_returned", run.result)
+                self.assertNotIn("wip_return_error", run.result)
+
+    def test_nothing_is_returned_when_nothing_is_left(self):
+        """A batch that consumed everything must not post an empty transfer."""
+        run = self._run(
+            wo=work_order(qty=50.0, material_transferred_for_manufacturing=47.0),
+            refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=47,
+        )
+
+        run.wip_return.assert_not_called()
+        self.assertEqual(0.0, run.result["wip_leftover_qty"])
+        self.assertNotIn("wip_returned", run.result)
+
+    def test_material_already_taken_home_is_not_reported_as_a_failure(self):
+        """The Work Order and the bins are allowed to disagree.
+
+        ``material_transferred_for_manufacturing`` never decreases, while
+        ``_get_wip_leftover_rows`` nets earlier returns off — so a manager who
+        already ran ``return_wip_to_store`` leaves the Work Order still claiming
+        leftover.  Calling that an error would teach the floor to ignore the one
+        message that means material really is stranded.
+        """
+        run = self._run(
+            wo=work_order(qty=50.0, material_transferred_for_manufacturing=50.0),
+            refreshed=SimpleNamespace(status="Completed", produced_qty=47.0, bom_no="BOM-PIST-CAKE"),
+            actual_qty=47,
+            wip_rows=[],
+        )
+
+        run.wip_return.assert_not_called()
+        self.assertNotIn("wip_return_error", run.result)
+        self.assertNotIn("wip_returned", run.result)
+        self.assertEqual(0.0, run.result["wip_leftover_returned_qty"])
+        self.assertIn("nothing is left in WIP", run.result["wip_return_skipped"])
+        # Still the Work Order's own figure — the skip explains it, it does not
+        # rewrite it.
+        self.assertEqual(3.0, run.result["wip_leftover_qty"])
 
     def test_refreshes_actual_dates_and_status_after_posting(self):
         run = self._run(
@@ -657,6 +826,275 @@ class TestQuickProducePathUnchanged(unittest.TestCase):
             ["Material Transfer for Manufacture", "Manufacture"],
             [c.args[1] for c in mock_se.call_args_list],
         )
+
+
+LINE = {"item_code": "PIST-CAKE", "bom_name": "BOM-PIST-CAKE", "item_qty": 5}
+
+SHORTAGE = [
+    {
+        "item_code": "FLOUR",
+        "item_name": "Flour",
+        "source_warehouse": "Raw Material - J",
+        "required_qty": 12.0,
+        "available_qty": 4.0,
+        "missing_qty": 8.0,
+        "uom": "Kg",
+    }
+]
+
+
+def run_one_shot(endpoint, lines=None, gate=None, shortages=None, cap=None, **kwargs):
+    """Drive a one-shot produce endpoint end to end through the shared impl.
+
+    Patches only the database seams, never ``_submit_work_orders_impl`` — the
+    whole point of these tests is that both entry points really do run the same
+    body.
+
+    ``cap`` is the side effect for ``_assert_batch_value_within_threshold``,
+    which ``produce_now`` runs and ``submit_work_orders`` must not.  It is
+    patched by default because the real one prices a BOM explosion; pass a
+    ``Thrown`` to stand in for an operator over the ceiling.
+    """
+    from jarz_pos.api import manufacturing
+
+    gate = gate or f"_ensure_{'manager' if endpoint == 'submit_work_orders' else 'production_execute'}_access"
+
+    with patch(f"jarz_pos.api.manufacturing.{gate}"), patch(
+        "jarz_pos.api.manufacturing._get_basket_shortages", return_value=list(shortages or [])
+    ) as mock_basket, patch(
+        "jarz_pos.api.manufacturing._assert_batch_value_within_threshold",
+        side_effect=cap,
+        return_value=PRICED,
+    ) as mock_cap, patch(
+        "jarz_pos.api.manufacturing._assert_material_availability"
+    ), patch(
+        "jarz_pos.api.manufacturing._assert_posting_date_allowed"
+    ), patch(
+        "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+    ), patch(
+        "jarz_pos.api.manufacturing._get_mfg_defaults", return_value={}
+    ), patch(
+        "jarz_pos.api.manufacturing._resolve_work_order_warehouses", return_value={}
+    ), patch(
+        "jarz_pos.api.manufacturing._resolve_scheduled_datetime", return_value=SCHEDULED
+    ), patch(
+        "jarz_pos.api.manufacturing._ensure_work_order", return_value="WO-0001"
+    ), patch(
+        "jarz_pos.api.manufacturing._make_and_submit_se", side_effect=["STE-1", "STE-2"]
+    ) as mock_se, patch(
+        "jarz_pos.api.manufacturing._set_work_order_actual_dates"
+    ), passthrough_translate(), patch("jarz_pos.api.manufacturing.frappe"):
+        out = getattr(manufacturing, endpoint)(
+            list(lines if lines is not None else [dict(LINE)]), **kwargs
+        )
+
+    return SimpleNamespace(result=out, se=mock_se, basket=mock_basket, cap=mock_cap)
+
+
+class TestProduceNowKeepsTheOperatorCap(unittest.TestCase):
+    """Widening the gate must not widen what an operator may commit.
+
+    ``start_production_batch`` caps the material value of one batch for anybody
+    outside ``ROLES.MANUFACTURING``.  ``produce_now`` opens the one-shot route
+    to exactly those people, so without the same cap the split path would be
+    the only guarded one and the shortcut would be the way around it.
+    """
+
+    def test_the_cap_runs_on_every_produce_now_line(self):
+        run = run_one_shot("produce_now", lines=[dict(LINE), dict(LINE)])
+
+        self.assertEqual(run.cap.call_count, 2)
+
+    def test_submit_work_orders_never_pays_for_the_cap(self):
+        run = run_one_shot("submit_work_orders")
+
+        # Not a micro-optimisation: everyone who reaches this door is in
+        # ROLES.MANUFACTURING, which the real assert waves through, so the only
+        # thing the call could buy is a BOM explosion per line.
+        run.cap.assert_not_called()
+
+    def test_an_operator_over_the_ceiling_is_refused_before_any_stock_moves(self):
+        run = run_one_shot("produce_now", cap=Thrown("Batch value exceeds the limit"))
+
+        run.se.assert_not_called()
+        self.assertFalse(run.result["results"][0]["ok"])
+        self.assertIn("exceeds the limit", run.result["results"][0]["error"])
+
+    def test_one_capped_line_does_not_take_the_basket_down_with_it(self):
+        run = run_one_shot(
+            "produce_now",
+            lines=[dict(LINE), dict(LINE)],
+            cap=[Thrown("Batch value exceeds the limit"), PRICED],
+        )
+
+        ok = [r["ok"] for r in run.result["results"]]
+        self.assertEqual(ok, [False, True])
+
+
+class TestProduceNowGate(unittest.TestCase):
+    """The one thing that differs between the two entry points: who may call.
+
+    A Production Operator is outside ``ROLES.MANUFACTURING``, so the manager
+    route refuses them — which is exactly why recording what the floor actually
+    made needed a second door rather than a looser lock on the first.
+    """
+
+    def _call(self, endpoint, roles):
+        from jarz_pos.api import manufacturing
+
+        with patch(
+            "jarz_pos.api.manufacturing._submit_work_orders_impl", return_value={"results": []}
+        ) as mock_impl, passthrough_translate(), patch(
+            "jarz_pos.api.manufacturing.frappe"
+        ) as mock_frappe:
+            wire_throw(mock_frappe)
+            mock_frappe.get_roles.return_value = list(roles)
+            mock_frappe.PermissionError = Thrown
+            out = getattr(manufacturing, endpoint)([dict(LINE)])
+
+        return out, mock_impl
+
+    def test_a_production_operator_may_produce_now(self):
+        from jarz_pos.constants import ROLES
+
+        out, mock_impl = self._call("produce_now", {ROLES.PRODUCTION_OPERATOR})
+
+        self.assertEqual({"results": []}, out)
+        mock_impl.assert_called_once()
+
+    def test_the_same_production_operator_is_refused_by_submit_work_orders(self):
+        from jarz_pos.constants import ROLES
+
+        with self.assertRaises(Thrown) as ctx:
+            self._call("submit_work_orders", {ROLES.PRODUCTION_OPERATOR})
+
+        self.assertIn("Managers only", str(ctx.exception))
+
+    def test_a_user_with_no_production_role_is_refused_by_produce_now(self):
+        with self.assertRaises(Thrown) as ctx:
+            self._call("produce_now", {"Sales User"})
+
+        self.assertIn("production access required", str(ctx.exception))
+
+    def test_a_manager_may_use_either_door(self):
+        from jarz_pos.constants import ROLES
+
+        for endpoint in ("produce_now", "submit_work_orders"):
+            with self.subTest(endpoint=endpoint):
+                out, mock_impl = self._call(endpoint, {ROLES.JARZ_MANAGER})
+                self.assertEqual({"results": []}, out)
+                mock_impl.assert_called_once()
+
+    def test_both_doors_reach_the_same_implementation(self):
+        """Not "does the same thing" — literally the same function.
+
+        A copy of the body here is how the two paths would drift, and the one
+        that drifts is always the one the floor uses.
+        """
+        _, manager_impl = self._call("submit_work_orders", {"System Manager"})
+        _, floor_impl = self._call("produce_now", {"Production Operator"})
+
+        self.assertEqual([dict(LINE)], manager_impl.call_args.args[0])
+        self.assertEqual([dict(LINE)], floor_impl.call_args.args[0])
+
+    def test_strict_basket_survives_the_http_string_round_trip(self):
+        """Whitelisted args arrive as strings, so ``"0"`` must be False.
+
+        Left uncoerced, ``"0"`` is truthy and the opt-out silently does nothing
+        — the failure mode that makes a flag worse than no flag.
+        """
+        from jarz_pos.api import manufacturing
+
+        cases = {"0": False, "false": False, "1": True, None: True}
+        for raw, expected in cases.items():
+            with self.subTest(strict_basket=raw):
+                with patch(
+                    "jarz_pos.api.manufacturing._ensure_production_execute_access"
+                ), patch(
+                    "jarz_pos.api.manufacturing._submit_work_orders_impl",
+                    return_value={"results": []},
+                ) as mock_impl, patch("jarz_pos.api.manufacturing.frappe"):
+                    if raw is None:
+                        manufacturing.produce_now([dict(LINE)])
+                    else:
+                        manufacturing.produce_now([dict(LINE)], strict_basket=raw)
+
+                self.assertIs(expected, mock_impl.call_args.args[1])
+
+
+class TestProduceNowBehaviourMatchesSubmitWorkOrders(unittest.TestCase):
+    """The refactor is a refactor: same entries, same shape, same short-circuit."""
+
+    def test_both_endpoints_post_the_transfer_then_the_manufacture_entry(self):
+        for endpoint in ("submit_work_orders", "produce_now"):
+            with self.subTest(endpoint=endpoint):
+                run = run_one_shot(endpoint)
+
+                self.assertEqual(
+                    ["Material Transfer for Manufacture", "Manufacture"],
+                    [c.args[1] for c in run.se.call_args_list],
+                )
+                result = run.result["results"][0]
+                self.assertTrue(result["ok"])
+                self.assertEqual("success", result["status"])
+                self.assertEqual("WO-0001", result["work_order"])
+                self.assertEqual("STE-1", result["material_transfer"])
+                self.assertEqual("STE-2", result["manufacture_entry"])
+
+    def test_both_endpoints_short_circuit_on_a_basket_shortage(self):
+        """The basket precheck is the reason the loop is safe to commit per line.
+
+        Losing it on the floor route would be the worst possible place to lose
+        it: the operator is the one standing next to the empty bin.
+        """
+        for endpoint in ("submit_work_orders", "produce_now"):
+            with self.subTest(endpoint=endpoint):
+                run = run_one_shot(endpoint, shortages=SHORTAGE)
+
+                self.assertEqual(0, run.se.call_count)
+                self.assertEqual(SHORTAGE, run.result["basket_shortages"])
+                self.assertFalse(run.result["results"][0]["ok"])
+                self.assertIn("Combined material shortage", run.result["results"][0]["error"])
+
+    def test_strict_basket_off_skips_the_aggregate_check_on_both(self):
+        for endpoint in ("submit_work_orders", "produce_now"):
+            with self.subTest(endpoint=endpoint):
+                run = run_one_shot(endpoint, shortages=SHORTAGE, strict_basket="0")
+
+                run.basket.assert_not_called()
+                self.assertEqual(2, run.se.call_count)
+
+    def test_a_failing_line_is_reported_not_raised_on_both(self):
+        """Per-line savepoints: one bad line must not take the basket down."""
+        from jarz_pos.api import manufacturing
+
+        for endpoint in ("submit_work_orders", "produce_now"):
+            with self.subTest(endpoint=endpoint):
+                gate = (
+                    "_ensure_manager_access"
+                    if endpoint == "submit_work_orders"
+                    else "_ensure_production_execute_access"
+                )
+                with patch(f"jarz_pos.api.manufacturing.{gate}"), patch(
+                    "jarz_pos.api.manufacturing._get_basket_shortages", return_value=[]
+                ), patch(
+                    "jarz_pos.api.manufacturing._assert_material_availability",
+                    side_effect=RuntimeError("FLOUR is short"),
+                ), patch(
+                    "jarz_pos.api.manufacturing._assert_posting_date_allowed"
+                ), patch(
+                    "jarz_pos.api.manufacturing._get_bom_company", return_value="Jarz Co"
+                ), patch(
+                    "jarz_pos.api.manufacturing._resolve_scheduled_datetime",
+                    return_value=SCHEDULED,
+                ), passthrough_translate(), patch(
+                    "jarz_pos.api.manufacturing.frappe"
+                ) as mock_frappe:
+                    out = getattr(manufacturing, endpoint)([dict(LINE)])
+
+                self.assertFalse(out["results"][0]["ok"])
+                self.assertIn("FLOUR is short", out["results"][0]["error"])
+                mock_frappe.db.rollback.assert_called_once()
 
 
 class TestSopVersionStamp(unittest.TestCase):
