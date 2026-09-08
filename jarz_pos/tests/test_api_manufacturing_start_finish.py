@@ -734,7 +734,10 @@ class TestListRunningWorkOrders(unittest.TestCase):
     def test_reports_elapsed_time_and_stranded_wip(self):
         out, _ = self._run(
             [dict(self.ROW, produced_qty=20.0)],
-            wip_rows=[{"item_code": "FLOUR", "qty": 30.0}],
+            # One component line in ITS OWN uom -- deliberately not 30, so a
+            # regression that starts summing the bin rows prints Kg where the
+            # screen renders the finished item's Nos.
+            wip_rows=[{"item_code": "FLOUR", "qty": 7.5}],
         )
 
         self.assertEqual(1, len(out))

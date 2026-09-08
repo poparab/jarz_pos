@@ -3078,23 +3078,37 @@ def list_running_work_orders(limit: Any = 50) -> List[Dict[str, Any]]:
 
 
 def _running_wip_leftover(work_order: Any, transferred: float, produced: float) -> float:
-    """Material still physically in WIP for one running batch.
+    """Material still in WIP for one running batch, in the FINISHED item's UOM.
 
-    Prefers the bins, which net earlier returns off, and falls back to the
-    Work Order's own arithmetic when that lookup fails — a listing that cannot
-    reach the Stock Entry rows must still report something, and over-reporting
-    is the safer direction for a number whose job is to make stranded material
+    The quantity stays ``transferred - produced`` — the units matter.  Callers
+    render this beside ``stock_uom``, and the bin rows behind it are one line
+    per component in each component's own UOM, so summing them would print a
+    number that is Kg and Litres added together.
+
+    The bins are used only to answer "is anything actually there", which the
+    Work Order cannot: ``material_transferred_for_manufacturing`` never
+    decreases, so a batch whose leftover has already gone home keeps claiming
+    it — for ever, since a short batch stays In Process.  That is the number
+    the Today screen's open-batches banner counts, and a banner full of
+    phantoms is worse than no banner.
+
+    A failed lookup falls back to the Work Order's arithmetic: over-reporting
+    is the safer direction for a figure whose job is to make stranded material
     visible.
     """
+    claimed = max(0.0, transferred - produced)
+    if claimed <= QTY_TOLERANCE:
+        return 0.0
+
     name = _coerce_str(work_order)
     if name:
         try:
             rows = _get_wip_leftover_rows(name)
         except Exception:
-            rows = None
-        if rows is not None:
-            return max(0.0, sum(_flt(row.get("qty")) for row in rows))
-    return max(0.0, transferred - produced)
+            return claimed
+        if not rows:
+            return 0.0
+    return claimed
 
 
 def _fetch_running_work_orders(filters: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
