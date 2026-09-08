@@ -26,20 +26,23 @@ from jarz_pos.events import sales_invoice as sales_invoice_events
 
 
 class _NotInATestRun:
-    """Context manager that makes the module believe it is serving live traffic."""
+    """Context manager that makes the module believe it is serving live traffic.
+
+    Assigns and restores by hand rather than using `patch.object`: `frappe.flags`
+    is a `frappe._dict`, whose `__dict__` is None, so `patch.object` dies in
+    `get_original` with "'NoneType' object is not subscriptable".
+    """
 
     def __enter__(self):
-        self._patches = [
-            patch.object(frappe, "in_test", False, create=True),
-            patch.object(frappe.flags, "in_test", False, create=True),
-        ]
-        for p in self._patches:
-            p.start()
+        self._saved_module_flag = getattr(frappe, "in_test", False)
+        self._saved_local_flag = frappe.flags.get("in_test", False)
+        frappe.in_test = False
+        frappe.flags.in_test = False
         return self
 
     def __exit__(self, *exc_info):
-        for p in reversed(self._patches):
-            p.stop()
+        frappe.in_test = self._saved_module_flag
+        frappe.flags.in_test = self._saved_local_flag
         return False
 
 
