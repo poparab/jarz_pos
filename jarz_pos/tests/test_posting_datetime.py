@@ -353,3 +353,56 @@ class TestApplyLedgerPostingDatetime(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFutureTimeGates(unittest.TestCase):
+    """The clock half of "the future is never postable".
+
+    Both guards used to compare DAYS only, which was sufficient while the clock
+    component could only come from the device's own ``now``. Once an operator
+    can name a time, 23:59 chosen at 09:00 is as future as tomorrow — and a
+    forward-stamped stock entry distorts every as-of valuation until it is
+    reached, then makes a legitimate finish fail as "before its transfer".
+    """
+
+    def test_same_day_future_clock_is_refused(self):
+        from jarz_pos.api import manufacturing
+
+        thrown = []
+
+        def fake_throw(msg, exc=None):
+            thrown.append(str(msg))
+            raise RuntimeError("thrown")
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe,                 patch.object(manufacturing, "_resolve_now_datetime",
+                             return_value=datetime(2026, 9, 8, 9, 0, 0)),                 patch.object(manufacturing, "_resolve_user_roles", return_value=set()):
+            mock_frappe.throw.side_effect = fake_throw
+            with self.assertRaises(RuntimeError):
+                manufacturing._assert_posting_date_allowed(
+                    datetime(2026, 9, 8, 23, 59, 0)
+                )
+
+        self.assertTrue(thrown, "a future clock time on today must be refused")
+        self.assertIn("future", thrown[0].lower())
+
+    def test_same_day_past_clock_is_allowed(self):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe,                 patch.object(manufacturing, "_resolve_now_datetime",
+                             return_value=datetime(2026, 9, 8, 9, 0, 0)),                 patch.object(manufacturing, "_resolve_user_roles", return_value=set()):
+            mock_frappe.throw.side_effect = AssertionError("must not throw")
+            manufacturing._assert_posting_date_allowed(
+                datetime(2026, 9, 8, 8, 30, 0)
+            )
+
+    def test_date_only_today_still_passes(self):
+        """A date-only request carries midnight, which must not read as future.
+
+        This is the legacy client's exact shape during the deploy window.
+        """
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe,                 patch.object(manufacturing, "_resolve_now_datetime",
+                             return_value=datetime(2026, 9, 8, 9, 0, 0)),                 patch.object(manufacturing, "_resolve_user_roles", return_value=set()):
+            mock_frappe.throw.side_effect = AssertionError("must not throw")
+            manufacturing._assert_posting_date_allowed(datetime(2026, 9, 8, 0, 0, 0))

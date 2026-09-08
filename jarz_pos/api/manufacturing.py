@@ -488,6 +488,37 @@ def _as_date(value: Any):
         return None
 
 
+def _as_datetime(value: Any):
+    """The same coercion as :func:`_as_date`, keeping the clock.
+
+    Separate from ``_as_date`` rather than folded into it because the two
+    guards want different things: the backdating window is a question about
+    days, while "is this in the future" became a question about the clock the
+    moment operators could name one.
+    """
+    if isinstance(value, _datetime_cls):
+        return value
+    if isinstance(value, _date_cls):
+        return _datetime_cls(value.year, value.month, value.day)
+
+    try:
+        coerced = get_datetime(value)
+    except Exception:
+        coerced = None
+    if isinstance(coerced, _datetime_cls):
+        return coerced
+    if isinstance(coerced, _date_cls):
+        return _datetime_cls(coerced.year, coerced.month, coerced.day)
+
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return None
+    try:
+        return _datetime_cls.fromisoformat(text.replace(" ", "T"))
+    except ValueError:
+        return None
+
+
 def _assert_posting_date_allowed(scheduled_dt: Any) -> None:
     """Gate *when* a batch may be posted.
 
@@ -516,6 +547,24 @@ def _assert_posting_date_allowed(scheduled_dt: Any) -> None:
         return
 
     if target == today:
+        # Same day, so the day comparison above cannot decide it — but the
+        # operator can now name a clock time, and 23:59 chosen at 09:00 is
+        # every bit as future as tomorrow. Stock valuation is ordered by
+        # posting datetime, so a forward-stamped entry both distorts every
+        # as-of valuation until it is reached and makes
+        # `_assert_finish_not_before_transfer` refuse a finish that is
+        # perfectly legitimate. Only compare the clock when one was actually
+        # named: a date-only request carries midnight, which would otherwise
+        # read as "in the past" and is not a time anybody chose.
+        requested = _as_datetime(scheduled_dt)
+        now = _resolve_now_datetime()
+        if requested is not None and now is not None and requested > now:
+            frappe.throw(
+                _(
+                    "Production cannot be posted in the future (requested {0}, "
+                    "the server clock reads {1})"
+                ).format(requested, now)
+            )
         return
 
     roles = _resolve_user_roles()

@@ -963,6 +963,19 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
     )
     posting_date = posting_date or today()
 
+    # The future is not postable. This is not decoration: `approve_employee_advance`
+    # dates the payout Payment Entry from this value, so a request filed for next
+    # month would move real cash on a cash account at a date that has not happened
+    # — hitting `_assert_posting_date_allowed`-shaped problems nothing on this path
+    # would catch, and distorting every as-of drawer balance in between. The old
+    # code could not do this because the payout always posted on the approval day.
+    if getdate(posting_date) > getdate(today()):
+        frappe.throw(
+            _("An advance cannot be dated in the future (requested {0}, today is {1}).").format(
+                posting_date, today()
+            )
+        )
+
     # ``currency`` is reqd on Employee Advance and normally fetched from
     # ``employee.salary_currency``. Plenty of Employee records here have that
     # field empty, and the fetch then leaves the document invalid at insert —
@@ -1068,8 +1081,24 @@ def _build_and_submit_payment_entry(advance: Any, paying_account: str) -> Any:
         #
         # A `Time` column comes back from the database as a `datetime.timedelta`;
         # `join_posting_datetime` is what knows that.
+        #
+        # Tested with `is not None`, never for truthiness: midnight is
+        # `timedelta(0)`, which is falsy, so `if chosen_time` would silently give
+        # an operator who deliberately picked 00:00 the legacy behaviour instead
+        # of the one they asked for — and do it only at that one time of day.
         chosen_time = advance.get(F_POSTING_TIME) if _advance_has_field(F_POSTING_TIME) else None
-        if chosen_time:
+        if chosen_time is not None:
+            # Belt and braces against a future payout. `create_employee_advance_request`
+            # now refuses a future date outright, but rows filed before that guard
+            # existed are still in the table and still approvable, and this is the
+            # call that actually moves the cash.
+            if getdate(advance.posting_date) > getdate(today()):
+                frappe.throw(
+                    _(
+                        "Advance {0} is dated {1}, which is in the future. "
+                        "Correct the date before releasing the cash."
+                    ).format(advance.name, advance.posting_date)
+                )
             apply_ledger_posting_datetime(
                 pe, join_posting_datetime(advance.posting_date, chosen_time)
             )
