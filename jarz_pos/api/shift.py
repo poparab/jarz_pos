@@ -1441,7 +1441,14 @@ def _notify_shift_event(*, pos_profile: str, event_type: str, user: str, opening
 
         # Send FCM push notifications to registered devices
         try:
-            from jarz_pos.api.notifications import _get_tokens_for_users, _send_fcm_notifications
+            from jarz_pos.api.notifications import (
+                _get_tokens_for_users,
+                _send_fcm_notifications,
+                outbound_alerts_suppressed,
+            )
+
+            if outbound_alerts_suppressed(f"shift_{event_type}"):
+                return
 
             tokens = _get_tokens_for_users(profile_users)
             if tokens:

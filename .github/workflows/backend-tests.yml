@@ -253,6 +253,12 @@ jobs:
             test_woo_order_id_display
             test_invoice_return
             test_api_notifications_return_filters
+            # This suite runs against the LIVE staging site, so a test that
+            # submits an invoice fires the real on_submit push. A rolled-back
+            # test invoice still rang the order alarm on every phone signed
+            # into the staging app, and the app could not clear an alert whose
+            # invoice no longer existed. This pins the suppression guard.
+            test_push_suppressed_in_test_run
             test_accounting_guards
             # The operator-chosen posting date AND time. One shared splitter
             # feeds every write that lets the till pick a moment (transfers,

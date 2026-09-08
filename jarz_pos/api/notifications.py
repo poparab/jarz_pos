@@ -479,6 +479,43 @@ def _log_fcm_info(message: str) -> None:
         pass
 
 
+def outbound_alerts_suppressed(context: str = "") -> bool:
+    """True while a test run owns this process — no order alert may leave it.
+
+    CI's backend suite does not run against a throwaway site. It runs against
+    the LIVE staging `frontend` site (see .github/workflows/backend-tests.yml:
+    ERPNext v16's test bootstrap collides with populated master data and a
+    vanilla site cannot install jarz_pos), so a test that submits a Sales
+    Invoice fires the real `on_submit` hooks against real data.
+
+    `frappe.db.rollback()` in tearDown undoes the invoice. It cannot undo an
+    FCM message already handed to Google. So every push to `main` touching
+    `jarz_pos/**` rang the order alarm on every phone signed into the staging
+    app -- `test_b2b_branch_invoice_persistence` alone pushes
+    "New Order: _TEST B2B Branch <hex>" for the Nasr city branch -- and because
+    the invoice is gone by the time the alarm rings, the app can neither accept
+    nor dismiss it and keeps re-alarming until it is opened and closed by hand.
+
+    Deliberately keyed on the test flag alone. `settlement_strategies._in_test_mode`
+    also treats "unittest is importable" as test mode; that is a safe fallback
+    for choosing a placeholder account, but here a false positive silences a
+    real branch's order alarm, so nothing but an actual test run counts.
+    """
+
+    try:
+        in_test = bool(getattr(frappe, "in_test", False)) or bool(
+            getattr(getattr(frappe, "flags", None), "in_test", False)
+        )
+    except Exception:
+        return False
+
+    if in_test:
+        _log_fcm_info(
+            f"Push suppressed: test run in progress{f' ({context})' if context else ''}"
+        )
+    return in_test
+
+
 # Delivery gaps have to survive the trip to a server. Everything else in this
 # module reports through _log_fcm_info -> frappe.logger().info(), which is
 # discarded on both hosts, so a branch losing push produced no evidence at all
@@ -1063,8 +1100,9 @@ def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
     })
 
     recipients = _resolve_recipients_for_payload(payload)
-    _publish_invoice_accepted(payload, recipients)
-    _push_invoice_accepted(payload, recipients)
+    if not outbound_alerts_suppressed("invoice_accepted"):
+        _publish_invoice_accepted(payload, recipients)
+        _push_invoice_accepted(payload, recipients)
 
     return {
         "success": True,
@@ -1174,6 +1212,9 @@ def notify_invoice_reassignment(invoice: Union[str, Any], new_kanban_profile: st
     if not new_kanban_profile:
         return
 
+    if outbound_alerts_suppressed("invoice_reassignment"):
+        return
+
     try:
         doc = invoice if not isinstance(invoice, str) else frappe.get_doc("Sales Invoice", invoice)
         if not doc:
@@ -1208,6 +1249,9 @@ def notify_invoice_cancellation(
     credit_note: Optional[str] = None,
 ) -> None:
     """Notify relevant users that an invoice has been cancelled from the Kanban board."""
+
+    if outbound_alerts_suppressed("invoice_cancellation"):
+        return
 
     try:
         if isinstance(invoice, str):

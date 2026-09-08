@@ -143,9 +143,20 @@ def suppress_pos_invoice_stock_update(doc: Any, method: Optional[str] = None) ->
 
 
 def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
-	"""Notify listeners a Sales Invoice has been submitted."""
+	"""Notify listeners a Sales Invoice has been submitted.
+
+	This is the `on_submit` doc event, so it fires for EVERY submitted Sales
+	Invoice on the site -- including the ones CI's backend suite submits, which
+	runs against the live staging site. See
+	`notifications.outbound_alerts_suppressed` for why a rolled-back test invoice
+	still rang real phones, and why the guard lives at this boundary rather than
+	inside `handle_invoice_submission` (which the unit tests call directly).
+	"""
 	try:
 		from jarz_pos.api import notifications as _notifications  # local import to avoid circulars
+
+		if _notifications.outbound_alerts_suppressed("new_invoice_on_submit"):
+			return
 
 		_notifications.handle_invoice_submission(doc)
 	except Exception:
