@@ -956,3 +956,65 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 
 		booked.assert_not_called()
 		self.assertEqual(receipt.status, "Confirmed")
+
+
+class TestTransferProofIsMandatory(unittest.TestCase):
+	"""InstaPay/Wallet money may only be booked against confirmed proof.
+
+	Branch staff cannot see the company bank account, so they cannot know a
+	transfer arrived. The customer's screenshot is the evidence and a manager
+	who can see the account is the one who confirms it. ``pay_invoice`` used to
+	skip all of that and book the money on a button press -- it even generated
+	the bank reference itself when none was supplied, so the reference proved
+	nothing. Three production orders were booked that way with no proof at all.
+	"""
+
+	def _frappe(self, receipts):
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_all.return_value = receipts
+		return mock_frappe
+
+	def test_refuses_when_no_receipt_exists(self):
+		from jarz_pos.api.invoices import _require_confirmed_transfer_proof
+
+		mock_frappe = self._frappe([])
+		with patch("jarz_pos.api.invoices.frappe", mock_frappe):
+			with self.assertRaises(Exception) as exc:
+				_require_confirmed_transfer_proof("ACC-SINV-0001", "instapay")
+		self.assertIn("confirmed transfer receipt", str(exc.exception))
+
+	def test_refuses_a_confirmed_receipt_that_carries_no_image(self):
+		"""Confirmed but imageless is not proof -- nobody looked at anything."""
+		from jarz_pos.api.invoices import _require_confirmed_transfer_proof
+
+		mock_frappe = self._frappe([
+			{"name": "PPR-1", "receipt_image": None, "receipt_image_url": None},
+		])
+		with patch("jarz_pos.api.invoices.frappe", mock_frappe):
+			with self.assertRaises(Exception):
+				_require_confirmed_transfer_proof("ACC-SINV-0001", "instapay")
+
+	def test_allows_a_confirmed_receipt_with_an_image(self):
+		from jarz_pos.api.invoices import _require_confirmed_transfer_proof
+
+		mock_frappe = self._frappe([
+			{"name": "PPR-1", "receipt_image": None,
+			 "receipt_image_url": "/files/transfer.jpg"},
+		])
+		with patch("jarz_pos.api.invoices.frappe", mock_frappe):
+			_require_confirmed_transfer_proof("ACC-SINV-0001", "instapay")
+		# Only CONFIRMED receipts are even considered -- an Unconfirmed one is
+		# a screenshot nobody with bank access has checked yet.
+		self.assertEqual(
+			mock_frappe.get_all.call_args.kwargs["filters"]["status"], "Confirmed"
+		)
+
+	def test_the_gate_is_wired_into_pay_invoice_for_both_online_modes(self):
+		"""The rule has to hold at the endpoint, not just in the helper."""
+		import inspect
+		from jarz_pos.api import invoices
+
+		src = inspect.getsource(invoices.pay_invoice)
+		self.assertIn("_require_confirmed_transfer_proof", src)
+		self.assertIn('mode_lower in ("wallet", "instapay")', src)

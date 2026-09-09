@@ -281,6 +281,50 @@ SITE: {frappe.local.site}
         raise
 
 
+def _require_confirmed_transfer_proof(invoice_name: str, payment_mode: str) -> None:
+    """An InstaPay/Wallet invoice may only be marked paid against confirmed proof.
+
+    This is a business rule, not a technical one, and it is the whole reason the
+    payment-receipt flow exists: branch staff cannot see the company bank
+    account, so they have no way of knowing a transfer actually arrived. What
+    they can do is take the screenshot the customer sends. Someone who CAN see
+    the account -- a manager -- then confirms the money is really there. Without
+    that second step, "InstaPay" on an order means only that a customer said
+    they had paid.
+
+    This endpoint bypassed the whole arrangement. It booked the money straight
+    into the bank ledger on a button press, with no receipt, no screenshot and
+    no manager, and it generated the bank reference number itself when the
+    caller did not supply one -- so the reference proved nothing either. On
+    production three orders were booked that way with no proof on file at all
+    (18096, 18025, 17943 -- 1,450 EGP), and 18025's money went into the wrong
+    branch's cash account on top.
+
+    So: no exceptions. The receipt must exist, carry an image, and be Confirmed.
+
+    Note this is not a dead end for either flow. An order dispatched as unpaid
+    online never needs this endpoint -- confirming its receipt posts the payment
+    itself. An order paid at the counter still can: the manager confirms the
+    receipt (a plain stamp, since the order is not awaiting anything), and this
+    check then passes.
+    """
+    rows = frappe.get_all(
+        "POS Payment Receipt",
+        filters={"sales_invoice": invoice_name, "status": "Confirmed"},
+        fields=["name", "receipt_image", "receipt_image_url"],
+    )
+    for row in rows:
+        if str(row.get("receipt_image_url") or row.get("receipt_image") or "").strip():
+            return
+
+    frappe.throw(
+        f"{payment_mode} payments need a confirmed transfer receipt. Attach the "
+        "customer's transfer screenshot to this order and have a manager confirm "
+        "it -- for an order awaiting payment, confirming the receipt records the "
+        "payment itself."
+    )
+
+
 def _clear_awaiting_payment_flag(invoice_name: str) -> None:
     """Clear ``Awaiting Payment`` once this invoice's money is actually in.
 
@@ -412,6 +456,12 @@ def pay_invoice(
             account_base = pos_profile  # POS profile name itself
         else:
             frappe.throw(f"Unsupported payment_mode: {payment_mode}")
+
+        # Money is about to move into a ledger nobody on the floor can see.
+        # Gate it on proof a manager has already verified. Runs before the
+        # Payment Entry is built, so a refusal changes nothing.
+        if mode_lower in ("wallet", "instapay"):
+            _require_confirmed_transfer_proof(inv.name, payment_mode)
 
         # Validate reference_date format if provided (allow strict date only)
         if reference_date:
