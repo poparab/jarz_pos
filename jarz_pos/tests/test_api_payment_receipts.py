@@ -550,25 +550,29 @@ class TestConfirmOnlinePaymentGate(unittest.TestCase):
 
 @contextlib.contextmanager
 def _stubbed_confirm_online_payment(booked):
-	"""Install a stub ``delivery_handling`` for the lazy import in confirm_receipt.
+	"""Install a stub ``api.couriers`` for the lazy import in confirm_receipt.
 
 	``confirm_receipt`` imports ``confirm_online_payment`` inside the function
-	body -- it has to, the two modules import each other. Patching the real
-	module would drag in ``erpnext``, which only exists inside a bench, so the
-	whole class would be skipped on a bare interpreter and the money path would
-	go untested exactly where it is easiest to regress.
+	body -- it has to, the two modules import each other. It imports the
+	GUARDED wrapper in ``api.couriers``, not the bare service, so that the
+	branch-scope and open-shift gates run; stubbing the service instead would
+	let a regression that bypasses those gates pass the suite.
+
+	Patching the real module would drag in ``erpnext``, which only exists inside
+	a bench, so the whole class would be skipped on a bare interpreter and the
+	money path would go untested exactly where it is easiest to regress.
 	"""
-	previous = sys.modules.get("jarz_pos.services.delivery_handling")
-	stub = types.ModuleType("jarz_pos.services.delivery_handling")
+	previous = sys.modules.get("jarz_pos.api.couriers")
+	stub = types.ModuleType("jarz_pos.api.couriers")
 	stub.confirm_online_payment = booked
-	sys.modules["jarz_pos.services.delivery_handling"] = stub
+	sys.modules["jarz_pos.api.couriers"] = stub
 	try:
 		yield stub
 	finally:
 		if previous is not None:
-			sys.modules["jarz_pos.services.delivery_handling"] = previous
+			sys.modules["jarz_pos.api.couriers"] = previous
 		else:
-			sys.modules.pop("jarz_pos.services.delivery_handling", None)
+			sys.modules.pop("jarz_pos.api.couriers", None)
 
 
 class TestPendingReceiptFiling(unittest.TestCase):
@@ -727,6 +731,62 @@ class TestPendingReceiptFiling(unittest.TestCase):
 			["in", ["Unconfirmed", "Rejected"]],
 		)
 
+
+	def test_does_not_resync_the_amount_once_a_screenshot_is_attached(self):
+		"""An imageless row holds a target; a row with an image holds a claim.
+
+		Rewriting the claim is how a 500 EGP transfer against a 1,000 EGP order
+		becomes a full collection with nothing left in the record to show it.
+		"""
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = [{
+			"name": "POS-RCPT-2026-00044",
+			"payment_method": "InstaPay",
+			"status": "Unconfirmed",
+			"amount": 500.0,
+			"receipt_image": "/files/proof.jpg",
+			"receipt_image_url": "/files/proof.jpg",
+		}]
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			name = ensure_pending_payment_receipt(
+				"ACC-SINV-0001",
+				payment_method="Instapay",
+				amount=1000.0,
+				pos_profile="Dokki",
+			)
+
+		self.assertEqual(name, "POS-RCPT-2026-00044")
+		mock_frappe.db.set_value.assert_not_called()
+
+	def test_a_mismatched_amount_is_still_refused_at_confirmation(self):
+		"""The only automated check that the proof matches the order's money.
+
+		The posted Payment Entry takes its amount from the invoice outstanding,
+		never from the receipt, so this comparison is not redundant with it.
+		"""
+		from jarz_pos.api.payment_receipts import ensure_uploaded_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.get_doc.return_value = _FakeReceiptDoc(
+			status="Unconfirmed", amount=500.0
+		)
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			with self.assertRaises(Exception) as exc:
+				ensure_uploaded_payment_receipt(
+					"PPR-0001",
+					sales_invoice="ACC-SINV-0001",
+					payment_method="InstaPay",
+					amount=1000.0,
+				)
+
+		self.assertIn("does not match", str(exc.exception))
+		mock_frappe.get_doc.return_value.save.assert_not_called()
 
 class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 	"""Confirming in the receipts list must post the payment, not just stamp.

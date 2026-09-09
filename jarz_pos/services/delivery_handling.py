@@ -14,6 +14,7 @@ from erpnext.stock.stock_ledger import is_negative_stock_allowed
 from frappe import _
 from jarz_pos.api.payment_receipts import (
     ensure_pending_payment_receipt,
+    receipt_method_label,
     ensure_uploaded_payment_receipt,
     mark_payment_receipts_changed_for_invoice,
     retire_pending_payment_receipts,
@@ -1862,6 +1863,22 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     if not invoice_name:
         frappe.throw("invoice_name required")
 
+    # Serialize against the OTHER endpoint that posts a customer Payment Entry
+    # for this invoice. ``pay_invoice`` already takes exactly this lock; this
+    # function never did, so the two were not serialized against each other and
+    # both could read the same outstanding before either committed. That was
+    # survivable while the two screens were used by different people for
+    # different orders -- it is not, now that confirming in the receipts list
+    # reaches this code for the very orders the kanban InstaPay button also
+    # covers. Two submitted Receive PEs for one transfer is not self-correcting.
+    try:
+        frappe.db.sql(
+            "SELECT name FROM `tabSales Invoice` WHERE name=%s FOR UPDATE",
+            (invoice_name,),
+        )
+    except Exception:
+        pass
+
     inv = frappe.get_doc("Sales Invoice", invoice_name)
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
@@ -1902,7 +1919,7 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     order_amount = float(inv.grand_total or 0) or outstanding
 
     # Validate the uploaded screenshot (invoice + method + amount), then confirm the receipt
-    ensure_uploaded_payment_receipt(
+    validated_receipt = ensure_uploaded_payment_receipt(
         receipt_name,
         sales_invoice=inv.name,
         payment_method=method_label,
@@ -1911,7 +1928,11 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     # Stamp the row directly rather than through the whitelisted
     # ``confirm_receipt``: that entry point now routes an awaiting-payment
     # receipt back into THIS function, so calling it here would recurse.
-    _confirm_receipt_record(frappe.get_doc("POS Payment Receipt", receipt_name))
+    # Uses the name the validator resolved, not the raw parameter -- the
+    # validator strips it, so a padded argument would validate and then miss.
+    _confirm_receipt_record(
+        frappe.get_doc("POS Payment Receipt", validated_receipt["name"])
+    )
 
     # DR Bank/Instapay ledger, CR Debtors → auto-allocated to the SI → marks Paid
     paid_from = _get_receivable_account(company)
@@ -1940,6 +1961,23 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     return payload
 
 
+def _log_reconcile_note(invoice_name: str, message: str) -> None:
+    """Record a reconciliation note where somebody can actually read it.
+
+    ``frappe.logger()`` output is not retrievable on these servers, so a note
+    written there is the same as no note. ``frappe.log_error`` lands in Desk --
+    and is itself wrapped, because it raises when the message trips its own
+    length or encoding limits, and nothing here is worth failing over.
+    """
+    try:
+        frappe.log_error(
+            title=f"Payment confirmation reconcile: {invoice_name}"[:140],
+            message=str(message)[:5000],
+        )
+    except Exception:
+        pass
+
+
 def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
     """Bring one ``Awaiting Payment`` invoice back in step with its own ledger.
 
@@ -1957,9 +1995,17 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
     enumerated yet -- a Desk payment, a bank reconciliation, a future endpoint --
     is healed as well:
 
-    * **Money is in** (nothing outstanding): flip the flag to Payment Confirmed
-      and retire any receipt still asking for a screenshot. A Confirmed receipt
-      is left alone; it is evidence.
+    * **Money is in** — meaning a REAL customer Payment Entry exists, not merely
+      that the outstanding reached zero. Those are different questions and
+      conflating them is how an order gets falsely marked collected: an unpaid
+      RETURN knocks the receivable off with a journal entry, and
+      ``mark_courier_outstanding`` moves it to Courier Outstanding while the
+      cash is still in the courier's pocket. Both zero the outstanding and
+      neither is a collection, so gating on it would have stamped
+      "Payment Confirmed" on money nobody has, retired the receipt, and removed
+      the order from the only two screens that track it. Flip the flag and
+      retire any receipt still asking for a screenshot. A Confirmed receipt is
+      left alone; it is evidence.
     * **Money is still owed** but no receipt is pending: file one, so the order
       is visible on the receipts list. This catches an order whose receipt was
       retired by a collection change to another online method, which leaves it
@@ -1990,7 +2036,12 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
 
         outstanding = float(row.get("outstanding_amount") or 0)
 
-        if outstanding > 0.01:
+        # ``_get_real_customer_payment_entry`` excludes anything landing in
+        # Courier Outstanding, which is exactly the distinction that matters
+        # here, so it -- not the outstanding -- decides whether money arrived.
+        pe = _get_real_customer_payment_entry(row["name"], row.get("company")) or {}
+
+        if outstanding > 0.01 or not pe:
             filed = ensure_pending_payment_receipt(
                 row["name"],
                 payment_method=row.get("custom_payment_method"),
@@ -1998,10 +2049,28 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
                 pos_profile=(row.get("custom_kanban_profile") or row.get("pos_profile")),
             )
             if not filed:
+                if outstanding <= 0.01:
+                    # Zero outstanding, no customer payment, and no receipt can
+                    # be filed for this method. Left awaiting on purpose -- it
+                    # is the honest state -- but said out loud, because the
+                    # order is otherwise invisible on the receipts list and
+                    # would be re-swept and skipped silently every hour.
+                    _log_reconcile_note(
+                        row["name"],
+                        "outstanding is zero but no customer payment entry exists "
+                        "(returned, or moved to Courier Outstanding); left awaiting",
+                    )
+                elif not receipt_method_label(row.get("custom_payment_method")):
+                    _log_reconcile_note(
+                        row["name"],
+                        "awaiting payment with method "
+                        f"{row.get('custom_payment_method')!r}, which takes no "
+                        "receipt -- it can appear on no receipts list and cannot "
+                        "be confirmed from the app",
+                    )
                 return None
             return {"invoice": row["name"], "action": "receipt_filed", "receipt": filed}
 
-        pe = _get_real_customer_payment_entry(row["name"], row.get("company")) or {}
         inv = frappe.get_doc("Sales Invoice", row["name"])
         update_submitted_sales_invoice_fields(
             inv,
@@ -2026,10 +2095,8 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
             "payment_entry": pe.get("name"),
             "retired_receipts": retired,
         }
-    except Exception as exc:  # pragma: no cover - reconciliation must never raise
-        frappe.logger().error(
-            f"Failed to reconcile payment confirmation for {invoice_name}: {exc}"
-        )
+    except Exception:  # pragma: no cover - reconciliation must never raise
+        _log_reconcile_note(invoice_name, frappe.get_traceback())
         return None
 
 

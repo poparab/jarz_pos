@@ -77,11 +77,15 @@ def ensure_pending_payment_receipt(
       cannot be filed is a reporting gap; an exception here would be a courier
       standing at the door with an order that will not go out. Same reasoning as
       the courier-attribution params being optional.
-    * **It refreshes a stale amount.** ``ensure_uploaded_payment_receipt`` refuses
-      a receipt whose amount has drifted from the invoice, so a post-submit
-      re-rate (shipping recalculated on an address change) would otherwise leave
-      an order that can never be confirmed. Only a not-yet-Confirmed row is
-      touched — a Confirmed one is evidence and is frozen.
+    * **It refreshes a stale amount, but only while no screenshot is attached.**
+      ``ensure_uploaded_payment_receipt`` refuses a receipt whose amount has
+      drifted from the invoice, so a post-submit re-rate (shipping recalculated
+      on an address change) would otherwise leave an order that can never be
+      confirmed. An imageless row carries a TARGET copied off the invoice, so
+      re-syncing it loses nothing. Once an image is attached the amount is a
+      CLAIM about that screenshot, and it is the only automated check that the
+      proof matches the order — rewriting it would silently turn a 500 EGP
+      transfer against a 1,000 EGP order into a full collection.
     """
     invoice_name = str(sales_invoice or "").strip()
     method_label = receipt_method_label(payment_method)
@@ -96,7 +100,10 @@ def ensure_pending_payment_receipt(
                 "sales_invoice": invoice_name,
                 "status": ["!=", RECEIPT_STATUS_CHANGED],
             },
-            fields=["name", "payment_method", "status", "amount"],
+            fields=[
+                "name", "payment_method", "status", "amount",
+                "receipt_image", "receipt_image_url",
+            ],
             order_by="creation desc",
             limit_page_length=20,
         )
@@ -110,8 +117,16 @@ def ensure_pending_payment_receipt(
         )
 
         if existing:
+            has_image = bool(
+                str(
+                    existing.get("receipt_image_url")
+                    or existing.get("receipt_image")
+                    or ""
+                ).strip()
+            )
             if (
-                str(existing.get("status") or "").strip() != RECEIPT_STATUS_CONFIRMED
+                not has_image
+                and str(existing.get("status") or "").strip() != RECEIPT_STATUS_CONFIRMED
                 and abs(float(existing.get("amount") or 0) - float(amount or 0)) > 0.01
             ):
                 frappe.db.set_value(
@@ -240,24 +255,16 @@ def ensure_uploaded_payment_receipt(
         frappe.throw("Payment receipt method does not match the selected collection method")
     receipt_amount = float(getattr(receipt, "amount", 0) or 0)
     if abs(receipt_amount - float(amount or 0)) > 0.01:
-        # A receipt that has not been confirmed yet carries a TARGET, not
-        # evidence: the amount was copied off the invoice when the row was
-        # filed, and the money actually posted comes from the invoice's
-        # outstanding, never from this field. So a drift here means the invoice
-        # was re-rated after dispatch (shipping recalculated on an address
-        # change is the live example) — refusing would strand an order that can
-        # then never be confirmed by anyone. Re-sync and carry on.
-        # A CONFIRMED row is evidence and is frozen: there the mismatch is real
-        # and must still stop the caller.
-        if str(getattr(receipt, "status", "") or "").strip() in (
-            RECEIPT_STATUS_UNCONFIRMED,
-            RECEIPT_STATUS_REJECTED,
-        ):
-            receipt.amount = float(amount or 0)
-            receipt.save(ignore_permissions=True)
-            receipt_amount = float(receipt.amount or 0)
-        else:
-            frappe.throw("Payment receipt amount does not match the order amount")
+        # Deliberately still a refusal. The posted Payment Entry takes its
+        # amount from the invoice's outstanding, never from this field, so this
+        # comparison is the only automated check that the screenshot somebody
+        # uploaded is for this order's money. Re-syncing it here would turn a
+        # 500 EGP transfer against a 1,000 EGP order into a full collection with
+        # no trace of the 500 claim. The stale-amount case this used to guard
+        # against is healed earlier and more safely, by
+        # ensure_pending_payment_receipt, which re-syncs only while the row
+        # still has no image attached.
+        frappe.throw("Payment receipt amount does not match the order amount")
 
     image_url = str(
         getattr(receipt, "receipt_image_url", None)
@@ -842,7 +849,14 @@ def confirm_receipt(receipt_name: str):
                     "this receipt records the payment against the invoice."
                 )
 
-            from jarz_pos.services.delivery_handling import confirm_online_payment
+            # The GUARDED endpoint, not the bare service underneath it.
+            # ``api.couriers.confirm_online_payment`` wraps the service in
+            # ``_guard_invoice_action`` — branch scope on the INVOICE plus an
+            # open shift. Calling the service directly would have made this a
+            # second, weaker door to the same Payment Entry: money bookable into
+            # the bank ledger outside any open shift, and a receipt filed
+            # against another branch's order confirmable by whoever filed it.
+            from jarz_pos.api.couriers import confirm_online_payment
 
             result = confirm_online_payment(
                 awaiting["name"],

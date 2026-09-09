@@ -129,6 +129,7 @@ def _build_stub_payment_receipts():
     # awaiting-payment receipt back into ``confirm_online_payment``.
     module._confirm_receipt_record = MagicMock(return_value=None)
     module.ensure_pending_payment_receipt = MagicMock(return_value="PPR-PENDING")
+    module.receipt_method_label = MagicMock(return_value="InstaPay")
     module.retire_pending_payment_receipts = MagicMock(return_value=[])
     module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
     module._has_payment_receipt_confirm_access = MagicMock(return_value=True)
@@ -841,3 +842,90 @@ class TestCollectionChangeSourceLookup(unittest.TestCase):
         # An older row read without the column reads as still open, which is the
         # behaviour every caller had before the settled fallback existed.
         self.assertTrue(module._courier_row_can_still_carry_cash({}))
+
+
+class TestReconcilePaymentConfirmation(unittest.TestCase):
+    """The backstop that re-aligns an awaiting order with its own ledger.
+
+    Its one dangerous mistake would be treating "nothing outstanding" as "the
+    customer paid". An unpaid RETURN knocks the receivable off with a journal
+    entry and ``mark_courier_outstanding`` moves it to Courier Outstanding while
+    the cash is still in the courier's pocket -- both zero the outstanding and
+    neither is a collection.
+    """
+
+    def _module(self, invoice, outstanding, status="Awaiting Payment"):
+        module, stub_frappe = _import_delivery_handling(invoice)
+        stub_frappe.db.get_value = MagicMock(return_value={
+            "name": invoice.name,
+            "company": "Test Company",
+            "docstatus": 1,
+            "outstanding_amount": outstanding,
+            "grand_total": 480.0,
+            "custom_payment_confirmation_status": status,
+            "custom_payment_method": "Instapay",
+            "custom_kanban_profile": "Dokki",
+            "pos_profile": "Dokki",
+        })
+        return module, stub_frappe
+
+    def test_zero_outstanding_without_a_customer_payment_is_not_a_collection(self):
+        invoice = _FakeInvoice(name="INV-RETURNED")
+        module, _ = self._module(invoice, 0.0)
+        # A returned order: the receivable was knocked off by a journal entry,
+        # so there is no real customer Payment Entry.
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module.retire_pending_payment_receipts = MagicMock(return_value=[])
+        module.ensure_pending_payment_receipt = MagicMock(return_value=None)
+        module.update_submitted_sales_invoice_fields = MagicMock()
+
+        result = module.reconcile_payment_confirmation("INV-RETURNED")
+
+        self.assertIsNone(result)
+        # Never claim money arrived, and never drop the receipt that is the
+        # only remaining trace of the order on the receipts list.
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+        module.retire_pending_payment_receipts.assert_not_called()
+
+    def test_a_real_customer_payment_confirms_and_retires_the_pending_receipt(self):
+        invoice = _FakeInvoice(name="INV-PAID")
+        module, _ = self._module(invoice, 0.0)
+        module._get_real_customer_payment_entry = MagicMock(
+            return_value={"name": "ACC-PAY-0001", "paid_to": "Bank Account - TC"}
+        )
+        module.retire_pending_payment_receipts = MagicMock(return_value=["PPR-1"])
+        module.update_submitted_sales_invoice_fields = MagicMock()
+
+        result = module.reconcile_payment_confirmation("INV-PAID")
+
+        self.assertEqual(result["action"], "confirmed_from_ledger")
+        self.assertEqual(result["payment_entry"], "ACC-PAY-0001")
+        fields = module.update_submitted_sales_invoice_fields.call_args.args[1]
+        self.assertEqual(
+            fields["custom_payment_confirmation_status"], "Payment Confirmed"
+        )
+        module.retire_pending_payment_receipts.assert_called_once_with("INV-PAID")
+
+    def test_an_unpaid_order_gets_the_receipt_that_makes_it_visible(self):
+        invoice = _FakeInvoice(name="INV-OWING")
+        module, _ = self._module(invoice, 480.0)
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module.ensure_pending_payment_receipt = MagicMock(return_value="PPR-NEW")
+        module.update_submitted_sales_invoice_fields = MagicMock()
+
+        result = module.reconcile_payment_confirmation("INV-OWING")
+
+        self.assertEqual(result["action"], "receipt_filed")
+        self.assertEqual(result["receipt"], "PPR-NEW")
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+
+    def test_an_order_that_is_not_awaiting_is_left_alone(self):
+        invoice = _FakeInvoice(name="INV-DONE")
+        module, _ = self._module(invoice, 0.0, status="Payment Confirmed")
+        module._get_real_customer_payment_entry = MagicMock(return_value={"name": "PE-1"})
+        module.update_submitted_sales_invoice_fields = MagicMock()
+        module.retire_pending_payment_receipts = MagicMock()
+
+        self.assertIsNone(module.reconcile_payment_confirmation("INV-DONE"))
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+        module.retire_pending_payment_receipts.assert_not_called()
