@@ -2073,6 +2073,20 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
                         "receipt -- it can appear on no receipts list and cannot "
                         "be confirmed from the app",
                     )
+                else:
+                    # Money outstanding, a method that DOES take a receipt, and
+                    # still no row: the invoice carries no POS profile to file
+                    # it against, or the insert failed. Said out loud because
+                    # silence now means "everything is in step" -- and the only
+                    # other trace is frappe.logger().error, which is not
+                    # retrievable on these servers.
+                    _log_reconcile_note(
+                        row["name"],
+                        f"awaiting payment with {outstanding} outstanding and "
+                        f"method {row.get('custom_payment_method')!r}, which takes "
+                        "a receipt, but none could be filed -- check the POS "
+                        "profile on the invoice; the order is on no receipts list",
+                    )
                 return None
             if not pending.changed:
                 # The receipt is already on file and still matches the order.

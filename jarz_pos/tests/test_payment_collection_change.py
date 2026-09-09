@@ -111,23 +111,39 @@ def _build_stub_account_utils():
     return module
 
 
-def _pending_receipt(name, *, created=False, amount_synced=False):
+class _PendingReceipt:
     """Stand-in for ``api.payment_receipts.PendingReceipt``.
 
     Built locally rather than imported: the real module cannot be imported
     inside the stub-``frappe`` window (it does ``from frappe.exceptions import
     ...``, and the stub is a plain module, not a package). The contract mirrored
-    here is the whole of what ``reconcile_payment_confirmation`` reads --
-    ``name`` for "is there a receipt at all" and ``changed`` for "did this call
-    write anything"; ``test_api_payment_receipts`` asserts the real object
-    against the real function.
+    here is what ``reconcile_payment_confirmation`` reads -- ``name`` for "is
+    there a receipt at all" and ``changed`` for "did this call write anything";
+    ``test_api_payment_receipts`` asserts the real object against the real
+    function.
+
+    ``__bool__`` is mirrored rather than left to default. A ``SimpleNamespace``
+    is truthy even with ``name=None`` -- the exact inverse of the real class --
+    so a later refactor of the reconciler to ``if not pending:``, which is
+    CORRECT against the real object, would silently stop exercising the
+    log-note branch below while the test carried on passing.
     """
-    return SimpleNamespace(
-        name=name,
-        created=created,
-        amount_synced=amount_synced,
-        changed=created or amount_synced,
-    )
+
+    def __init__(self, name, *, created=False, amount_synced=False):
+        self.name = name
+        self.created = created
+        self.amount_synced = amount_synced
+
+    @property
+    def changed(self):
+        return self.created or self.amount_synced
+
+    def __bool__(self):
+        return bool(self.name)
+
+
+def _pending_receipt(name, *, created=False, amount_synced=False):
+    return _PendingReceipt(name, created=created, amount_synced=amount_synced)
 
 
 def _build_stub_payment_receipts():
@@ -901,6 +917,7 @@ class TestReconcilePaymentConfirmation(unittest.TestCase):
             return_value=_pending_receipt(None)
         )
         module.update_submitted_sales_invoice_fields = MagicMock()
+        module._log_reconcile_note = MagicMock()
 
         result = module.reconcile_payment_confirmation("INV-RETURNED")
 
@@ -909,6 +926,13 @@ class TestReconcilePaymentConfirmation(unittest.TestCase):
         # only remaining trace of the order on the receipts list.
         module.update_submitted_sales_invoice_fields.assert_not_called()
         module.retire_pending_payment_receipts.assert_not_called()
+        # Left awaiting on purpose, but not silently: it is invisible on the
+        # receipts list and would otherwise be re-swept and skipped for ever.
+        module._log_reconcile_note.assert_called_once()
+        self.assertIn(
+            "no customer payment entry",
+            module._log_reconcile_note.call_args.args[1],
+        )
 
     def test_a_real_customer_payment_confirms_and_retires_the_pending_receipt(self):
         invoice = _FakeInvoice(name="INV-PAID")
@@ -989,6 +1013,33 @@ class TestReconcilePaymentConfirmation(unittest.TestCase):
         self.assertEqual(result["action"], "receipt_amount_synced")
         self.assertEqual(result["receipt"], "PPR-EXISTING")
         module.update_submitted_sales_invoice_fields.assert_not_called()
+
+    def test_an_owed_order_whose_receipt_cannot_be_filed_says_so(self):
+        """The one state that would otherwise be silent AND wrong.
+
+        Money outstanding, a method that does take a receipt, and no row filed
+        -- an invoice with no POS profile to file it against, or a failed
+        insert. The only other trace is ``frappe.logger().error``, which is not
+        retrievable on these servers, and now that a quiet sweep means
+        "everything is in step" this had to stop being quiet.
+        """
+        invoice = _FakeInvoice(name="INV-NO-PROFILE")
+        module, _ = self._module(invoice, 480.0)
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module.ensure_pending_payment_receipt = MagicMock(
+            return_value=_pending_receipt(None)
+        )
+        module.receipt_method_label = MagicMock(return_value="InstaPay")
+        module.update_submitted_sales_invoice_fields = MagicMock()
+        module._log_reconcile_note = MagicMock()
+
+        self.assertIsNone(module.reconcile_payment_confirmation("INV-NO-PROFILE"))
+
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+        module._log_reconcile_note.assert_called_once()
+        self.assertIn(
+            "none could be filed", module._log_reconcile_note.call_args.args[1]
+        )
 
     def test_an_order_that_is_not_awaiting_is_left_alone(self):
         invoice = _FakeInvoice(name="INV-DONE")
