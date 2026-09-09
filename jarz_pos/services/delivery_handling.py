@@ -2013,6 +2013,11 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
 
     Never raises, never moves money, and is idempotent -- both branches are
     no-ops once they have run.
+
+    **Returns a result only when it changed something** -- filed a NEW receipt,
+    re-synced a drifted amount, or confirmed from the ledger. A sweep that finds
+    every order already in step returns ``None`` for all of them, which is what
+    lets the hourly job log (and commit) only on a run that did work.
     """
     invoice_name = str(invoice_name or "").strip()
     if not invoice_name:
@@ -2042,13 +2047,13 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
         pe = _get_real_customer_payment_entry(row["name"], row.get("company")) or {}
 
         if outstanding > 0.01 or not pe:
-            filed = ensure_pending_payment_receipt(
+            pending = ensure_pending_payment_receipt(
                 row["name"],
                 payment_method=row.get("custom_payment_method"),
                 amount=float(row.get("grand_total") or 0),
                 pos_profile=(row.get("custom_kanban_profile") or row.get("pos_profile")),
             )
-            if not filed:
+            if not pending.name:
                 if outstanding <= 0.01:
                     # Zero outstanding, no customer payment, and no receipt can
                     # be filed for this method. Left awaiting on purpose -- it
@@ -2069,7 +2074,18 @@ def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
                         "be confirmed from the app",
                     )
                 return None
-            return {"invoice": row["name"], "action": "receipt_filed", "receipt": filed}
+            if not pending.changed:
+                # The receipt is already on file and still matches the order.
+                # Nothing happened, so say nothing happened: the caller counts
+                # a truthy result as work done, and reporting a steady-state
+                # sweep as 23 orders "reconciled" every hour is how that count
+                # stopped meaning anything.
+                return None
+            return {
+                "invoice": row["name"],
+                "action": "receipt_filed" if pending.created else "receipt_amount_synced",
+                "receipt": pending.name,
+            }
 
         inv = frappe.get_doc("Sales Invoice", row["name"])
         update_submitted_sales_invoice_fields(

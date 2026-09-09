@@ -114,6 +114,11 @@ def reconcile_awaiting_online_payments():
     and the receipts list agree with the ledger again. Per-invoice failures are
     isolated so one bad row cannot stop the sweep, and it never raises out of
     the scheduler.
+
+    ``reconcile_payment_confirmation`` returns a result only when it actually
+    changed something, so ``healed`` counts writes, not rows looked at. A steady
+    hour is silent and commits nothing -- it used to report every awaiting order
+    as reconciled and commit an empty transaction every hour.
     """
     import frappe
 
@@ -138,7 +143,8 @@ def reconcile_awaiting_online_payments():
         if healed:
             frappe.db.commit()
             frappe.logger().info(
-                f"reconcile_awaiting_online_payments: reconciled {healed}/{len(rows)} orders"
+                f"reconcile_awaiting_online_payments: changed {healed} of "
+                f"{len(rows)} awaiting orders"
             )
     except Exception:
         frappe.logger().error(

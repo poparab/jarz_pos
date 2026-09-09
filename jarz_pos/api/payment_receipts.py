@@ -4,6 +4,7 @@ from __future__ import annotations
 import frappe
 import base64
 import os
+from dataclasses import dataclass
 from typing import List, Dict, Any
 from frappe import _
 from frappe.exceptions import PermissionError as FrappePermissionError
@@ -54,13 +55,46 @@ def receipt_method_label(method: str | None) -> str | None:
     return RECEIPT_METHOD_LABELS.get(_normalize_receipt_method(method))
 
 
+@dataclass(frozen=True)
+class PendingReceipt:
+    """What :func:`ensure_pending_payment_receipt` actually did.
+
+    A bare receipt name could not tell "I filed this row" from "this row was
+    already here", and the hourly reconciler reported both as work done: on
+    2026-09-09 a steady-state sweep of production logged 23 of 23 orders
+    "reconciled" while creating nothing, so the one line meant to say whether
+    the backlog moved said the same thing every hour whatever happened.
+
+    ``name`` is the receipt for this invoice and method, or ``None`` when none
+    could be filed. ``changed`` is the only thing a caller should report on.
+    """
+
+    name: str | None = None
+    created: bool = False
+    amount_synced: bool = False
+
+    @property
+    def changed(self) -> bool:
+        """Whether this call wrote anything. A reused, in-step row did not."""
+        return self.created or self.amount_synced
+
+    def __bool__(self) -> bool:
+        """Truthy means *a receipt exists*, not that this call made one.
+
+        Kept deliberately different from :attr:`changed`: the callers that test
+        this are asking "is the order visible on the receipts list", which a
+        reused row answers just as well as a new one.
+        """
+        return bool(self.name)
+
+
 def ensure_pending_payment_receipt(
     sales_invoice: str,
     *,
     payment_method: str | None,
     amount: float,
     pos_profile: str | None,
-) -> str | None:
+) -> PendingReceipt:
     """Create — or refresh — the imageless receipt an awaiting-payment order needs.
 
     An unpaid InstaPay/Wallet order moved Out for Delivery used to create no
@@ -86,12 +120,16 @@ def ensure_pending_payment_receipt(
       CLAIM about that screenshot, and it is the only automated check that the
       proof matches the order — rewriting it would silently turn a 500 EGP
       transfer against a 1,000 EGP order into a full collection.
+
+    Returns a :class:`PendingReceipt` rather than the name alone, so a caller
+    that reports on its own work -- the hourly reconciler and the v1_9 patch --
+    can tell a row it filed from one that was already there.
     """
     invoice_name = str(sales_invoice or "").strip()
     method_label = receipt_method_label(payment_method)
     profile = str(pos_profile or "").strip()
     if not invoice_name or not method_label or not profile:
-        return None
+        return PendingReceipt()
 
     try:
         rows = frappe.get_all(
@@ -124,11 +162,12 @@ def ensure_pending_payment_receipt(
                     or ""
                 ).strip()
             )
-            if (
+            needs_resync = (
                 not has_image
                 and str(existing.get("status") or "").strip() != RECEIPT_STATUS_CONFIRMED
                 and abs(float(existing.get("amount") or 0) - float(amount or 0)) > 0.01
-            ):
+            )
+            if needs_resync:
                 frappe.db.set_value(
                     "POS Payment Receipt",
                     existing["name"],
@@ -136,7 +175,9 @@ def ensure_pending_payment_receipt(
                     float(amount or 0),
                     update_modified=False,
                 )
-            return existing["name"]
+            return PendingReceipt(
+                name=existing["name"], created=False, amount_synced=needs_resync
+            )
 
         receipt = frappe.get_doc({
             "doctype": "POS Payment Receipt",
@@ -147,12 +188,12 @@ def ensure_pending_payment_receipt(
             "status": RECEIPT_STATUS_UNCONFIRMED,
         })
         receipt.insert(ignore_permissions=True)
-        return receipt.name
+        return PendingReceipt(name=receipt.name, created=True)
     except Exception as exc:  # pragma: no cover - must never block a dispatch
         frappe.logger().error(
             f"Failed to file pending payment receipt for {invoice_name}: {exc}"
         )
-        return None
+        return PendingReceipt()
 
 
 def mark_payment_receipts_changed_for_invoice(

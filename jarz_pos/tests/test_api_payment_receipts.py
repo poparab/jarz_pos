@@ -594,14 +594,17 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		mock_frappe.get_doc.return_value = created
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
-			name = ensure_pending_payment_receipt(
+			result = ensure_pending_payment_receipt(
 				"ACC-SINV-0001",
 				payment_method="Instapay",
 				amount=480.0,
 				pos_profile="Dokki",
 			)
 
-		self.assertEqual(name, "POS-RCPT-2026-00044")
+		self.assertEqual(result.name, "POS-RCPT-2026-00044")
+		# The caller has to be able to say it filed this row rather than found it.
+		self.assertTrue(result.created)
+		self.assertTrue(result.changed)
 		payload = mock_frappe.get_doc.call_args.args[0]
 		# The invoice spells it "Instapay"; the DocType Select accepts only
 		# "InstaPay", so writing the invoice's spelling straight through would
@@ -637,14 +640,16 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		mock_frappe = MagicMock()
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
 			for method in ("Cash", "Kashier Card", "", None):
-				self.assertIsNone(
-					ensure_pending_payment_receipt(
-						"ACC-SINV-0003",
-						payment_method=method,
-						amount=50.0,
-						pos_profile="Dokki",
-					)
+				result = ensure_pending_payment_receipt(
+					"ACC-SINV-0003",
+					payment_method=method,
+					amount=50.0,
+					pos_profile="Dokki",
 				)
+				self.assertIsNone(result.name)
+				self.assertFalse(result.changed)
+				# No receipt exists, so the order is on no receipts list.
+				self.assertFalse(result)
 		mock_frappe.get_doc.assert_not_called()
 
 	def test_is_idempotent_and_refreshes_a_stale_amount(self):
@@ -659,19 +664,60 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		}]
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
-			name = ensure_pending_payment_receipt(
+			result = ensure_pending_payment_receipt(
 				"ACC-SINV-0001",
 				payment_method="Instapay",
 				amount=525.0,
 				pos_profile="Dokki",
 			)
 
-		self.assertEqual(name, "POS-RCPT-2026-00044")
+		self.assertEqual(result.name, "POS-RCPT-2026-00044")
+		# Reused, so nothing was filed -- but the amount really was rewritten,
+		# which is a change worth reporting.
+		self.assertFalse(result.created)
+		self.assertTrue(result.amount_synced)
+		self.assertTrue(result.changed)
 		mock_frappe.get_doc.assert_not_called()
 		# A re-rated invoice must not strand: ensure_uploaded_payment_receipt
 		# refuses a receipt whose amount has drifted from the order.
 		mock_frappe.db.set_value.assert_called_once()
 		self.assertEqual(mock_frappe.db.set_value.call_args.args[3], 525.0)
+
+	def test_reusing_an_in_step_row_reports_no_change(self):
+		"""The steady state has to be distinguishable from real work.
+
+		The hourly reconciler counts a truthy result as an order it healed. While
+		this returned the existing name, a sweep that wrote nothing looked exactly
+		like one that filed 23 receipts -- production logged "reconciled 23/23"
+		every hour on 2026-09-09 with the receipt count sitting still at 62.
+		"""
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = [{
+			"name": "POS-RCPT-2026-00044",
+			"payment_method": "InstaPay",
+			"status": "Unconfirmed",
+			"amount": 480.0,
+		}]
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			result = ensure_pending_payment_receipt(
+				"ACC-SINV-0001",
+				payment_method="Instapay",
+				amount=480.0,
+				pos_profile="Dokki",
+			)
+
+		self.assertEqual(result.name, "POS-RCPT-2026-00044")
+		self.assertFalse(result.created)
+		self.assertFalse(result.amount_synced)
+		self.assertFalse(result.changed)
+		# Still truthy: the order IS on the receipts list, which is the question
+		# the dispatch path asks.
+		self.assertTrue(result)
+		mock_frappe.get_doc.assert_not_called()
+		mock_frappe.db.set_value.assert_not_called()
 
 	def test_leaves_a_confirmed_row_alone(self):
 		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
@@ -685,7 +731,7 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		}]
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
-			ensure_pending_payment_receipt(
+			result = ensure_pending_payment_receipt(
 				"ACC-SINV-0001",
 				payment_method="Instapay",
 				amount=525.0,
@@ -694,6 +740,7 @@ class TestPendingReceiptFiling(unittest.TestCase):
 
 		# Confirmed is evidence a manager looked at. Never rewritten.
 		mock_frappe.db.set_value.assert_not_called()
+		self.assertFalse(result.changed)
 
 	def test_never_raises_so_a_dispatch_cannot_be_blocked(self):
 		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
@@ -702,14 +749,15 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		mock_frappe.get_all.side_effect = Exception("db is down")
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
-			self.assertIsNone(
-				ensure_pending_payment_receipt(
-					"ACC-SINV-0001",
-					payment_method="Instapay",
-					amount=480.0,
-					pos_profile="Dokki",
-				)
+			result = ensure_pending_payment_receipt(
+				"ACC-SINV-0001",
+				payment_method="Instapay",
+				amount=480.0,
+				pos_profile="Dokki",
 			)
+
+		self.assertIsNone(result.name)
+		self.assertFalse(result.changed)
 
 	def test_retiring_spares_a_confirmed_receipt(self):
 		from jarz_pos.api.payment_receipts import retire_pending_payment_receipts
@@ -751,15 +799,16 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		}]
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
-			name = ensure_pending_payment_receipt(
+			result = ensure_pending_payment_receipt(
 				"ACC-SINV-0001",
 				payment_method="Instapay",
 				amount=1000.0,
 				pos_profile="Dokki",
 			)
 
-		self.assertEqual(name, "POS-RCPT-2026-00044")
+		self.assertEqual(result.name, "POS-RCPT-2026-00044")
 		mock_frappe.db.set_value.assert_not_called()
+		self.assertFalse(result.changed)
 
 	def test_a_mismatched_amount_is_still_refused_at_confirmation(self):
 		"""The only automated check that the proof matches the order's money.

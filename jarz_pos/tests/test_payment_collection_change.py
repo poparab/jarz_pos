@@ -111,6 +111,25 @@ def _build_stub_account_utils():
     return module
 
 
+def _pending_receipt(name, *, created=False, amount_synced=False):
+    """Stand-in for ``api.payment_receipts.PendingReceipt``.
+
+    Built locally rather than imported: the real module cannot be imported
+    inside the stub-``frappe`` window (it does ``from frappe.exceptions import
+    ...``, and the stub is a plain module, not a package). The contract mirrored
+    here is the whole of what ``reconcile_payment_confirmation`` reads --
+    ``name`` for "is there a receipt at all" and ``changed`` for "did this call
+    write anything"; ``test_api_payment_receipts`` asserts the real object
+    against the real function.
+    """
+    return SimpleNamespace(
+        name=name,
+        created=created,
+        amount_synced=amount_synced,
+        changed=created or amount_synced,
+    )
+
+
 def _build_stub_payment_receipts():
     module = types.ModuleType("jarz_pos.api.payment_receipts")
     module.mark_payment_receipts_changed_for_invoice = MagicMock(return_value=[])
@@ -128,7 +147,9 @@ def _build_stub_payment_receipts():
     # ``confirm_receipt`` would recurse, because that entry point now routes an
     # awaiting-payment receipt back into ``confirm_online_payment``.
     module._confirm_receipt_record = MagicMock(return_value=None)
-    module.ensure_pending_payment_receipt = MagicMock(return_value="PPR-PENDING")
+    module.ensure_pending_payment_receipt = MagicMock(
+        return_value=_pending_receipt("PPR-PENDING", created=True)
+    )
     module.receipt_method_label = MagicMock(return_value="InstaPay")
     module.retire_pending_payment_receipts = MagicMock(return_value=[])
     module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
@@ -876,7 +897,9 @@ class TestReconcilePaymentConfirmation(unittest.TestCase):
         # so there is no real customer Payment Entry.
         module._get_real_customer_payment_entry = MagicMock(return_value=None)
         module.retire_pending_payment_receipts = MagicMock(return_value=[])
-        module.ensure_pending_payment_receipt = MagicMock(return_value=None)
+        module.ensure_pending_payment_receipt = MagicMock(
+            return_value=_pending_receipt(None)
+        )
         module.update_submitted_sales_invoice_fields = MagicMock()
 
         result = module.reconcile_payment_confirmation("INV-RETURNED")
@@ -910,13 +933,61 @@ class TestReconcilePaymentConfirmation(unittest.TestCase):
         invoice = _FakeInvoice(name="INV-OWING")
         module, _ = self._module(invoice, 480.0)
         module._get_real_customer_payment_entry = MagicMock(return_value=None)
-        module.ensure_pending_payment_receipt = MagicMock(return_value="PPR-NEW")
+        module.ensure_pending_payment_receipt = MagicMock(
+            return_value=_pending_receipt("PPR-NEW", created=True)
+        )
         module.update_submitted_sales_invoice_fields = MagicMock()
 
         result = module.reconcile_payment_confirmation("INV-OWING")
 
         self.assertEqual(result["action"], "receipt_filed")
         self.assertEqual(result["receipt"], "PPR-NEW")
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+
+    def test_an_order_whose_receipt_is_already_on_file_is_not_reported(self):
+        """A sweep that wrote nothing must not read as a sweep that healed.
+
+        The hourly job counts every truthy result as an order it reconciled and
+        commits on the strength of that count. While a reused receipt came back
+        indistinguishable from a filed one, production logged "reconciled 23/23"
+        every hour and committed an empty transaction -- verified 2026-09-09,
+        second pass, zero new rows.
+        """
+        invoice = _FakeInvoice(name="INV-OWING-STEADY")
+        module, _ = self._module(invoice, 480.0)
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module.ensure_pending_payment_receipt = MagicMock(
+            return_value=_pending_receipt("PPR-EXISTING")
+        )
+        module.update_submitted_sales_invoice_fields = MagicMock()
+        module._log_reconcile_note = MagicMock()
+
+        self.assertIsNone(module.reconcile_payment_confirmation("INV-OWING-STEADY"))
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+        # Nothing happened and nothing is wrong, so there is nothing to say
+        # either -- an hourly Error Log per order would be the same noise in a
+        # different place.
+        module._log_reconcile_note.assert_not_called()
+
+    def test_a_re_synced_receipt_amount_is_reported_as_its_own_action(self):
+        """A drifted amount really was rewritten, so the sweep did do work.
+
+        Reported separately from a filed receipt because the two need different
+        follow-up: one made an order visible, the other repaired an order that
+        could not be confirmed at all after a post-submit re-rate.
+        """
+        invoice = _FakeInvoice(name="INV-RERATED")
+        module, _ = self._module(invoice, 525.0)
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module.ensure_pending_payment_receipt = MagicMock(
+            return_value=_pending_receipt("PPR-EXISTING", amount_synced=True)
+        )
+        module.update_submitted_sales_invoice_fields = MagicMock()
+
+        result = module.reconcile_payment_confirmation("INV-RERATED")
+
+        self.assertEqual(result["action"], "receipt_amount_synced")
+        self.assertEqual(result["receipt"], "PPR-EXISTING")
         module.update_submitted_sales_invoice_fields.assert_not_called()
 
     def test_an_order_that_is_not_awaiting_is_left_alone(self):

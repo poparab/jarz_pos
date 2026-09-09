@@ -22,7 +22,9 @@ reconciliation screen: the receipts list hides Confirm on an already-confirmed
 row, while the reconciliation sheet re-submits the existing receipt through
 ``confirm_online_payment``, which posts the payment entry.
 
-Idempotent: re-running finds nothing left to do.
+Idempotent: re-running finds nothing left to do -- and now says so. The
+reconciler reports only what it changed, so a second pass lists no receipts
+under "filed" instead of re-listing every unpaid order it merely looked at.
 """
 
 import frappe
@@ -43,6 +45,7 @@ def execute():
 
     confirmed_from_ledger = []
     receipts_filed = []
+    amounts_resynced = []
     needs_a_decision = []
 
     for row in rows:
@@ -75,6 +78,8 @@ def execute():
             confirmed_from_ledger.append((name, result.get("payment_entry")))
         elif result.get("action") == "receipt_filed":
             receipts_filed.append((name, result.get("receipt")))
+        elif result.get("action") == "receipt_amount_synced":
+            amounts_resynced.append((name, result.get("receipt")))
 
     frappe.db.commit()
 
@@ -82,12 +87,15 @@ def execute():
         f"reconcile_awaiting_online_payments: {len(rows)} awaiting; "
         f"{len(confirmed_from_ledger)} already paid and now confirmed; "
         f"{len(receipts_filed)} pending receipts filed; "
+        f"{len(amounts_resynced)} receipt amounts re-synced; "
         f"{len(needs_a_decision)} left for a human."
     )
     for name, pe in confirmed_from_ledger:
         print(f"  confirmed from ledger: {name} (payment entry {pe})")
     for name, receipt in receipts_filed:
         print(f"  receipt filed: {name} -> {receipt}")
+    for name, receipt in amounts_resynced:
+        print(f"  receipt amount re-synced: {name} -> {receipt}")
     if needs_a_decision:
         print(
             "  NOT touched - a manager confirmed the transfer but no payment was "
