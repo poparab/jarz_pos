@@ -1,3 +1,4 @@
+import contextlib
 import unittest
 import sys
 import types
@@ -490,7 +491,7 @@ class TestConfirmOnlinePaymentGate(unittest.TestCase):
 			side_effect=FrappePermissionError("Only branch managers and above can confirm")
 		)
 		module._create_payment_entry = MagicMock()
-		module.confirm_receipt = MagicMock()
+		module._confirm_receipt_record = MagicMock()
 		module.ensure_uploaded_payment_receipt = MagicMock()
 
 		with self.assertRaises(FrappePermissionError):
@@ -503,7 +504,7 @@ class TestConfirmOnlinePaymentGate(unittest.TestCase):
 
 		# Gate runs first: no accounting or receipt confirmation happens
 		module._create_payment_entry.assert_not_called()
-		module.confirm_receipt.assert_not_called()
+		module._confirm_receipt_record.assert_not_called()
 		module.ensure_uploaded_payment_receipt.assert_not_called()
 		module._ensure_payment_receipt_confirm_access.assert_called_once_with("Dokki")
 
@@ -526,7 +527,7 @@ class TestConfirmOnlinePaymentGate(unittest.TestCase):
 		module._normalize_collection_method = MagicMock(return_value="Instapay")
 		module._is_online_collection_method = MagicMock(return_value=True)
 		module._create_payment_entry = MagicMock()
-		module.confirm_receipt = MagicMock()
+		module._confirm_receipt_record = MagicMock()
 		stub_frappe.db.get_value = MagicMock(return_value=150.0)
 		module.ensure_uploaded_payment_receipt = MagicMock(
 			side_effect=Exception("Payment receipt must have an uploaded image")
@@ -543,5 +544,306 @@ class TestConfirmOnlinePaymentGate(unittest.TestCase):
 		self.assertIn("uploaded image", str(exc.exception))
 		# Screenshot validation blocks booking and receipt confirmation
 		module._create_payment_entry.assert_not_called()
-		module.confirm_receipt.assert_not_called()
+		module._confirm_receipt_record.assert_not_called()
 		module.ensure_uploaded_payment_receipt.assert_called_once()
+
+
+@contextlib.contextmanager
+def _stubbed_confirm_online_payment(booked):
+	"""Install a stub ``delivery_handling`` for the lazy import in confirm_receipt.
+
+	``confirm_receipt`` imports ``confirm_online_payment`` inside the function
+	body -- it has to, the two modules import each other. Patching the real
+	module would drag in ``erpnext``, which only exists inside a bench, so the
+	whole class would be skipped on a bare interpreter and the money path would
+	go untested exactly where it is easiest to regress.
+	"""
+	previous = sys.modules.get("jarz_pos.services.delivery_handling")
+	stub = types.ModuleType("jarz_pos.services.delivery_handling")
+	stub.confirm_online_payment = booked
+	sys.modules["jarz_pos.services.delivery_handling"] = stub
+	try:
+		yield stub
+	finally:
+		if previous is not None:
+			sys.modules["jarz_pos.services.delivery_handling"] = previous
+		else:
+			sys.modules.pop("jarz_pos.services.delivery_handling", None)
+
+
+class TestPendingReceiptFiling(unittest.TestCase):
+	"""The row that makes an awaiting order visible on the receipts list.
+
+	Before this, ``handle_unpaid_online_deliver_unconfirmed`` wrote no receipt at
+	all, so the list of orders still owing a transfer showed only the orders that
+	had already been dealt with -- 20 production orders worth 10,780 EGP were on
+	no receipt screen on 2026-09-09.
+	"""
+
+	def test_files_an_unconfirmed_row_with_the_select_label(self):
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = []
+		created = MagicMock()
+		created.name = "POS-RCPT-2026-00044"
+		mock_frappe.get_doc.return_value = created
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			name = ensure_pending_payment_receipt(
+				"ACC-SINV-0001",
+				payment_method="Instapay",
+				amount=480.0,
+				pos_profile="Dokki",
+			)
+
+		self.assertEqual(name, "POS-RCPT-2026-00044")
+		payload = mock_frappe.get_doc.call_args.args[0]
+		# The invoice spells it "Instapay"; the DocType Select accepts only
+		# "InstaPay", so writing the invoice's spelling straight through would
+		# fail validation and file no row at all.
+		self.assertEqual(payload["payment_method"], "InstaPay")
+		self.assertEqual(payload["status"], "Unconfirmed")
+		self.assertEqual(payload["amount"], 480.0)
+		self.assertEqual(payload["pos_profile"], "Dokki")
+		created.insert.assert_called_once_with(ignore_permissions=True)
+
+	def test_maps_mobile_wallet_to_the_wallet_label(self):
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = []
+		mock_frappe.get_doc.return_value = MagicMock(name="x")
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			ensure_pending_payment_receipt(
+				"ACC-SINV-0002",
+				payment_method="Mobile Wallet",
+				amount=100.0,
+				pos_profile="Dokki",
+			)
+
+		self.assertEqual(
+			mock_frappe.get_doc.call_args.args[0]["payment_method"], "Wallet"
+		)
+
+	def test_files_nothing_for_a_method_that_takes_no_screenshot(self):
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			for method in ("Cash", "Kashier Card", "", None):
+				self.assertIsNone(
+					ensure_pending_payment_receipt(
+						"ACC-SINV-0003",
+						payment_method=method,
+						amount=50.0,
+						pos_profile="Dokki",
+					)
+				)
+		mock_frappe.get_doc.assert_not_called()
+
+	def test_is_idempotent_and_refreshes_a_stale_amount(self):
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = [{
+			"name": "POS-RCPT-2026-00044",
+			"payment_method": "InstaPay",
+			"status": "Unconfirmed",
+			"amount": 480.0,
+		}]
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			name = ensure_pending_payment_receipt(
+				"ACC-SINV-0001",
+				payment_method="Instapay",
+				amount=525.0,
+				pos_profile="Dokki",
+			)
+
+		self.assertEqual(name, "POS-RCPT-2026-00044")
+		mock_frappe.get_doc.assert_not_called()
+		# A re-rated invoice must not strand: ensure_uploaded_payment_receipt
+		# refuses a receipt whose amount has drifted from the order.
+		mock_frappe.db.set_value.assert_called_once()
+		self.assertEqual(mock_frappe.db.set_value.call_args.args[3], 525.0)
+
+	def test_leaves_a_confirmed_row_alone(self):
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = [{
+			"name": "POS-RCPT-2026-00044",
+			"payment_method": "InstaPay",
+			"status": "Confirmed",
+			"amount": 480.0,
+		}]
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			ensure_pending_payment_receipt(
+				"ACC-SINV-0001",
+				payment_method="Instapay",
+				amount=525.0,
+				pos_profile="Dokki",
+			)
+
+		# Confirmed is evidence a manager looked at. Never rewritten.
+		mock_frappe.db.set_value.assert_not_called()
+
+	def test_never_raises_so_a_dispatch_cannot_be_blocked(self):
+		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.side_effect = Exception("db is down")
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			self.assertIsNone(
+				ensure_pending_payment_receipt(
+					"ACC-SINV-0001",
+					payment_method="Instapay",
+					amount=480.0,
+					pos_profile="Dokki",
+				)
+			)
+
+	def test_retiring_spares_a_confirmed_receipt(self):
+		from jarz_pos.api.payment_receipts import retire_pending_payment_receipts
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = ["PPR-0001"]
+		doc = _FakeReceiptDoc(status="Unconfirmed")
+		mock_frappe.get_doc.return_value = doc
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			result = retire_pending_payment_receipts("ACC-SINV-0001")
+
+		self.assertEqual(result, ["PPR-0001"])
+		self.assertEqual(doc.status, "Changed")
+		# Only pending rows are selected -- a Confirmed one is the audit trail
+		# for a payment that really happened.
+		self.assertEqual(
+			mock_frappe.get_all.call_args.kwargs["filters"]["status"],
+			["in", ["Unconfirmed", "Rejected"]],
+		)
+
+
+class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
+	"""Confirming in the receipts list must post the payment, not just stamp.
+
+	It used to be a pure stamp, while the Payment Entry was posted only by
+	``confirm_online_payment`` on the other screen. Production carried four
+	orders -- 17987, 18039, 18048, 18053, 2,460 EGP -- whose proof of transfer a
+	manager had confirmed while the invoice stayed fully unpaid.
+	"""
+
+	def _awaiting_frappe(self, receipt, outstanding=480.0, status="Awaiting Payment"):
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_doc.return_value = receipt
+		mock_frappe.db.get_value.return_value = {
+			"name": "ACC-SINV-0001",
+			"docstatus": 1,
+			"outstanding_amount": outstanding,
+			"custom_payment_confirmation_status": status,
+			"custom_kanban_profile": "Dokki",
+			"pos_profile": "Dokki",
+		}
+		return mock_frappe
+
+	def test_routes_an_awaiting_unpaid_receipt_through_the_payment_path(self):
+		from jarz_pos.api.payment_receipts import confirm_receipt
+
+		receipt = _FakeReceiptDoc(status="Unconfirmed")
+		mock_frappe = self._awaiting_frappe(receipt)
+		booked = MagicMock(return_value={
+			"payment_entry": "ACC-PAY-0001",
+			"payment_confirmation_status": "Payment Confirmed",
+		})
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
+				 _stubbed_confirm_online_payment(booked):
+			result = confirm_receipt("PPR-0001")
+
+		self.assertEqual(result["payment_entry"], "ACC-PAY-0001")
+		booked.assert_called_once_with(
+			"ACC-SINV-0001", "Dokki", receipt_name="PPR-0001"
+		)
+		# The stamp is the payment path's job, not a second write from here.
+		receipt.save.assert_not_called()
+
+	def test_refuses_without_a_screenshot_and_leaves_the_row_pending(self):
+		from jarz_pos.api.payment_receipts import confirm_receipt
+
+		receipt = _FakeReceiptDoc(status="Unconfirmed", receipt_image_url="")
+		mock_frappe = self._awaiting_frappe(receipt)
+		booked = MagicMock()
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
+				 _stubbed_confirm_online_payment(booked):
+			with self.assertRaises(Exception) as exc:
+				confirm_receipt("PPR-0001")
+
+		self.assertIn("screenshot", str(exc.exception))
+		booked.assert_not_called()
+		# Unconfirmed and still listed is the honest state: nobody has
+		# evidenced this transfer yet.
+		self.assertEqual(receipt.status, "Unconfirmed")
+		receipt.save.assert_not_called()
+
+	def test_an_already_confirmed_receipt_can_still_release_the_money(self):
+		"""The way out of the stuck state, from the same button.
+
+		Returning "already confirmed" here is exactly what made those four
+		orders permanent.
+		"""
+		from jarz_pos.api.payment_receipts import confirm_receipt
+
+		receipt = _FakeReceiptDoc(status="Confirmed")
+		mock_frappe = self._awaiting_frappe(receipt)
+		booked = MagicMock(return_value={"payment_entry": "ACC-PAY-0002"})
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
+				 _stubbed_confirm_online_payment(booked):
+			result = confirm_receipt("PPR-0001")
+
+		self.assertEqual(result["payment_entry"], "ACC-PAY-0002")
+		booked.assert_called_once()
+
+	def test_a_receipt_on_a_paid_order_keeps_the_plain_stamp(self):
+		from jarz_pos.api.payment_receipts import confirm_receipt
+
+		receipt = _FakeReceiptDoc(status="Unconfirmed")
+		mock_frappe = self._awaiting_frappe(receipt, outstanding=0.0)
+		mock_frappe.utils.now.return_value = "2026-09-09 12:00:00"
+		booked = MagicMock()
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
+				 _stubbed_confirm_online_payment(booked):
+			result = confirm_receipt("PPR-0001")
+
+		booked.assert_not_called()
+		self.assertEqual(receipt.status, "Confirmed")
+		self.assertEqual(receipt.confirmed_by, "manager@example.com")
+		self.assertNotIn("payment_entry", result)
+
+	def test_a_receipt_on_a_non_awaiting_order_keeps_the_plain_stamp(self):
+		from jarz_pos.api.payment_receipts import confirm_receipt
+
+		receipt = _FakeReceiptDoc(status="Unconfirmed")
+		mock_frappe = self._awaiting_frappe(receipt, status="Converted to Cash")
+		mock_frappe.utils.now.return_value = "2026-09-09 12:00:00"
+		booked = MagicMock()
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
+				 _stubbed_confirm_online_payment(booked):
+			confirm_receipt("PPR-0001")
+
+		booked.assert_not_called()
+		self.assertEqual(receipt.status, "Confirmed")

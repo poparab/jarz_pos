@@ -281,6 +281,23 @@ SITE: {frappe.local.site}
         raise
 
 
+def _clear_awaiting_payment_flag(invoice_name: str) -> None:
+    """Clear ``Awaiting Payment`` once this invoice's money is actually in.
+
+    Imported lazily and swallowed on failure on purpose: a registered payment
+    must never be undone, or reported as failed, because a status field could
+    not be tidied up afterwards.
+    """
+    try:
+        from jarz_pos.services.delivery_handling import reconcile_payment_confirmation
+
+        reconcile_payment_confirmation(invoice_name)
+    except Exception:
+        frappe.logger().error(
+            f"Failed to clear awaiting-payment flag for {invoice_name}"
+        )
+
+
 @frappe.whitelist(allow_guest=False)
 def pay_invoice(
     invoice_name: str,
@@ -348,6 +365,7 @@ def pay_invoice(
                 if existing_payment_entries:
                     # Return existing payment entry instead of throwing error (idempotency)
                     pe = existing_payment_entries[0]
+                    _clear_awaiting_payment_flag(inv.name)
                     return {
                         "success": True,
                         "payment_entry": pe.get("name"),
@@ -480,6 +498,7 @@ def pay_invoice(
                     )
                     if existing_pe:
                         pe_data = existing_pe[0]
+                        _clear_awaiting_payment_flag(inv.name)
                         return {
                             "success": True,
                             "payment_entry": pe_data.get("name"),
@@ -522,6 +541,13 @@ def pay_invoice(
                 message=f"Invoice: {invoice_name}\nError: {frappe.get_traceback()}",
             )
             raise
+
+        # The money is in. An order dispatched as unpaid-online is still flagged
+        # Awaiting Payment at this point, and nothing here used to clear it -- so
+        # a paid order stayed in the reconciliation queue for ever and staff chased
+        # the customer for money already banked. Reconciling reads the ledger, so
+        # it is a no-op for every invoice that was never awaiting anything.
+        _clear_awaiting_payment_flag(inv.name)
 
         return {
             "success": True,

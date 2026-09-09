@@ -123,6 +123,13 @@ def _build_stub_payment_receipts():
         "receipt_image_url": "/files/receipt.png",
     })
     module.confirm_receipt = MagicMock(return_value={"success": True})
+    # ``confirm_online_payment`` stamps the row through the extracted
+    # ``_confirm_receipt_record``; going through the whitelisted
+    # ``confirm_receipt`` would recurse, because that entry point now routes an
+    # awaiting-payment receipt back into ``confirm_online_payment``.
+    module._confirm_receipt_record = MagicMock(return_value=None)
+    module.ensure_pending_payment_receipt = MagicMock(return_value="PPR-PENDING")
+    module.retire_pending_payment_receipts = MagicMock(return_value=[])
     module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
     module._has_payment_receipt_confirm_access = MagicMock(return_value=True)
     return module
@@ -441,7 +448,7 @@ class TestConfirmOnlinePayment(unittest.TestCase):
             "status": "Unconfirmed",
             "receipt_image_url": "/files/receipt.png",
         })
-        module.confirm_receipt = MagicMock(return_value={"success": True})
+        module._confirm_receipt_record = MagicMock(return_value=None)
         module._get_receivable_account = MagicMock(return_value="Debtors - TC")
         module._get_online_collection_account = MagicMock(return_value="Instapay - TC")
 
@@ -475,7 +482,7 @@ class TestConfirmOnlinePayment(unittest.TestCase):
         self.assertEqual(invoice.custom_payment_confirmation_status, "Payment Confirmed")
         self.assertEqual(invoice.custom_payment_confirmation_reference, "REF-777")
         self.assertEqual(invoice.custom_payment_confirmed_by, "manager@example.com")
-        module.confirm_receipt.assert_called_once_with("PPR-1")
+        module._confirm_receipt_record.assert_called_once()
         module.ensure_uploaded_payment_receipt.assert_called_once()
 
     def test_double_confirm_is_noop(self):
@@ -489,7 +496,7 @@ class TestConfirmOnlinePayment(unittest.TestCase):
         module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
         module._get_real_customer_payment_entry = MagicMock(return_value={"name": "PE-EXISTING"})
         module._create_payment_entry = MagicMock()
-        module.confirm_receipt = MagicMock()
+        module._confirm_receipt_record = MagicMock()
 
         result = module.confirm_online_payment(
             invoice_name="INV-ALREADY",
@@ -503,7 +510,7 @@ class TestConfirmOnlinePayment(unittest.TestCase):
         self.assertEqual(result["payment_entry"], "PE-EXISTING")
         self.assertEqual(result["payment_confirmation_status"], "Payment Confirmed")
         module._create_payment_entry.assert_not_called()
-        module.confirm_receipt.assert_not_called()
+        module._confirm_receipt_record.assert_not_called()
 
 
 class TestUnpaidOnlineCollectionChange(unittest.TestCase):

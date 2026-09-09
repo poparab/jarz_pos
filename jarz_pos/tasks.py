@@ -100,6 +100,52 @@ def get_unconfirmed_online_payment_alert_hours() -> int:
     return DEFAULT_UNCONFIRMED_ONLINE_PAYMENT_ALERT_HOURS
 
 
+def reconcile_awaiting_online_payments():
+    """Hourly: re-align every ``Awaiting Payment`` order with its own ledger.
+
+    The escalation job below alerts on orders that have been awaiting payment too
+    long. It never asked whether they are still awaiting anything -- so an order
+    paid through the kanban card's own InstaPay button, which posts the Payment
+    Entry without clearing the flag, stayed in the queue for ever AND got
+    escalated. Six production orders were in that state on 2026-09-09.
+
+    This runs first, and is the backstop for the whole feature: whatever route
+    the money took, whatever route retired the receipt, an hour later the flag
+    and the receipts list agree with the ledger again. Per-invoice failures are
+    isolated so one bad row cannot stop the sweep, and it never raises out of
+    the scheduler.
+    """
+    import frappe
+
+    try:
+        from jarz_pos.services.delivery_handling import reconcile_payment_confirmation
+
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters={"docstatus": 1, "custom_payment_confirmation_status": "Awaiting Payment"},
+            pluck="name",
+            limit_page_length=0,
+        )
+        healed = 0
+        for name in rows:
+            try:
+                if reconcile_payment_confirmation(name):
+                    healed += 1
+            except Exception:
+                frappe.logger().error(
+                    f"reconcile_awaiting_online_payments: failed on {name}"
+                )
+        if healed:
+            frappe.db.commit()
+            frappe.logger().info(
+                f"reconcile_awaiting_online_payments: reconciled {healed}/{len(rows)} orders"
+            )
+    except Exception:
+        frappe.logger().error(
+            "reconcile_awaiting_online_payments failed: " + frappe.get_traceback()
+        )
+
+
 def escalate_unconfirmed_online_payments():
     """Hourly: alert managers about unpaid InstaPay/Mobile Wallet orders that have sat
     Out for Delivery awaiting payment confirmation past the configured threshold.

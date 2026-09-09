@@ -462,6 +462,11 @@ scheduler_events = {
         "jarz_pos.tasks.run_weekly_velocity_update",
     ],
     "hourly": [
+        # Re-align every Awaiting Payment order with its ledger BEFORE escalating,
+        # so an order that has already been paid through another route is neither
+        # chased nor left sitting in the reconciliation queue. Must stay ahead of
+        # the escalation job below or paid orders keep generating alerts.
+        "jarz_pos.tasks.reconcile_awaiting_online_payments",
         # Escalate unpaid InstaPay/Mobile Wallet orders that have sat Out for
         # Delivery awaiting payment confirmation past the configured threshold.
         "jarz_pos.tasks.escalate_unconfirmed_online_payments",

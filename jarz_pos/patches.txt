@@ -32,3 +32,10 @@ jarz_pos.Patches.v1_8.dedupe_sales_partner_transactions
 # match on. Skipping it leaves every entry posted before 2026-09-07 invisible to
 # its own guard, i.e. a retried dispatch double-posts the freight accrual.
 jarz_pos.Patches.v1_9.backfill_journal_entry_tag_field
+# Heals the Awaiting Payment backlog: orders already paid through another route
+# get their flag cleared (they were sitting in the reconciliation queue for ever,
+# oldest since 2026-08-26), and orders still owed a transfer finally get the
+# POS Payment Receipt row that makes them visible on the receipts list at all.
+# Leaves alone the ones where a manager confirmed proof but no payment was
+# booked -- that is real money and the owner's call. Idempotent.
+jarz_pos.Patches.v1_9.reconcile_awaiting_online_payments

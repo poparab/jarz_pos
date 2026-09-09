@@ -13,9 +13,11 @@ import frappe
 from erpnext.stock.stock_ledger import is_negative_stock_allowed
 from frappe import _
 from jarz_pos.api.payment_receipts import (
+    ensure_pending_payment_receipt,
     ensure_uploaded_payment_receipt,
     mark_payment_receipts_changed_for_invoice,
-    confirm_receipt,
+    retire_pending_payment_receipts,
+    _confirm_receipt_record,
     _ensure_payment_receipt_confirm_access,
     _has_payment_receipt_confirm_access,
 )
@@ -1591,6 +1593,18 @@ def handle_unpaid_online_deliver_unconfirmed(
         },
     )
 
+    # File the receipt the branch will hang the transfer screenshot on. Without
+    # it the order is invisible on the payment-receipts list -- that list reads
+    # the receipt table, and nothing on this path used to write a row, so the
+    # queue of orders still owing a transfer showed only the ones already dealt
+    # with. Best-effort by design: it must never keep a courier at the door.
+    ensure_pending_payment_receipt(
+        inv.name,
+        payment_method=inv.get("custom_payment_method"),
+        amount=float(inv.grand_total or 0),
+        pos_profile=(inv.get("custom_kanban_profile") or pos_profile or inv.get("pos_profile")),
+    )
+
     if party_type and party:
         _persist_invoice_courier_assignment(
             inv,
@@ -1894,7 +1908,10 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
         payment_method=method_label,
         amount=order_amount,
     )
-    confirm_receipt(receipt_name)
+    # Stamp the row directly rather than through the whitelisted
+    # ``confirm_receipt``: that entry point now routes an awaiting-payment
+    # receipt back into THIS function, so calling it here would recurse.
+    _confirm_receipt_record(frappe.get_doc("POS Payment Receipt", receipt_name))
 
     # DR Bank/Instapay ledger, CR Debtors → auto-allocated to the SI → marks Paid
     paid_from = _get_receivable_account(company)
@@ -1923,6 +1940,99 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     return payload
 
 
+def reconcile_payment_confirmation(invoice_name: str) -> dict | None:
+    """Bring one ``Awaiting Payment`` invoice back in step with its own ledger.
+
+    The awaiting flag is set by the dispatch path and cleared by exactly one
+    function, :func:`confirm_online_payment`. Every other way an order can be
+    paid leaves the flag behind, and nothing ever noticed: ``pay_invoice`` --
+    the kanban card's own InstaPay button -- posts the Payment Entry and returns
+    without touching it. On 2026-09-09 that had left six production orders fully
+    paid and still sitting in the reconciliation queue, the oldest since
+    2026-08-26. Staff cannot tell those from orders that never paid, so they
+    chase customers for money already banked.
+
+    This is the reconciler for that, and it is deliberately written against the
+    LEDGER rather than against any particular code path, so a route nobody has
+    enumerated yet -- a Desk payment, a bank reconciliation, a future endpoint --
+    is healed as well:
+
+    * **Money is in** (nothing outstanding): flip the flag to Payment Confirmed
+      and retire any receipt still asking for a screenshot. A Confirmed receipt
+      is left alone; it is evidence.
+    * **Money is still owed** but no receipt is pending: file one, so the order
+      is visible on the receipts list. This catches an order whose receipt was
+      retired by a collection change to another online method, which leaves it
+      awaiting a transfer with nothing to hang the proof on.
+
+    Never raises, never moves money, and is idempotent -- both branches are
+    no-ops once they have run.
+    """
+    invoice_name = str(invoice_name or "").strip()
+    if not invoice_name:
+        return None
+
+    try:
+        row = frappe.db.get_value(
+            "Sales Invoice",
+            invoice_name,
+            [
+                "name", "company", "docstatus", "outstanding_amount", "grand_total",
+                "custom_payment_confirmation_status", "custom_payment_method",
+                "custom_kanban_profile", "pos_profile",
+            ],
+            as_dict=True,
+        )
+        if not row or int(row.get("docstatus") or 0) != 1:
+            return None
+        if str(row.get("custom_payment_confirmation_status") or "").strip() != "Awaiting Payment":
+            return None
+
+        outstanding = float(row.get("outstanding_amount") or 0)
+
+        if outstanding > 0.01:
+            filed = ensure_pending_payment_receipt(
+                row["name"],
+                payment_method=row.get("custom_payment_method"),
+                amount=float(row.get("grand_total") or 0),
+                pos_profile=(row.get("custom_kanban_profile") or row.get("pos_profile")),
+            )
+            if not filed:
+                return None
+            return {"invoice": row["name"], "action": "receipt_filed", "receipt": filed}
+
+        pe = _get_real_customer_payment_entry(row["name"], row.get("company")) or {}
+        inv = frappe.get_doc("Sales Invoice", row["name"])
+        update_submitted_sales_invoice_fields(
+            inv,
+            {
+                "custom_payment_confirmation_status": "Payment Confirmed",
+                "custom_payment_confirmation_reference": (
+                    str(inv.get("custom_payment_confirmation_reference") or "").strip()
+                    or pe.get("name")
+                ),
+                "custom_payment_confirmed_by": (
+                    inv.get("custom_payment_confirmed_by") or frappe.session.user
+                ),
+                "custom_payment_confirmed_date": (
+                    inv.get("custom_payment_confirmed_date") or frappe.utils.now_datetime()
+                ),
+            },
+        )
+        retired = retire_pending_payment_receipts(row["name"])
+        return {
+            "invoice": row["name"],
+            "action": "confirmed_from_ledger",
+            "payment_entry": pe.get("name"),
+            "retired_receipts": retired,
+        }
+    except Exception as exc:  # pragma: no cover - reconciliation must never raise
+        frappe.logger().error(
+            f"Failed to reconcile payment confirmation for {invoice_name}: {exc}"
+        )
+        return None
+
+
 def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None) -> dict:
     """Endpoint logic: convert an unconfirmed online order into a cash-on-delivery courier order.
 
@@ -1942,6 +2052,12 @@ def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type:
 
     res = mark_courier_outstanding(invoice_name, None, party_type, party) or {}
 
+    # The customer is paying the courier in cash, so no transfer screenshot is
+    # owed any more. Retiring the receipt is what stops the pending row this
+    # order was dispatched with from sitting in the receipts list for ever --
+    # the collection-change paths already do this; this one did not.
+    changed_receipts = mark_payment_receipts_changed_for_invoice(inv.name)
+
     update_submitted_sales_invoice_fields(
         inv,
         {"custom_payment_confirmation_status": "Converted to Cash"},
@@ -1954,6 +2070,7 @@ def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type:
         "payment_entry": res.get("payment_entry"),
         "journal_entry": res.get("journal_entry"),
         "payment_confirmation_status": "Converted to Cash",
+        "changed_receipts": changed_receipts,
     }
     _publish_branch_event(WS_EVENTS.COURIER_OUTSTANDING, payload)
     return payload

@@ -22,6 +22,14 @@ RECEIPT_STATUS_CHANGED = "Changed"
 RECEIPT_STATUS_REJECTED = "Rejected"
 
 
+#: The ``payment_method`` Select on POS Payment Receipt accepts exactly these two
+#: labels, while a Sales Invoice's ``custom_payment_method`` carries the
+#: operator-facing spelling ("Instapay", "Mobile Wallet"). Writing the invoice's
+#: spelling straight through fails Select validation, so every automatic writer
+#: must map through :func:`receipt_method_label` first.
+RECEIPT_METHOD_LABELS = {"instapay": "InstaPay", "wallet": "Wallet"}
+
+
 def _normalize_receipt_method(method: str | None) -> str:
     normalized = str(method or "").strip().lower().replace(" ", "").replace("_", "")
     if normalized in {"instapay", "insta", "bank", "bankaccount"}:
@@ -33,6 +41,103 @@ def _normalize_receipt_method(method: str | None) -> str:
     if normalized in {"cash", "cod", "cashondelivery"}:
         return "cash"
     return normalized
+
+
+def receipt_method_label(method: str | None) -> str | None:
+    """The DocType Select label for *method*, or ``None`` if it has no receipt.
+
+    Only the two transfer methods take a screenshot. Cash needs no proof, and a
+    card/gateway payment is captured by the gateway itself — returning ``None``
+    for those is what keeps :func:`ensure_pending_payment_receipt` from filing a
+    receipt nobody can ever satisfy.
+    """
+    return RECEIPT_METHOD_LABELS.get(_normalize_receipt_method(method))
+
+
+def ensure_pending_payment_receipt(
+    sales_invoice: str,
+    *,
+    payment_method: str | None,
+    amount: float,
+    pos_profile: str | None,
+) -> str | None:
+    """Create — or refresh — the imageless receipt an awaiting-payment order needs.
+
+    An unpaid InstaPay/Wallet order moved Out for Delivery used to create no
+    ``POS Payment Receipt`` row at all: the row was only ever born client-side, at
+    the moment somebody attached a screenshot. So the list whose entire purpose is
+    "orders still owing a transfer" showed only the orders that had already been
+    dealt with, and on 2026-09-09 production held 20 awaiting orders worth
+    10,780 EGP that appeared on no receipt screen. Filing the row up front makes
+    the queue match reality.
+
+    Two properties matter more than the creation itself:
+
+    * **It never raises.** This runs as a side effect of dispatch. A receipt that
+      cannot be filed is a reporting gap; an exception here would be a courier
+      standing at the door with an order that will not go out. Same reasoning as
+      the courier-attribution params being optional.
+    * **It refreshes a stale amount.** ``ensure_uploaded_payment_receipt`` refuses
+      a receipt whose amount has drifted from the invoice, so a post-submit
+      re-rate (shipping recalculated on an address change) would otherwise leave
+      an order that can never be confirmed. Only a not-yet-Confirmed row is
+      touched — a Confirmed one is evidence and is frozen.
+    """
+    invoice_name = str(sales_invoice or "").strip()
+    method_label = receipt_method_label(payment_method)
+    profile = str(pos_profile or "").strip()
+    if not invoice_name or not method_label or not profile:
+        return None
+
+    try:
+        rows = frappe.get_all(
+            "POS Payment Receipt",
+            filters={
+                "sales_invoice": invoice_name,
+                "status": ["!=", RECEIPT_STATUS_CHANGED],
+            },
+            fields=["name", "payment_method", "status", "amount"],
+            order_by="creation desc",
+            limit_page_length=20,
+        )
+        existing = next(
+            (
+                row for row in rows
+                if _normalize_receipt_method(row.get("payment_method"))
+                == _normalize_receipt_method(method_label)
+            ),
+            None,
+        )
+
+        if existing:
+            if (
+                str(existing.get("status") or "").strip() != RECEIPT_STATUS_CONFIRMED
+                and abs(float(existing.get("amount") or 0) - float(amount or 0)) > 0.01
+            ):
+                frappe.db.set_value(
+                    "POS Payment Receipt",
+                    existing["name"],
+                    "amount",
+                    float(amount or 0),
+                    update_modified=False,
+                )
+            return existing["name"]
+
+        receipt = frappe.get_doc({
+            "doctype": "POS Payment Receipt",
+            "sales_invoice": invoice_name,
+            "payment_method": method_label,
+            "amount": float(amount or 0),
+            "pos_profile": profile,
+            "status": RECEIPT_STATUS_UNCONFIRMED,
+        })
+        receipt.insert(ignore_permissions=True)
+        return receipt.name
+    except Exception as exc:  # pragma: no cover - must never block a dispatch
+        frappe.logger().error(
+            f"Failed to file pending payment receipt for {invoice_name}: {exc}"
+        )
+        return None
 
 
 def mark_payment_receipts_changed_for_invoice(
@@ -79,6 +184,40 @@ def mark_payment_receipts_changed_for_invoice(
     return changed_receipts
 
 
+def retire_pending_payment_receipts(sales_invoice: str) -> list[str]:
+    """Mark the still-pending receipts on *sales_invoice* as no longer applicable.
+
+    Used when the money arrived by some other route, so nobody is owed a
+    transfer screenshot any more. Unlike
+    :func:`mark_payment_receipts_changed_for_invoice` this deliberately spares a
+    CONFIRMED row: that one is evidence a manager actually looked at, and
+    rewriting it to "Changed" would destroy the audit trail for a payment that
+    really did happen.
+    """
+    invoice_name = str(sales_invoice or "").strip()
+    if not invoice_name:
+        return []
+
+    rows = frappe.get_all(
+        "POS Payment Receipt",
+        filters={
+            "sales_invoice": invoice_name,
+            "status": ["in", [RECEIPT_STATUS_UNCONFIRMED, RECEIPT_STATUS_REJECTED]],
+        },
+        pluck="name",
+    )
+    retired: list[str] = []
+    for name in rows:
+        try:
+            receipt = frappe.get_doc("POS Payment Receipt", name)
+            receipt.status = RECEIPT_STATUS_CHANGED
+            receipt.save(ignore_permissions=True)
+            retired.append(name)
+        except Exception as exc:  # pragma: no cover - housekeeping must not raise
+            frappe.logger().error(f"Failed to retire payment receipt {name}: {exc}")
+    return retired
+
+
 def ensure_uploaded_payment_receipt(
     receipt_name: str,
     *,
@@ -101,7 +240,24 @@ def ensure_uploaded_payment_receipt(
         frappe.throw("Payment receipt method does not match the selected collection method")
     receipt_amount = float(getattr(receipt, "amount", 0) or 0)
     if abs(receipt_amount - float(amount or 0)) > 0.01:
-        frappe.throw("Payment receipt amount does not match the order amount")
+        # A receipt that has not been confirmed yet carries a TARGET, not
+        # evidence: the amount was copied off the invoice when the row was
+        # filed, and the money actually posted comes from the invoice's
+        # outstanding, never from this field. So a drift here means the invoice
+        # was re-rated after dispatch (shipping recalculated on an address
+        # change is the live example) — refusing would strand an order that can
+        # then never be confirmed by anyone. Re-sync and carry on.
+        # A CONFIRMED row is evidence and is frozen: there the mismatch is real
+        # and must still stop the caller.
+        if str(getattr(receipt, "status", "") or "").strip() in (
+            RECEIPT_STATUS_UNCONFIRMED,
+            RECEIPT_STATUS_REJECTED,
+        ):
+            receipt.amount = float(amount or 0)
+            receipt.save(ignore_permissions=True)
+            receipt_amount = float(receipt.amount or 0)
+        else:
+            frappe.throw("Payment receipt amount does not match the order amount")
 
     image_url = str(
         getattr(receipt, "receipt_image_url", None)
@@ -572,47 +728,143 @@ def remove_receipt_image(receipt_name: str):
         frappe.throw(f"Failed to remove receipt image: {str(e)}")
 
 
+def _awaiting_online_payment_invoice(sales_invoice: str | None) -> dict | None:
+    """The invoice behind a receipt, when it is still owed an online transfer.
+
+    Returns ``None`` -- meaning "a plain stamp is the whole job" -- for every
+    other case: a receipt filed against an order already paid at the counter, a
+    cancelled invoice, or one whose collection was converted to cash.
+    """
+    invoice_name = str(sales_invoice or "").strip()
+    if not invoice_name:
+        return None
+    # Everything below degrades to "not awaiting" on any surprise. This probe
+    # runs in front of every receipt confirmation, including the ordinary
+    # paid-at-the-counter ones, and a receipt that cannot be confirmed because
+    # the invoice could not be read would be a worse failure than the one this
+    # whole change exists to fix.
+    try:
+        row = frappe.db.get_value(
+            "Sales Invoice",
+            invoice_name,
+            [
+                "name",
+                "docstatus",
+                "outstanding_amount",
+                "custom_payment_confirmation_status",
+                "custom_kanban_profile",
+                "pos_profile",
+            ],
+            as_dict=True,
+        )
+        if not row or int(row.get("docstatus") or 0) != 1:
+            return None
+        if str(row.get("custom_payment_confirmation_status") or "").strip() != "Awaiting Payment":
+            return None
+        if float(row.get("outstanding_amount") or 0) <= 0.01:
+            return None
+        return row
+    except Exception:
+        return None
+
+
+def _confirm_receipt_record(receipt) -> None:
+    """Stamp a receipt Confirmed. Moves no money -- see :func:`confirm_receipt`."""
+    # Confirming a previously rejected receipt is deliberately allowed: it
+    # is the only way back from a rejection made in error, and the
+    # alternative -- refusing -- would strand the receipt in a state with no
+    # exit and push the branch to upload a duplicate image instead.
+    # The stale rejection stamp is cleared so the record does not read as
+    # both rejected and confirmed.
+    if receipt.status == RECEIPT_STATUS_REJECTED:
+        receipt.rejected_by = None
+        receipt.rejected_date = None
+        receipt.rejection_reason = None
+
+    receipt.status = RECEIPT_STATUS_CONFIRMED
+    receipt.confirmed_by = frappe.session.user
+    receipt.confirmed_date = frappe.utils.now()
+    receipt.save()
+
+
 @frappe.whitelist()
 def confirm_receipt(receipt_name: str):
-    """Confirm a payment receipt.
-    
+    """Confirm a payment receipt -- and, when one is owed, collect the money.
+
+    Confirming used to be a pure stamp: the row went Confirmed and nothing else
+    happened, because the Payment Entry was posted only by
+    ``confirm_online_payment`` on the reconciliation screen. Two screens, one
+    verb, and the receipts list was the one staff actually used. On 2026-09-09
+    production carried four orders -- 17987, 18039, 18048, 18053, 2,460 EGP --
+    whose proof of transfer a manager had looked at and confirmed while the
+    invoice stayed fully unpaid. Nobody was told; the order simply read
+    "confirmed" on one screen and "awaiting payment" on the other.
+
+    So confirming now finishes the job. If the invoice behind the receipt is
+    still awaiting an online transfer and still owes money, this routes through
+    ``confirm_online_payment``, which validates the screenshot, posts
+    ``DR Bank/Instapay . CR Debtors`` and flips the invoice to Payment
+    Confirmed. Every other receipt -- an order paid at the counter, a cancelled
+    one, one converted to cash -- keeps the plain stamp it always had.
+
     Args:
         receipt_name: POS Payment Receipt name
-    
+
     Returns:
         dict: Confirmation result
     """
     try:
         frappe.logger().info(f"Confirming receipt {receipt_name}")
-        
+
         receipt = frappe.get_doc('POS Payment Receipt', receipt_name)
         _ensure_payment_receipt_confirm_access(getattr(receipt, 'pos_profile', None))
 
         if receipt.status == RECEIPT_STATUS_CHANGED:
             frappe.throw('Changed payment receipts cannot be confirmed')
-        
+
+        # Deliberately BEFORE the already-confirmed short circuit. A receipt that
+        # is Confirmed while its invoice is still unpaid is precisely the stuck
+        # state described above, and returning "already confirmed" there is what
+        # made it permanent -- pressing the button again has to be the way out.
+        awaiting = _awaiting_online_payment_invoice(getattr(receipt, 'sales_invoice', None))
+        if awaiting:
+            image_url = str(
+                getattr(receipt, 'receipt_image_url', None)
+                or getattr(receipt, 'receipt_image', None)
+                or ''
+            ).strip()
+            if not image_url:
+                # Confirming now moves money, so it needs the proof first. The
+                # receipt stays Unconfirmed and listed, which is the honest
+                # state: nobody has evidenced this transfer yet.
+                frappe.throw(
+                    "Upload the transfer screenshot before confirming - confirming "
+                    "this receipt records the payment against the invoice."
+                )
+
+            from jarz_pos.services.delivery_handling import confirm_online_payment
+
+            result = confirm_online_payment(
+                awaiting["name"],
+                str(getattr(receipt, 'pos_profile', None) or '').strip(),
+                receipt_name=receipt.name,
+            ) or {}
+            return {
+                'success': True,
+                'message': 'Receipt confirmed and payment recorded',
+                'invoice': awaiting["name"],
+                'payment_entry': result.get('payment_entry'),
+                'payment_confirmation_status': result.get('payment_confirmation_status'),
+            }
+
         if receipt.status == RECEIPT_STATUS_CONFIRMED:
             return {
                 'success': True,
                 'message': 'Receipt already confirmed'
             }
 
-        # Confirming a previously rejected receipt is deliberately allowed: it
-        # is the only way back from a rejection made in error, and the
-        # alternative -- refusing -- would strand the receipt in a state with no
-        # exit and push the branch to upload a duplicate image instead.
-        # The stale rejection stamp is cleared so the record does not read as
-        # both rejected and confirmed.
-        if receipt.status == RECEIPT_STATUS_REJECTED:
-            receipt.rejected_by = None
-            receipt.rejected_date = None
-            receipt.rejection_reason = None
+        _confirm_receipt_record(receipt)
 
-        receipt.status = RECEIPT_STATUS_CONFIRMED
-        receipt.confirmed_by = frappe.session.user
-        receipt.confirmed_date = frappe.utils.now()
-        receipt.save()
-        
         frappe.db.commit()
         
         frappe.logger().info(f"Receipt confirmed: {receipt_name}")
