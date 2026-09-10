@@ -125,6 +125,28 @@ class TestGetProductionSuggestions(unittest.TestCase):
         ):
             self.assertIn(key, item)
 
+    def test_an_unreadable_bom_table_leaves_every_row_on_the_board(self):
+        """Fail OPEN. This is the one that matters.
+
+        Degrading to "nothing is phantom" shows one item too many; degrading
+        the other way empties the board and the floor cannot make anything.
+        Patched at the planning module's own ``frappe`` so the real
+        ``resolve_phantom_boms`` runs and takes its except branch.
+        """
+        from jarz_pos.services import production_planning as planning
+
+        rows = [_row(), _row("CHEESECAKE-MIX")]
+        with patch("jarz_pos.services.production_planning.frappe") as mock_frappe, patch(
+            "jarz_pos.services.production_planning._log_failure"
+        ) as mock_log:
+            mock_frappe.db.sql.side_effect = Exception("no such column: is_phantom_bom")
+
+            kept = planning.exclude_phantom_rows(rows)
+
+        self.assertEqual(rows, kept)
+        # And it says so, rather than turning itself off in silence.
+        self.assertTrue(mock_log.called)
+
     def test_a_phantom_bom_is_never_offered_on_the_board(self):
         """A phantom sub-assembly must not be producible in its own right.
 
@@ -314,6 +336,8 @@ class TestGetProductionSuggestions(unittest.TestCase):
             "jarz_pos.api.production.planning._resolve_default_company", return_value="Jarz Co"
         ), patch(
             "jarz_pos.api.production.planning._resolve_producible_rows", return_value=[_row()]
+        ), patch(
+            "jarz_pos.api.production.planning.resolve_phantom_boms", return_value=set()
         ), patch(
             "jarz_pos.api.production.planning._resolve_on_hand_map", return_value={"PIST-CAKE": 0.0}
         ), patch(

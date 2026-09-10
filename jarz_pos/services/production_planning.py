@@ -533,8 +533,8 @@ def resolve_phantom_boms(bom_names: Sequence[Any]) -> Set[str]:
         )
     except Exception:
         _log_failure(
-            "JARZ Production - phantom BOM read failed",
-            f"boms={names}",
+            "JARZ Production – phantom BOM read failed",
+            f"boms={names}\n{frappe.get_traceback()}",
         )
         return set()
 
