@@ -47,8 +47,13 @@ def _row(item_code="PIST-CAKE", **overrides):
 
 
 class TestGetProductionSuggestions(unittest.TestCase):
-    def _run(self, rows, on_hand, capacity=None, **kwargs):
-        """Drive the endpoint with every resolver stubbed out."""
+    def _run(self, rows, on_hand, capacity=None, phantom=(), **kwargs):
+        """Drive the endpoint with every resolver stubbed out.
+
+        ``phantom`` stubs the BOM read only — ``exclude_phantom_rows`` itself
+        runs for real, because dropping a phantom row from the ranked board is
+        part of what the endpoint owes its caller.
+        """
         from jarz_pos.api import production
 
         with patch("jarz_pos.api.production._ensure_production_view_access"), patch(
@@ -57,6 +62,9 @@ class TestGetProductionSuggestions(unittest.TestCase):
             "jarz_pos.api.production.planning._resolve_default_company", return_value="Jarz Co"
         ), patch(
             "jarz_pos.api.production.planning._resolve_producible_rows", return_value=rows
+        ), patch(
+            "jarz_pos.api.production.planning.resolve_phantom_boms",
+            return_value=set(phantom),
         ), patch(
             "jarz_pos.api.production.planning._resolve_on_hand_map", return_value=on_hand
         ), patch(
@@ -116,6 +124,40 @@ class TestGetProductionSuggestions(unittest.TestCase):
             "limiting_component",
         ):
             self.assertIn(key, item)
+
+    def test_a_phantom_bom_is_never_offered_on_the_board(self):
+        """A phantom sub-assembly must not be producible in its own right.
+
+        ERPNext expands a phantom BOM into its components at Work Order time,
+        so the jars that use it already relieve the raw materials.  Ranking it
+        here gave it an Add button, and producing it would consume those
+        materials a second time and mint stock nothing ever relieves.
+        """
+        mix = _row("CHEESECAKE-MIX", item_name="Cheesecake Mix", item_group="Sub Assemblies")
+        payload, _, _ = self._run(
+            [_row(), mix],
+            {"PIST-CAKE": 20.0, "CHEESECAKE-MIX": 3.0},
+            phantom=["BOM-CHEESECAKE-MIX"],
+        )
+
+        self.assertEqual(["PIST-CAKE"], [i["item_code"] for i in payload["items"]])
+
+    def test_a_phantom_row_is_dropped_before_the_bom_explosion(self):
+        """Cheaper, and it keeps the summary honest.
+
+        Capacity is priced per row, so a row that must not be offered should
+        not cost a BOM explosion either — and ``capped_by_materials`` counting
+        an item nobody may make would overstate the shortage.
+        """
+        mix = _row("CHEESECAKE-MIX", item_name="Cheesecake Mix")
+        _, mock_capacity, _ = self._run(
+            [_row(), mix],
+            {"PIST-CAKE": 20.0},
+            phantom=["BOM-CHEESECAKE-MIX"],
+        )
+
+        explored = [r["item_code"] for r in mock_capacity.call_args.args[0]]
+        self.assertEqual(["PIST-CAKE"], explored)
 
     def test_suggestion_uses_live_season_not_the_stored_days_of_stock(self):
         # velocity 5 x season 1.8 = 9/day.  20 on hand is 2.22 days of cover,

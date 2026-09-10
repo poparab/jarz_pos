@@ -18,7 +18,7 @@ accessor for the same reason.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import frappe
 
@@ -509,6 +509,59 @@ def _resolve_producible_rows(company: str, search: Optional[str] = None) -> List
         as_dict=True,
     )
     return [dict(r) for r in rows]
+
+
+def resolve_phantom_boms(bom_names: Sequence[Any]) -> Set[str]:
+    """Which of these BOMs are phantom, in one query.
+
+    A read failure returns the empty set: degrading to "nothing is phantom"
+    shows one item too many on a board, while degrading the other way would
+    silently empty it and leave the floor unable to make anything.
+    """
+    names = sorted({str(b).strip() for b in (bom_names or []) if str(b or "").strip()})
+    if not names:
+        return set()
+
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT name FROM `tabBOM`
+            WHERE name IN %(names)s AND is_phantom_bom = 1
+            """,
+            {"names": names},
+            as_dict=True,
+        )
+    except Exception:
+        _log_failure(
+            "JARZ Production - phantom BOM read failed",
+            f"boms={names}",
+        )
+        return set()
+
+    return {r["name"] for r in rows or []}
+
+
+def exclude_phantom_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop every producible row whose default BOM is phantom.
+
+    **A safety guard, not a tidy-up, and it belongs to every screen that offers
+    something to produce.**  A phantom sub-assembly is expanded into its own
+    components at Work Order time (``bom.py`` recurses through an
+    ``is_phantom_item`` row whatever the exploded flag says), so a jar batch
+    already relieves the raw cheese and cream directly.  Offering that same
+    item as a batch of its own consumes the identical raw materials a second
+    time and mints stock that no Work Order will ever relieve.
+
+    It lives here rather than in either caller because the Bases tab enforced
+    it and the ranked board did not: ``Cheesecake Mix`` sat on the Plan tab
+    with an Add button while the tab one along deliberately hid it.  One
+    definition, both readers.
+    """
+    rows = list(rows or [])
+    phantom = resolve_phantom_boms([row.get("default_bom") for row in rows])
+    if not phantom:
+        return rows
+    return [row for row in rows if row.get("default_bom") not in phantom]
 
 
 def _resolve_on_hand_map(item_codes: Sequence[str]) -> Dict[str, float]:

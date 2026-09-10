@@ -193,7 +193,14 @@ def get_production_suggestions(
             return _apply_status_filter(cached, status)
 
     context = planning.get_planning_context(company)
-    rows = planning._resolve_producible_rows(company, search)
+    # Phantom BOMs are excluded for the same reason the Bases tab excludes
+    # them: ERPNext expands a phantom sub-assembly into its own components at
+    # Work Order time, so a jar batch already relieves the raw materials.
+    # Ranking one here put ``Cheesecake Mix`` on the board with an Add button,
+    # and producing it would have consumed the cheese and cream twice over.
+    rows = planning.exclude_phantom_rows(
+        planning._resolve_producible_rows(company, search)
+    )
     on_hand_map = planning._resolve_on_hand_map([r["item_code"] for r in rows])
     capacity_map = planning.build_capacity_map(rows, company) if want_capacity else {}
 
