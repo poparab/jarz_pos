@@ -28,7 +28,15 @@ from jarz_pos.constants import DEFAULT_UOM
 # is set.  The Settings field ships via DocType JSON rather than a fixture, so
 # the existing Single row reads empty until somebody saves it — every read has
 # to survive that.
-DEFAULT_TARGET_DAYS = 7
+#
+# Fourteen days, not seven: the factory holds roughly two weeks of freezer
+# sub-assemblies and fills jars from them on other days, so a one-week target
+# proposes a batch that is already half-eaten by the time it is frozen.  The
+# same target now drives the jar board and the Bases screen — one number, so a
+# jar cannot be planned to a fortnight while the base it eats is planned to a
+# week.  The stored ``Jarz Forecast Settings.default_target_days_of_cover``
+# still wins whenever it is set; this is only the "nobody ever saved it" floor.
+DEFAULT_TARGET_DAYS = 14
 
 # Warehouse types whose stock must not count towards a finished good's
 # on-hand.  A batch sitting in WIP would otherwise inflate its own cover and

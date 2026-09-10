@@ -29,12 +29,22 @@ shipped bugs elsewhere in this codebase:
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 # Batch counts are reported to 3 decimals.  Enough to see "2.5 batches in the
 # freezer" without rendering 0.30000000000000004 at somebody standing at a
 # bench.
 BATCH_PRECISION = 3
+
+# Quantities (Kg of a base) carry more decimals than batch counts do: a base
+# consumed at 0.0004 Kg/day is a real, if slow, consumer and must not round
+# away to "nothing needed".  Six is enough to absorb float noise — 35.0 - 12.3
+# lands on 22.700000000000003 — without erasing a milligram-scale rate.
+QTY_PRECISION = 6
+
+# Days of cover are read as "about a fortnight", never to the microsecond.
+COVER_PRECISION = 3
 
 # Below a milligram is float noise, not a real quantity.  Same value the daily
 # plan uses, so the two modules agree at the boundary.
@@ -291,6 +301,159 @@ def build_demand_block(
             qty_required=required, on_hand=on_hand, batch_yield=batch_yield
         ),
         "driver": driver,
+    }
+
+
+# ── Derived consumption and cover ───────────────────────────────────────
+#
+# The ``demand`` block above answers "what does the plan I am looking at
+# need today".  Everything below answers a different question — "how long does
+# the freezer last" — and the two must both be reported, because a base can be
+# fully covered for today's plan and still be four days from empty.
+#
+# A base has no sales velocity of its own; it is never sold.  Its consumption is
+# derived one BOM level down from the jars that eat it, which is why the input
+# here is a *rate* (Kg/day) rather than a quantity.
+
+
+def derive_base_consumption_per_day(
+    jar_velocity_targets: Iterable[Mapping[str, Any]],
+    bom_rows: Iterable[Mapping[str, Any]],
+    base_item_codes: Iterable[str],
+) -> Dict[str, float]:
+    """Per-day consumption of each base, implied by the jars that consume it.
+
+    Deliberately the *same* arithmetic and the *same* code path as
+    ``derive_base_demand``: ``qty`` is dimensionless to that walk, so feeding
+    each jar's **effective daily velocity** in as ``qty`` returns a per-day
+    quantity per base instead of a per-plan one.  ``sum over jars (jar velocity
+    x base qty per jar)`` — exactly the brief — and one BOM walk rather than
+    two that could drift apart about what a jar contains.
+
+    A base that no jar's one-level BOM lists is **absent** from the result, not
+    zero.  The caller renders absent as ``None``/``no_velocity``, the same way
+    the jar board reports an item that never sells; a zero there would read as
+    "we know this base needs nothing", which is a claim nobody has evidence for.
+    """
+    return derive_base_demand(jar_velocity_targets, bom_rows, base_item_codes)
+
+
+def cover_days(*, on_hand: Any, consumption_per_day: Any) -> Optional[float]:
+    """Days the freezer lasts at the derived rate, or ``None`` if unknown.
+
+    Mirrors ``production_planning.days_of_cover`` deliberately, because the two
+    figures sit side by side on one screen and an operator reading "4 days" on a
+    jar and "4 days" on its base must be reading the same thing:
+
+    * ``None`` — not a sentinel — when the rate is zero or unknown.  The stored
+      ``jarz_days_of_stock`` field writes ``999`` for that case, which makes
+      "never consumed" and "huge pile" indistinguishable downstream.
+    * stock at or below zero covers ``0.0`` days, never a negative number.  A
+      negative ``Bin`` is a counting error; "-17 days of cover" means nothing to
+      somebody deciding what to make, and the raw ``on_hand`` is reported beside
+      this so the hole stays visible.
+    """
+    rate = to_float(consumption_per_day, 0.0)
+    if rate <= 0:
+        return None
+
+    stock = to_float(on_hand, 0.0)
+    if stock <= 0:
+        return 0.0
+    return round(stock / rate, COVER_PRECISION)
+
+
+def cover_suggested_qty(*, consumption_per_day: Any, target_days: Any, on_hand: Any) -> float:
+    """Quantity to make so the freezer holds ``target_days`` of consumption.
+
+    ``max(0, rate x target_days - max(0, on_hand))``, in the item's stock UOM.
+
+    **The inner floor is the load-bearing one.**  ERPNext permits negative
+    ``Bin`` quantities and production carries 26 of them right now; subtracting
+    a negative would add that phantom hole on top of the real requirement.  The
+    jar board learned this the hard way — 81 of 183 suggested batches on staging
+    were the counting error, not demand — and over-producing a frozen
+    perishable is the more expensive error of the two.
+
+    Returns ``0.0`` when the rate is unknown/zero or the target is zero: with no
+    consumption signal there is no defensible quantity, and inventing one from a
+    target alone would tell the floor to fill a freezer nobody empties.
+    """
+    rate = to_float(consumption_per_day, 0.0)
+    days = to_float(target_days, 0.0)
+    if rate <= 0 or days <= 0:
+        return 0.0
+
+    deficit = (rate * days) - countable(on_hand)
+    if deficit <= QTY_EPSILON:
+        return 0.0
+    return round(deficit, QTY_PRECISION)
+
+
+def cover_suggested_batches(*, suggested_qty: Any, batch_yield: Any) -> int:
+    """Whole batches covering ``suggested_qty``.
+
+    Rounded **up**, because half a mixer bowl is not a thing anyone can make,
+    and reported as a whole ``int`` — this is the number that goes on a
+    Work Order, unlike the fractional ``batches_on_hand`` figure above.
+
+    ``0`` when the BOM has no yield, for the same reason ``batches_from_qty``
+    returns ``0.0``: a zero-yield BOM cannot be divided by, and inventing a
+    yield of 1 would ask for 35 batches of a 13.674 Kg mix.
+
+    The epsilon matches ``production_planning.suggested_batches``: ``27.348 /
+    13.674`` can land on ``2.0000000000000004`` in float, and a naive ``ceil``
+    would then ask for a third batch nobody needs.
+    """
+    produced = to_float(batch_yield, 0.0)
+    qty = to_float(suggested_qty, 0.0)
+    if produced <= 0 or qty <= 0:
+        return 0
+
+    return max(0, math.ceil((qty / produced) - 1e-9))
+
+
+def build_cover_block(
+    *,
+    consumption_per_day: Any,
+    on_hand: Any,
+    target_days: Any,
+    batch_yield: Any,
+) -> Dict[str, Any]:
+    """The cover figures for one base, composed once so they cannot disagree.
+
+    ``consumption_per_day=None`` means *no signal* — no jar BOM lists this base
+    one level down, or nothing sells at all — and propagates as ``None`` to
+    ``days_of_cover`` too.  The two quantity fields still report ``0``/``0.0``
+    in that case rather than ``None``, exactly as the jar board reports
+    ``suggested_batches: 0`` for an item that never sells: the caller pairs them
+    with a ``no_velocity`` status, which is what carries "we do not know".
+
+    ``status`` is deliberately **not** produced here.  It is
+    ``production_planning.status_for_days_of_cover`` applied to the thresholds
+    the jar board read for this same request — one vocabulary, one set of
+    thresholds, resolved in the API layer that already holds them.
+    """
+    known = consumption_per_day is not None
+    rate = round(countable(consumption_per_day), QTY_PRECISION) if known else None
+
+    qty = cover_suggested_qty(
+        consumption_per_day=rate, target_days=target_days, on_hand=on_hand
+    )
+
+    try:
+        target = int(target_days or 0)
+    except (TypeError, ValueError):
+        target = 0
+
+    return {
+        "consumption_per_day": rate,
+        "days_of_cover": cover_days(on_hand=on_hand, consumption_per_day=rate),
+        "target_days": target,
+        "suggested_qty": qty,
+        "suggested_batches": cover_suggested_batches(
+            suggested_qty=qty, batch_yield=batch_yield
+        ),
     }
 
 

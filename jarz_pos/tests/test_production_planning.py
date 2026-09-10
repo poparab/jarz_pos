@@ -319,6 +319,21 @@ class TestResolveTargetDays(unittest.TestCase):
         self.assertEqual((DEFAULT_TARGET_DAYS, "fallback"), self._call(None, None))
         self.assertEqual((DEFAULT_TARGET_DAYS, "fallback"), self._call(0, 0))
 
+    def test_the_fallback_target_is_a_fortnight(self):
+        from jarz_pos.services.production_planning import DEFAULT_TARGET_DAYS
+
+        # The factory holds roughly two weeks of freezer sub-assemblies, and one
+        # target now drives both the jar board and the Bases screen — a jar
+        # planned to 14 days whose base is planned to 7 empties the freezer.
+        self.assertEqual(14, DEFAULT_TARGET_DAYS)
+        self.assertEqual((14, "fallback"), self._call(None, None))
+
+    def test_a_stored_settings_value_still_wins_over_the_fortnight(self):
+        # The Single row is the operator's dial; the constant is only the
+        # "nobody ever saved it" floor.
+        self.assertEqual((7, "default"), self._call(None, 7))
+        self.assertEqual((21, "default"), self._call(0, 21))
+
     def test_garbage_values_do_not_raise(self):
         from jarz_pos.services.production_planning import DEFAULT_TARGET_DAYS
 

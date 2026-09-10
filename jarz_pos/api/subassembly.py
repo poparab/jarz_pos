@@ -10,8 +10,17 @@ This module is that missing screen's read side.  Two endpoints, both read-only:
 
 ``get_base_items``
     The catalogue of bases with what is in the freezer, what the raw materials
-    allow, and — the part the board could never supply — a **demand hint**
-    derived from the jars somebody actually intends to fill today.
+    allow, and — the part the board could never supply — both a **demand hint**
+    derived from the jars somebody actually intends to fill today, and a
+    **make-to-cover** figure derived from what the jars sell.
+
+    The cover half is what gives a base the same model a jar has.  A base has no
+    velocity of its own because it is never sold, so the board computes nothing
+    for it and the fortnight the freezer is supposed to hold has been an
+    owner's guess.  Its consumption is derivable all the same: one BOM level
+    down, ``sum over jars (jar's effective daily velocity x base qty per jar)``.
+    That rate feeds the identical cover/target/status maths the jar board runs,
+    against the identical Jarz Forecast Settings row.
 
 ``preview_base_batch``
     What one specific run would consume, cost and produce, in the exact shape
@@ -277,42 +286,103 @@ def _resolve_default_bom_map(item_codes: Sequence[str]) -> Dict[str, str]:
     return {r["item_code"]: r["bom_name"] for r in rows or []}
 
 
-def _resolve_suggestion_targets(company: str) -> List[Dict[str, Any]]:
-    """Jar targets from the Plan tab's own suggestion maths.
+def _resolve_jar_board(company: str) -> Dict[str, Any]:
+    """The Plan tab's own payload, read once and shared by both derivations.
 
     Deliberately calls the existing endpoint rather than re-deriving velocity,
     season and cover here: the two screens disagreeing about what today needs
-    would be worse than either being wrong.  Capacity is skipped — this call
-    only wants the quantities, and the BOM explosion it would trigger is paid
-    for again below by ``build_capacity_map``.
+    would be worse than either being wrong.  Capacity is skipped — these callers
+    only want quantities, and the BOM explosion it would trigger is paid for
+    again by ``build_capacity_map``.
+
+    A failure degrades to ``{}``: the demand hint falls back to "none" and the
+    cover figures to "unknown", but the Bases screen still renders.  Both
+    callers below therefore treat an empty payload as *no signal*, never as a
+    signal of zero.
     """
     from jarz_pos.api import production
 
     try:
-        payload = production.get_production_suggestions(company=company, include_capacity=0)
+        return production.get_production_suggestions(company=company, include_capacity=0) or {}
     except Exception:
-        # A suggestion failure degrades the demand hint to "none"; it must not
-        # take the whole Bases screen down.
         _log_failure(
-            "JARZ Bases – suggestion fallback failed",
+            "JARZ Bases – jar board read failed",
             f"company={company}\n{frappe.get_traceback()}",
         )
-        return []
+        return {}
 
-    targets: List[Dict[str, Any]] = []
+
+def _jar_rows(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Finished-jar rows of a board payload, with a usable BOM."""
+    rows: List[Dict[str, Any]] = []
     for item in (payload or {}).get("items") or []:
         if item.get("item_group") not in FINISHED_GOODS_GROUPS:
             continue
-        if bases.to_float(item.get("suggested_batches"), 0.0) <= 0:
+        if not _coerce_str(item.get("default_bom")):
             continue
-        bom_name = _coerce_str(item.get("default_bom"))
-        if not bom_name:
+        rows.append(item)
+    return rows
+
+
+def _effective_velocity(item: Mapping[str, Any]) -> float:
+    """A jar's season-adjusted daily velocity, off the board's own figure.
+
+    ``effective_velocity`` is what the board publishes and what its own
+    suggestion is built from, so reading it keeps the base's consumption tied to
+    the jar's plan.  The product is recomputed only as a fallback for a payload
+    served from cache by an older build mid-deploy, where the key may be absent
+    — degrading to 0 there would blank the whole Bases screen for two minutes.
+    """
+    if item.get("effective_velocity") is not None:
+        return bases.countable(item.get("effective_velocity"))
+    return bases.countable(item.get("velocity_60d")) * bases.to_float(
+        item.get("season_multiplier"), 1.0
+    )
+
+
+def _resolve_suggestion_targets(company: str) -> List[Dict[str, Any]]:
+    """Jar targets from the Plan tab's own suggestion maths.
+
+    What the board says somebody should fill *today* — the fallback demand
+    driver when no plan has been saved.  A jar the board is not asking for
+    contributes nothing.
+    """
+    targets: List[Dict[str, Any]] = []
+    for item in _jar_rows(_resolve_jar_board(company)):
+        if bases.to_float(item.get("suggested_batches"), 0.0) <= 0:
             continue
         targets.append(
             {
                 "item_code": item.get("item_code"),
                 "qty": bases.countable(item.get("suggested_units")),
-                "bom_name": bom_name,
+                "bom_name": _coerce_str(item.get("default_bom")),
+            }
+        )
+    return targets
+
+
+def _resolve_velocity_targets(company: str) -> List[Dict[str, Any]]:
+    """Jar **rates** — one day's worth of each jar — as demand targets.
+
+    The same ``{item_code, qty, bom_name}`` shape ``_resolve_suggestion_targets``
+    produces, but ``qty`` is a per-day velocity rather than a quantity to fill.
+    Pushed through the identical BOM walk, that returns each base's per-day
+    consumption (see ``bases.derive_base_consumption_per_day``).
+
+    Every jar that moves is included, not just the ones the board wants a batch
+    of: a jar that is well stocked today still eats its base tomorrow, and
+    dropping it would understate the freezer's burn rate.
+    """
+    targets: List[Dict[str, Any]] = []
+    for item in _jar_rows(_resolve_jar_board(company)):
+        velocity = _effective_velocity(item)
+        if velocity <= bases.QTY_EPSILON:
+            continue
+        targets.append(
+            {
+                "item_code": item.get("item_code"),
+                "qty": velocity,
+                "bom_name": _coerce_str(item.get("default_bom")),
             }
         )
     return targets
@@ -598,6 +668,31 @@ def _resolve_demand(
     return demand, source, driver
 
 
+def _resolve_consumption(company: str, base_codes: Set[str]) -> Dict[str, float]:
+    """``{base_item_code: qty consumed per day}`` for the whole screen.
+
+    Bases are never sold, so ``jarz_velocity_60d`` is 0 for every one of them
+    and the board can say nothing about their cover — which is why the freezer
+    target has been a guess.  Their consumption is nonetheless derivable: one
+    BOM level down, each jar eats a known quantity of a base per unit, and the
+    jar's velocity is already resolved.
+
+    A base absent from the returned map has **no signal** (no jar's one-level
+    BOM lists it — usually a catalogue that predates the sub-assembly BOM
+    migration, or a base nothing currently sells uses).  The caller reports that
+    as ``null``, never as a consumption of zero.
+    """
+    if not base_codes:
+        return {}
+
+    targets = _resolve_velocity_targets(company)
+    if not targets:
+        return {}
+
+    bom_rows = _resolve_jar_bom_rows({t.get("bom_name") for t in targets})
+    return bases.derive_base_consumption_per_day(targets, bom_rows, base_codes)
+
+
 # ── Endpoints ───────────────────────────────────────────────────────────
 
 
@@ -607,26 +702,49 @@ def get_base_items(
     search: Optional[str] = None,
     include_demand: Any = 1,
     plan_date: Optional[str] = None,
+    include_cover: Any = 1,
 ) -> Dict[str, Any]:
-    """The bases the floor can make, with stock, capacity and a demand hint.
+    """The bases the floor can make, with stock, capacity, demand and cover.
 
     A "base item" is any item with a submitted default BOM that is not disabled
     and does not sit in ``FINISHED_GOODS_GROUPS`` — i.e. everything the jars are
     built from rather than the jars themselves.
 
-    ``include_demand=0`` skips the plan/suggestion derivation entirely and
-    returns ``demand_source: "none"`` with every ``demand`` blank; the stock and
-    capacity figures are unaffected.
+    Two different questions are answered per item and **both** are reported:
+
+    ``demand``
+        what the plan somebody is looking at needs today.  Blank when there is
+        no plan and the board is proposing nothing.
+
+    ``consumption_per_day`` / ``days_of_cover`` / ``suggested_qty``
+        make-to-cover, the same model the jar board runs, against the same
+        resolved ``target_days`` and the same status vocabulary.  A base can be
+        fully covered for today's plan and still be four days from empty; that
+        is the gap this half closes, and it is why neither number replaces the
+        other.
+
+    ``include_demand=0`` skips the plan/suggestion derivation and returns
+    ``demand_source: "none"`` with every ``demand`` blank.  ``include_cover=0``
+    skips the consumption derivation and returns ``cover_included: false`` with
+    every cover figure blank.  Stock and capacity are unaffected by either.
     """
     _ensure_production_view_access()
 
     company = _resolve_company(company)
     search = _coerce_str(search)
     want_demand = _coerce_flag(include_demand, default=True)
+    want_cover = _coerce_flag(include_cover, default=True)
     plan_date = _coerce_str(plan_date) or _resolve_today()
 
     rows = _resolve_base_rows(company, search)
     item_codes = [row["item_code"] for row in rows]
+
+    # Thresholds, season and the default cover target, read once for the whole
+    # screen from the same accessor the jar board uses — so one Settings row
+    # drives both boards and a base cannot be planned to a different fortnight
+    # than the jar that eats it.
+    context = planning.get_planning_context(company)
+    thresholds = context["thresholds"]
 
     on_hand_map = planning._resolve_on_hand_map(item_codes)
     # ``build_capacity_map`` already degrades a single unexplodable BOM to an
@@ -645,6 +763,10 @@ def get_base_items(
     if want_demand:
         demand_map, demand_source, driver = _resolve_demand(company, plan_date, set(item_codes))
 
+    consumption_map: Dict[str, float] = {}
+    if want_cover:
+        consumption_map = _resolve_consumption(company, set(item_codes))
+
     items: List[Dict[str, Any]] = []
     for row in rows:
         item_code = row["item_code"]
@@ -661,6 +783,21 @@ def get_base_items(
                 batch_yield=batch_yield,
                 driver=driver,
             )
+
+        # Same resolution the jar board applies, so an Item-level override set
+        # on a base behaves exactly as it does on a jar.
+        target_days, target_source = planning.resolve_target_days(
+            row.get("target_days_override"), context["default_target_days"]
+        )
+        cover = bases.build_cover_block(
+            # ``None``, not ``0.0``: absent from the map means no jar BOM lists
+            # this base one level down, which is "we have no signal", not "it is
+            # not consumed".
+            consumption_per_day=consumption_map.get(item_code),
+            on_hand=on_hand,
+            target_days=target_days,
+            batch_yield=batch_yield,
+        )
 
         items.append(
             {
@@ -685,6 +822,19 @@ def get_base_items(
                 "has_sop": sop is not None,
                 "sop_total_duration_mins": _sop_duration_for_batch(sop, batch_yield),
                 "demand": demand_block,
+                # ── Make-to-cover, derived one BOM level down from the jars ──
+                # ``None`` throughout when nothing consumes this base, paired
+                # with ``no_velocity`` — exactly how the jar board reports an
+                # item that never sells.
+                "consumption_per_day": cover["consumption_per_day"],
+                "days_of_cover": cover["days_of_cover"],
+                "target_days": cover["target_days"],
+                "target_days_source": target_source,
+                "status": planning.status_for_days_of_cover(
+                    cover["days_of_cover"], **thresholds
+                ),
+                "suggested_qty": cover["suggested_qty"],
+                "suggested_batches": cover["suggested_batches"],
             }
         )
 
@@ -692,6 +842,12 @@ def get_base_items(
         "company": company,
         "generated_on": _resolve_now(),
         "demand_source": demand_source,
+        # Mirrors the jar board's ``capacity_included``: a client must be able
+        # to tell "nothing consumes this" from "we did not look this time".
+        "cover_included": want_cover,
+        "season": context["season"],
+        "default_target_days": context["default_target_days"],
+        "thresholds": thresholds,
         "items": items,
         "summary": bases.summarise_bases(items),
     }

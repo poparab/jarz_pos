@@ -57,8 +57,8 @@
    "label": "Production Planning"
   },
   {
-   "default": "7",
-   "description": "Days of demand a production batch should cover. Drives the suggested quantity on the Production Board. Per-item overrides live on Item → Target Days of Cover.",
+   "default": "14",
+   "description": "Days of demand a production batch should cover. Drives the suggested quantity on the Production Board, for finished jars and for freezer bases alike. Per-item overrides live on Item → Target Days of Cover.",
    "fieldname": "default_target_days_of_cover",
    "fieldtype": "Int",
    "label": "Default Target Days of Cover",

@@ -377,6 +377,280 @@ class TestBuildDemandBlock(unittest.TestCase):
         self.assertEqual(0.0, block["shortfall_batches"])
 
 
+class TestDeriveBaseConsumptionPerDay(unittest.TestCase):
+    """Velocities in, per-day base consumption out — the same BOM walk.
+
+    A base is never sold, so it has no velocity of its own; feeding the jars'
+    daily velocity through the demand walk as ``qty`` is what turns "what the
+    plan needs" arithmetic into "what the freezer burns per day".
+    """
+
+    def _call(self, targets, bom_rows, base_codes=("Butter Biscuit",)):
+        from jarz_pos.services.subassembly_planning import derive_base_consumption_per_day
+
+        return derive_base_consumption_per_day(targets, bom_rows, base_codes)
+
+    def _row(self, bom_name, item_code, qty, bom_quantity=1.0):
+        return {
+            "bom_name": bom_name,
+            "item_code": item_code,
+            "qty": qty,
+            "bom_quantity": bom_quantity,
+        }
+
+    def test_one_jar_burns_its_base_at_velocity_times_qty_per_jar(self):
+        consumption = self._call(
+            [{"item_code": "Lotus Medium", "qty": 8.0, "bom_name": "BOM-LOTUS-M"}],
+            [self._row("BOM-LOTUS-M", "Butter Biscuit", 0.06)],
+        )
+        self.assertAlmostEqual(0.48, consumption["Butter Biscuit"], places=9)
+
+    def test_every_jar_using_the_base_accumulates(self):
+        consumption = self._call(
+            [
+                {"item_code": "Lotus Medium", "qty": 8.0, "bom_name": "BOM-LOTUS-M"},
+                {"item_code": "Lotus Large", "qty": 3.0, "bom_name": "BOM-LOTUS-L"},
+                # A BOM that yields 20 jars off 0.5 Kg is 0.025 Kg/jar.
+                {"item_code": "Biscoff Mini", "qty": 12.0, "bom_name": "BOM-BISCOFF"},
+            ],
+            [
+                self._row("BOM-LOTUS-M", "Butter Biscuit", 0.06),
+                self._row("BOM-LOTUS-L", "Butter Biscuit", 0.09),
+                self._row("BOM-BISCOFF", "Butter Biscuit", 0.5, bom_quantity=20.0),
+            ],
+        )
+        self.assertAlmostEqual(1.05, consumption["Butter Biscuit"], places=9)
+
+    def test_a_base_no_jar_uses_is_absent_not_zero(self):
+        # Absent is what the caller renders as ``null``/``no_velocity``. A zero
+        # here would read as "we know this base needs nothing".
+        consumption = self._call(
+            [{"item_code": "Lotus Medium", "qty": 8.0, "bom_name": "BOM-LOTUS-M"}],
+            [self._row("BOM-LOTUS-M", "Butter Biscuit", 0.06)],
+            base_codes=("Butter Biscuit", "Mango mix"),
+        )
+        self.assertIn("Butter Biscuit", consumption)
+        self.assertNotIn("Mango mix", consumption)
+
+    def test_a_catalogue_predating_the_sub_assembly_migration_yields_nothing(self):
+        # The jar BOM still lists flour and butter directly, so no base appears
+        # one level down and every base reports "no signal".
+        self.assertEqual(
+            {},
+            self._call(
+                [{"item_code": "Lotus Medium", "qty": 8.0, "bom_name": "BOM-LOTUS-M"}],
+                [self._row("BOM-LOTUS-M", "Butter", 0.4)],
+            ),
+        )
+
+    def test_a_jar_that_never_sells_contributes_nothing(self):
+        self.assertEqual(
+            {},
+            self._call(
+                [{"item_code": "Lotus Medium", "qty": 0.0, "bom_name": "BOM-LOTUS-M"}],
+                [self._row("BOM-LOTUS-M", "Butter Biscuit", 0.06)],
+            ),
+        )
+
+
+class TestCoverDays(unittest.TestCase):
+    def _call(self, **kwargs):
+        from jarz_pos.services.subassembly_planning import cover_days
+
+        params = {"on_hand": 42.0, "consumption_per_day": 3.0}
+        params.update(kwargs)
+        return cover_days(**params)
+
+    def test_stock_over_rate(self):
+        self.assertEqual(14.0, self._call())
+
+    def test_unknown_consumption_is_none_not_a_huge_number(self):
+        # The stored ``jarz_days_of_stock`` field writes 999 here, which makes
+        # "never consumed" and "huge pile" indistinguishable downstream.
+        self.assertIsNone(self._call(consumption_per_day=None))
+        self.assertIsNone(self._call(consumption_per_day=0))
+        self.assertIsNone(self._call(consumption_per_day="abc"))
+
+    def test_empty_freezer_covers_zero_days(self):
+        self.assertEqual(0.0, self._call(on_hand=0.0))
+
+    def test_negative_stock_never_reports_negative_cover(self):
+        # "-17 days of cover" means nothing to somebody deciding what to make.
+        self.assertEqual(0.0, self._call(on_hand=-56.0))
+
+    def test_matches_the_jar_boards_answer_for_the_same_situation(self):
+        from jarz_pos.services.production_planning import days_of_cover
+
+        jar = days_of_cover(on_hand=42.0, velocity=3.0, season_multiplier=1.0)
+        self.assertEqual(jar, self._call())
+        self.assertEqual(
+            days_of_cover(on_hand=-5.0, velocity=3.0, season_multiplier=1.0),
+            self._call(on_hand=-5.0),
+        )
+        self.assertEqual(
+            days_of_cover(on_hand=42.0, velocity=0.0, season_multiplier=1.0),
+            self._call(consumption_per_day=0.0),
+        )
+
+
+class TestCoverSuggestedQty(unittest.TestCase):
+    def _call(self, **kwargs):
+        from jarz_pos.services.subassembly_planning import cover_suggested_qty
+
+        params = {"consumption_per_day": 1.05, "target_days": 14, "on_hand": 4.2}
+        params.update(kwargs)
+        return cover_suggested_qty(**params)
+
+    def test_fills_the_gap_to_the_target(self):
+        # 1.05 x 14 = 14.7 needed, 4.2 in the freezer.
+        self.assertEqual(10.5, self._call())
+
+    def test_a_covered_base_is_asked_for_nothing(self):
+        self.assertEqual(0.0, self._call(on_hand=14.7))
+        self.assertEqual(0.0, self._call(on_hand=500.0))
+
+    def test_negative_on_hand_is_treated_as_zero_never_subtracted(self):
+        # THE rule of this feature. Subtracting a -2 Kg counting error would ask
+        # for 16.7 Kg — the phantom hole on top of real demand. Production
+        # carries 26 negative bins, so this path is live.
+        self.assertEqual(self._call(on_hand=0.0), self._call(on_hand=-2.0))
+        self.assertEqual(14.7, self._call(on_hand=-2.0))
+        self.assertEqual(14.7, self._call(on_hand=-2000.0))
+
+    def test_unknown_consumption_asks_for_nothing(self):
+        # With no consumption signal there is no defensible quantity; inventing
+        # one from the target alone fills a freezer nobody empties.
+        self.assertEqual(0.0, self._call(consumption_per_day=None))
+        self.assertEqual(0.0, self._call(consumption_per_day=0.0))
+
+    def test_a_zero_target_suppresses_the_suggestion(self):
+        self.assertEqual(0.0, self._call(target_days=0))
+        self.assertEqual(0.0, self._call(target_days=None))
+
+    def test_float_noise_does_not_leak_into_the_quantity(self):
+        # 35.0 - 12.3 lands on 22.700000000000003.
+        self.assertEqual(22.7, self._call(consumption_per_day=2.5, target_days=14, on_hand=12.3))
+
+    def test_a_very_slow_consumer_still_reports_a_real_quantity(self):
+        self.assertEqual(0.0056, self._call(consumption_per_day=0.0004, on_hand=0.0))
+
+
+class TestCoverSuggestedBatches(unittest.TestCase):
+    def _call(self, **kwargs):
+        from jarz_pos.services.subassembly_planning import cover_suggested_batches
+
+        params = {"suggested_qty": 10.5, "batch_yield": 13.674}
+        params.update(kwargs)
+        return cover_suggested_batches(**params)
+
+    def test_any_shortfall_is_at_least_one_whole_batch(self):
+        # Half a mixer bowl is not a thing anyone can make.
+        self.assertEqual(1, self._call())
+        self.assertEqual(1, self._call(suggested_qty=0.001))
+
+    def test_rounds_up_to_whole_batches(self):
+        self.assertEqual(2, self._call(suggested_qty=14.7))
+        self.assertEqual(3, self._call(suggested_qty=28.0))
+
+    def test_an_exact_multiple_does_not_ask_for_one_more(self):
+        # 27.348 / 13.674 lands on 2.0000000000000004 in float.
+        self.assertEqual(2, self._call(suggested_qty=27.348))
+        self.assertEqual(1, self._call(suggested_qty=13.674))
+
+    def test_nothing_to_make_is_zero_batches(self):
+        self.assertEqual(0, self._call(suggested_qty=0.0))
+        self.assertEqual(0, self._call(suggested_qty=None))
+
+    def test_missing_batch_yield_is_not_a_division_error(self):
+        # A zero-yield BOM is a setup problem the caller surfaces; inventing a
+        # yield of 1 would ask for 11 batches of a 13.674 Kg mix.
+        self.assertEqual(0, self._call(batch_yield=0))
+        self.assertEqual(0, self._call(batch_yield=None))
+        self.assertEqual(0, self._call(batch_yield=""))
+        self.assertEqual(0, self._call(batch_yield=-13.674))
+
+    def test_the_result_is_a_whole_int_not_a_float(self):
+        # It goes on a Work Order, unlike the fractional batches_on_hand figure.
+        self.assertIsInstance(self._call(), int)
+
+
+class TestBuildCoverBlock(unittest.TestCase):
+    def _call(self, **kwargs):
+        from jarz_pos.services.subassembly_planning import build_cover_block
+
+        params = {
+            "consumption_per_day": 1.05,
+            "on_hand": 4.2,
+            "target_days": 14,
+            "batch_yield": 13.674,
+        }
+        params.update(kwargs)
+        return build_cover_block(**params)
+
+    def test_butter_biscuit_end_to_end(self):
+        # Three jars burn 1.05 Kg/day of Butter Biscuit between them; 4.2 Kg is
+        # in the freezer; the target is a fortnight; one batch is 13.674 Kg.
+        block = self._call()
+        self.assertEqual(1.05, block["consumption_per_day"])
+        self.assertEqual(4.0, block["days_of_cover"])  # 4.2 / 1.05
+        self.assertEqual(14, block["target_days"])
+        self.assertEqual(10.5, block["suggested_qty"])  # 1.05*14 - 4.2
+        self.assertEqual(1, block["suggested_batches"])  # 10.5 / 13.674 -> 1
+
+    def test_butter_biscuit_end_to_end_with_a_negative_bin(self):
+        # The same base after a miscount. The suggestion must be the full 14
+        # days (14.7 Kg -> 2 batches), NOT 16.7 Kg, and cover reads 0 days.
+        block = self._call(on_hand=-2.0)
+        self.assertEqual(0.0, block["days_of_cover"])
+        self.assertEqual(14.7, block["suggested_qty"])
+        self.assertEqual(2, block["suggested_batches"])
+
+    def test_a_base_nothing_consumes_is_blank_not_zero(self):
+        block = self._call(consumption_per_day=None)
+        self.assertIsNone(block["consumption_per_day"])
+        self.assertIsNone(block["days_of_cover"])
+        # The quantities still report 0: the caller pairs them with a
+        # ``no_velocity`` status, which is what carries "we do not know".
+        self.assertEqual(0.0, block["suggested_qty"])
+        self.assertEqual(0, block["suggested_batches"])
+        self.assertEqual(14, block["target_days"])
+
+    def test_a_known_zero_rate_is_reported_as_zero(self):
+        block = self._call(consumption_per_day=0.0)
+        self.assertEqual(0.0, block["consumption_per_day"])
+        self.assertIsNone(block["days_of_cover"])
+
+    def test_zero_batch_yield_still_reports_the_quantity(self):
+        # The Kg figure is real and actionable even when nobody can say how many
+        # batches it is; only the batch count degrades.
+        block = self._call(batch_yield=0)
+        self.assertEqual(10.5, block["suggested_qty"])
+        self.assertEqual(0, block["suggested_batches"])
+        self.assertEqual(4.0, block["days_of_cover"])
+
+    def test_an_item_target_override_drives_the_quantity(self):
+        block = self._call(target_days=28)
+        self.assertAlmostEqual(25.2, block["suggested_qty"], places=6)
+        self.assertEqual(28, block["target_days"])
+
+    def test_junk_target_does_not_raise(self):
+        block = self._call(target_days="abc")
+        self.assertEqual(0, block["target_days"])
+        self.assertEqual(0.0, block["suggested_qty"])
+
+    def test_the_block_carries_exactly_the_documented_keys(self):
+        self.assertEqual(
+            {
+                "consumption_per_day",
+                "days_of_cover",
+                "target_days",
+                "suggested_qty",
+                "suggested_batches",
+            },
+            set(self._call().keys()),
+        )
+
+
 class TestSummariseBases(unittest.TestCase):
     def _call(self, items):
         from jarz_pos.services.subassembly_planning import summarise_bases
