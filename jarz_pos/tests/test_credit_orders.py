@@ -25,6 +25,26 @@ What is locked down here, and why each one matters:
 6. **Regression:** an unpaid INSTAPAY order still routes exactly where it always
    did. This whole feature is additive or it is a bug.
 
+Then the four things the first production week proved were wrong, each of which
+only became reachable BECAUSE credit exists — every one of them is a way for the
+books to be quietly wrong rather than loudly broken:
+
+7. **A debt must survive a relabel** (``CreditDebtSurvivesARelabelTests``).
+   ``custom_payment_method`` is mutable after submit; the frozen
+   ``custom_credit_terms_days`` stamp is not. Every reader of "what is owed on
+   account" matches EITHER, or a collection-method change that moves no money at
+   all makes a real debt vanish and frees the shop's limit.
+8. **A part-paid order must not over-charge the courier**
+   (``PartPaidCollectionChangeTests``). FIFO allocation makes "partly paid, then
+   switched to cash" ordinary; the GL leg and the Courier Transaction have to
+   move the same number or settlement drives Courier Outstanding negative.
+9. **One delivery, one freight accrual** (``FreightIdempotencyTests``). The
+   per-path notes tag is attribution, not idempotency: a re-dispatch on the other
+   path must not owe the rider his freight a second time.
+10. **The credit action is anchored to a dispatch state**
+    (``KanbanCreditActionGateTests``) and **the creation gate normalises exactly
+    as dispatch does** (``CreditCreationGateNormalisationTests``).
+
 Pure ``unittest`` with mocks — no site, no fixtures.
 """
 
@@ -403,7 +423,16 @@ class FreightHelperContractTests(unittest.TestCase):
             "- no cash position",
         )
 
-    def test_credit_and_online_freight_rows_never_dedupe_against_each_other(self):
+    def test_the_two_freight_tags_stay_distinct_for_ATTRIBUTION_only(self):
+        """Each row still says which dispatch wrote it — and that is ALL it says.
+
+        This used to be asserted as "the credit and online rows never dedupe
+        against each other", which named the tags as the idempotency boundary.
+        They are not, and treating them as one was a live double-accrual: see
+        :meth:`FreightIdempotencyTests.test_dedupe_crosses_the_tag_boundary`.
+        The tags remain distinct so a row is attributable to the path that wrote
+        it; ``_existing_freight_ct`` is what decides whether a row already exists.
+        """
         from jarz_pos.services import delivery_handling as dh
 
         self.assertNotEqual(dh._CREDIT_FREIGHT_NOTES, dh._ONLINE_FREIGHT_NOTES)
@@ -737,6 +766,501 @@ class CreditPaymentFifoTests(unittest.TestCase):
         # Not even read: a replay must post nothing at all.
         mock_frappe.new_doc.assert_not_called()
         mock_open.assert_not_called()
+
+
+#: The exact ``or_filters`` every credit-debt query must send. Written out here
+#: rather than imported from the helper so a change to the helper has to be made
+#: deliberately, in two places, instead of silently agreeing with itself.
+_EXPECTED_CREDIT_OR_FILTERS = [
+    ["Sales Invoice", "custom_payment_method", "=", "Credit"],
+    ["Sales Invoice", "custom_credit_terms_days", ">", 0],
+]
+
+
+class CreditDebtSurvivesARelabelTests(unittest.TestCase):
+    """DEFECT A — a debt must not vanish when its payment method is rewritten.
+
+    ``custom_payment_method`` is MUTABLE after submit:
+    ``change_payment_collection_method`` writes it on every collection-method
+    change, and its ``unpaid_online_retarget`` branch posts no voucher at all —
+    the outstanding stays exactly where it was. Keyed on that column alone, a
+    manager tapping "Change collection method -> Instapay" on a credit card made
+    a real debt disappear from the ledger, freed that much of the shop's limit,
+    and left ``record_credit_payment`` unable to allocate against it. The frozen
+    ``custom_credit_terms_days`` stamp is the permanent half of the answer, and
+    all three readers must ask the same question.
+    """
+
+    def test_the_predicate_matches_the_method_OR_the_frozen_stamp(self):
+        from jarz_pos.utils import credit_utils
+
+        with patch.object(credit_utils, "has_credit_terms_field", return_value=True):
+            self.assertEqual(
+                credit_utils.credit_invoice_or_filters(),
+                _EXPECTED_CREDIT_OR_FILTERS,
+            )
+
+    def test_it_degrades_to_the_method_alone_when_the_stamp_column_is_missing(self):
+        """A bench that has not migrated must still answer, not raise."""
+        from jarz_pos.utils import credit_utils
+
+        filters = {"docstatus": 1}
+        with patch.object(credit_utils, "has_credit_terms_field", return_value=False):
+            or_filters = credit_utils.apply_credit_invoice_match(filters)
+
+        self.assertIsNone(or_filters)
+        self.assertEqual(filters["custom_payment_method"], "Credit")
+
+    def test_the_ledger_query_does_not_key_on_the_mutable_column(self):
+        from jarz_pos.api import credit as credit_api
+        from jarz_pos.utils import credit_utils
+
+        with patch.object(credit_api, "frappe") as mock_frappe, patch.object(
+            credit_utils, "has_credit_terms_field", return_value=True
+        ), patch.object(
+            credit_api, "_open_credit_invoice_fields", return_value=["name"]
+        ):
+            mock_frappe.get_all.return_value = []
+            credit_api._open_credit_invoices(customers=["CUST-1"])
+
+        _, kwargs = mock_frappe.get_all.call_args
+        # The equality filter is what LOST the debt. It must be gone, not merely
+        # supplemented — an AND with the OR would be the same bug.
+        self.assertNotIn("custom_payment_method", kwargs["filters"])
+        self.assertEqual(kwargs["or_filters"], _EXPECTED_CREDIT_OR_FILTERS)
+        # Still only open, submitted, non-return rows.
+        self.assertEqual(kwargs["filters"]["docstatus"], 1)
+        self.assertEqual(kwargs["filters"]["is_return"], 0)
+        self.assertEqual(kwargs["filters"]["outstanding_amount"], [">", 0.005])
+
+    def test_the_limit_check_does_not_key_on_the_mutable_column(self):
+        """The other half of the same bug: a relabelled debt FREED the limit."""
+        from jarz_pos.services import invoice_creation
+        from jarz_pos.utils import credit_utils
+
+        with patch.object(invoice_creation, "frappe") as mock_frappe, patch.object(
+            credit_utils, "has_credit_terms_field", return_value=True
+        ):
+            mock_frappe.get_all.return_value = [{"outstanding_amount": 600.0}]
+            balance = invoice_creation.get_open_credit_balance("CUST-1")
+
+        _, kwargs = mock_frappe.get_all.call_args
+        self.assertNotIn("custom_payment_method", kwargs["filters"])
+        self.assertEqual(kwargs["or_filters"], _EXPECTED_CREDIT_OR_FILTERS)
+        self.assertEqual(kwargs["filters"]["customer"], "CUST-1")
+        self.assertEqual(balance, 600.0)
+
+    def test_the_kanban_card_asks_the_same_question(self):
+        """Three readers, one predicate. Any two disagreeing is a lost debt."""
+        from jarz_pos.api import kanban
+        from jarz_pos.utils import credit_utils
+
+        with patch.object(kanban, "frappe") as mock_frappe, patch.object(
+            credit_utils, "has_credit_terms_field", return_value=True
+        ):
+            mock_frappe.get_all.side_effect = [[], [], [], []]
+            kanban._get_unsettled_customer_amount_map(["INV-1"])
+
+        credit_call = mock_frappe.get_all.call_args_list[2]
+        self.assertNotIn("custom_payment_method", credit_call.kwargs["filters"])
+        self.assertEqual(credit_call.kwargs["or_filters"], _EXPECTED_CREDIT_OR_FILTERS)
+
+    def test_a_return_is_excluded_and_that_is_deliberate(self):
+        """``is_return: 0`` does NOT over-state the debt.
+
+        ``services/invoice_return`` posts a ``JE_AR_KNOCKOFF`` against the
+        ORIGINAL invoice for an unpaid order, so the surviving row's outstanding
+        is already net of the credit note and the note's own outstanding is zero.
+        Admitting returns here would hand ``record_credit_payment``'s FIFO
+        allocation a negative-outstanding row to point a Receive Payment Entry at.
+        """
+        from jarz_pos.api import credit as credit_api
+        from jarz_pos.services import invoice_creation
+        from jarz_pos.utils import credit_utils
+
+        with patch.object(credit_api, "frappe") as mock_frappe, patch.object(
+            credit_utils, "has_credit_terms_field", return_value=True
+        ), patch.object(
+            credit_api, "_open_credit_invoice_fields", return_value=["name"]
+        ):
+            mock_frappe.get_all.return_value = []
+            credit_api._open_credit_invoices(customers=["CUST-1"])
+        self.assertEqual(mock_frappe.get_all.call_args.kwargs["filters"]["is_return"], 0)
+
+        with patch.object(invoice_creation, "frappe") as mock_frappe, patch.object(
+            credit_utils, "has_credit_terms_field", return_value=True
+        ):
+            mock_frappe.get_all.return_value = []
+            invoice_creation.get_open_credit_balance("CUST-1")
+        self.assertEqual(mock_frappe.get_all.call_args.kwargs["filters"]["is_return"], 0)
+
+
+class PartPaidCollectionChangeTests(unittest.TestCase):
+    """DEFECT B — a part-paid credit order must not over-charge the courier.
+
+    Before credit this was unreachable: an unpaid-online order is never
+    partially paid. ``record_credit_payment`` allocates FIFO by design, so
+    part-paying the oldest invoice and then switching it to Cash is now ordinary.
+    The GL posts the OUTSTANDING; the courier row must say the same number, or
+    settlement drives Courier Outstanding negative by the part payment.
+    """
+
+    def _source_ct(self):
+        return {
+            "name": "CT-1",
+            "party_type": "Employee",
+            "party": "HR-EMP-00042",
+            "amount": 0,
+            "shipping_amount": 30.0,
+            "status": "Unsettled",
+            "payment_mode": "Instapay",
+            "notes": "",
+            "idempotency_token": "an-older-token",
+        }
+
+    def test_the_caller_hands_down_the_outstanding_not_the_grand_total(self):
+        from jarz_pos.services import delivery_handling as dh
+
+        inv = _mock_invoice(
+            "Credit",
+            name="INV-CREDIT-PART",
+            grand_total=1000.0,
+            outstanding_amount=600.0,
+        )
+        inv.is_return = 0
+        inv.sales_partner = None
+        inv.custom_sales_invoice_state = "Out for Delivery"
+        inv.get = MagicMock(
+            side_effect=lambda key, default=None: {
+                "custom_payment_method": "Credit",
+                "custom_sales_invoice_state": "Out for Delivery",
+                "outstanding_amount": 600.0,
+            }.get(key, default)
+        )
+
+        with patch.object(dh, "frappe") as mock_frappe, patch.object(
+            dh, "_get_collection_change_source_ct", return_value=self._source_ct()
+        ), patch.object(
+            dh, "_get_real_customer_payment_entry", return_value=None
+        ), patch.object(
+            dh, "_courier_row_can_still_carry_cash", return_value=True
+        ), patch.object(
+            dh, "_switched_online_amount", return_value=0.0
+        ), patch.object(
+            dh, "_apply_collection_change_for_unpaid_online"
+        ) as mock_apply, patch.object(
+            dh, "_publish_branch_event"
+        ):
+            mock_frappe.get_doc.return_value = inv
+            # The DB is the source of truth about payment; the loaded doc may be
+            # stale. 600 is what the shop still owes after paying 400 of 1,000.
+            mock_frappe.db.get_value.return_value = 600.0
+            mock_frappe.generate_hash.return_value = "tok"
+            mock_apply.return_value = {"mode": "unpaid_online_to_cash"}
+
+            result = dh.change_payment_collection_method(
+                invoice_name="INV-CREDIT-PART",
+                new_method="Cash",
+                pos_profile="POS-001",
+                idempotency_token="tok-1",
+            )
+
+        _, kwargs = mock_apply.call_args
+        self.assertEqual(kwargs["order_amount"], 600.0)
+        # The two numbers that MUST be equal: what the GL moves and what the
+        # courier row will claim.
+        self.assertEqual(kwargs["order_amount"], kwargs["outstanding"])
+        self.assertNotEqual(kwargs["order_amount"], 1000.0)
+        # And the client is told the same number, not the order's face value.
+        self.assertEqual(result["order_amount"], 600.0)
+
+    def test_the_courier_row_and_the_gl_leg_move_the_same_money(self):
+        from jarz_pos.services import delivery_handling as dh
+
+        inv = _mock_invoice(
+            "Credit",
+            name="INV-CREDIT-PART",
+            grand_total=1000.0,
+            outstanding_amount=600.0,
+        )
+
+        with patch.object(dh, "frappe") as mock_frappe, patch.object(
+            dh, "_is_cash_collection_method", return_value=True
+        ), patch.object(
+            dh, "mark_payment_receipts_changed_for_invoice", return_value=[]
+        ), patch.object(
+            dh, "_create_payment_entry"
+        ) as mock_pe, patch.object(
+            dh, "_get_receivable_account", return_value="Debtors - T"
+        ), patch.object(
+            dh, "_get_courier_outstanding_account", return_value="Courier Outstanding - T"
+        ), patch.object(
+            dh, "_append_collection_change_note", return_value="note"
+        ), patch.object(
+            dh, "update_submitted_sales_invoice_fields"
+        ):
+            mock_pe.return_value = SimpleNamespace(name="PE-1")
+
+            result = dh._apply_collection_change_for_unpaid_online(
+                inv=inv,
+                ct={"name": "CT-1", "payment_mode": "Instapay", "notes": ""},
+                new_method="Cash",
+                order_amount=600.0,
+                shipping_amount=30.0,
+                party_type="Employee",
+                party="HR-EMP-00042",
+                outstanding=600.0,
+                courier_can_carry=True,
+                pos_profile="POS-001",
+                notes=None,
+                idempotency_token="tok-1",
+            )
+
+        # GL leg: the Payment Entry moves the outstanding.
+        self.assertEqual(mock_pe.call_args.args[3], 600.0)
+        # Courier Transaction: the SAME number, not the 1,000 grand total. The
+        # rider is charged with what he will actually collect.
+        ct_updates = mock_frappe.db.set_value.call_args.args[2]
+        self.assertEqual(ct_updates["amount"], 600.0)
+        self.assertEqual(result["order_amount"], 600.0)
+        self.assertEqual(result["mode"], "unpaid_online_to_cash")
+
+
+class FreightIdempotencyTests(unittest.TestCase):
+    """DEFECT C — the rider must not be owed one delivery's freight twice.
+
+    The Courier Transaction used to dedupe on a TAG-specific ``notes`` LIKE while
+    the freight JE deduped per invoice. An order dispatched on the credit path,
+    relabelled to an online method and re-dispatched (offline-queue replay, or a
+    card dragged back and re-sent) therefore got a SECOND Unsettled row carrying
+    ``shipping_amount`` against a single accrual — and settlement paid it.
+    """
+
+    def test_dedupe_crosses_the_tag_boundary(self):
+        from jarz_pos.services import delivery_handling as dh
+
+        with patch.object(dh, "frappe") as mock_frappe:
+            mock_frappe.get_all.side_effect = [
+                # 1. the online path's own tag: nothing, because the row that
+                #    exists was written by the CREDIT dispatch.
+                [],
+                # 2. cross-tag, on reference_invoice + party.
+                [{"name": "CT-CREDIT-1", "shipping_amount": 30.0, "partner_fee": 0.0}],
+            ]
+            found = dh._existing_freight_ct(
+                invoice_name="INV-1",
+                party_type="Employee",
+                party="HR-EMP-00042",
+                idempotency_like=dh._ONLINE_FREIGHT_NOTES_LIKE,
+            )
+
+        self.assertEqual(found, "CT-CREDIT-1")
+
+    def test_the_tag_scoped_lookup_still_wins_and_still_runs_first(self):
+        """The online path's PREFIX pattern is a compatibility contract with rows
+        already in the database. It must keep matching them, first."""
+        from jarz_pos.services import delivery_handling as dh
+
+        with patch.object(dh, "frappe") as mock_frappe:
+            mock_frappe.get_all.side_effect = [["CT-OWN-1"], []]
+            found = dh._existing_freight_ct(
+                invoice_name="INV-1",
+                party_type="Employee",
+                party="HR-EMP-00042",
+                idempotency_like=dh._ONLINE_FREIGHT_NOTES_LIKE,
+            )
+
+        self.assertEqual(found, "CT-OWN-1")
+        # The second query is not even run when the first one answers.
+        self.assertEqual(mock_frappe.get_all.call_count, 1)
+        first_filters = mock_frappe.get_all.call_args_list[0].kwargs["filters"]
+        self.assertEqual(
+            first_filters["notes"], ["like", dh._ONLINE_FREIGHT_NOTES_LIKE]
+        )
+
+    def test_a_zero_freight_row_does_not_suppress_an_accrual(self):
+        """The cross-tag net catches rows that ALREADY OWE this delivery. A row
+        carrying no freight in either place owes nothing and must not block it."""
+        from jarz_pos.services import delivery_handling as dh
+
+        with patch.object(dh, "frappe") as mock_frappe:
+            mock_frappe.get_all.side_effect = [
+                [],
+                [{"name": "CT-EMPTY", "shipping_amount": 0.0, "partner_fee": 0.0}],
+            ]
+            found = dh._existing_freight_ct(
+                invoice_name="INV-1",
+                party_type="Employee",
+                party="HR-EMP-00042",
+                idempotency_like=dh._CREDIT_FREIGHT_NOTES_LIKE,
+            )
+
+        self.assertIsNone(found)
+
+    def test_a_partner_row_counts_even_though_its_shipping_amount_is_zero(self):
+        """A delivery partner's rider carries the fee on ``partner_fee``; his row
+        is born Settled with ``shipping_amount`` zero. It is still an accrual."""
+        from jarz_pos.services import delivery_handling as dh
+
+        with patch.object(dh, "frappe") as mock_frappe:
+            mock_frappe.get_all.side_effect = [
+                [],
+                [{"name": "CT-PARTNER", "shipping_amount": 0.0, "partner_fee": 45.0}],
+            ]
+            found = dh._existing_freight_ct(
+                invoice_name="INV-1",
+                party_type="Supplier",
+                party="SUP-TALABAT",
+                idempotency_like=dh._ONLINE_FREIGHT_NOTES_LIKE,
+            )
+
+        self.assertEqual(found, "CT-PARTNER")
+
+    def test_the_accrual_writes_no_second_courier_transaction(self):
+        from jarz_pos.services import delivery_handling as dh
+
+        inv = SimpleNamespace(
+            name="INV-1", company="Test Company", custom_shipping_expense=30.0
+        )
+
+        with patch.object(dh, "frappe") as mock_frappe, patch.object(
+            dh, "_partner_link", return_value=None
+        ), patch.object(
+            dh, "_existing_freight_ct", return_value="CT-CREDIT-1"
+        ), patch.object(
+            dh, "get_creditors_account", return_value="Creditors - T"
+        ), patch.object(
+            dh, "_create_shipping_expense_to_creditors_je", return_value="JE-1"
+        ):
+            result = dh._accrue_courier_freight_only(
+                inv,
+                party_type="Employee",
+                party="HR-EMP-00042",
+                courier_details={},
+                partner_fee=None,
+                notes_tag=dh._ONLINE_FREIGHT_NOTES,
+                partner_notes_tag=dh._ONLINE_PARTNER_FREIGHT_NOTES,
+                idempotency_like=dh._ONLINE_FREIGHT_NOTES_LIKE,
+            )
+
+        self.assertEqual(result, ("CT-CREDIT-1", "JE-1", 30.0))
+        # The whole point: no second Unsettled row carrying shipping_amount.
+        mock_frappe.new_doc.assert_not_called()
+
+
+class KanbanCreditActionGateTests(unittest.TestCase):
+    """DEFECT D — the credit action must be anchored to a dispatch state.
+
+    The online shape it mirrors is implicitly gated: ``Awaiting Payment`` is only
+    stamped at Out-for-Delivery. A credit order carries no such stamp (by design
+    — it would arm the hourly escalation on a 30-day term), so an ungated credit
+    shape offered "Change collection method" on an order still in Recieved, and
+    with no Courier Transaction that lands on DR branch cash / CR Debtors: cash
+    into the drawer for goods still in the kitchen.
+    """
+
+    def _credit_query_filters(self):
+        from jarz_pos.api import kanban
+        from jarz_pos.utils import credit_utils
+
+        with patch.object(kanban, "frappe") as mock_frappe, patch.object(
+            credit_utils, "has_credit_terms_field", return_value=True
+        ):
+            mock_frappe.get_all.side_effect = [[], [], [], []]
+            kanban._get_unsettled_customer_amount_map(["INV-1"])
+        return mock_frappe.get_all.call_args_list[2].kwargs["filters"]
+
+    def test_the_credit_shape_is_restricted_to_dispatched_orders(self):
+        filters = self._credit_query_filters()
+
+        clause = filters.get("custom_sales_invoice_state")
+        self.assertIsNotNone(clause, "the credit shape has no state gate at all")
+        self.assertEqual(clause[0], "in")
+        normalised = {str(s).strip().lower().replace("_", " ") for s in clause[1]}
+        self.assertEqual(normalised, {"out for delivery", "delivered"})
+
+    def test_the_board_matches_the_server_side_rule(self):
+        """The card must not offer what the service will refuse. The refusal is
+        the authority; this pins the two to the same set of states."""
+        import inspect
+
+        from jarz_pos.services import delivery_handling as dh
+
+        source = inspect.getsource(dh.change_payment_collection_method)
+        self.assertIn("out for delivery", source)
+        self.assertIn("delivered", source)
+
+        filters = self._credit_query_filters()
+        for state in filters["custom_sales_invoice_state"][1]:
+            self.assertIn(
+                str(state).strip().lower().replace("_", " "),
+                {"out for delivery", "delivered"},
+                f"{state!r} is offered on the board but refused by the server",
+            )
+
+
+class CreditCreationGateNormalisationTests(unittest.TestCase):
+    """DEFECT E — the creation gate must normalise exactly as dispatch does.
+
+    ``_is_credit_intent`` / ``_invoice_is_credit_intent`` fold case, spaces and
+    underscores and also accept "on account". The creation gate compared the raw
+    string against ``"Credit"``. An order spelled "on account" therefore skipped
+    ``_apply_credit_terms`` entirely — no permission check, no limit, no due date
+    and no ``custom_credit_terms_days`` stamp — while still routing to the credit
+    handler at dispatch. With no stamp it is also invisible to the ledger's OR.
+    """
+
+    def test_the_value_level_predicate_truth_table(self):
+        from jarz_pos.utils.credit_utils import is_credit_payment_method
+
+        for spelling in ["Credit", "credit", "  CREDIT  ", "On Account",
+                         "on_account", "ONACCOUNT", "on account"]:
+            self.assertTrue(
+                is_credit_payment_method(spelling), f"{spelling!r} should be credit"
+            )
+        for spelling in ["Cash", "Instapay", "Mobile Wallet", "Kashier Card",
+                         "Kashier Wallet", "", None, "   "]:
+            self.assertFalse(
+                is_credit_payment_method(spelling),
+                f"{spelling!r} should NOT be credit",
+            )
+
+    def test_the_creation_gate_and_the_dispatch_predicates_cannot_disagree(self):
+        """One truth, three readers. A disagreement here is a debt with no limit
+        check, no frozen terms and no presence in the ledger."""
+        from jarz_pos.services.delivery_handling import _invoice_is_credit_intent
+        from jarz_pos.services.settlement_strategies import _is_credit_intent
+        from jarz_pos.utils.credit_utils import is_credit_payment_method
+
+        for method in ["Credit", "credit", "  CREDIT  ", "On Account", "on_account",
+                       "ONACCOUNT", "Cash", "Instapay", "Mobile Wallet", "", None]:
+            inv = MagicMock()
+            inv.get = MagicMock(return_value=method)
+            expected = is_credit_payment_method(method)
+            self.assertEqual(
+                expected,
+                _is_credit_intent(inv),
+                f"creation gate and settlement_strategies disagree on {method!r}",
+            )
+            self.assertEqual(
+                expected,
+                _invoice_is_credit_intent(inv),
+                f"creation gate and delivery_handling disagree on {method!r}",
+            )
+
+    def test_create_pos_invoice_normalises_instead_of_comparing_strings(self):
+        import inspect
+
+        from jarz_pos.services import invoice_creation
+
+        source = inspect.getsource(invoice_creation.create_pos_invoice)
+        self.assertIn("is_credit_payment_method(payment_method)", source)
+        # The exact comparison that let "on account" through.
+        self.assertNotIn("payment_method == CREDIT_PAYMENT_METHOD", source)
+        # And every credit spelling is folded to the canonical Select option, so
+        # custom_payment_method never stores a value the Select does not offer —
+        # which is what keeps the MUTABLE half of the ledger's OR meaningful.
+        self.assertIn("payment_method = CREDIT_PAYMENT_METHOD", source)
 
 
 if __name__ == "__main__":

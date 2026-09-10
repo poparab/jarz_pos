@@ -450,7 +450,20 @@ def change_payment_collection_method(
     notes: str | None = None,
     idempotency_token: str | None = None,
 ):
-    """Manager-only collection-method switch for customer-unpaid courier orders."""
+    """Manager-only collection-method switch for customer-unpaid courier orders.
+
+    The DISPATCH-STATE gate lives one layer down, in
+    ``services/delivery_handling.change_payment_collection_method``: it refuses
+    anything whose ``custom_sales_invoice_state`` is not Out for Delivery or
+    Delivered, normalising case and underscores as it goes. Deliberately not
+    duplicated here — two copies of a money gate drift, and the one that drifts is
+    always the one nobody is reading. It matters most for the credit shape, which
+    has no ``Awaiting Payment`` stamp to gate it implicitly: a credit order still in
+    Recieved would otherwise fall through to ``unpaid_online_cash_at_branch`` and
+    post DR branch cash / CR Debtors for goods still in the kitchen. The kanban card
+    matches the same states (``api/kanban._COLLECTION_CHANGE_STATES``) so the action
+    is not offered where the server would refuse it.
+    """
     try:
         _ensure_collection_change_access()
         inv = frappe.get_doc("Sales Invoice", (invoice_name or "").strip())

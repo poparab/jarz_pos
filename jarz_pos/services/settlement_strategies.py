@@ -35,6 +35,7 @@ from jarz_pos.services.delivery_handling import (
     handle_credit_deliver_on_account as handle_credit_deliver_on_account,  # alias for tests
 )
 import sys
+from jarz_pos.utils.credit_utils import CREDIT_INTENT_TOKENS, is_credit_intent_doc
 from jarz_pos.utils.account_utils import (
     get_pos_cash_account,
     get_freight_expense_account,
@@ -74,9 +75,10 @@ _CASH_TOKENS = {"cash", "cod", "cashondelivery"}
 _ONLINE_INTENT_TOKENS = {"instapay", "insta", "bank", "bankaccount", "mobilewallet", "wallet"}
 # "Credit" (order taken on account) is its own intent and shares NOTHING with the
 # tokens above: no transfer is expected, so no confirmation queue and no alarm.
-# Kept as a set for symmetry with _ONLINE_INTENT_TOKENS and so a synonym
-# ("onaccount") can be added without touching the predicate.
-_CREDIT_INTENT_TOKENS = {"credit", "onaccount"}
+# The definition lives in ``utils/credit_utils`` and is shared with
+# ``delivery_handling`` AND with the creation gate in ``invoice_creation`` — three
+# readers of one truth, rather than three spellings of it.
+_CREDIT_INTENT_TOKENS = CREDIT_INTENT_TOKENS
 
 
 def _is_online_intent(inv) -> bool:
@@ -109,14 +111,7 @@ def _is_credit_intent(inv) -> bool:
     and arms an HOURLY escalation. Trade credit is 30 days by agreement; the
     same treatment would page a manager about every credit order, all night.
     """
-    try:
-        raw = inv.get("custom_payment_method") if hasattr(inv, "get") else getattr(inv, "custom_payment_method", None)
-    except Exception:
-        raw = getattr(inv, "custom_payment_method", None)
-    normalized = str(raw or "").strip().lower().replace(" ", "").replace("_", "")
-    if not normalized:
-        return False
-    return normalized in _CREDIT_INTENT_TOKENS
+    return is_credit_intent_doc(inv)
 
 
 def _in_test_mode() -> bool:

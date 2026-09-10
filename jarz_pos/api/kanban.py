@@ -21,6 +21,7 @@ from jarz_pos.utils.access_control import (
     get_users_for_pos_profiles,
 )
 from jarz_pos.utils.realtime import publish_invoice_event
+from jarz_pos.utils.credit_utils import apply_credit_invoice_match
 from jarz_pos.services import ofd_pin_gate
 from jarz_pos.services.delivery_handling import (
     DN_LOGIC_VERSION,
@@ -745,6 +746,20 @@ def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]
 
 
 
+#: The board states in which a collection method may still be changed. Mirrors the
+#: server-side gate in ``services/delivery_handling.change_payment_collection_method``
+#: ("Collection method can only be changed for Out for Delivery or Delivered
+#: orders"), which normalises case and underscores; a SQL ``in`` cannot, so both
+#: spellings are listed for the sake of rows written by earlier revisions. The
+#: canonical Select options are "Out for Delivery" and "Delivered".
+_COLLECTION_CHANGE_STATES = [
+    "Out for Delivery",
+    "out_for_delivery",
+    "Delivered",
+    "delivered",
+]
+
+
 def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, float]:
     """Customer money still to be collected on this order, per invoice.
 
@@ -770,7 +785,9 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
       through ``_apply_collection_change_for_unpaid_online``, which moves the receivable
       to Courier Outstanding while the rider is still open, or into the branch drawer
       once he has closed out). Hiding the action would leave the operator with no way
-      to record money that has actually changed hands.
+      to record money that has actually changed hands. It IS gated on the order having
+      been dispatched — see ``_COLLECTION_CHANGE_STATES`` — because that branch-drawer
+      posting on an order still in the kitchen would take cash for goods nobody has.
 
     ``outstanding_amount`` alone cannot answer the first one — a COD order is settled
     against Courier Outstanding at Out-for-Delivery, so it reads as fully paid while the
@@ -829,18 +846,32 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
     # this order was taken on credit, so the action survives a later switch of
     # ``custom_payment_method`` (credit -> Instapay, say) that would otherwise make the
     # card lose its own history. ``max`` rather than ``+``, for the same reason as above.
+    # The same predicate backs ``api/credit._open_credit_invoices`` and
+    # ``invoice_creation.get_open_credit_balance``; it lives in ``utils/credit_utils``.
+    #
+    # ANCHORED ON A DISPATCH STATE, exactly like the "Awaiting Payment" shape above.
+    # That stamp is only written at Out-for-Delivery, so the online shape is
+    # implicitly gated; the credit shape has no such stamp (deliberately — it would
+    # arm the hourly escalation on a 30-day term) and so must say the state out loud.
+    # Without it a credit order still sitting in Recieved offered "Change collection
+    # method", and with no Courier Transaction that lands in
+    # ``_apply_collection_change_for_unpaid_online``'s ``unpaid_online_cash_at_branch``
+    # branch: DR branch cash / CR Debtors for the whole order — cash into the drawer
+    # for goods still in the kitchen. ``services/delivery_handling`` refuses that
+    # server-side, so this is the affordance agreeing with the rule rather than
+    # offering an action the server will reject.
     try:
+        credit_filters: Dict[str, Any] = {
+            "name": ["in", cleaned],
+            "docstatus": 1,
+            "outstanding_amount": [">", 0.005],
+            "custom_sales_invoice_state": ["in", _COLLECTION_CHANGE_STATES],
+        }
+        credit_or_filters = apply_credit_invoice_match(credit_filters)
         credit_rows = frappe.get_all(
             "Sales Invoice",
-            filters={
-                "name": ["in", cleaned],
-                "docstatus": 1,
-                "outstanding_amount": [">", 0.005],
-            },
-            or_filters=[
-                ["Sales Invoice", "custom_payment_method", "=", "Credit"],
-                ["Sales Invoice", "custom_credit_terms_days", ">", 0],
-            ],
+            filters=credit_filters,
+            or_filters=credit_or_filters,
             fields=["name", "outstanding_amount"],
             limit=QUERY_LIMITS.KANBAN_INVOICES,
         )

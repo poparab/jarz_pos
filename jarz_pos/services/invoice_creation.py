@@ -36,6 +36,10 @@ from jarz_pos.utils.customer_address_utils import (
     preferred_address_was_honoured,
     resolve_customer_shipping_address,
 )
+from jarz_pos.utils.credit_utils import (
+    CREDIT_PAYMENT_METHOD,
+    is_credit_payment_method,
+)
 from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 from jarz_pos.utils.account_utils import (
@@ -1027,10 +1031,14 @@ def _set_initial_state_for_sales_partner(invoice_doc, logger):
 # gets paged.
 # ---------------------------------------------------------------------------
 
-#: Payment method value that means "on account". Must match the option added to
-#: ``Sales Invoice-custom_payment_method`` in ``fixtures/custom_field.json`` and
-#: the token ``settlement_strategies._is_credit_intent`` normalizes to.
-CREDIT_PAYMENT_METHOD = "Credit"
+#: Payment method value that means "on account" is ``CREDIT_PAYMENT_METHOD``,
+#: imported at the top of this module from ``utils/credit_utils`` rather than
+#: re-declared here. It travels with :func:`is_credit_payment_method`, the
+#: predicate that answers the same question for a NON-canonical spelling
+#: ("on account", "credit", "on_account"). The gate below and the dispatch
+#: predicates must never disagree about whether an order is on account — an
+#: order that reaches the credit dispatch handler without passing this gate is a
+#: debt with no permission check, no limit and no frozen terms.
 
 #: Days used when a customer is allowed credit but nobody typed a number.
 #: Mirrors ``setup/credit_terms.DEFAULT_CREDIT_DAYS``; kept independent on
@@ -1083,30 +1091,48 @@ def get_open_credit_balance(customer_name: str, exclude_invoice: str | None = No
 
     Deliberately all-time and unfiltered by branch or date: a credit balance is
     money, and a windowed balance would quietly shrink exactly the oldest debt
-    the limit exists to catch. Only submitted invoices whose payment method is
-    ``Credit`` count — a shop's cash orders are not credit exposure.
+    the limit exists to catch. Only submitted invoices that WERE TAKEN on credit
+    count — a shop's cash orders are not credit exposure.
+
+    "Were taken on credit" is an OR, and it has to be. ``custom_payment_method``
+    is a MUTABLE column — ``change_payment_collection_method`` rewrites it on
+    every collection-method change, and its ``unpaid_online_retarget`` branch
+    posts no voucher at all, so the outstanding stays exactly where it was.
+    Keyed on the method alone, relabelling a credit card as Instapay silently
+    FREED that much of the shop's credit limit while they still owed every
+    pound. ``custom_credit_terms_days`` is stamped once by
+    :func:`_apply_credit_terms` and never rewritten, so it is permanent
+    provenance. ``api/credit._open_credit_invoices`` and
+    ``api/kanban._get_unsettled_customer_amount_map`` match the same way; the
+    predicate lives in ``utils/credit_utils`` so the three cannot drift.
 
     ``exclude_invoice`` lets an amendment leave its own predecessor out of the
     sum instead of counting the order twice against the limit.
     """
+    from jarz_pos.utils.credit_utils import apply_credit_invoice_match
+
     name = str(customer_name or "").strip()
     if not name:
         return 0.0
     filters = {
         "docstatus": 1,
         "customer": name,
-        "custom_payment_method": CREDIT_PAYMENT_METHOD,
         "outstanding_amount": [">", 0.005],
         # A credit note carries a negative outstanding and is excluded by the
-        # filter above anyway; this is belt and braces for partial returns.
+        # filter above anyway; this is belt and braces for partial returns. Kept
+        # on purpose: services/invoice_return knocks a return off the ORIGINAL
+        # invoice's outstanding (JE_AR_KNOCKOFF), so the surviving row already
+        # reflects it and admitting the credit note here would double-count.
         "is_return": 0,
     }
+    or_filters = apply_credit_invoice_match(filters)
     if exclude_invoice:
         filters["name"] = ["!=", str(exclude_invoice).strip()]
     try:
         rows = frappe.get_all(
             "Sales Invoice",
             filters=filters,
+            or_filters=or_filters,
             fields=["outstanding_amount"],
             limit_page_length=0,
         ) or []
@@ -1316,6 +1342,25 @@ def create_pos_invoice(
             # "Credit" is not a way of paying — it is a way of NOT paying yet.
             # Everything that makes it different is enforced later (see
             # _apply_credit_terms at STEP 8.2), once grand_total is real.
+            #
+            # CANONICALISED FIRST, and that is the point: the dispatch predicates
+            # (``settlement_strategies._is_credit_intent`` /
+            # ``delivery_handling._invoice_is_credit_intent``) normalise case,
+            # spaces and underscores and also accept "on account", while this gate
+            # compared the raw string. The two disagreeing is how an invoice could
+            # end up routed to the credit handler at dispatch while having skipped
+            # ``_apply_credit_terms`` entirely — no permission check, no limit, no
+            # due date and, fatally, no ``custom_credit_terms_days`` stamp, which is
+            # the only permanent evidence the ledger has that a debt is a credit
+            # debt. Folding every credit spelling to the exact Select option here
+            # also keeps ``custom_payment_method`` a VALID option value.
+            if is_credit_payment_method(payment_method):
+                if payment_method != CREDIT_PAYMENT_METHOD:
+                    print(
+                        f"   🔤 Payment method '{payment_method}' normalised to "
+                        f"'{CREDIT_PAYMENT_METHOD}'"
+                    )
+                payment_method = CREDIT_PAYMENT_METHOD
             allowed_methods = [
                 "Cash",
                 "Instapay",
@@ -1875,7 +1920,14 @@ def create_pos_invoice(
         #     otherwise hand this order the customer's default term.
         # It THROWS rather than degrading: an order the shop is not allowed to
         # take on credit, or one that breaks their limit, must not exist.
-        if payment_method == CREDIT_PAYMENT_METHOD:
+        #
+        # Normalised, not ``== CREDIT_PAYMENT_METHOD``: STEP 1 has already folded
+        # every credit spelling to the exact option, and asking through the same
+        # predicate the DISPATCH side uses is what guarantees these two can never
+        # disagree about whether an order is on account. An order that reaches
+        # dispatch's credit handler without having passed through here is a debt
+        # with no limit check and no frozen terms.
+        if is_credit_payment_method(payment_method):
             print("\n8️⃣.2️⃣ CREDIT / ON ACCOUNT:")
             _apply_credit_terms(
                 invoice_doc, customer_doc, logger, amended_from=amended_from

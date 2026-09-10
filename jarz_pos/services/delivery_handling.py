@@ -43,6 +43,7 @@ from jarz_pos.utils.courier_visibility import (
     resolve_courier_delivery_partner,
     user_has_global_profile_access,
 )
+from jarz_pos.utils.credit_utils import CREDIT_INTENT_TOKENS, is_credit_intent_doc
 from jarz_pos.utils.invoice_utils import get_woo_order_ids, normalize_woo_order_id
 
 # ---------------------------------------------------------------------------
@@ -1481,13 +1482,14 @@ def _invoice_is_online_intent(inv) -> bool:
     return _is_online_collection_method(normalized)
 
 
-#: Normalized tokens that mean "taken on account". Kept in lockstep with
-#: ``settlement_strategies._CREDIT_INTENT_TOKENS`` — duplicated rather than
-#: imported because ``settlement_strategies`` imports THIS module, so a reverse
-#: import would be circular. Two four-word sets are a cheaper price than an
-#: import cycle, and the guard test in ``tests/test_credit_orders.py`` pins them
-#: to the same answers.
-_CREDIT_INTENT_TOKENS = {"credit", "onaccount"}
+#: Normalized tokens that mean "taken on account". No longer duplicated: the one
+#: definition lives in ``utils/credit_utils``, a leaf module that imports nothing
+#: from ``jarz_pos``, so THIS module and ``settlement_strategies`` (which imports
+#: this one) can both take it without an import cycle. The creation gate in
+#: ``invoice_creation`` reads the same tokens, which is what stops an order
+#: spelled "on account" from routing here at dispatch while having skipped the
+#: credit gate at creation.
+_CREDIT_INTENT_TOKENS = CREDIT_INTENT_TOKENS
 
 
 def _invoice_is_credit_intent(inv) -> bool:
@@ -1499,14 +1501,7 @@ def _invoice_is_credit_intent(inv) -> bool:
     on any method outside its four and would push "Invalid collection method"
     into the user's message log as a side effect.
     """
-    try:
-        raw = inv.get("custom_payment_method") if hasattr(inv, "get") else getattr(inv, "custom_payment_method", None)
-    except Exception:
-        raw = getattr(inv, "custom_payment_method", None)
-    normalized = str(raw or "").strip().lower().replace(" ", "").replace("_", "")
-    if not normalized:
-        return False
-    return normalized in _CREDIT_INTENT_TOKENS
+    return is_credit_intent_doc(inv)
 
 
 def _resolve_party_display_name(party_type: str | None, party: str | None) -> str | None:
@@ -1578,11 +1573,86 @@ _ONLINE_PARTNER_FREIGHT_NOTES = (
 #: Same three strings for an order taken ON ACCOUNT. The courier is owed his
 #: delivery either way — the customer's credit terms are between the shop and
 #: us, not between the shop and the rider.
+#:
+#: These tags are deliberately DISJOINT from the online ones above, so each row
+#: says which dispatch wrote it. That is an attribution property and nothing
+#: more: it is emphatically NOT the idempotency boundary, because an order can
+#: be dispatched on one path and re-dispatched on the other after its payment
+#: method is changed. ``_existing_freight_ct`` therefore falls back to a
+#: cross-tag match on invoice + party; see its docstring.
 _CREDIT_FREIGHT_NOTES = "Courier freight accrual (credit / on account)"
 _CREDIT_FREIGHT_NOTES_LIKE = "%Courier freight accrual (credit / on account%"
 _CREDIT_PARTNER_FREIGHT_NOTES = (
     "Partner delivery fee accrual (credit / on account) - no cash position"
 )
+
+
+def _existing_freight_ct(
+    *,
+    invoice_name: str,
+    party_type: str,
+    party: str,
+    idempotency_like: str,
+) -> str | None:
+    """A Courier Transaction that ALREADY owes this rider this delivery, or None.
+
+    Two lookups, and the second one is the fix for a real double-accrual:
+
+    1. **Tag-scoped**, exactly as before — rows carrying this path's own notes
+       prefix. Unchanged on purpose: the online path's pattern is a deliberate
+       PREFIX so rows written by earlier revisions still dedupe, and that
+       compatibility is not something to re-derive.
+    2. **Cross-tag**, keyed on ``reference_invoice`` + party alone. The credit
+       tag and the online tag are deliberately disjoint, so lookup 1 cannot see a
+       row the OTHER path wrote. That is correct for attribution and wrong for
+       idempotency: an order dispatched on the credit path whose method is later
+       flipped to an online one and re-dispatched (offline-queue replay, or a card
+       dragged back and re-sent) got a SECOND Unsettled Courier Transaction
+       carrying ``shipping_amount`` — while the freight JE, which dedupes per
+       invoice, correctly wrote nothing. The rider was then owed his freight twice
+       against a single accrual, and settlement paid it.
+
+    A row counts as "already owes him this delivery" when it carries freight in
+    either of the two places freight can live: ``shipping_amount`` for an ordinary
+    courier, ``partner_fee`` for a delivery partner's rider (whose row is born
+    Settled with ``shipping_amount`` zero). A zero-freight row is not a freight
+    accrual and must not suppress one.
+    """
+    existing = frappe.get_all(
+        "Courier Transaction",
+        filters={
+            "reference_invoice": invoice_name,
+            "party_type": party_type,
+            "party": party,
+            "notes": ["like", idempotency_like],
+        },
+        pluck="name",
+        limit_page_length=1,
+    )
+    if existing:
+        return str(existing[0])
+
+    try:
+        rows = frappe.get_all(
+            "Courier Transaction",
+            filters={
+                "reference_invoice": invoice_name,
+                "party_type": party_type,
+                "party": party,
+            },
+            fields=["name", "shipping_amount", "partner_fee"],
+            order_by="creation asc",
+            limit_page_length=20,
+        ) or []
+    except Exception:
+        # Never let the extra safety net become the failure. Losing it means the
+        # old (tag-scoped) behaviour, which is what shipped.
+        return None
+
+    for row in rows:
+        if _safe_float(row.get("shipping_amount")) > 0.0001 or _safe_float(row.get("partner_fee")) > 0.0001:
+            return str(row.get("name"))
+    return None
 
 
 def _accrue_courier_freight_only(
@@ -1673,21 +1743,18 @@ def _accrue_courier_freight_only(
     except Exception:
         pass
 
-    # Idempotency: don't re-accrue if a freight CT already exists for this invoice+courier.
-    existing_freight_ct = frappe.get_all(
-        "Courier Transaction",
-        filters={
-            "reference_invoice": inv.name,
-            "party_type": party_type,
-            "party": party,
-            "notes": ["like", idempotency_like],
-        },
-        pluck="name",
-        limit_page_length=1,
+    # Idempotency: don't re-accrue if a freight CT already exists for this
+    # invoice+courier — whichever dispatch path wrote it. See _existing_freight_ct
+    # for why the tag alone is not enough.
+    existing_freight_ct = _existing_freight_ct(
+        invoice_name=inv.name,
+        party_type=party_type,
+        party=party,
+        idempotency_like=idempotency_like,
     )
     dp_link = _partner_link(courier_details)
     if existing_freight_ct:
-        freight_ct = existing_freight_ct[0]
+        freight_ct = existing_freight_ct
     else:
         ct = frappe.new_doc("Courier Transaction")
         ct.party_type = party_type
@@ -4311,6 +4378,19 @@ def change_payment_collection_method(
         if shipping_amount <= 0.0001:
             stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
             shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+        # Echo the SAME customer amount the first call reported, or a replay of a
+        # part-paid credit order answers 1,000 where the original answered 600.
+        # The row's own ``amount`` first (that is what the classic COD/online
+        # shapes recorded), then what is still owed, and only then the grand
+        # total for the fully-paid shapes where both of the above are zero.
+        replay_amount = _safe_float(source_ct.get("amount"))
+        if replay_amount <= 0.0001:
+            replay_amount = _safe_float(
+                frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount"),
+                default=_safe_float(inv.get("outstanding_amount")),
+            )
+        if replay_amount <= 0.0001:
+            replay_amount = float(inv.grand_total or 0)
         return {
             # Same shape as the branches below, ``success`` included, so a client that
             # replays a timed-out call reads the same contract it would have got first
@@ -4320,7 +4400,7 @@ def change_payment_collection_method(
             "invoice": inv.name,
             "courier_transaction": source_ct.get("name"),
             "journal_entry": source_ct.get("journal_entry"),
-            "order_amount": float(inv.grand_total or 0),
+            "order_amount": replay_amount,
             "shipping_amount": shipping_amount,
             "reference_no": reference_no,
             "reference_date": reference_date,
@@ -4367,7 +4447,18 @@ def change_payment_collection_method(
         switched_amount = _switched_online_amount(source_ct)
         if latest_outstanding > 0.0001:
             unpaid_online = True
-            order_amount = float(inv.grand_total or 0) or latest_outstanding
+            # THE OUTSTANDING, NOT THE GRAND TOTAL. What is being changed here is
+            # how the money STILL OWED will be collected, and on this shape those
+            # two numbers are not the same once a payment has been part-allocated.
+            # Before credit they always were — an unpaid-online order is never
+            # partially paid — but ``api/credit.record_credit_payment`` allocates
+            # FIFO by design, so part-paying the oldest invoice and then switching
+            # it to Cash is now an ordinary Tuesday. The grand total made the GL
+            # (which posts ``outstanding``, below) and the Courier Transaction
+            # disagree: a 1,000 order part-paid 400 moved 600 to Courier
+            # Outstanding while telling settlement the rider owed 1,000, driving
+            # that account 400 negative at settlement.
+            order_amount = latest_outstanding
         elif switched_amount > 0.0001:
             # A cash order that was switched to an online ledger after dispatch and
             # is not settled yet. The customer's money is claimed in that ledger by
@@ -5263,6 +5354,13 @@ def _apply_collection_change_for_unpaid_online(*, inv, ct, new_method: str, orde
                 party,
             )
             voucher_name = getattr(voucher, "name", None)
+        # The SAME number the voucher above moved. ``order_amount`` is the
+        # invoice's outstanding on this shape (see the caller), never its grand
+        # total: a part-paid credit order that puts 600 into Courier Outstanding
+        # must tell settlement the rider owes 600, not the 1,000 the order was
+        # worth, or settlement drives Courier Outstanding negative by the part
+        # payment. GL leg and courier row are one fact stated twice; they agree
+        # here or the account is wrong the moment anyone settles.
         ct_updates["amount"] = order_amount
     elif to_cash:
         mode = "unpaid_online_cash_at_branch"

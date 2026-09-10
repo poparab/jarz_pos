@@ -37,13 +37,15 @@ from frappe import _
 from frappe.utils import add_days, flt, getdate, nowdate
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.credit_utils import (
+    CREDIT_PAYMENT_METHOD,  # noqa: F401  (re-export; see the note below)
+    apply_credit_invoice_match,
+)
 
-#: Value of ``Sales Invoice.custom_payment_method`` that means "on account".
-#: Single source of truth for it lives in ``services/invoice_creation``; imported
-#: lazily inside the functions so this module stays importable on a bench where
-#: that module's own imports are unavailable (mirrors the defensive import style
-#: used across ``api/``).
-CREDIT_PAYMENT_METHOD = "Credit"
+# ``CREDIT_PAYMENT_METHOD`` is re-exported here for the callers that already
+# import it from this module. The definition — and the OR predicate that goes
+# with it — lives in ``utils/credit_utils`` so this module, ``api/kanban`` and
+# ``services/invoice_creation`` cannot drift apart about what a credit debt is.
 
 #: Same fallback ``invoice_creation`` uses when a customer is allowed credit but
 #: nobody typed a number of days.
@@ -210,13 +212,33 @@ def _open_credit_invoices(
     all-time: truncating a list loses rows, truncating a balance states the
     wrong amount of money — and the older the debt, the more certainly a date
     window would hide exactly the row somebody is hunting for.
+
+    **The credit match is an OR, and that is load-bearing.**
+    ``custom_payment_method`` is a MUTABLE column: ``change_payment_collection_method``
+    rewrites it on every collection-method change, and its ``unpaid_online_retarget``
+    branch posts NO voucher — the outstanding stays exactly where it was. Keyed on
+    the method alone, a manager tapping "Change collection method -> Instapay" on a
+    credit card made a real debt disappear from this query: out of the ledger, out of
+    the customer's used limit, and unreachable by ``record_credit_payment``'s FIFO
+    allocation. ``custom_credit_terms_days`` is the stamp
+    ``_apply_credit_terms`` freezes at creation and nothing ever rewrites, so it is
+    permanent provenance. ``api/kanban`` and ``invoice_creation.get_open_credit_balance``
+    use the same predicate; see ``utils/credit_utils``.
+
+    ``is_return: 0`` is KEPT deliberately. A credit note against an unpaid credit
+    invoice does not sit here waiting to be netted off: ``services/invoice_return``
+    posts a ``JE_AR_KNOCKOFF`` that credits Debtors against the ORIGINAL invoice, so
+    the surviving row's ``outstanding_amount`` is already reduced by the return and
+    the credit note's own outstanding is zero. Admitting returns would not correct a
+    balance — it would hand ``record_credit_payment`` a negative-outstanding row to
+    allocate a Receive Payment Entry against.
     """
     filters: Dict[str, Any] = {
         "docstatus": 1,
-        "custom_payment_method": CREDIT_PAYMENT_METHOD,
         "outstanding_amount": [">", 0.005],
         "is_return": 0,
     }
+    or_filters = apply_credit_invoice_match(filters)
     if customers is not None:
         if not customers:
             return []
@@ -230,6 +252,7 @@ def _open_credit_invoices(
             frappe.get_all(
                 "Sales Invoice",
                 filters=filters,
+                or_filters=or_filters,
                 fields=_open_credit_invoice_fields(),
                 # FIFO order, and the same order the allocation below walks in.
                 order_by="posting_date asc, creation asc",
@@ -398,16 +421,22 @@ def get_credit_ledger(
     try:
         activity_filters: Dict[str, Any] = {
             "docstatus": 1,
-            "custom_payment_method": CREDIT_PAYMENT_METHOD,
             "posting_date": ["between", [str(start_date), str(end_date)]],
             branch_field: ["in", profiles],
         }
+        # Same OR as the balance query above, for the same reason: the payment
+        # method is rewritten by a collection-method change, the frozen terms
+        # stamp is not. Without it an order relabelled after dispatch vanishes
+        # from the activity feed too, so the screen would not even show the row
+        # a manager is trying to reconcile.
+        activity_or_filters = apply_credit_invoice_match(activity_filters)
         if selected_customer:
             activity_filters["customer"] = selected_customer
         listed_rows = (
             frappe.get_all(
                 "Sales Invoice",
                 filters=activity_filters,
+                or_filters=activity_or_filters,
                 fields=_open_credit_invoice_fields(),
                 order_by="posting_date desc, creation desc",
                 # One extra row is asked for so truncation can be DETECTED rather
