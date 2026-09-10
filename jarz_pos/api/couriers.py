@@ -25,6 +25,7 @@ from jarz_pos.services.delivery_handling import (
     settle_courier_collected_payment as _settle_courier_collected_payment,
     change_payment_collection_method as _change_payment_collection_method,
     deliver_online_unconfirmed as _deliver_online_unconfirmed,
+    deliver_credit_on_account as _deliver_credit_on_account,
     list_unconfirmed_online_orders as _list_unconfirmed_online_orders,
     confirm_online_payment as _confirm_online_payment,
     convert_online_order_to_cod as _convert_online_order_to_cod,
@@ -39,6 +40,7 @@ from jarz_pos.services import delivery_handling as _delivery_services
 from jarz_pos.services.settlement_strategies import (
     dispatch_settlement as _dispatch_settlement,
     _is_online_intent as _is_online_intent,
+    _is_credit_intent as _is_credit_intent,
 )
 from jarz_pos.utils.account_utils import (
     get_freight_expense_account,
@@ -164,6 +166,24 @@ def deliver_online_unconfirmed(invoice_name: str, pos_profile: str, party_type: 
     _guard_invoice_action(invoice_name, action_label="dispatching an order")
     _guard_dispatch(invoice_name, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
     return _deliver_online_unconfirmed(
+        invoice_name, pos_profile, party_type, party, partner_fee=partner_fee
+    )
+
+
+@frappe.whitelist()  # type: ignore[attr-defined]
+def deliver_credit_on_account(invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None, partner_fee=None, shortage_approved=False, shortage_reason: str | None = None):
+    """Move an order taken ON ACCOUNT Out for Delivery while it stays Unpaid.
+
+    Same guards as every other dispatch entry point (branch scope, open shift,
+    no double dispatch, stock/pin/territory gates). What it does NOT do is touch
+    the customer's money: no Payment Entry, no move to Courier Outstanding, and
+    no "Awaiting Payment" stamp — a credit order is not waiting for a transfer,
+    and stamping it would arm the hourly escalation alarm. The courier is still
+    accrued (and settleable for) his freight.
+    """
+    _guard_invoice_action(invoice_name, action_label="dispatching an order")
+    _guard_dispatch(invoice_name, shortage_approved=shortage_approved, shortage_reason=shortage_reason)
+    return _deliver_credit_on_account(
         invoice_name, pos_profile, party_type, party, partner_fee=partner_fee
     )
 
@@ -818,7 +838,15 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
     # the customer pays online and a manager confirms the transfer separately. Zero the courier
     # cash-collection amounts so the preview never implies the courier is liable.
     is_online_unconfirmed = bool(is_unpaid_effective and _is_online_intent(inv))
-    if is_online_unconfirmed:
+    # A credit / on-account order collects nothing from the courier either, and for
+    # the same reason: the money is not travelling with him. Kept as its own flag
+    # because the two are NOT the same downstream — an online order is awaiting a
+    # transfer, a credit order is a 30-day receivable on the customer — but the
+    # courier's cash position is identically zero, and without this a preview taken
+    # BEFORE dispatch (no Courier Transaction yet) would fall into the branch above
+    # and tell the branch to collect the whole invoice from the rider.
+    is_credit_on_account = bool(is_unpaid_effective and _is_credit_intent(inv))
+    if is_online_unconfirmed or is_credit_on_account:
         order_amount = 0.0
 
     # Detect delivery partner mode
@@ -847,8 +875,9 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
     else:
         net_amount = order_amount - shipping
 
-    # Online-intent unpaid orders: no courier cash collection at all.
-    if is_online_unconfirmed:
+    # Online-intent unpaid and credit / on-account orders: no courier cash
+    # collection at all.
+    if is_online_unconfirmed or is_credit_on_account:
         net_amount = 0.0
 
     # include resolved party if not provided – from any existing CT linked to invoice
@@ -882,6 +911,7 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
             "delivery_partner": _dp,
             "partner_fee": partner_fee,
             "is_online_unconfirmed": is_online_unconfirmed,
+            "is_credit_on_account": is_credit_on_account,
         }
     )
 
@@ -907,6 +937,9 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
         # orders (a transaction exists) keep the fee they were sent with.
         "requires_partner_fee": bool(is_partner_order and settlement_ct is None),
         "is_online_unconfirmed": is_online_unconfirmed,
+        # Lets the client label the dispatch honestly ("on account — nothing to
+        # collect") instead of showing a zero it cannot explain.
+        "is_credit_on_account": is_credit_on_account,
     }
 
 

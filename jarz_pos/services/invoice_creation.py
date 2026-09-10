@@ -1011,6 +1011,243 @@ def _set_initial_state_for_sales_partner(invoice_doc, logger):
             pass
 
 
+# ---------------------------------------------------------------------------
+# Credit / on-account orders
+#
+# A B2B shop (a coffee shop) sometimes takes an order on credit: the goods are
+# delivered and NOTHING is paid at the door. The decision is per ORDER, not per
+# customer — the same shop pays cash on one order and takes the next on credit —
+# so "Credit" is a value of ``custom_payment_method`` like any other, and the
+# only thing that lives on the Customer is *permission* plus the terms.
+#
+# Settlement is informal and rolling ("when I send them the second invoice they
+# pay the first"), which is why the primary artefact is a running balance
+# (``api/credit.get_credit_ledger``) and NOT an overdue alarm. Nothing here arms
+# a reminder; ``due_date`` exists so the ledger can age the debt, not so anybody
+# gets paged.
+# ---------------------------------------------------------------------------
+
+#: Payment method value that means "on account". Must match the option added to
+#: ``Sales Invoice-custom_payment_method`` in ``fixtures/custom_field.json`` and
+#: the token ``settlement_strategies._is_credit_intent`` normalizes to.
+CREDIT_PAYMENT_METHOD = "Credit"
+
+#: Days used when a customer is allowed credit but nobody typed a number.
+#: Mirrors ``setup/credit_terms.DEFAULT_CREDIT_DAYS``; kept independent on
+#: purpose so a bench that has not run the seeder still freezes a sane term
+#: instead of a zero-day one that reads as overdue the moment it is delivered.
+DEFAULT_CREDIT_DAYS = 30
+
+
+def _customer_credit_settings(customer_name: str) -> dict:
+    """Read the three credit columns off a Customer, defensively.
+
+    Every field is a Custom Field seeded by ``setup/credit_terms.py``, so on a
+    bench that has not migrated yet the read raises rather than returning None.
+    That must degrade to "credit not allowed" — refusing the order — and never
+    to "allowed with no limit", which is the direction that loses money.
+    """
+    result = {"allowed": False, "days": 0, "limit": 0.0}
+    name = str(customer_name or "").strip()
+    if not name:
+        return result
+    try:
+        row = frappe.db.get_value(
+            "Customer",
+            name,
+            ["custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"],
+            as_dict=True,
+        )
+    except Exception:
+        # Column missing (seeder has not run) or DB hiccup. Fail CLOSED.
+        return result
+    if not row:
+        return result
+    try:
+        result["allowed"] = bool(int(row.get("custom_credit_allowed") or 0))
+    except Exception:
+        result["allowed"] = bool(row.get("custom_credit_allowed"))
+    try:
+        result["days"] = max(0, int(row.get("custom_credit_days") or 0))
+    except Exception:
+        result["days"] = 0
+    try:
+        result["limit"] = max(0.0, float(row.get("custom_credit_limit_amount") or 0))
+    except Exception:
+        result["limit"] = 0.0
+    return result
+
+
+def get_open_credit_balance(customer_name: str, exclude_invoice: str | None = None) -> float:
+    """What this customer still owes across every OPEN credit order.
+
+    Deliberately all-time and unfiltered by branch or date: a credit balance is
+    money, and a windowed balance would quietly shrink exactly the oldest debt
+    the limit exists to catch. Only submitted invoices whose payment method is
+    ``Credit`` count — a shop's cash orders are not credit exposure.
+
+    ``exclude_invoice`` lets an amendment leave its own predecessor out of the
+    sum instead of counting the order twice against the limit.
+    """
+    name = str(customer_name or "").strip()
+    if not name:
+        return 0.0
+    filters = {
+        "docstatus": 1,
+        "customer": name,
+        "custom_payment_method": CREDIT_PAYMENT_METHOD,
+        "outstanding_amount": [">", 0.005],
+        # A credit note carries a negative outstanding and is excluded by the
+        # filter above anyway; this is belt and braces for partial returns.
+        "is_return": 0,
+    }
+    if exclude_invoice:
+        filters["name"] = ["!=", str(exclude_invoice).strip()]
+    try:
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            fields=["outstanding_amount"],
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        # An unreadable balance must not silently become "nothing owed" — that
+        # would wave an over-limit order through. Re-raise as a clear refusal.
+        frappe.throw(
+            "Could not read the current credit balance for customer "
+            f"'{name}'. Refusing to take this order on credit until it can be checked."
+        )
+        return 0.0
+    total = 0.0
+    for row in rows:
+        try:
+            total += float(row.get("outstanding_amount") or 0)
+        except Exception:
+            continue
+    return round(total, 2)
+
+
+def _apply_credit_terms(invoice_doc, customer_doc, logger, amended_from: str | None = None) -> None:
+    """Gate a Credit order and freeze its terms onto the invoice.
+
+    Runs AFTER ``calculate_taxes_and_totals`` (so ``grand_total`` is real) and
+    BEFORE ``insert`` (so ``due_date`` is the one ERPNext keeps: ``set_missing_values``
+    only fills ``due_date`` when it is empty, and ``set_payment_schedule``
+    returns early for ``is_pos``, so nothing downstream overwrites it).
+
+    Three things happen, in this order:
+
+    1. **Permission.** No ``custom_credit_allowed`` on the Customer, no credit
+       order. The message names the shop and the field, because the person
+       reading it is at a counter with a customer in front of them.
+    2. **Limit.** When ``custom_credit_limit_amount`` is set, the existing open
+       balance plus THIS order must fit inside it. An order that lands exactly
+       on the limit is allowed; only exceeding it is refused.
+    3. **Terms.** ``due_date = posting_date + days`` and the days actually used
+       are stamped on ``custom_credit_terms_days``.
+
+    The stamp is a FREEZE, exactly like ``commercial_policy``: nothing later
+    re-reads the Customer. Changing a shop's credit days tomorrow must not
+    silently re-date an invoice that was already agreed, delivered and is
+    sitting in somebody's ledger.
+    """
+    customer_name = getattr(customer_doc, "name", None) or getattr(invoice_doc, "customer", None)
+    display_name = getattr(customer_doc, "customer_name", None) or customer_name
+
+    settings = _customer_credit_settings(customer_name)
+
+    if not settings["allowed"]:
+        message = (
+            f"{display_name} is not set up for credit orders. "
+            "Open the Customer record and tick 'Allow orders on credit' "
+            "(and set the credit days / limit) before taking this order on account."
+        )
+        logger.warning(  # pre-throw: see _exception_detail note on log levels
+            f"Credit order refused for {customer_name}: custom_credit_allowed is off"
+        )
+        print(f"   ❌ {message}")
+        frappe.throw(message)
+
+    order_value = 0.0
+    try:
+        order_value = float(invoice_doc.grand_total or 0)
+    except Exception:
+        order_value = 0.0
+
+    limit = settings["limit"]
+    if limit > 0:
+        current_balance = get_open_credit_balance(customer_name, exclude_invoice=amended_from)
+        projected = round(current_balance + order_value, 2)
+        # Half a piastre of tolerance: an order that lands exactly ON the limit
+        # is inside it, and float arithmetic must not turn that into a refusal.
+        if projected > limit + 0.005:
+            message = (
+                f"This order would put {display_name} over their credit limit. "
+                f"Limit {limit:,.2f}; already owed {current_balance:,.2f}; "
+                f"this order {order_value:,.2f} (total {projected:,.2f}). "
+                "Collect a payment first, or raise the limit on the Customer record."
+            )
+            logger.warning(  # pre-throw: see _exception_detail note on log levels
+                f"Credit order refused for {customer_name}: "
+                f"limit={limit} balance={current_balance} order={order_value}"
+            )
+            print(f"   ❌ {message}")
+            frappe.throw(message)
+        print(
+            f"   ✅ Credit limit OK: {projected:,.2f} of {limit:,.2f} "
+            f"(was {current_balance:,.2f})"
+        )
+    else:
+        print("   ✅ Credit allowed with no limit set")
+
+    days = settings["days"] or DEFAULT_CREDIT_DAYS
+    posting_date = getattr(invoice_doc, "posting_date", None) or frappe.utils.nowdate()
+    try:
+        invoice_doc.due_date = frappe.utils.add_days(frappe.utils.getdate(posting_date), days)
+    except Exception as due_err:
+        # A due date we could not compute must not become "due today" by
+        # accident; refuse rather than mis-state the agreed term.
+        frappe.throw(f"Could not compute the credit due date: {due_err}")
+    # Checked, not assumed. Setting an attribute a DocType has no field for does
+    # NOT raise in Frappe — it is simply dropped at save — so without this probe a
+    # bench whose fixture has not imported would take credit orders that silently
+    # forget their own terms, and only api/credit would notice, months later.
+    #
+    # Worth naming loudly for whoever migrates this: Sales Invoice on this site
+    # sits close to the MariaDB row limit (see _persist_selling_price_list), which
+    # is why this field is an Int — four bytes, the cheapest column there is. If a
+    # migrate ever refuses it, this is the message that will point here.
+    try:
+        _has_terms_field = bool(
+            frappe.get_meta("Sales Invoice").get_field("custom_credit_terms_days")
+        )
+    except Exception:
+        _has_terms_field = False
+    if not _has_terms_field:
+        frappe.throw(
+            "This site has no 'custom_credit_terms_days' field on Sales Invoice, so "
+            "a credit order cannot record the terms it was agreed on. Run bench "
+            "migrate for jarz_pos, then take this order again."
+        )
+
+    try:
+        invoice_doc.custom_credit_terms_days = days
+    except Exception as stamp_err:
+        # Unlike the price-list re-stamp this is NOT cosmetic: the frozen term is
+        # what api/credit reports as the agreed one, so a silent miss would leave
+        # the order claiming the customer's *current* days forever after.
+        frappe.throw(
+            "Could not stamp the credit terms onto this invoice "
+            f"(custom_credit_terms_days): {stamp_err}"
+        )
+
+    logger.info(
+        f"Credit order accepted for {customer_name}: days={days}, "
+        f"due_date={invoice_doc.due_date}, order_value={order_value}"
+    )
+    print(f"   🧾 Credit terms frozen: {days} day(s), due {invoice_doc.due_date}")
+
+
 @frappe.whitelist()
 def create_pos_invoice(
     cart_json,
@@ -1076,7 +1313,17 @@ def create_pos_invoice(
 
         # Validate payment method if provided
         if payment_method:
-            allowed_methods = ["Cash", "Instapay", "Mobile Wallet", "Kashier Card", "Kashier Wallet"]
+            # "Credit" is not a way of paying — it is a way of NOT paying yet.
+            # Everything that makes it different is enforced later (see
+            # _apply_credit_terms at STEP 8.2), once grand_total is real.
+            allowed_methods = [
+                "Cash",
+                "Instapay",
+                "Mobile Wallet",
+                "Kashier Card",
+                "Kashier Wallet",
+                CREDIT_PAYMENT_METHOD,
+            ]
             if payment_method not in allowed_methods:
                 error_msg = f"Invalid payment_method: {payment_method}. Must be one of: {', '.join(allowed_methods)}"
                 logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
@@ -1617,6 +1864,22 @@ def create_pos_invoice(
         # STEP 8: Validate and Calculate Document
         print("\n8️⃣ DOCUMENT VALIDATION:")
         _validate_and_calculate_document(invoice_doc, logger)
+
+        # STEP 8.2: Credit / on-account gate.
+        #
+        # Deliberately HERE — after calculate_taxes_and_totals and before insert:
+        #   * the limit check needs a real `grand_total`, which only exists after
+        #     STEP 8, and
+        #   * `due_date` must be set before insert, because ERPNext's
+        #     `set_missing_values` fills it only when it is empty and would
+        #     otherwise hand this order the customer's default term.
+        # It THROWS rather than degrading: an order the shop is not allowed to
+        # take on credit, or one that breaks their limit, must not exist.
+        if payment_method == CREDIT_PAYMENT_METHOD:
+            print("\n8️⃣.2️⃣ CREDIT / ON ACCOUNT:")
+            _apply_credit_terms(
+                invoice_doc, customer_doc, logger, amended_from=amended_from
+            )
 
         # STEP 8.1: Keep POS Sales Invoices accounting-only for all payment flows.
         # Business Rule: Stock movement must happen via Delivery Note on the delivery flow,

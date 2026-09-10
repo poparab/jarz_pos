@@ -1481,6 +1481,34 @@ def _invoice_is_online_intent(inv) -> bool:
     return _is_online_collection_method(normalized)
 
 
+#: Normalized tokens that mean "taken on account". Kept in lockstep with
+#: ``settlement_strategies._CREDIT_INTENT_TOKENS`` — duplicated rather than
+#: imported because ``settlement_strategies`` imports THIS module, so a reverse
+#: import would be circular. Two four-word sets are a cheaper price than an
+#: import cycle, and the guard test in ``tests/test_credit_orders.py`` pins them
+#: to the same answers.
+_CREDIT_INTENT_TOKENS = {"credit", "onaccount"}
+
+
+def _invoice_is_credit_intent(inv) -> bool:
+    """True when this invoice was taken ON ACCOUNT (nothing paid at the door).
+
+    Self-contained and DB-free on purpose: it is read inside dispatch paths that
+    unit tests drive with mocks, and — unlike ``_invoice_is_online_intent`` above
+    — it must never route through ``_normalize_collection_method``, which throws
+    on any method outside its four and would push "Invalid collection method"
+    into the user's message log as a side effect.
+    """
+    try:
+        raw = inv.get("custom_payment_method") if hasattr(inv, "get") else getattr(inv, "custom_payment_method", None)
+    except Exception:
+        raw = getattr(inv, "custom_payment_method", None)
+    normalized = str(raw or "").strip().lower().replace(" ", "").replace("_", "")
+    if not normalized:
+        return False
+    return normalized in _CREDIT_INTENT_TOKENS
+
+
 def _resolve_party_display_name(party_type: str | None, party: str | None) -> str | None:
     """Best-effort human label for an Employee/Supplier courier party."""
     party_type = (party_type or "").strip()
@@ -1531,6 +1559,176 @@ def _latest_active_payment_receipt(invoice_name: str) -> dict | None:
         "status": row.get("status"),
         "receipt_image_url": row.get("receipt_image_url") or row.get("receipt_image"),
     }
+
+
+#: The exact ``notes`` written by the unpaid-online freight accrual, and the
+#: LIKE pattern its idempotency lookup has always used. The pattern is a
+#: deliberate PREFIX of the note rather than the whole of it: rows written by
+#: earlier revisions of this code carry slightly different wording after
+#: "(unpaid online", and a lookup that missed them would accrue the courier's
+#: freight a second time on a retried dispatch. Frozen here so the shared
+#: helper below can be given both without either drifting.
+_ONLINE_FREIGHT_NOTES = "Courier freight accrual (unpaid online delivery, awaiting payment)"
+_ONLINE_FREIGHT_NOTES_LIKE = "%Courier freight accrual (unpaid online%"
+_ONLINE_PARTNER_FREIGHT_NOTES = (
+    "Partner delivery fee accrual (unpaid online delivery, awaiting payment) "
+    "- no cash position"
+)
+
+#: Same three strings for an order taken ON ACCOUNT. The courier is owed his
+#: delivery either way — the customer's credit terms are between the shop and
+#: us, not between the shop and the rider.
+_CREDIT_FREIGHT_NOTES = "Courier freight accrual (credit / on account)"
+_CREDIT_FREIGHT_NOTES_LIKE = "%Courier freight accrual (credit / on account%"
+_CREDIT_PARTNER_FREIGHT_NOTES = (
+    "Partner delivery fee accrual (credit / on account) - no cash position"
+)
+
+
+def _accrue_courier_freight_only(
+    inv,
+    *,
+    party_type: str | None,
+    party: str | None,
+    courier_details: dict | None,
+    partner_fee: float | None,
+    notes_tag: str,
+    partner_notes_tag: str | None = None,
+    idempotency_like: str | None = None,
+) -> tuple[str | None, str | None, float]:
+    """Owe the courier his delivery, and NOTHING else. Touches no receivable.
+
+    Extracted from ``handle_unpaid_online_deliver_unconfirmed`` so the credit /
+    on-account dispatch can reuse it byte-for-byte instead of growing a second,
+    drifting copy of the same five decisions. Both callers share the same shape:
+    the customer's money is not moving at dispatch (it is coming by transfer, or
+    it is coming in 30 days), but the rider physically delivers and is owed the
+    freight exactly as in the settle-later paths.
+
+    What it does, in order:
+
+    1. Resolve the freight. For a DELIVERY-PARTNER rider that is ``partner_fee``
+       and only ``partner_fee`` — our own area rates do not price their company,
+       so a missing fee is refused rather than guessed (see
+       ``mark_courier_outstanding`` for the full reason). For an ordinary
+       courier it is the stored ``custom_shipping_expense``, else the territory
+       rate.
+    2. Persist the resolved amount on the invoice when it was empty — or always,
+       for a partner order, where the typed cost is the truth and must overwrite
+       whatever our territory table had put there.
+    3. Log a shipping-only Courier Transaction. An ordinary courier's row is
+       ``Unsettled`` and carries ``shipping_amount``; a partner rider's row is
+       born ``Settled`` with ``partner_fee`` instead, because there is no cash
+       position for the branch to settle in either direction.
+       ``amount`` is 0 on both: the courier collects nothing from the customer.
+    4. Post the fee accrual — DR Freight & Forwarding / CR Creditors[courier] for
+       an ordinary courier, or the partner-company accrual for a partner rider.
+
+    Idempotent per invoice + courier via ``idempotency_like``; the JE is
+    idempotent on its own ``user_remark`` tag (see FIX 3).
+
+    Returns ``(freight_ct, freight_je, freight_amount)``. All three are the
+    "nothing accrued" values (``None``, ``None``, ``0.0``) when no courier is
+    supplied or the freight resolves to zero.
+    """
+    courier_details = courier_details or {}
+    partner_notes_tag = partner_notes_tag or notes_tag
+    idempotency_like = idempotency_like or f"%{notes_tag}%"
+
+    freight_ct: str | None = None
+    freight_je: str | None = None
+    freight_amount = 0.0
+
+    if not (party_type and party):
+        return freight_ct, freight_je, freight_amount
+
+    _dp_probe = _partner_link(courier_details)
+    if _dp_probe:
+        # Partner pricing never comes from our area rates — see
+        # mark_courier_outstanding for the full reason.
+        if partner_fee is None:
+            frappe.throw(
+                _(
+                    "This courier works for delivery partner {0}. Enter the partner's "
+                    "delivery cost for this order before dispatching — our own area rate "
+                    "does not apply to them."
+                ).format(_dp_probe)
+            )
+        freight_amount = float(partner_fee)
+        stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
+    else:
+        stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
+        freight_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+
+    if not (freight_amount and freight_amount > 0):
+        return freight_ct, freight_je, 0.0
+
+    # Persist the resolved expense on the SI only when it was previously
+    # empty — except for a partner order, where the typed cost is the truth
+    # and must overwrite whatever our territory table had put there, or the
+    # delivery-cost reports would show our rate instead of what we paid.
+    try:
+        if stored_ship <= 0 or _dp_probe:
+            inv.db_set("custom_shipping_expense", freight_amount, update_modified=False)
+    except Exception:
+        pass
+
+    # Idempotency: don't re-accrue if a freight CT already exists for this invoice+courier.
+    existing_freight_ct = frappe.get_all(
+        "Courier Transaction",
+        filters={
+            "reference_invoice": inv.name,
+            "party_type": party_type,
+            "party": party,
+            "notes": ["like", idempotency_like],
+        },
+        pluck="name",
+        limit_page_length=1,
+    )
+    dp_link = _partner_link(courier_details)
+    if existing_freight_ct:
+        freight_ct = existing_freight_ct[0]
+    else:
+        ct = frappe.new_doc("Courier Transaction")
+        ct.party_type = party_type
+        ct.party = party
+        ct.date = frappe.utils.now_datetime()
+        ct.reference_invoice = inv.name
+        ct.amount = 0  # courier collects nothing from the customer on this path
+        if dp_link:
+            # A partner rider on a prepaid/online/on-account order carries no
+            # money AND is owed nothing personally: there is no cash position
+            # for the branch to settle in either direction, so this row is born
+            # Settled and never appears in courier balances or at shift close.
+            # His company's fee rides on ``partner_fee`` and is paid weekly,
+            # tracked independently by ``partner_settled``.
+            ct.shipping_amount = 0.0
+            ct.partner_fee = float(freight_amount)
+            ct.is_partner_order = 1
+            ct.delivery_partner = dp_link
+            ct.status = "Settled"
+            ct.notes = partner_notes_tag
+        else:
+            ct.shipping_amount = float(freight_amount)
+            ct.status = "Unsettled"
+            ct.notes = notes_tag
+        ct.payment_mode = "Deferred"
+        ct.insert(ignore_permissions=True)
+        freight_ct = ct.name
+
+    # Fee accrual JE (idempotent via user_remark tag — see FIX 3). An ordinary
+    # courier is owed it personally; a partner rider's company is.
+    if dp_link:
+        freight_je = create_partner_fee_accrual_je(
+            inv, delivery_partner=dp_link, fee=float(freight_amount)
+        )
+    else:
+        creditors_acc = get_creditors_account(inv.company)
+        freight_je = _create_shipping_expense_to_creditors_je(
+            inv, float(freight_amount), creditors_acc, party_type, party
+        )
+
+    return freight_ct, freight_je, float(freight_amount)
 
 
 def handle_unpaid_online_deliver_unconfirmed(
@@ -1624,95 +1822,17 @@ def handle_unpaid_online_deliver_unconfirmed(
     # Courier Transaction (amount=0, shipping_amount=freight) so the courier is tracked
     # and can be settled later. Requires a resolved courier party; idempotent per
     # invoice + courier.
-    freight_je = None
-    freight_ct = None
-    freight_amount = 0.0
-    if party_type and party:
-        _dp_probe = _partner_link(courier_details)
-        if _dp_probe:
-            # Partner pricing never comes from our area rates — see
-            # mark_courier_outstanding for the full reason.
-            if partner_fee is None:
-                frappe.throw(
-                    _(
-                        "This courier works for delivery partner {0}. Enter the partner's "
-                        "delivery cost for this order before dispatching — our own area rate "
-                        "does not apply to them."
-                    ).format(_dp_probe)
-                )
-            freight_amount = float(partner_fee)
-            stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
-        else:
-            stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
-            freight_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
-        if freight_amount and freight_amount > 0:
-            # Persist the resolved expense on the SI only when it was previously
-            # empty — except for a partner order, where the typed cost is the truth
-            # and must overwrite whatever our territory table had put there, or the
-            # delivery-cost reports would show our rate instead of what we paid.
-            try:
-                if stored_ship <= 0 or _dp_probe:
-                    inv.db_set("custom_shipping_expense", freight_amount, update_modified=False)
-            except Exception:
-                pass
-
-            # Idempotency: don't re-accrue if a freight CT already exists for this invoice+courier.
-            existing_freight_ct = frappe.get_all(
-                "Courier Transaction",
-                filters={
-                    "reference_invoice": inv.name,
-                    "party_type": party_type,
-                    "party": party,
-                    "notes": ["like", "%Courier freight accrual (unpaid online%"],
-                },
-                pluck="name",
-                limit_page_length=1,
-            )
-            dp_link = _partner_link(courier_details)
-            if existing_freight_ct:
-                freight_ct = existing_freight_ct[0]
-            else:
-                ct = frappe.new_doc("Courier Transaction")
-                ct.party_type = party_type
-                ct.party = party
-                ct.date = frappe.utils.now_datetime()
-                ct.reference_invoice = inv.name
-                ct.amount = 0  # courier collects nothing — the customer pays online
-                if dp_link:
-                    # A partner rider on a prepaid/online order carries no money AND
-                    # is owed nothing: there is no cash position for the branch to
-                    # settle in either direction, so this row is born Settled and
-                    # never appears in courier balances or at shift close. His
-                    # company's fee rides on ``partner_fee`` and is paid weekly,
-                    # tracked independently by ``partner_settled``.
-                    ct.shipping_amount = 0.0
-                    ct.partner_fee = float(freight_amount)
-                    ct.is_partner_order = 1
-                    ct.delivery_partner = dp_link
-                    ct.status = "Settled"
-                    ct.notes = (
-                        "Partner delivery fee accrual (unpaid online delivery, awaiting payment) "
-                        "- no cash position"
-                    )
-                else:
-                    ct.shipping_amount = float(freight_amount)
-                    ct.status = "Unsettled"
-                    ct.notes = "Courier freight accrual (unpaid online delivery, awaiting payment)"
-                ct.payment_mode = "Deferred"
-                ct.insert(ignore_permissions=True)
-                freight_ct = ct.name
-
-            # Fee accrual JE (idempotent via user_remark tag — see FIX 3). An ordinary
-            # courier is owed it personally; a partner rider's company is.
-            if dp_link:
-                freight_je = create_partner_fee_accrual_je(
-                    inv, delivery_partner=dp_link, fee=float(freight_amount)
-                )
-            else:
-                creditors_acc = get_creditors_account(inv.company)
-                freight_je = _create_shipping_expense_to_creditors_je(
-                    inv, float(freight_amount), creditors_acc, party_type, party
-                )
+    freight_ct, freight_je, freight_amount = _accrue_courier_freight_only(
+        inv,
+        party_type=party_type,
+        party=party,
+        courier_details=courier_details,
+        partner_fee=partner_fee,
+        notes_tag=_ONLINE_FREIGHT_NOTES,
+        partner_notes_tag=_ONLINE_PARTNER_FREIGHT_NOTES,
+        # The legacy PREFIX pattern, not f"%{notes_tag}%": see the constant.
+        idempotency_like=_ONLINE_FREIGHT_NOTES_LIKE,
+    )
 
     # Mandatory Delivery Note (same enforcement as every other OFD path)
     dn_result = ensure_delivery_note_for_invoice(inv.name)
@@ -1738,6 +1858,174 @@ def handle_unpaid_online_deliver_unconfirmed(
     }
     _publish_branch_event(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
     return payload
+
+
+def handle_credit_deliver_on_account(
+    inv,
+    *,
+    pos_profile: str | None = None,
+    party_type: str | None = None,
+    party: str | None = None,
+    partner_fee: float | None = None,
+) -> dict:
+    """Move an order taken ON ACCOUNT Out for Delivery. The customer still owes it.
+
+    A B2B shop takes the goods on credit: nothing is paid at the door, and the
+    money arrives days later — usually rolling, when the NEXT invoice is handed
+    over. So this path does exactly what dispatch always does operationally
+    (state, courier attribution, Delivery Note, the rider's freight) and
+    deliberately does NOTHING to the customer's receivable.
+
+    Contract, and every clause of it is a "must not":
+
+      * State -> ``Out for Delivery``; courier required and attributed; Delivery
+        Note mandatory — identical to every other OFD path.
+      * MUST NOT call ``mark_courier_outstanding`` and MUST NOT create any
+        customer Payment Entry. That is the whole point: the receivable stays on
+        Debtors against the CUSTOMER and the invoice stays Unpaid. Sending a
+        credit order down the COD path would charge the RIDER with money the shop
+        never handed him, mark the invoice Paid, and make the debt invisible to
+        everything that reports it.
+      * MUST NOT stamp ``custom_payment_confirmation_status`` and MUST NOT call
+        ``ensure_pending_payment_receipt``. This is the non-obvious part, so it
+        is spelled out: "Awaiting Payment" is what puts an order into the
+        InstaPay verification queue AND arms the HOURLY escalation in
+        ``api/escalations.py`` / ``tasks.py``. A transfer that has not landed in
+        an hour is a problem; a 30-day trade credit that has not landed in an
+        hour is Tuesday. Stamping it would page a manager about every credit
+        order, all night, and demand a payment screenshot that will never exist.
+      * DOES accrue the courier's freight (shared helper, notes tag
+        "Courier freight accrual (credit / on account)"), because the rider
+        delivered and is owed his money whatever the shop's terms are. He can be
+        settled for the delivery alone.
+
+    The customer's side is closed later by ``api/credit.record_credit_payment``
+    (one Receive Payment Entry, FIFO across the shop's open credit invoices), or
+    — if the shop decides to pay cash at the door after all — by
+    ``change_payment_collection_method``.
+    """
+    if getattr(inv, "docstatus", 0) != 1:
+        frappe.throw("Invoice must be submitted before moving Out for Delivery.")
+
+    party_type = (party_type or "").strip()
+    party = (party or "").strip()
+
+    courier_details = {
+        "delivery_partner": resolve_courier_delivery_partner(party_type, party),
+    }
+    if party_type and party:
+        resolved_pos_profile = resolve_assignment_pos_profile(inv, requested_pos_profile=pos_profile)
+        courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
+    else:
+        # A courier IS required, for the same reason as every other OFD path:
+        # without one nothing below accrues the freight or writes a Courier
+        # Transaction, so the rider who delivers is never owed anything.
+        frappe.throw(
+            _("Assign a courier before sending {0} out for delivery.").format(inv.name),
+            title=_("Courier required"),
+        )
+
+    # Operational state → Out for Delivery. No accounting fields are touched:
+    # see the docstring for why custom_payment_confirmation_status stays empty.
+    update_submitted_sales_invoice_state(inv, "Out for Delivery")
+
+    _persist_invoice_courier_assignment(
+        inv,
+        party_type=party_type,
+        party=party,
+        delivery_partner=courier_details.get("delivery_partner"),
+    )
+
+    # The rider is owed his delivery even though the shop owes us the order.
+    freight_ct, freight_je, freight_amount = _accrue_courier_freight_only(
+        inv,
+        party_type=party_type,
+        party=party,
+        courier_details=courier_details,
+        partner_fee=partner_fee,
+        notes_tag=_CREDIT_FREIGHT_NOTES,
+        partner_notes_tag=_CREDIT_PARTNER_FREIGHT_NOTES,
+        idempotency_like=_CREDIT_FREIGHT_NOTES_LIKE,
+    )
+
+    # Mandatory Delivery Note (same enforcement as every other OFD path)
+    dn_result = ensure_delivery_note_for_invoice(inv.name)
+    if dn_result.get("error"):
+        frappe.throw(f"Failed auto-creating Delivery Note: {dn_result.get('error')}")
+
+    payload = {
+        "success": True,
+        "invoice": inv.name,
+        "new_state": "Out for Delivery",
+        # Explicitly None, and explicitly PRESENT: a client that reads this key
+        # to decide whether to show the "awaiting transfer" badge must get a
+        # definite "no", not a missing key it might treat as unknown.
+        "payment_confirmation_status": None,
+        "party_type": party_type or None,
+        "party": party or None,
+        "delivery_partner": courier_details.get("delivery_partner") or None,
+        "delivery_note": dn_result.get("delivery_note"),
+        "delivery_note_reused": bool(dn_result.get("reused")),
+        "courier_transaction": freight_ct,
+        "journal_entry": freight_je,
+        "shipping_amount": float(freight_amount or 0),
+        # What the shop still owes, straight off the invoice — the number that
+        # makes this path different from every other dispatch.
+        "outstanding_amount": float(
+            frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount")
+            or getattr(inv, "outstanding_amount", 0)
+            or 0
+        ),
+        "credit_terms_days": int(inv.get("custom_credit_terms_days") or 0),
+        "due_date": str(inv.get("due_date") or "") or None,
+        "mode": "credit_deliver_on_account",
+        "dn_logic_version": DN_LOGIC_VERSION,
+    }
+    _publish_branch_event(WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION, payload)
+    return payload
+
+
+def deliver_credit_on_account(
+    invoice_name: str,
+    pos_profile: str,
+    party_type: str | None = None,
+    party: str | None = None,
+    partner_fee: float | None = None,
+) -> dict:
+    """Endpoint logic: move a credit / on-account invoice Out for Delivery.
+
+    Mirrors :func:`deliver_online_unconfirmed` so the kanban has a direct entry
+    point per dispatch shape rather than only the generic ``dispatch_settlement``
+    router. The whitelisted wrapper lives in ``api/couriers.py``.
+    """
+    invoice_name = (invoice_name or "").strip()
+    if not invoice_name:
+        frappe.throw("invoice_name required")
+
+    inv = frappe.get_doc("Sales Invoice", invoice_name)
+    if inv.docstatus != 1:
+        frappe.throw("Invoice must be submitted")
+
+    result = handle_credit_deliver_on_account(
+        inv,
+        pos_profile=pos_profile,
+        party_type=party_type,
+        party=party,
+        partner_fee=partner_fee,
+    )
+    return {
+        "success": True,
+        "invoice": inv.name,
+        "new_state": "Out for Delivery",
+        "party_type": result.get("party_type"),
+        "party": result.get("party"),
+        "delivery_partner": result.get("delivery_partner"),
+        "delivery_note": result.get("delivery_note"),
+        "delivery_note_reused": bool(result.get("delivery_note_reused")),
+        "outstanding_amount": result.get("outstanding_amount"),
+        "credit_terms_days": result.get("credit_terms_days"),
+        "due_date": result.get("due_date"),
+    }
 
 
 def deliver_online_unconfirmed(
@@ -3353,6 +3641,29 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
             outstanding = float(inv.outstanding_amount or 0)
 
         company = inv.company
+
+        # CREDIT / ON ACCOUNT comes first, because the branch below is
+        # unconditional and would otherwise swallow it.
+        #
+        # This legacy entry point sends EVERY unpaid order to
+        # ``mark_courier_outstanding``, which moves the receivable from the
+        # CUSTOMER to Courier Outstanding against the RIDER and marks the invoice
+        # Paid. For an order taken on account that is simply false in three ways
+        # at once: the rider was handed no money, the shop's debt disappears from
+        # every credit report, and the invoice reads as settled. So a credit
+        # order is routed to its own handler here, exactly as
+        # ``dispatch_settlement`` does, and the two entry points agree.
+        if outstanding > 0.0001 and _invoice_is_credit_intent(inv):
+            frappe.logger().info(
+                f"OFD transition for CREDIT invoice {invoice_name} - routing to "
+                "handle_credit_deliver_on_account (receivable stays on Debtors)"
+            )
+            return handle_credit_deliver_on_account(
+                inv,
+                pos_profile=resolved_pos_profile or pos_profile,
+                party_type=party_type,
+                party=party,
+            )
 
         # If UNPAID: Route to mark_courier_outstanding for proper "settle later" accounting
         if outstanding > 0.0001:

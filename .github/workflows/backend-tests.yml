@@ -260,6 +260,17 @@ jobs:
             # invoice no longer existed. This pins the suppression guard.
             test_push_suppressed_in_test_run
             test_accounting_guards
+            # The credit / on-account path. The load-bearing cases are the two
+            # that pin what the handler must NOT do: never move the receivable
+            # to Courier Outstanding (which would charge the rider with the
+            # shop's money and mark the invoice Paid), and never stamp
+            # `Awaiting Payment` (which would arm the hourly escalation alarm on
+            # a debt that is legitimately 30 days old). Both are silent failures
+            # -- the order still dispatches and the board still looks right --
+            # so nothing but a test catches a regression here. Also pins that an
+            # unpaid Instapay order still routes to the online handler, because
+            # the credit branch sits directly above it in `dispatch_settlement`.
+            test_credit_orders
             # The operator-chosen posting date AND time. One shared splitter
             # feeds every write that lets the till pick a moment (transfers,
             # counts, purchases, cash transfers, expenses, advances), so a

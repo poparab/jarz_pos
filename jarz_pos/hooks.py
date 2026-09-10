@@ -142,6 +142,12 @@ after_migrate = [
     # After b2b_master_data because the name-matching fallback in
     # utils/employee_link.py is scoped to the "Employee" Customer Group it seeds.
     "jarz_pos.setup.employee_link_setup.ensure_employee_link_fields",
+    # Customer credit schema: custom_credit_allowed / custom_credit_days /
+    # custom_credit_limit_amount. An after_migrate seeder rather than a fixture
+    # because fixtures sync at the very end of a migrate while the deployed code
+    # is already serving, and the invoice-creation gate reads these columns on
+    # the first credit order placed after a deploy. Never raises.
+    "jarz_pos.setup.credit_terms.ensure_credit_terms_fields",
     # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
     "jarz_pos.setup.crm_setup.ensure_crm_setup",
     # Create the Production Operator role + role profile + doc perms (idempotent)

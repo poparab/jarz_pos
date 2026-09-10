@@ -796,6 +796,18 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
         except Exception:
             already_settled = False
 
+    # Credit / on-account: the customer owes US, on agreed terms — the rider carries
+    # nothing. Resolved here rather than with the other flags below because it has to
+    # be able to short-circuit the "no transaction yet -> anticipate collecting the
+    # whole invoice" branch; once dispatch has run, the CT (amount=0) says the same
+    # thing and the authoritative branch above wins anyway.
+    try:
+        from jarz_pos.services.settlement_strategies import _is_credit_intent
+
+        is_credit_on_account = bool(is_unpaid and _is_credit_intent(inv))
+    except Exception:
+        is_credit_on_account = False
+
     if has_ct_rows:
         # AUTHORITATIVE: an unsettled Courier Transaction exists, so the courier's position on
         # this invoice is already recorded. Take it verbatim — exactly like the batch path,
@@ -815,6 +827,11 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     elif already_settled:
         order_amount = 0.0
         shipping = 0.0
+    elif is_credit_on_account:
+        # Unpaid AND on account: there is nothing for the courier to hand over now or
+        # later. Only his freight is in play, so the preview reads "pay the courier
+        # the freight" instead of "collect the invoice from the courier".
+        order_amount = 0.0
     elif is_unpaid:
         # No transaction accrued yet (preview requested before Out for Delivery): anticipate a
         # settle-now collection of the whole invoice.
@@ -912,6 +929,9 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     "courier_order_amount": ct_order_total,
     "courier_shipping_amount": ct_shipping_total,
     "is_online_unconfirmed": is_online_unconfirmed,
+    # Same purpose as the flag above, different reason: this invoice is unpaid
+    # because the shop took it on account, not because a transfer is pending.
+    "is_credit_on_account": is_credit_on_account,
     "message": msg,
     }
 

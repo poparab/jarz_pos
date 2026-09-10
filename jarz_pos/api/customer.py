@@ -759,6 +759,16 @@ def search_customers(name=None, phone=None, customer_type=None):
     if frappe.db.has_column("Customer", "phone"):
         fields_to_select.append("`phone`")
 
+    # Credit permission, so the POS can badge shops that may order on account and
+    # offer the Credit button without a second round trip. Probed, not assumed:
+    # the column is seeded by setup/credit_terms.py at after_migrate, so on a
+    # bench that has not migrated yet the SELECT would fail and take the WHOLE
+    # customer search down with it — which is exactly the class of outage this
+    # search must never cause.
+    has_credit_column = frappe.db.has_column("Customer", "custom_credit_allowed")
+    if has_credit_column:
+        fields_to_select.append("`custom_credit_allowed`")
+
     query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
 
     params = {}
@@ -821,10 +831,15 @@ def search_customers(name=None, phone=None, customer_type=None):
     
     try:
         customers = frappe.db.sql(query, params, as_dict=1)
-        
+
         for c in customers:
             _augment_customer_with_territory(c)
-            
+            # Normalised to a real bool under a stable key. The raw column is an
+            # Int (0/1) and is absent entirely on an un-migrated bench; a client
+            # badge must not have to tell `0`, `None` and "key missing" apart, and
+            # the safe answer for all three is False.
+            c["credit_allowed"] = bool(int(c.get("custom_credit_allowed") or 0)) if has_credit_column else False
+
         frappe.logger().info(f"Found {len(customers)} customers via SQL")
         return customers
 

@@ -761,6 +761,16 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
       There the receivable is still on Debtors and ``outstanding_amount`` is the answer.
       Missing this is what let the board hide "Change collection method" the moment a
       shift close settled the freight, on orders whose customer still owed every pound.
+    * **credit / on account** — structurally identical to the shape above (freight-only
+      courier row, receivable still on Debtors) but WITHOUT the "Awaiting Payment"
+      stamp, because a credit order is not waiting for a transfer and must never enter
+      the InstaPay queue or arm the hourly escalation. It is reported here on purpose:
+      a shop that took an order on account can later decide to pay cash at the door,
+      and "Change collection method" is precisely the tool that records it (it routes
+      through ``_apply_collection_change_for_unpaid_online``, which moves the receivable
+      to Courier Outstanding while the rider is still open, or into the branch drawer
+      once he has closed out). Hiding the action would leave the operator with no way
+      to record money that has actually changed hands.
 
     ``outstanding_amount`` alone cannot answer the first one — a COD order is settled
     against Courier Outstanding at Out-for-Delivery, so it reads as fully paid while the
@@ -812,6 +822,39 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
             if outstanding > amount_map.get(invoice_name, 0.0):
                 amount_map[invoice_name] = outstanding
     except Exception:
+        pass
+
+    # Credit / on-account shape. Keyed on the payment method AND on the frozen
+    # ``custom_credit_terms_days`` stamp, ORed: the stamp is permanent provenance that
+    # this order was taken on credit, so the action survives a later switch of
+    # ``custom_payment_method`` (credit -> Instapay, say) that would otherwise make the
+    # card lose its own history. ``max`` rather than ``+``, for the same reason as above.
+    try:
+        credit_rows = frappe.get_all(
+            "Sales Invoice",
+            filters={
+                "name": ["in", cleaned],
+                "docstatus": 1,
+                "outstanding_amount": [">", 0.005],
+            },
+            or_filters=[
+                ["Sales Invoice", "custom_payment_method", "=", "Credit"],
+                ["Sales Invoice", "custom_credit_terms_days", ">", 0],
+            ],
+            fields=["name", "outstanding_amount"],
+            limit=QUERY_LIMITS.KANBAN_INVOICES,
+        )
+        for row in credit_rows:
+            invoice_name = row.get("name")
+            if not invoice_name:
+                continue
+            outstanding = float(row.get("outstanding_amount") or 0.0)
+            if outstanding > amount_map.get(invoice_name, 0.0):
+                amount_map[invoice_name] = outstanding
+    except Exception:
+        # The credit columns are seeded by setup/credit_terms.py + the fixture, so a
+        # bench that has not migrated yet must simply not offer the action rather than
+        # break the whole board.
         pass
 
     # Third shape: a COD order switched to an online method after dispatch and

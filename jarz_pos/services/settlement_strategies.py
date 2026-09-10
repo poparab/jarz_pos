@@ -32,6 +32,7 @@ from jarz_pos.services.delivery_handling import (
     handle_out_for_delivery_paid as handle_out_for_delivery_paid,  # alias for tests
     mark_courier_outstanding as mark_courier_outstanding,          # alias for tests
     handle_unpaid_online_deliver_unconfirmed as handle_unpaid_online_deliver_unconfirmed,  # alias for tests
+    handle_credit_deliver_on_account as handle_credit_deliver_on_account,  # alias for tests
 )
 import sys
 from jarz_pos.utils.account_utils import (
@@ -71,6 +72,11 @@ _CASH_TOKENS = {"cash", "cod", "cashondelivery"}
 # Only these normalized tokens count as unpaid online-intent (InstaPay + Mobile Wallet share
 # identical accounting). Payment-gateway/card methods are prepaid and are intentionally excluded.
 _ONLINE_INTENT_TOKENS = {"instapay", "insta", "bank", "bankaccount", "mobilewallet", "wallet"}
+# "Credit" (order taken on account) is its own intent and shares NOTHING with the
+# tokens above: no transfer is expected, so no confirmation queue and no alarm.
+# Kept as a set for symmetry with _ONLINE_INTENT_TOKENS and so a synonym
+# ("onaccount") can be added without touching the predicate.
+_CREDIT_INTENT_TOKENS = {"credit", "onaccount"}
 
 
 def _is_online_intent(inv) -> bool:
@@ -87,6 +93,30 @@ def _is_online_intent(inv) -> bool:
     if not normalized or normalized in _CASH_TOKENS:
         return False
     return normalized in _ONLINE_INTENT_TOKENS
+
+
+def _is_credit_intent(inv) -> bool:
+    """True when this order was taken ON ACCOUNT (nothing paid at the door).
+
+    Self-contained (no frappe / DB calls) so it is safe under unit-test mocks,
+    exactly like :func:`_is_online_intent`. Unknown or empty methods return
+    False, so every existing flow keeps its current route.
+
+    This must stay a SEPARATE predicate rather than another online token: an
+    online-intent order is waiting for a transfer that is expected within the
+    hour, and ``handle_unpaid_online_deliver_unconfirmed`` stamps it
+    ``Awaiting Payment`` — which drops it into the InstaPay verification queue
+    and arms an HOURLY escalation. Trade credit is 30 days by agreement; the
+    same treatment would page a manager about every credit order, all night.
+    """
+    try:
+        raw = inv.get("custom_payment_method") if hasattr(inv, "get") else getattr(inv, "custom_payment_method", None)
+    except Exception:
+        raw = getattr(inv, "custom_payment_method", None)
+    normalized = str(raw or "").strip().lower().replace(" ", "").replace("_", "")
+    if not normalized:
+        return False
+    return normalized in _CREDIT_INTENT_TOKENS
 
 
 def _in_test_mode() -> bool:
@@ -531,6 +561,22 @@ def dispatch_settlement(inv_name: str, *, mode: str, pos_profile: Optional[str] 
     # unpaid InstaPay partner order down a cash path and recorded money nobody had
     # collected. The rule is the same either way — the rider carries nothing — and
     # handle_unpaid_online_deliver_unconfirmed books the partner's fee to the partner.
+    # Credit / on account. Checked BEFORE the online-intent branch because the two
+    # are mutually exclusive and this one is the stricter statement: an unpaid
+    # credit order is not waiting for a transfer at all, so it must NOT be stamped
+    # 'Awaiting Payment' (InstaPay queue + hourly escalation) and must NOT be sent
+    # down mark_courier_outstanding, which would charge the rider with money the
+    # customer never handed him and mark the invoice Paid. The receivable stays on
+    # Debtors against the CUSTOMER; only the courier's freight is accrued.
+    if status == "unpaid" and _is_credit_intent(inv):
+        return handle_credit_deliver_on_account(
+            inv,
+            pos_profile=pos_profile,
+            party_type=party_type,
+            party=party,
+            partner_fee=partner_fee,
+        )
+
     if status == "unpaid" and _is_online_intent(inv):
         return handle_unpaid_online_deliver_unconfirmed(
             inv,
