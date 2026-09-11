@@ -291,6 +291,36 @@ class TestInventoryCountAPI(unittest.TestCase):
 
 		self.assertAlmostEqual(265.0, row["valuation_rate"])
 
+	def test_count_sheet_prices_an_item_that_only_has_a_seeded_rate(self):
+		"""The sheet and the submit must agree on what an item is worth.
+
+		The sheet used its own copy of the valuation chain, carrying the same
+		two defects, so it reported 0.0 for `raspberry mix`. The app drops a
+		non-positive rate rather than sending it back, which is why the submit
+		had to resolve the item from scratch -- and failed too.
+		"""
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype in ("Stock Ledger Entry", "Item Price", "BOM"):
+				return []
+			raise AssertionError((doctype, kwargs))
+
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Item" and len(args) >= 2:
+				return {"last_purchase_rate": 0.0, "valuation_rate": 265.0}.get(args[1])
+			return None
+
+		with patch.object(
+			inventory_count.frappe, "get_all", side_effect=fake_get_all
+		), patch.object(
+			inventory_count.frappe.db, "get_value", side_effect=fake_get_value
+		):
+			rate = inventory_count._resolve_item_valuation(
+				"raspberry mix", "Raw Material - J"
+			)
+
+		self.assertAlmostEqual(265.0, rate)
+
 	def test_to_stock_qty_rejects_an_unconfigured_uom(self):
 		with patch.object(
 			inventory_count.frappe.db, "get_value", return_value="Kg"

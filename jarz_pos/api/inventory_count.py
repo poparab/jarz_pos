@@ -319,53 +319,92 @@ def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
     return out
 
 
-# Public helper used by both list and submit to infer a plausible valuation rate
+def _first_positive(value: Any) -> Optional[float]:
+    """A usable rate, or None. Zero and NaN are not usable rates."""
+    if value is None:
+        return None
+    try:
+        rate = float(value)
+    except Exception:
+        return None
+    return rate if math.isfinite(rate) and rate > 0 else None
+
+
+# The single valuation chain, used by both the count sheet and the submit.
+# It was duplicated once, and the same two defects were present in both copies:
+# `Item.valuation_rate` was never consulted, and `last_purchase_rate` -- which
+# is 0.0 rather than NULL on anything never purchased -- was returned merely
+# because it "is not None", which made every source below it unreachable.
 def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
     try:
-        # Latest SLE in this warehouse
-        rows = frappe.get_all(
-            "Stock Ledger Entry",
-            filters={"item_code": item_code, "warehouse": warehouse},
-            fields=["valuation_rate"],
-            order_by="posting_date desc, posting_time desc, creation desc",
+        # 1) Latest SLE in this warehouse, then 2) any SLE for the item.
+        for sle_filters in (
+            {"item_code": item_code, "warehouse": warehouse},
+            {"item_code": item_code},
+        ):
+            rows = frappe.get_all(
+                "Stock Ledger Entry",
+                filters=sle_filters,
+                fields=["valuation_rate"],
+                order_by="posting_date desc, posting_time desc, creation desc",
+                limit=1,
+            )
+            rate = _first_positive(rows[0].get("valuation_rate") if rows else None)
+            if rate is not None:
+                return rate
+
+        # 3) Item.last_purchase_rate
+        rate = _first_positive(
+            frappe.db.get_value("Item", item_code, "last_purchase_rate")
+        )
+        if rate is not None:
+            return rate
+
+        # 4) Any Buying Item Price, then 5) any Selling Item Price.
+        for price_filters in (
+            {"item_code": item_code, "buying": 1},
+            {"item_code": item_code, "selling": 1},
+        ):
+            prices = frappe.get_all(
+                "Item Price",
+                filters=price_filters,
+                fields=["price_list_rate"],
+                order_by="modified desc",
+                limit=1,
+            )
+            rate = _first_positive(
+                prices[0].get("price_list_rate") if prices else None
+            )
+            if rate is not None:
+                return rate
+
+        # 6) Item.valuation_rate -- ERPNext's own final fallback in
+        # ``get_valuation_rate``, and the field the fruit-mix migration seeds
+        # from the recipe for a sub-assembly that has never been produced. Not
+        # reading it is what blocked the first count of `raspberry mix`: the
+        # rate was on the Item the whole time.
+        rate = _first_positive(
+            frappe.db.get_value("Item", item_code, "valuation_rate")
+        )
+        if rate is not None:
+            return rate
+
+        # 7) Active BOM unit cost. A manufactured sub-assembly is never bought
+        # and never sold, so sources 3-5 can structurally never fire for one;
+        # its recipe is the only cost it has ever had.
+        bom = frappe.get_all(
+            "BOM",
+            filters={"item": item_code, "is_active": 1},
+            fields=["total_cost", "quantity"],
+            order_by="is_default desc, modified desc",
             limit=1,
         )
-        if rows and rows[0].get("valuation_rate") is not None:
-            return float(rows[0]["valuation_rate"])  # type: ignore
-        # Any SLE for the item
-        rows_any = frappe.get_all(
-            "Stock Ledger Entry",
-            filters={"item_code": item_code},
-            fields=["valuation_rate"],
-            order_by="posting_date desc, posting_time desc, creation desc",
-            limit=1,
-        )
-        if rows_any and rows_any[0].get("valuation_rate") is not None:
-            return float(rows_any[0]["valuation_rate"])  # type: ignore
-        # last_purchase_rate
-        lpr = frappe.db.get_value("Item", item_code, "last_purchase_rate")
-        if lpr is not None:
-            return float(lpr)
-        # Buying Item Price
-        ip = frappe.get_all(
-            "Item Price",
-            filters={"item_code": item_code, "buying": 1},
-            fields=["price_list_rate"],
-            order_by="modified desc",
-            limit=1,
-        )
-        if ip and ip[0].get("price_list_rate") is not None:
-            return float(ip[0]["price_list_rate"])  # type: ignore
-        # Fallback: Selling Item Price (as last resort)
-        ips = frappe.get_all(
-            "Item Price",
-            filters={"item_code": item_code, "selling": 1},
-            fields=["price_list_rate"],
-            order_by="modified desc",
-            limit=1,
-        )
-        if ips and ips[0].get("price_list_rate") is not None:
-            return float(ips[0]["price_list_rate"])  # type: ignore
+        if bom:
+            produced = float(bom[0].get("quantity") or 0)
+            if produced > 0:
+                return _first_positive(
+                    float(bom[0].get("total_cost") or 0) / produced
+                )
     except Exception:
         pass
     return None
@@ -668,97 +707,11 @@ def submit_reconciliation(
         # Current quantities
         cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
-        # Helper to fetch a sensible valuation rate when ERPNext requires one.
-        #
-        # Sources are tried in order and the first *positive* rate wins. The
-        # "positive" part is load-bearing: ``last_purchase_rate`` is 0.0 rather
-        # than NULL on every item that was never bought, so returning it just
-        # because it "is not None" short-circuited the rest of the chain and
-        # left sources 4-7 unreachable for exactly the manufactured items that
-        # depend on them.
-        def _first_positive(value: Any) -> Optional[float]:
-            if value is None:
-                return None
-            try:
-                rate = float(value)
-            except Exception:
-                return None
-            return rate if math.isfinite(rate) and rate > 0 else None
-
+        # Valuation for an increase comes from the same chain the count
+        # sheet used to price the item, so the sheet and the submit can
+        # never disagree about what an item is worth.
         def _resolve_valuation_rate(item_code: str, wh: str) -> Optional[float]:
-            # 1) Latest Stock Ledger Entry in this warehouse, then 2) any SLE.
-            for sle_filters in (
-                {"item_code": item_code, "warehouse": wh},
-                {"item_code": item_code},
-            ):
-                rows = frappe.get_all(
-                    "Stock Ledger Entry",
-                    filters=sle_filters,
-                    fields=["valuation_rate"],
-                    order_by="posting_date desc, posting_time desc, creation desc",
-                    limit=1,
-                )
-                rate = _first_positive(rows[0].get("valuation_rate") if rows else None)
-                if rate is not None:
-                    return rate
-
-            # 3) Item.last_purchase_rate
-            rate = _first_positive(
-                frappe.db.get_value("Item", item_code, "last_purchase_rate")
-            )
-            if rate is not None:
-                return rate
-
-            # 4) Any Buying Item Price, then 5) any Selling Item Price.
-            for price_filters in (
-                {"item_code": item_code, "buying": 1},
-                {"item_code": item_code, "selling": 1},
-            ):
-                prices = frappe.get_all(
-                    "Item Price",
-                    filters=price_filters,
-                    fields=["price_list_rate"],
-                    order_by="modified desc",
-                    limit=1,
-                )
-                rate = _first_positive(
-                    prices[0].get("price_list_rate") if prices else None
-                )
-                if rate is not None:
-                    return rate
-
-            # 6) Item.valuation_rate -- ERPNext's own final fallback in
-            # ``get_valuation_rate``, and the field the fruit-mix migration
-            # seeds from the recipe for a sub-assembly that has never been
-            # produced. Not reading it is what blocked the first count of
-            # `raspberry mix`: the rate was on the Item the whole time.
-            rate = _first_positive(
-                frappe.db.get_value("Item", item_code, "valuation_rate")
-            )
-            if rate is not None:
-                return rate
-
-            # 7) Active BOM unit cost. A manufactured sub-assembly is never
-            # bought and never sold, so sources 3-5 can structurally never fire
-            # for one; its recipe is the only cost it has ever had.
-            bom = frappe.get_all(
-                "BOM",
-                filters={"item": item_code, "is_active": 1},
-                fields=["total_cost", "quantity"],
-                order_by="is_default desc, modified desc",
-                limit=1,
-            )
-            if bom:
-                try:
-                    produced = float(bom[0].get("quantity") or 0)
-                    if produced > 0:
-                        return _first_positive(
-                            float(bom[0].get("total_cost") or 0) / produced
-                        )
-                except Exception:
-                    pass
-
-            return None
+            return _resolve_item_valuation(item_code, wh)
 
         # Create Stock Reconciliation only for differences
         sr = frappe.new_doc("Stock Reconciliation")
