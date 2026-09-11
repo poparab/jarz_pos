@@ -147,6 +147,150 @@ class TestInventoryCountAPI(unittest.TestCase):
 		self.assertEqual(1, len(doc.items))
 		self.assertAlmostEqual(12.3, doc.items[0]["qty"])
 
+	def _submit_one_increase(self, item_code, *, item_fields, get_all):
+		"""Run submit_reconciliation for a single counted item and return the row.
+
+		The caller supplies what the site knows about the item, so a test can
+		state precisely which valuation source is meant to be the only one
+		available.
+		"""
+
+		class FakeReconciliation:
+			def __init__(self):
+				self.company = None
+				self.flags = SimpleNamespace(ignore_permissions=False)
+				self.name = "MAT-RECO-1"
+				self.items = []
+
+			def append(self, field, row):
+				if field != "items":
+					raise AssertionError(field)
+				self.items.append(row)
+
+			def insert(self):
+				return None
+
+			def submit(self):
+				return None
+
+		doc = FakeReconciliation()
+
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Item" and len(args) >= 2:
+				return item_fields.get(args[1])
+			return None
+
+		with patch.object(inventory_count, "_ensure_manager_access"), patch.object(
+			inventory_count, "_get_bin_qty_map", return_value={item_code: 0}
+		), patch.object(
+			inventory_count.frappe.db, "get_value", side_effect=fake_get_value
+		), patch.object(
+			inventory_count.frappe.db, "get_single_value", return_value=0
+		), patch.object(
+			inventory_count.frappe.db, "commit", create=True
+		), patch.object(
+			inventory_count.frappe, "get_all", side_effect=get_all
+		), patch.object(
+			inventory_count.frappe, "new_doc", return_value=doc, create=True
+		):
+			result = inventory_count.submit_reconciliation(
+				warehouse="Raw Material - J",
+				posting_date="2026-09-12",
+				lines=[{"item_code": item_code, "counted_qty": 0.465}],
+				enforce_all=0,
+			)
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(1, len(doc.items))
+		return doc.items[0]
+
+	def test_first_count_of_a_subassembly_prices_from_the_item_valuation_rate(self):
+		"""A never-produced sub-assembly is countable on its seeded rate.
+
+		`raspberry mix` was created by the fruit-mix migration with no ledger,
+		no bin and no Item Price -- it is manufactured, so it is never bought
+		and never sold. Its recipe cost was seeded onto Item.valuation_rate,
+		which the resolver used to ignore, and the first floor count of it was
+		refused outright.
+		"""
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "UOM Conversion Detail":
+				return []
+			if doctype in ("Stock Ledger Entry", "Item Price", "Company", "BOM"):
+				return []
+			raise AssertionError((doctype, kwargs))
+
+		row = self._submit_one_increase(
+			"raspberry mix",
+			item_fields={
+				"stock_uom": "Kg",
+				"last_purchase_rate": 0.0,
+				"valuation_rate": 265.0,
+				"has_batch_no": 0,
+				"has_serial_no": 0,
+			},
+			get_all=fake_get_all,
+		)
+
+		self.assertAlmostEqual(265.0, row["valuation_rate"])
+
+	def test_zero_last_purchase_rate_does_not_shadow_the_item_price(self):
+		"""last_purchase_rate is 0.0, not NULL, on anything never bought.
+
+		Returning it merely because it "is not None" made every later source
+		unreachable, so an item priced only by an Item Price was refused too.
+		"""
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "UOM Conversion Detail":
+				return []
+			if doctype == "Item Price" and kwargs.get("filters", {}).get("buying"):
+				return [{"price_list_rate": 42.5}]
+			if doctype in ("Stock Ledger Entry", "Item Price", "Company", "BOM"):
+				return []
+			raise AssertionError((doctype, kwargs))
+
+		row = self._submit_one_increase(
+			"NEVER-BOUGHT",
+			item_fields={
+				"stock_uom": "Kg",
+				"last_purchase_rate": 0.0,
+				"valuation_rate": 0.0,
+				"has_batch_no": 0,
+				"has_serial_no": 0,
+			},
+			get_all=fake_get_all,
+		)
+
+		self.assertAlmostEqual(42.5, row["valuation_rate"])
+
+	def test_a_manufactured_item_falls_back_to_its_recipe_cost(self):
+		"""Last resort before refusing: the active BOM's unit cost."""
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "UOM Conversion Detail":
+				return []
+			if doctype == "BOM":
+				return [{"total_cost": 530.0, "quantity": 2.0}]
+			if doctype in ("Stock Ledger Entry", "Item Price", "Company"):
+				return []
+			raise AssertionError((doctype, kwargs))
+
+		row = self._submit_one_increase(
+			"MIX-NO-SEEDED-RATE",
+			item_fields={
+				"stock_uom": "Kg",
+				"last_purchase_rate": 0.0,
+				"valuation_rate": 0.0,
+				"has_batch_no": 0,
+				"has_serial_no": 0,
+			},
+			get_all=fake_get_all,
+		)
+
+		self.assertAlmostEqual(265.0, row["valuation_rate"])
+
 	def test_to_stock_qty_rejects_an_unconfigured_uom(self):
 		with patch.object(
 			inventory_count.frappe.db, "get_value", return_value="Kg"
