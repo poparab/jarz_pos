@@ -92,6 +92,10 @@ JAR_MIX_QTY: Dict[str, float] = {
 }
 
 # Held in the freezer, so the planner must see the sub-assembly, not its inputs.
+# The fruit mixes are stored the same way -- a batch is mixed, part is used and
+# the rest keeps until next time -- so they belong here too, and a re-run of
+# this script must not strip the flag that
+# ``migrate_fruit_mixes_to_subassembly`` set on them.
 FREEZER_SUB_ASSEMBLIES = (
     "Butter Biscuit",
     "Fudge Cake",
@@ -100,6 +104,9 @@ FREEZER_SUB_ASSEMBLIES = (
     "Savoiardi",
     "Chocolate ganache",
     "Mango mix",
+    "Blueberry mix",
+    "strawberry mix",
+    "raspberry mix",
 )
 
 # Medium jars must not consume 330 packaging.
