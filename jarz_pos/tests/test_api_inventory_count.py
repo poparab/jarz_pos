@@ -423,6 +423,40 @@ class TestInventoryCountAPI(unittest.TestCase):
 		# It must not advise a Stock Settings field that does not exist.
 		self.assertNotIn("Allow Zero Valuation Rate", message)
 
+	def test_a_failing_error_log_does_not_replace_the_refusal(self):
+		"""Logging must never become the failure it was meant to explain.
+
+		`frappe.log_error` can raise on its own -- `capture_exception` reads
+		System Settings outside its own try -- and the handler around the
+		submit called it unguarded. On a real site that swapped the operator's
+		refusal for "DocType Error Log not found", which is how this was found:
+		the mock suite passed and CI did not.
+		"""
+
+		def exploding_log_error(*args, **kwargs):
+			raise Exception("DocType Error Log not found")
+
+		with patch.object(
+			inventory_count.frappe, "log_error", side_effect=exploding_log_error
+		):
+			with self.assertRaises(Exception) as caught:
+				self._submit_one_increase(
+					"NOTHING-KNOWN",
+					item_fields={
+						"stock_uom": "Kg",
+						"last_purchase_rate": 0.0,
+						"valuation_rate": 0.0,
+						"item_name": "Nothing Known",
+						"has_batch_no": 0,
+						"has_serial_no": 0,
+					},
+					get_all=self._sheet_only,
+				)
+
+		message = str(caught.exception)
+		self.assertIn("NOTHING-KNOWN", message)
+		self.assertNotIn("Error Log", message)
+
 	def test_count_sheet_prices_an_item_that_only_has_a_seeded_rate(self):
 		"""The sheet and the submit must agree on what an item is worth.
 

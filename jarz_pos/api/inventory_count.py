@@ -330,15 +330,29 @@ def _first_positive(value: Any) -> Optional[float]:
     return rate if math.isfinite(rate) and rate > 0 else None
 
 
-def _log_valuation_source_failure(item_code: str, label: str) -> None:
-    """A source that errored must not look like a source that found nothing."""
+def _safe_log(title: str) -> str:
+    """Record the current exception without ever becoming the failure.
+
+    `frappe.log_error` can raise on its own -- `capture_exception` reads System
+    Settings outside its own try -- and every handler here exists to explain a
+    failure, not to replace one. Unguarded, it swapped the operator's refusal
+    message for "DocType Error Log not found". Returns the traceback so a
+    caller in debug mode can still hand it back.
+    """
     try:
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"jarz_pos valuation source failed: {label} for {item_code}"[:140],
-        )
+        tb = frappe.get_traceback()
+    except Exception:
+        tb = ""
+    try:
+        frappe.log_error(tb, title[:140])
     except Exception:
         pass
+    return tb
+
+
+def _log_valuation_source_failure(item_code: str, label: str) -> None:
+    """A source that errored must not look like a source that found nothing."""
+    _safe_log(f"jarz_pos valuation source failed: {label} for {item_code}")
 
 
 def _sle_valuation(item_code: str, warehouse: Optional[str]) -> Optional[float]:
@@ -850,8 +864,7 @@ def submit_reconciliation(
             sr.submit()
             frappe.db.commit()
         except Exception as e:
-            tb = frappe.get_traceback()
-            frappe.log_error(tb, "jarz_pos.submit_reconciliation")
+            tb = _safe_log("jarz_pos.submit_reconciliation")
             if debug_flag:
                 return {"ok": False, "error": str(e), "traceback": tb}
             if e.__class__.__name__.endswith("NegativeStockError"):
@@ -861,8 +874,7 @@ def submit_reconciliation(
         return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
 
     except Exception as e:
-        tb = frappe.get_traceback()
-        frappe.log_error(tb, "jarz_pos.submit_reconciliation")
+        tb = _safe_log("jarz_pos.submit_reconciliation")
         if debug_flag:
             return {"ok": False, "error": str(e), "traceback": tb}
         # Re-raise to preserve HTTP error semantics when not debugging
