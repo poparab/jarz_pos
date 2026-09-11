@@ -1015,10 +1015,24 @@ def _resolve_amendment_price_list(
     wins, and a Standard order (source == profile default) is byte-identical to before:
     rule 2 cannot fire, so rule 3 returns exactly what rule 1 used to return.
 
-    The lever for "re-price this order at retail" is the order purpose, not the picker:
-    a matched commercial policy re-derives the list through
-    ``_resolve_effective_price_list`` (policy → sales partner → customer → B2B baseline)
-    and would override the source list downstream anyway.
+    THE ACCEPTED TRADE-OFF, stated so nobody has to rediscover it: an operator who
+    genuinely wants to move an order ONTO the profile default is now ignored, and
+    silently — the client re-prices its cart locally when the picker changes, so the
+    operator confirms a retail total and gets a B2B invoice. That is an undercharge, the
+    safe direction, and it is the price of not being able to tell a real choice from a
+    fallback echo. There is no order-purpose escape hatch: ``submit_invoice_amendment``
+    takes no ``order_purpose`` and the job copies ``custom_order_purpose`` verbatim from
+    the source, and ``requested`` sits FIRST in both branches of
+    ``_resolve_effective_price_list`` — so a matched policy does not re-derive over this
+    either. The only per-order lever is a manager-gated per-line ``custom_rate_override``.
+    Giving the client a ``price_list_explicit`` flag would let intent be expressed
+    properly; until then this asymmetry is deliberate.
+
+    Note what this does NOT fix: an invoice whose header was clobbered before
+    ``_persist_selling_price_list`` shipped has ``selling_price_list`` EQUAL to the
+    profile default, so rule 2 cannot fire and amending it still re-prices at retail.
+    Re-stamp such a header before amending. Production carried exactly one such record
+    (``ACC-SINV-2026-18253-1``) when this landed.
 
     No new resolution logic lives here: whatever this returns is handed to
     ``create_pos_invoice(price_list=...)`` and run through that same chain, including
@@ -1027,9 +1041,41 @@ def _resolve_amendment_price_list(
     explicit = _normalize_price_list_name(requested)
     profile_default = _pos_profile_default_price_list(pos_profile_name)
 
-    # A deliberate, non-default choice outranks everything. When the profile default is
-    # unresolvable this keeps the pre-existing behaviour: any explicit list wins.
-    if explicit and explicit != profile_default:
+    # Case-insensitively, because MariaDB's collation is: "standard selling" and
+    # "Standard Selling" are the SAME list to `frappe.db.exists`, and treating them as
+    # different here would re-open the hole for any client that varies the casing.
+    def _same(a: Optional[str], b: Optional[str]) -> bool:
+        return bool(a) and bool(b) and a.casefold() == b.casefold()
+
+    if not profile_default:
+        # Fail-open: with no default to compare against, every explicit request looks
+        # deliberate and rule 1 is unconditional again — i.e. the pre-fix behaviour.
+        # Say so, because otherwise the protection is silently absent for that profile.
+        #
+        # A named logger with an explicit level, NOT a bare `frappe.logger().warning`:
+        # staging and production set neither developer_mode nor log_level, so every
+        # logger defaults to ERROR and both .info() and .warning() are dropped. A bare
+        # call here would look like a diagnostic while emitting nothing on the only two
+        # environments where this branch matters.
+        try:
+            import logging
+
+            _pl_logger = frappe.logger(
+                "jarz_pos.api.manager", allow_site=frappe.local.site
+            )
+            _pl_logger.setLevel(logging.WARNING)
+            _pl_logger.warning(
+                "amendment_price_list: POS Profile %r has no resolvable "
+                "selling_price_list; the client's requested list is being trusted "
+                "unconditionally, so an amendment can re-price the order.",
+                pos_profile_name or "",
+            )
+        except Exception:
+            # Never let a diagnostic break an amendment.
+            pass
+
+    # A deliberate, non-default choice outranks everything.
+    if explicit and not _same(explicit, profile_default):
         return explicit
 
     source_price_list = _normalize_price_list_name(source_invoice.get("selling_price_list"))
@@ -1037,7 +1083,7 @@ def _resolve_amendment_price_list(
     # Equal to the profile default means "never overridden": fall through so the
     # amendment is byte-identical to today's behaviour rather than being re-classified
     # as an explicit request.
-    if source_price_list and source_price_list != profile_default:
+    if source_price_list and not _same(source_price_list, profile_default):
         return source_price_list
 
     return explicit or None

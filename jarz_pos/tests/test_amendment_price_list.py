@@ -223,7 +223,12 @@ class TestResolveAmendmentPriceList(unittest.TestCase):
         )
 
     def test_explicit_argument_still_wins_when_the_profile_default_is_unknown(self):
-        """An unresolvable POS Profile must not change the pre-existing behaviour."""
+        """An unresolvable POS Profile must not change the pre-existing behaviour.
+
+        This is a deliberate fail-open, not an oversight: with no default to compare
+        against there is nothing to tell a real choice from a client echo. It is logged
+        at WARNING through a named logger so the gap is visible on a server.
+        """
         self.assertEqual(
             self._resolve(
                 _PROFILE_DEFAULT_PL,
@@ -231,6 +236,40 @@ class TestResolveAmendmentPriceList(unittest.TestCase):
                 profile_default=None,
             ),
             _PROFILE_DEFAULT_PL,
+        )
+
+    def test_blank_pos_profile_name_fails_open_without_raising(self):
+        """A blank profile name reaches `_pos_profile_default_price_list` as None.
+
+        Covers the fail-open through the real helper rather than by injecting
+        ``profile_default=None``, and pins that the diagnostic cannot break an
+        amendment.
+        """
+        from jarz_pos.api.manager import _resolve_amendment_price_list
+
+        inv = _FakeSourceInvoice(selling_price_list=_OVERRIDE_PL)
+        with patch("jarz_pos.api.manager.frappe", _mock_manager_frappe(None)):
+            self.assertEqual(
+                _resolve_amendment_price_list(
+                    inv, _PROFILE_DEFAULT_PL, pos_profile_name=""
+                ),
+                _PROFILE_DEFAULT_PL,
+            )
+
+    def test_casing_cannot_reopen_the_hole(self):
+        """MariaDB's collation is case-insensitive, so this comparison must be too.
+
+        A client echoing "standard selling" for a profile default of "Standard Selling"
+        would otherwise look like a deliberate non-default choice and re-price the order
+        at retail — the exact 17328 failure wearing different capitals.
+        """
+        self.assertEqual(
+            self._resolve(_PROFILE_DEFAULT_PL.lower(), source_price_list=_OVERRIDE_PL),
+            _OVERRIDE_PL,
+        )
+        self.assertEqual(
+            self._resolve(_OVERRIDE_PL.upper(), source_price_list=_OVERRIDE_PL),
+            _OVERRIDE_PL.upper(),
         )
 
 
