@@ -320,7 +320,7 @@ def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
 
 
 def _first_positive(value: Any) -> Optional[float]:
-    """A usable rate, or None. Zero and NaN are not usable rates."""
+    """A usable rate, or None. Zero, negative and NaN are not usable rates."""
     if value is None:
         return None
     try:
@@ -330,83 +330,104 @@ def _first_positive(value: Any) -> Optional[float]:
     return rate if math.isfinite(rate) and rate > 0 else None
 
 
-# The single valuation chain, used by both the count sheet and the submit.
-# It was duplicated once, and the same two defects were present in both copies:
-# `Item.valuation_rate` was never consulted, and `last_purchase_rate` -- which
-# is 0.0 rather than NULL on anything never purchased -- was returned merely
-# because it "is not None", which made every source below it unreachable.
-def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
+def _log_valuation_source_failure(item_code: str, label: str) -> None:
+    """A source that errored must not look like a source that found nothing."""
     try:
-        # 1) Latest SLE in this warehouse, then 2) any SLE for the item.
-        for sle_filters in (
-            {"item_code": item_code, "warehouse": warehouse},
-            {"item_code": item_code},
-        ):
-            rows = frappe.get_all(
-                "Stock Ledger Entry",
-                filters=sle_filters,
-                fields=["valuation_rate"],
-                order_by="posting_date desc, posting_time desc, creation desc",
-                limit=1,
-            )
-            rate = _first_positive(rows[0].get("valuation_rate") if rows else None)
-            if rate is not None:
-                return rate
-
-        # 3) Item.last_purchase_rate
-        rate = _first_positive(
-            frappe.db.get_value("Item", item_code, "last_purchase_rate")
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"jarz_pos valuation source failed: {label} for {item_code}"[:140],
         )
-        if rate is not None:
-            return rate
-
-        # 4) Any Buying Item Price, then 5) any Selling Item Price.
-        for price_filters in (
-            {"item_code": item_code, "buying": 1},
-            {"item_code": item_code, "selling": 1},
-        ):
-            prices = frappe.get_all(
-                "Item Price",
-                filters=price_filters,
-                fields=["price_list_rate"],
-                order_by="modified desc",
-                limit=1,
-            )
-            rate = _first_positive(
-                prices[0].get("price_list_rate") if prices else None
-            )
-            if rate is not None:
-                return rate
-
-        # 6) Item.valuation_rate -- ERPNext's own final fallback in
-        # ``get_valuation_rate``, and the field the fruit-mix migration seeds
-        # from the recipe for a sub-assembly that has never been produced. Not
-        # reading it is what blocked the first count of `raspberry mix`: the
-        # rate was on the Item the whole time.
-        rate = _first_positive(
-            frappe.db.get_value("Item", item_code, "valuation_rate")
-        )
-        if rate is not None:
-            return rate
-
-        # 7) Active BOM unit cost. A manufactured sub-assembly is never bought
-        # and never sold, so sources 3-5 can structurally never fire for one;
-        # its recipe is the only cost it has ever had.
-        bom = frappe.get_all(
-            "BOM",
-            filters={"item": item_code, "is_active": 1},
-            fields=["total_cost", "quantity"],
-            order_by="is_default desc, modified desc",
-            limit=1,
-        )
-        if bom:
-            produced = float(bom[0].get("quantity") or 0)
-            if produced > 0:
-                return _first_positive(
-                    float(bom[0].get("total_cost") or 0) / produced
-                )
     except Exception:
         pass
+
+
+def _sle_valuation(item_code: str, warehouse: Optional[str]) -> Optional[float]:
+    filters: Dict[str, Any] = {"item_code": item_code, "is_cancelled": 0}
+    if warehouse:
+        filters["warehouse"] = warehouse
+    rows = frappe.get_all(
+        "Stock Ledger Entry",
+        filters=filters,
+        fields=["valuation_rate"],
+        order_by="posting_date desc, posting_time desc, creation desc",
+        limit=1,
+    )
+    return _first_positive(rows[0].get("valuation_rate") if rows else None)
+
+
+def _item_field_valuation(item_code: str, fieldname: str) -> Optional[float]:
+    return _first_positive(frappe.db.get_value("Item", item_code, fieldname))
+
+
+def _item_price_valuation(item_code: str, buying: bool) -> Optional[float]:
+    rows = frappe.get_all(
+        "Item Price",
+        filters={"item_code": item_code, "buying" if buying else "selling": 1},
+        fields=["price_list_rate"],
+        order_by="modified desc",
+        limit=1,
+    )
+    return _first_positive(rows[0].get("price_list_rate") if rows else None)
+
+
+def _bom_unit_cost(item_code: str) -> Optional[float]:
+    """Unit cost of the item's own recipe, the way ERPNext computes it.
+
+    `base_total_cost`, not `total_cost`: the former is in company currency,
+    the latter in the BOM's own. `docstatus: 1` because `is_active` defaults
+    to 1 on a BOM, so a draft recipe -- which already carries a computed
+    `total_cost` from `validate` -- would otherwise become the valuation basis
+    for a stock increase that moves the GL.
+    """
+    rows = frappe.get_all(
+        "BOM",
+        filters={"item": item_code, "is_active": 1, "docstatus": 1},
+        fields=["base_total_cost", "quantity"],
+        order_by="is_default desc, modified desc",
+        limit=1,
+    )
+    if not rows:
+        return None
+    produced = _first_positive(rows[0].get("quantity"))
+    if produced is None:
+        return None
+    return _first_positive(float(rows[0].get("base_total_cost") or 0) / produced)
+
+
+# The single valuation chain, used by both the count sheet and the submit. It
+# was duplicated once, and the same two defects sat in both copies: the item's
+# own valuation rate was never consulted, and `last_purchase_rate` -- 0.0
+# rather than NULL on anything never purchased -- was returned merely because
+# it "is not None", which made every source below it unreachable.
+#
+# Order follows ERPNext's own `get_valuation_rate` (stock_ledger.py): ledger
+# first, then `Item.valuation_rate`, `Item.standard_rate`, and only then a
+# price list. Cost beats price -- a Stock Reconciliation applies the rate to
+# the WHOLE counted quantity, not just the delta, so valuing an increase off a
+# retail price restates the entire balance at margin and books the difference
+# to stock adjustment. Selling price stays last, purely so a count is never
+# refused outright when nothing else exists.
+def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
+    sources: Tuple[Tuple[str, Any], ...] = (
+        ("stock ledger, this warehouse", lambda: _sle_valuation(item_code, warehouse)),
+        ("stock ledger, any warehouse", lambda: _sle_valuation(item_code, None)),
+        ("item valuation rate", lambda: _item_field_valuation(item_code, "valuation_rate")),
+        ("item standard rate", lambda: _item_field_valuation(item_code, "standard_rate")),
+        ("last purchase rate", lambda: _item_field_valuation(item_code, "last_purchase_rate")),
+        ("buying item price", lambda: _item_price_valuation(item_code, True)),
+        ("active BOM unit cost", lambda: _bom_unit_cost(item_code)),
+        ("selling item price", lambda: _item_price_valuation(item_code, False)),
+    )
+    for label, source in sources:
+        try:
+            rate = source()
+        except Exception:
+            # One failing source must not forfeit the ones below it, and an
+            # infrastructure failure must not read as "this item has no rate".
+            _log_valuation_source_failure(item_code, label)
+            continue
+        if rate is not None:
+            return rate
     return None
 
 
@@ -636,7 +657,7 @@ def _build_missing_valuation_rate_message(
         item_label = f"{item_code} ({item_name})"
 
     return _(
-        "Cannot increase stock for Item {0} in Warehouse {1} from {2} to {3} because no valuation rate could be resolved from stock ledger entries, last purchase rate, item prices, the item's own valuation rate, or an active BOM. Set the Item's Valuation Rate or a Buying Item Price, create a prior valued stock entry, or enable 'Allow Zero Valuation Rate' in Stock Settings."
+        "Cannot increase stock for Item {0} in Warehouse {1} from {2} to {3} because no valuation rate could be resolved. Tried: stock ledger entries, the item's valuation and standard rates, its last purchase rate, item prices, and a submitted active BOM. Set the Item's Valuation Rate, add a Buying Item Price, or submit the item's BOM, then count again."
     ).format(
         item_label,
         warehouse,
@@ -707,12 +728,6 @@ def submit_reconciliation(
         # Current quantities
         cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
-        # Valuation for an increase comes from the same chain the count
-        # sheet used to price the item, so the sheet and the submit can
-        # never disagree about what an item is worth.
-        def _resolve_valuation_rate(item_code: str, wh: str) -> Optional[float]:
-            return _resolve_item_valuation(item_code, wh)
-
         # Create Stock Reconciliation only for differences
         sr = frappe.new_doc("Stock Reconciliation")
         # Set company from warehouse to align with stock rules across environments
@@ -776,7 +791,7 @@ def submit_reconciliation(
                 if vr is not None and float(vr) <= 0:
                     vr = None
                 if vr is None:
-                    vr = _resolve_valuation_rate(code, warehouse)
+                    vr = _resolve_item_valuation(code, warehouse)
                 # If zero or negative, treat as missing unless zero valuation is allowed
                 if vr is not None and float(vr) <= 0:
                     vr = None if not allow_zero_val else 0.0

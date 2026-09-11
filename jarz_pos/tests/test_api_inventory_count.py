@@ -42,6 +42,8 @@ if "frappe" not in sys.modules:
 	fake_utils.cint = lambda value: int(value or 0)
 	fake_utils.getdate = lambda value: value
 	fake_utils.strip_html = lambda value: str(value)
+	fake_frappe.get_traceback = lambda *args, **kwargs: ''
+	fake_frappe.log_error = lambda *args, **kwargs: None
 
 	sys.modules["frappe"] = fake_frappe
 	sys.modules["frappe.utils"] = fake_utils
@@ -147,13 +149,29 @@ class TestInventoryCountAPI(unittest.TestCase):
 		self.assertEqual(1, len(doc.items))
 		self.assertAlmostEqual(12.3, doc.items[0]["qty"])
 
-	def _submit_one_increase(self, item_code, *, item_fields, get_all):
-		"""Run submit_reconciliation for a single counted item and return the row.
+	def _resolve(self, *, item_fields, get_all, warehouse="Raw Material - J"):
+		"""Run the shared valuation chain with a stated view of the site."""
 
-		The caller supplies what the site knows about the item, so a test can
-		state precisely which valuation source is meant to be the only one
-		available.
-		"""
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Item" and len(args) >= 2:
+				return item_fields.get(args[1])
+			return None
+
+		with patch.object(
+			inventory_count.frappe, "get_all", side_effect=get_all
+		), patch.object(
+			inventory_count.frappe.db, "get_value", side_effect=fake_get_value
+		):
+			return inventory_count._resolve_item_valuation("ITEM", warehouse)
+
+	@staticmethod
+	def _nothing_anywhere(doctype, **kwargs):
+		if doctype in ("Stock Ledger Entry", "Item Price", "BOM"):
+			return []
+		raise AssertionError((doctype, kwargs))
+
+	def _submit_one_increase(self, item_code, *, item_fields, get_all):
+		"""Run submit_reconciliation for a single counted item and return the row."""
 
 		class FakeReconciliation:
 			def __init__(self):
@@ -204,6 +222,11 @@ class TestInventoryCountAPI(unittest.TestCase):
 		self.assertEqual(1, len(doc.items))
 		return doc.items[0]
 
+	def _sheet_only(self, doctype, **kwargs):
+		if doctype == "UOM Conversion Detail":
+			return []
+		return self._nothing_anywhere(doctype, **kwargs)
+
 	def test_first_count_of_a_subassembly_prices_from_the_item_valuation_rate(self):
 		"""A never-produced sub-assembly is countable on its seeded rate.
 
@@ -213,14 +236,6 @@ class TestInventoryCountAPI(unittest.TestCase):
 		which the resolver used to ignore, and the first floor count of it was
 		refused outright.
 		"""
-
-		def fake_get_all(doctype, **kwargs):
-			if doctype == "UOM Conversion Detail":
-				return []
-			if doctype in ("Stock Ledger Entry", "Item Price", "Company", "BOM"):
-				return []
-			raise AssertionError((doctype, kwargs))
-
 		row = self._submit_one_increase(
 			"raspberry mix",
 			item_fields={
@@ -230,7 +245,7 @@ class TestInventoryCountAPI(unittest.TestCase):
 				"has_batch_no": 0,
 				"has_serial_no": 0,
 			},
-			get_all=fake_get_all,
+			get_all=self._sheet_only,
 		)
 
 		self.assertAlmostEqual(265.0, row["valuation_rate"])
@@ -247,9 +262,7 @@ class TestInventoryCountAPI(unittest.TestCase):
 				return []
 			if doctype == "Item Price" and kwargs.get("filters", {}).get("buying"):
 				return [{"price_list_rate": 42.5}]
-			if doctype in ("Stock Ledger Entry", "Item Price", "Company", "BOM"):
-				return []
-			raise AssertionError((doctype, kwargs))
+			return self._nothing_anywhere(doctype, **kwargs)
 
 		row = self._submit_one_increase(
 			"NEVER-BOUGHT",
@@ -265,31 +278,150 @@ class TestInventoryCountAPI(unittest.TestCase):
 
 		self.assertAlmostEqual(42.5, row["valuation_rate"])
 
-	def test_a_manufactured_item_falls_back_to_its_recipe_cost(self):
-		"""Last resort before refusing: the active BOM's unit cost."""
+	def test_bom_fallback_uses_company_currency_and_ignores_draft_recipes(self):
+		"""The recipe is the last cost source, and only a submitted one counts.
+
+		`is_active` defaults to 1 on a BOM, so a draft recipe -- which already
+		carries a `total_cost` computed during validate -- would otherwise
+		price a stock increase. `base_total_cost` is the company-currency
+		figure; `total_cost` is in the BOM's own currency.
+		"""
+		seen = {}
 
 		def fake_get_all(doctype, **kwargs):
-			if doctype == "UOM Conversion Detail":
-				return []
 			if doctype == "BOM":
-				return [{"total_cost": 530.0, "quantity": 2.0}]
-			if doctype in ("Stock Ledger Entry", "Item Price", "Company"):
-				return []
-			raise AssertionError((doctype, kwargs))
+				seen.update(kwargs)
+				return [{"base_total_cost": 530.0, "total_cost": 999.0, "quantity": 2.0}]
+			return self._nothing_anywhere(doctype, **kwargs)
 
-		row = self._submit_one_increase(
-			"MIX-NO-SEEDED-RATE",
-			item_fields={
-				"stock_uom": "Kg",
-				"last_purchase_rate": 0.0,
-				"valuation_rate": 0.0,
-				"has_batch_no": 0,
-				"has_serial_no": 0,
-			},
+		rate = self._resolve(
+			item_fields={"last_purchase_rate": 0.0, "valuation_rate": 0.0},
 			get_all=fake_get_all,
 		)
 
-		self.assertAlmostEqual(265.0, row["valuation_rate"])
+		self.assertAlmostEqual(265.0, rate)
+		self.assertEqual(1, seen["filters"]["docstatus"])
+		self.assertEqual(1, seen["filters"]["is_active"])
+		self.assertIn("is_default desc", seen["order_by"])
+		self.assertIn("base_total_cost", seen["fields"])
+
+	def test_cost_sources_outrank_the_selling_price(self):
+		"""A Stock Reconciliation reprices the WHOLE balance, not the delta.
+
+		Valuing an increase off a retail price therefore restates every unit at
+		margin and books the difference to stock adjustment. Every cost-based
+		source must win first; the selling price is only a last resort so that
+		a count is never refused outright.
+		"""
+
+		def only_selling(doctype, **kwargs):
+			if doctype == "Item Price" and kwargs.get("filters", {}).get("selling"):
+				return [{"price_list_rate": 900.0}]
+			return self._nothing_anywhere(doctype, **kwargs)
+
+		def selling_and_buying(doctype, **kwargs):
+			if doctype == "Item Price" and kwargs.get("filters", {}).get("buying"):
+				return [{"price_list_rate": 400.0}]
+			return only_selling(doctype, **kwargs)
+
+		def selling_and_bom(doctype, **kwargs):
+			if doctype == "BOM":
+				return [{"base_total_cost": 530.0, "quantity": 2.0}]
+			return only_selling(doctype, **kwargs)
+
+		no_cost = {"last_purchase_rate": 0.0, "valuation_rate": 0.0}
+
+		# The item's own valuation rate beats any price list, as in ERPNext.
+		self.assertAlmostEqual(
+			265.0,
+			self._resolve(
+				item_fields={"last_purchase_rate": 0.0, "valuation_rate": 265.0},
+				get_all=selling_and_buying,
+			),
+		)
+		# Buying beats selling.
+		self.assertAlmostEqual(
+			400.0, self._resolve(item_fields=no_cost, get_all=selling_and_buying)
+		)
+		# The recipe beats selling.
+		self.assertAlmostEqual(
+			265.0, self._resolve(item_fields=no_cost, get_all=selling_and_bom)
+		)
+		# With nothing else at all, selling still keeps the count possible.
+		self.assertAlmostEqual(
+			900.0, self._resolve(item_fields=no_cost, get_all=only_selling)
+		)
+
+	def test_the_ledger_probe_ignores_cancelled_entries(self):
+		"""A reconciliation posted at a bad rate and then cancelled must not
+		price the next count. ERPNext's own probe filters `is_cancelled = 0`."""
+		seen = []
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "Stock Ledger Entry":
+				seen.append(kwargs["filters"])
+				return []
+			return self._nothing_anywhere(doctype, **kwargs)
+
+		self._resolve(
+			item_fields={"last_purchase_rate": 0.0, "valuation_rate": 265.0},
+			get_all=fake_get_all,
+		)
+
+		self.assertEqual(2, len(seen))
+		for filters in seen:
+			self.assertEqual(0, filters["is_cancelled"])
+		self.assertEqual("Raw Material - J", seen[0]["warehouse"])
+		self.assertNotIn("warehouse", seen[1])
+
+	def test_a_failing_source_does_not_forfeit_the_ones_below_it(self):
+		"""An infrastructure failure must not read as "this item has no rate".
+
+		The chain briefly sat under one broad `except`, so a raise in the first
+		source discarded every later fallback and the operator was told five
+		sources had been checked when none had.
+		"""
+		logged = []
+
+		def exploding_ledger(doctype, **kwargs):
+			if doctype == "Stock Ledger Entry":
+				raise RuntimeError("database is down")
+			return self._nothing_anywhere(doctype, **kwargs)
+
+		with patch.object(
+			inventory_count,
+			"_log_valuation_source_failure",
+			side_effect=lambda item, label: logged.append(label),
+		):
+			rate = self._resolve(
+				item_fields={"last_purchase_rate": 0.0, "valuation_rate": 265.0},
+				get_all=exploding_ledger,
+			)
+
+		self.assertAlmostEqual(265.0, rate)
+		self.assertEqual(2, len(logged))
+
+	def test_an_item_with_no_cost_anywhere_is_still_refused(self):
+		"""The refusal is the behaviour the operator actually sees."""
+		with self.assertRaises(Exception) as caught:
+			self._submit_one_increase(
+				"NOTHING-KNOWN",
+				item_fields={
+					"stock_uom": "Kg",
+					"last_purchase_rate": 0.0,
+					"valuation_rate": 0.0,
+					"item_name": "Nothing Known",
+					"has_batch_no": 0,
+					"has_serial_no": 0,
+				},
+				get_all=self._sheet_only,
+			)
+
+		message = str(caught.exception)
+		self.assertIn("NOTHING-KNOWN", message)
+		self.assertIn("Raw Material - J", message)
+		# It must not advise a Stock Settings field that does not exist.
+		self.assertNotIn("Allow Zero Valuation Rate", message)
 
 	def test_count_sheet_prices_an_item_that_only_has_a_seeded_rate(self):
 		"""The sheet and the submit must agree on what an item is worth.
@@ -299,25 +431,10 @@ class TestInventoryCountAPI(unittest.TestCase):
 		non-positive rate rather than sending it back, which is why the submit
 		had to resolve the item from scratch -- and failed too.
 		"""
-
-		def fake_get_all(doctype, **kwargs):
-			if doctype in ("Stock Ledger Entry", "Item Price", "BOM"):
-				return []
-			raise AssertionError((doctype, kwargs))
-
-		def fake_get_value(doctype, *args, **kwargs):
-			if doctype == "Item" and len(args) >= 2:
-				return {"last_purchase_rate": 0.0, "valuation_rate": 265.0}.get(args[1])
-			return None
-
-		with patch.object(
-			inventory_count.frappe, "get_all", side_effect=fake_get_all
-		), patch.object(
-			inventory_count.frappe.db, "get_value", side_effect=fake_get_value
-		):
-			rate = inventory_count._resolve_item_valuation(
-				"raspberry mix", "Raw Material - J"
-			)
+		rate = self._resolve(
+			item_fields={"last_purchase_rate": 0.0, "valuation_rate": 265.0},
+			get_all=self._nothing_anywhere,
+		)
 
 		self.assertAlmostEqual(265.0, rate)
 
