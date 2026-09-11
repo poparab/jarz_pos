@@ -25,6 +25,18 @@ Cause 2 — the amendment endpoint dropped the price list.
     ``TestAmendmentPriceListResolution`` and ``TestSubmitInvoiceAmendmentForwardsPriceList``
     pin the whole thread.
 
+Cause 3 — the client's fallback outranked the order's own list.
+    Fixing causes 1 and 2 was not enough: order 17328 / ``ACC-SINV-2026-18252`` repriced
+    the same way on 2026-09-11, six days after the deploy, overcharging Sos coffee
+    1,360 EGP on 20 jars. ``format_invoice_data`` never emitted ``selling_price_list``,
+    so the Flutter amendment draft could not know the order's basis, defaulted its
+    picker to the POS Profile's ``is_default`` list, and posted that fallback as an
+    explicit request — which ``_resolve_amendment_price_list`` honoured above the source
+    invoice's override. The resolver now ignores an explicit request that merely repeats
+    the profile default, because that value is exactly what a client sends when it knows
+    nothing. Pinned by ``test_client_echo_of_the_profile_default_does_not_clobber_the_override``
+    and ``test_default_price_list_echo_does_not_reprice_a_b2b_order``.
+
 Everything here is mock-based and runs without a live site (CI logic gate).
 """
 
@@ -191,6 +203,36 @@ class TestResolveAmendmentPriceList(unittest.TestCase):
     def test_whitespace_only_argument_falls_through_to_source(self):
         self.assertEqual(self._resolve("   ", source_price_list=_OVERRIDE_PL), _OVERRIDE_PL)
 
+    def test_client_echo_of_the_profile_default_does_not_clobber_the_override(self):
+        """Cause 3, the 17328 regression — the one assertion that closes the hole.
+
+        The amendment draft loads without a price list, so the client's picker falls
+        back to the ``is_default`` entry and posts it as though it were a choice. That
+        request carries no information, so the order's own override must survive it.
+        """
+        self.assertEqual(
+            self._resolve(_PROFILE_DEFAULT_PL, source_price_list=_OVERRIDE_PL),
+            _OVERRIDE_PL,
+        )
+
+    def test_profile_default_echo_on_a_standard_order_is_unchanged(self):
+        """The overwhelming majority of orders must behave byte-identically."""
+        self.assertEqual(
+            self._resolve(_PROFILE_DEFAULT_PL, source_price_list=_PROFILE_DEFAULT_PL),
+            _PROFILE_DEFAULT_PL,
+        )
+
+    def test_explicit_argument_still_wins_when_the_profile_default_is_unknown(self):
+        """An unresolvable POS Profile must not change the pre-existing behaviour."""
+        self.assertEqual(
+            self._resolve(
+                _PROFILE_DEFAULT_PL,
+                source_price_list=_OVERRIDE_PL,
+                profile_default=None,
+            ),
+            _PROFILE_DEFAULT_PL,
+        )
+
 
 # ---------------------------------------------------------------------------
 # 2. The job hands the resolved list to the creation service
@@ -226,6 +268,21 @@ class TestAmendmentPriceListResolution(unittest.TestCase):
         creation, _ = _run_amendment(source, _mock_manager_frappe())
 
         self.assertIsNone(creation.call_args.kwargs.get("price_list"))
+
+    def test_default_price_list_echo_does_not_reprice_a_b2b_order(self):
+        """(c2) The 17328 failure, end to end through the job.
+
+        The client posts the POS Profile default because its amendment draft never
+        received the order's real list. The replacement must still be created against
+        "B2B Selling" — this is the assertion that would have caught the 1,360 EGP
+        overcharge on Sos coffee.
+        """
+        source = _FakeSourceInvoice(selling_price_list=_OVERRIDE_PL)
+        creation, _ = _run_amendment(
+            source, _mock_manager_frappe(), price_list=_PROFILE_DEFAULT_PL
+        )
+
+        self.assertEqual(creation.call_args.kwargs.get("price_list"), _OVERRIDE_PL)
 
     def test_order_purpose_still_carried_alongside_the_price_list(self):
         """The policy carry-over that already existed must not have been displaced."""

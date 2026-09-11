@@ -765,6 +765,13 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         "items": items,
         "payment_method": invoice.get("custom_payment_method"),
         "pos_profile": invoice.get("custom_kanban_profile") or invoice.get("pos_profile"),
+        # The order's pricing basis. The amendment draft reads this to load the catalog
+        # from the SAME list the order was booked on; without it the client falls back
+        # to the POS Profile default and posts that fallback as an explicit choice,
+        # which is how a B2B order at 92/unit came back from amendment at the retail
+        # 160 (Woo 17328, 2026-09-11). Paired with the narrowed rule 1 in
+        # jarz_pos.api.manager._resolve_amendment_price_list.
+        "selling_price_list": invoice.get("selling_price_list"),
         "outstanding_amount": float(invoice.get("outstanding_amount") or 0),
         "docstatus_value": int(invoice.get("docstatus") or 0),
         "doc_status": invoice.get("status"),

@@ -989,40 +989,58 @@ def _resolve_amendment_price_list(
 
     Precedence, highest first:
 
-    1. an explicit ``price_list`` argument — the operator changed the list on this
-       amendment and that choice is the whole point of the request;
+    1. an explicit ``price_list`` argument that is NOT the POS Profile default — only a
+       list the server would never reach for on its own proves the operator chose it;
     2. the source invoice's own persisted ``selling_price_list``, when it differs from
        the POS Profile default — i.e. the order carried an override, and an amendment
        that only flips pickup / address / slot must NOT lose it;
-    3. ``None`` — no override, so ``create_pos_invoice`` re-derives exactly as it does
-       today.
+    3. the explicit argument (which by here IS the profile default), else ``None`` — no
+       override, so ``create_pos_invoice`` re-derives exactly as it does today.
 
-    Case 2 is the production regression: ``submit_invoice_amendment`` had no
+    Case 2 is the original production regression: ``submit_invoice_amendment`` had no
     ``price_list`` parameter at all, so Frappe silently dropped the one the Flutter
     client sends and every replacement re-priced from the POS Profile default. Order
     17206 fell from a B2B rate of 92 to the retail 160 on its first amendment and could
     not be brought back.
 
+    Rule 1 is narrowed to a NON-DEFAULT list because case 2 alone did not close the
+    hole — order 17328 re-priced the same way on 2026-09-11. The Flutter amendment draft
+    loads the source invoice without its price list (``format_invoice_data`` never
+    carried ``selling_price_list``), so the picker falls back to the ``is_default``
+    entry and checkout posts that fallback as though the operator had picked it. A
+    request equal to the profile default therefore carries NO information — it is
+    precisely what a client sends when it knows nothing — and letting it outrank the
+    source's own override re-priced 20 jars from the agreed B2B 92 to the retail 160,
+    overcharging Sos coffee by 1,360 EGP. A genuinely chosen non-default list still
+    wins, and a Standard order (source == profile default) is byte-identical to before:
+    rule 2 cannot fire, so rule 3 returns exactly what rule 1 used to return.
+
+    The lever for "re-price this order at retail" is the order purpose, not the picker:
+    a matched commercial policy re-derives the list through
+    ``_resolve_effective_price_list`` (policy → sales partner → customer → B2B baseline)
+    and would override the source list downstream anyway.
+
     No new resolution logic lives here: whatever this returns is handed to
-    ``create_pos_invoice(price_list=...)`` and run through the existing
-    ``_resolve_effective_price_list`` chain (policy → sales partner → customer → B2B
-    baseline → profile default), including its manager gate.
+    ``create_pos_invoice(price_list=...)`` and run through that same chain, including
+    its manager gate.
     """
     explicit = _normalize_price_list_name(requested)
-    if explicit:
+    profile_default = _pos_profile_default_price_list(pos_profile_name)
+
+    # A deliberate, non-default choice outranks everything. When the profile default is
+    # unresolvable this keeps the pre-existing behaviour: any explicit list wins.
+    if explicit and explicit != profile_default:
         return explicit
 
     source_price_list = _normalize_price_list_name(source_invoice.get("selling_price_list"))
-    if not source_price_list:
-        return None
 
-    # Equal to the profile default means "never overridden": return None so the
+    # Equal to the profile default means "never overridden": fall through so the
     # amendment is byte-identical to today's behaviour rather than being re-classified
     # as an explicit request.
-    if source_price_list == _pos_profile_default_price_list(pos_profile_name):
-        return None
+    if source_price_list and source_price_list != profile_default:
+        return source_price_list
 
-    return source_price_list
+    return explicit or None
 
 
 def _territory_default_delivery_income(territory_name: Optional[str]) -> Optional[float]:
