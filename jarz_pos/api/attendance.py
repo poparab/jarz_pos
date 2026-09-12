@@ -125,10 +125,15 @@ def get_employee(
     employee = _clean(employee)
     if not employee:
         frappe.throw(_("Employee is required."))
-    if not frappe.db.exists("Employee", employee):
-        frappe.throw(_("No such employee: {0}").format(employee))
 
+    # Scope BEFORE existence, with the same message for both: checking existence
+    # first answered "No such employee" for a bad id and "not at your branch"
+    # for a real one, which let any line manager enumerate employee ids.
     attendance_service.ensure_employee_in_scope(employee)
+    if not frappe.db.exists("Employee", employee):
+        frappe.throw(
+            attendance_service.NOT_AVAILABLE_MESSAGE(), frappe.PermissionError
+        )
 
     data = attendance_service.get_employee(
         employee=employee,

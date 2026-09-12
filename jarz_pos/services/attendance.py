@@ -136,6 +136,19 @@ DEFAULT_GRACE_MINUTES = 15
 
 CHECKIN_DOCTYPE = "Employee Checkin"
 
+#: Longest range each read accepts, counted inclusively (end - start + 1).
+#:
+#: ``build_grid`` materialises one cell per employee per day, and expands every
+#: open-ended assignment day by day, so the cost is employees x days with no
+#: ceiling of its own. A slipped year digit (1026-01-01 -> 2026-12-31) across
+#: ~40 staff is ~14.6M dicts -- on the 4 GB production box that also takes POS
+#: orders, the OOM killer then picks a gunicorn worker or MariaDB. The app's
+#: range pickers enforce the same numbers so a manager never meets the refusal.
+MAX_SUMMARY_RANGE_DAYS = 93
+MAX_EMPLOYEE_RANGE_DAYS = 366
+#: Backstop inside ``build_grid`` itself, for any future caller that forgets.
+MAX_GRID_DAYS = 366
+
 #: Fields that are safe to read from Employee Checkin WITHOUT auto-attendance.
 #: ``shift_start``/``shift_end`` are stamped by ``fetch_shift()`` in validate, so
 #: they are present even though no Attendance record ever is.
@@ -233,6 +246,10 @@ def scope_payload(allowed: Optional[Set[str]]) -> Dict[str, Any]:
     }
 
 
+def NOT_AVAILABLE_MESSAGE() -> str:
+    return _("That employee is not available to you.")
+
+
 def ensure_employee_in_scope(employee: str) -> None:
     """Refuse to report on somebody outside the caller's branches.
 
@@ -273,11 +290,9 @@ def ensure_employee_in_scope(employee: str) -> None:
         pass
 
     if not locations.intersection(allowed):
-        name = frappe.db.get_value("Employee", employee, "employee_name") or employee
-        frappe.throw(
-            _("{0} is not at one of your branches.").format(name),
-            frappe.PermissionError,
-        )
+        # Deliberately says nothing about the employee: naming them would let an
+        # out-of-scope caller confirm which ids exist and read their names.
+        frappe.throw(NOT_AVAILABLE_MESSAGE(), frappe.PermissionError)
 
 
 # ---------------------------------------------------------------------------
@@ -829,7 +844,14 @@ def _fetch_checkins(employees: List[str], start: date_cls, end: date_cls) -> Lis
                 order_by="time asc",
             )
         except Exception:
-            return []
+            # Returning [] here would render every rostered person as absent --
+            # a confident, wrong report. Fail the request instead, so the
+            # screen shows that it could not load.
+            try:
+                frappe.log_error(title="Attendance: Employee Checkin read failed")
+            except Exception:
+                pass
+            raise
 
 
 def build_grid(
@@ -848,6 +870,7 @@ def build_grid(
     """
     start = getdate(start)
     end = getdate(end)
+    _refuse_long_range(start, end, MAX_GRID_DAYS)
     today = getdate(today) if today else getdate()
     allowed = allowed_shift_locations()
 
@@ -971,6 +994,8 @@ def build_grid(
     grace = grace_minutes()
     employees_payload: List[Dict[str, Any]] = []
     cells_by_employee: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    # (employee, day) pairs that belong to a branch outside the caller's scope.
+    redacted: Set[Tuple[str, str]] = set()
 
     for name in names:
         row = employee_rows.get(name, {})
@@ -988,6 +1013,35 @@ def build_grid(
             if not resolved_location and day_off_row:
                 resolved_location = day_off_row.get("shift_location")
             scheduled = shift_times.get(shift_type or "", (None, None))
+
+            # Scope is decided PER DAY, not per person. ``in_scope`` admits an
+            # employee if any of their shifts ever touched one of the caller's
+            # branches -- right for who appears on the screen, wrong for what
+            # it shows about them. Somebody who covered one day at Nasr City
+            # would otherwise hand the Nasr City manager a year of their
+            # arrival times and raw GPS at Dokki; with a zero or mis-set
+            # radius, that GPS is a home address. A day this caller cannot
+            # attribute to their own branch -- including a day with no branch
+            # at all -- is reported as a blank, unrostered day and carries no
+            # clock, no coordinates and no day-off detail.
+            if allowed is not None and resolved_location not in allowed:
+                redacted.add((name, key))
+                cells[key] = build_cell(
+                    date_str=key,
+                    shift_type=None,
+                    shift_location=None,
+                    scheduled_start=None,
+                    scheduled_end=None,
+                    group=None,
+                    day_off_row=None,
+                    is_holiday=False,
+                    is_cover=False,
+                    exempt=exempt,
+                    grace=grace,
+                    today=today,
+                    location_row=None,
+                )
+                continue
 
             cells[key] = build_cell(
                 date_str=key,
@@ -1017,6 +1071,11 @@ def build_grid(
                 "exempt": exempt,
             }
         )
+
+    # The raw check-in groups feed ``get_employee``'s coordinate list, so the
+    # redacted days have to leave here too, not just their cells.
+    if redacted:
+        groups = {pair: group for pair, group in groups.items() if pair not in redacted}
 
     return {
         "employees": employees_payload,
@@ -1227,7 +1286,7 @@ def get_employee(
     an empty screen and need opposite fixes (one is a POS Profile mapping, the
     other is a different date range).
     """
-    start, end = _range_bounds(from_date, to_date)
+    start, end = _range_bounds(from_date, to_date, MAX_EMPLOYEE_RANGE_DAYS)
     if not hrms_available():
         return {
             "hrms_available": False,
@@ -1328,9 +1387,17 @@ def get_employee(
 
 
 def _range_bounds(
-    from_date: Optional[str], to_date: Optional[str]
+    from_date: Optional[str],
+    to_date: Optional[str],
+    max_days: Optional[int] = None,
 ) -> Tuple[date_cls, date_cls]:
-    """Default to the current month; tolerate a reversed pair by swapping it."""
+    """Default to the current month; tolerate a reversed pair by swapping it.
+
+    A reversed pair is a slip worth forgiving; an over-long one is not, because
+    serving it can take the server down (see ``MAX_SUMMARY_RANGE_DAYS``). It is
+    refused rather than silently truncated: a report quietly covering less than
+    the manager asked for would be read as the whole period.
+    """
     if from_date and to_date:
         start, end = getdate(from_date), getdate(to_date)
     elif from_date:
@@ -1344,7 +1411,19 @@ def _range_bounds(
         start, end = getdate(get_first_day(today)), getdate(get_last_day(today))
     if end < start:
         start, end = end, start
+    if max_days is not None:
+        _refuse_long_range(start, end, max_days)
     return start, end
+
+
+def _refuse_long_range(start: date_cls, end: date_cls, max_days: int) -> None:
+    span = (getdate(end) - getdate(start)).days + 1
+    if span > max_days:
+        frappe.throw(
+            _("That range covers {0} days. Choose a range of {1} days or fewer.").format(
+                span, max_days
+            )
+        )
 
 
 GROUP_BY_CHOICES = ("branch", "employee", "day")
@@ -1379,7 +1458,7 @@ def get_summary(
     group_by = (group_by or "branch").strip().lower()
     if group_by not in GROUP_BY_CHOICES:
         group_by = "branch"
-    start, end = _range_bounds(from_date, to_date)
+    start, end = _range_bounds(from_date, to_date, MAX_SUMMARY_RANGE_DAYS)
 
     if not hrms_available():
         empty = totals_for([])

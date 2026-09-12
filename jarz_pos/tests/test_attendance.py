@@ -1669,5 +1669,334 @@ class TestHrmsAbsentDegrades(unittest.TestCase):
             self.assertIn("scope", self._call(fn, **kwargs), fn.__name__)
 
 
+
+# ---------------------------------------------------------------------------
+# Release blockers (pre-production review, 2026-09-12)
+# ---------------------------------------------------------------------------
+
+
+class _Refused(Exception):
+    """Stands in for frappe.throw so a refusal is observable without a site."""
+
+
+class TestRangeIsCapped(unittest.TestCase):
+    """An unbounded range was one request away from taking production down.
+
+    ``build_grid`` materialises employees x days cells with no ceiling of its
+    own. A slipped year digit -- 1026-01-01 to 2026-12-31 -- across ~40 staff is
+    ~14.6M dicts on a 4 GB box that also takes POS orders. The limit is counted
+    inclusively, so both edges are pinned.
+    """
+
+    def _bounds(self, from_date, to_date, max_days):
+        def fake_throw(msg, exc=None):
+            raise _Refused(str(msg))
+
+        with patch.object(attendance_service, "frappe") as mock_frappe:
+            mock_frappe.throw.side_effect = fake_throw
+            try:
+                return attendance_service._range_bounds(from_date, to_date, max_days)
+            except _Refused:
+                return "refused"
+
+    def test_summary_accepts_exactly_its_limit(self):
+        # 2026-06-01 .. 2026-09-01 inclusive is 93 days.
+        self.assertNotEqual(
+            self._bounds("2026-06-01", "2026-09-01", attendance_service.MAX_SUMMARY_RANGE_DAYS),
+            "refused",
+        )
+
+    def test_summary_refuses_one_day_more(self):
+        self.assertEqual(
+            self._bounds("2026-06-01", "2026-09-02", attendance_service.MAX_SUMMARY_RANGE_DAYS),
+            "refused",
+        )
+
+    def test_employee_accepts_a_full_year(self):
+        # 2025-09-13 .. 2026-09-13 inclusive is 366 days.
+        self.assertNotEqual(
+            self._bounds("2025-09-13", "2026-09-13", attendance_service.MAX_EMPLOYEE_RANGE_DAYS),
+            "refused",
+        )
+
+    def test_employee_refuses_a_year_and_a_day(self):
+        self.assertEqual(
+            self._bounds("2025-09-12", "2026-09-13", attendance_service.MAX_EMPLOYEE_RANGE_DAYS),
+            "refused",
+        )
+
+    def test_a_slipped_year_digit_is_refused(self):
+        """The exact failure that was reported."""
+        self.assertEqual(
+            self._bounds("1026-01-01", "2026-12-31", attendance_service.MAX_EMPLOYEE_RANGE_DAYS),
+            "refused",
+        )
+
+    def test_a_reversed_over_long_pair_is_still_refused(self):
+        """Swapping a reversed pair must not smuggle the span past the check."""
+        self.assertEqual(
+            self._bounds("2026-12-31", "1026-01-01", attendance_service.MAX_SUMMARY_RANGE_DAYS),
+            "refused",
+        )
+
+    def test_the_default_month_is_never_refused(self):
+        self.assertNotEqual(
+            self._bounds(None, None, attendance_service.MAX_SUMMARY_RANGE_DAYS), "refused"
+        )
+
+    def test_both_endpoints_pass_their_limit(self):
+        """A cap that exists but is never passed protects nothing."""
+        seen = []
+
+        def fake_bounds(from_date, to_date, max_days=None):
+            seen.append(max_days)
+            raise _Refused("stop")
+
+        with patch.object(attendance_service, "_range_bounds", side_effect=fake_bounds):
+            for fn, kwargs in (
+                (attendance_service.get_summary, {}),
+                (attendance_service.get_employee, {"employee": "HR-EMP-1"}),
+            ):
+                with self.assertRaises(_Refused):
+                    fn(**kwargs)
+        self.assertEqual(
+            seen,
+            [
+                attendance_service.MAX_SUMMARY_RANGE_DAYS,
+                attendance_service.MAX_EMPLOYEE_RANGE_DAYS,
+            ],
+        )
+
+    def test_build_grid_has_its_own_backstop(self):
+        """A future caller that forgets the cap must not reach a single query."""
+
+        def fake_throw(msg, exc=None):
+            raise _Refused(str(msg))
+
+        with patch.object(attendance_service, "frappe") as mock_frappe, patch.object(
+            attendance_service, "allowed_shift_locations"
+        ) as allowed:
+            mock_frappe.throw.side_effect = fake_throw
+            with self.assertRaises(_Refused):
+                attendance_service.build_grid("1026-01-01", "2026-12-31")
+            mock_frappe.get_all.assert_not_called()
+            allowed.assert_not_called()
+
+
+SHARED_DAYS = [
+    _assignment("HR-EMP-1", "Branch Opening", "Nasr City", "2026-09-10", "2026-09-10"),
+    _assignment("HR-EMP-1", "Branch Opening", "Dokki", "2026-09-11", "2026-09-11"),
+]
+
+
+def _punch(name, day, lat, lng):
+    return {
+        "name": name,
+        "employee": "HR-EMP-1",
+        "time": f"{day} 12:40:00",
+        "log_type": "IN",
+        "shift": "Branch Opening",
+        "shift_start": f"{day} 12:30:00",
+        "offshift": 0,
+        "latitude": lat,
+        "longitude": lng,
+    }
+
+
+SHARED_PUNCHES = [
+    _punch("CI-NASR", "2026-09-10", 30.05, 31.34),
+    _punch("CI-DOKKI", "2026-09-11", 30.03, 31.21),
+]
+FENCES = {
+    "Nasr City": {"latitude": 30.05, "longitude": 31.34, "checkin_radius": 200},
+    "Dokki": {"latitude": 30.03, "longitude": 31.21, "checkin_radius": 200},
+}
+
+
+class TestOtherBranchDaysAreRedacted(AttendanceGridCase):
+    """Scope is decided per day, not per person.
+
+    The Nasr City manager can see Ali, because Ali worked a shift at Nasr City.
+    That must not hand them Ali's arrival times and raw GPS from the days Ali
+    worked at Dokki -- with a zero or mis-set radius, that GPS is a home address.
+    """
+
+    def _shared(self, allowed):
+        return self._grid(
+            assignments=SHARED_DAYS,
+            employees=[ALI],
+            checkins=SHARED_PUNCHES,
+            start="2026-09-10",
+            end="2026-09-11",
+            allowed=allowed,
+            shift_times={"Branch Opening": ("12:30", "21:30")},
+            locations=FENCES,
+        )
+
+    def test_the_own_branch_day_is_intact(self):
+        cell = self._shared({"Nasr City"})["cells"]["HR-EMP-1"]["2026-09-10"]
+        self.assertEqual(
+            (cell["shift_location"], cell["checkin_count"]), ("Nasr City", 1)
+        )
+        self.assertIsNotNone(cell["first_in"])
+
+    def test_the_other_branch_day_carries_no_clock_and_no_location(self):
+        cell = self._shared({"Nasr City"})["cells"]["HR-EMP-1"]["2026-09-11"]
+        self.assertEqual(cell["status"], "not_rostered")
+        for key in (
+            "shift_location", "shift_type", "first_in", "last_out", "late_minutes",
+            "worked_hours", "geo_ok", "day_off", "scheduled_start", "scheduled_end",
+        ):
+            self.assertIsNone(cell[key], key)
+        self.assertEqual(cell["checkin_count"], 0)
+        self.assertFalse(cell["is_cover"])
+
+    def test_the_raw_punches_for_that_day_are_gone_too(self):
+        """``get_employee`` builds its coordinate list from these groups."""
+        groups = self._shared({"Nasr City"})["groups"]
+        self.assertIn(("HR-EMP-1", "2026-09-10"), groups)
+        self.assertNotIn(("HR-EMP-1", "2026-09-11"), groups)
+
+    def test_an_unrestricted_caller_still_sees_both_days(self):
+        grid = self._shared(None)
+        self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["shift_location"], "Dokki")
+        self.assertIn(("HR-EMP-1", "2026-09-11"), grid["groups"])
+
+    def test_the_other_branch_day_does_not_count_in_this_managers_totals(self):
+        cells = self._shared({"Nasr City"})["cells"]["HR-EMP-1"].values()
+        self.assertEqual(attendance_service.totals_for(cells)["rostered_days"], 1)
+
+    def test_a_day_off_at_another_branch_leaks_no_detail(self):
+        grid = self._grid(
+            assignments=[SHARED_DAYS[0]],
+            day_offs=[{
+                "name": "JRDO-1",
+                "employee": "HR-EMP-1",
+                "off_date": "2026-09-11",
+                "off_type": "Sick",
+                "shift_location": "Dokki",
+                "covered_by": "HR-EMP-2",
+                "covered_by_name": "Sara",
+            }],
+            employees=[ALI],
+            start="2026-09-10",
+            end="2026-09-11",
+            allowed={"Nasr City"},
+        )
+        cell = grid["cells"]["HR-EMP-1"]["2026-09-11"]
+        self.assertIsNone(cell["day_off"])
+        self.assertEqual(cell["status"], "not_rostered")
+
+    def test_a_punch_on_a_day_with_no_branch_is_not_shown_to_a_branch_manager(self):
+        """No branch means no branch can claim it -- the conservative reading."""
+        grid = self._grid(
+            assignments=[SHARED_DAYS[0]],
+            employees=[ALI],
+            checkins=[_punch("CI-NOWHERE", "2026-09-11", 29.9, 31.0)],
+            start="2026-09-10",
+            end="2026-09-11",
+            allowed={"Nasr City"},
+        )
+        self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 0)
+        self.assertNotIn(("HR-EMP-1", "2026-09-11"), grid["groups"])
+
+    def test_get_employee_returns_no_coordinates_from_the_other_branch(self):
+        """Through the real grid, not a canned one."""
+        grid = self._shared({"Nasr City"})
+        grid.pop("captured", None)
+        with patch.object(attendance_service, "hrms_available", return_value=True), patch.object(
+            attendance_service, "build_grid", return_value=grid
+        ), patch.object(
+            attendance_service, "shift_location_map", return_value=dict(FENCES)
+        ):
+            data = attendance_service.get_employee(
+                "HR-EMP-1", from_date="2026-09-10", to_date="2026-09-11"
+            )
+        self.assertEqual([c["name"] for c in data["checkins"]], ["CI-NASR"])
+        self.assertEqual(
+            [b["shift_location"] for b in data["by_branch"] if b["rostered_days"]],
+            ["Nasr City"],
+        )
+
+
+class TestCheckinReadFailureIsNotAbsence(unittest.TestCase):
+    """A failed read used to return [] -- which renders every rostered person absent."""
+
+    def test_a_read_that_fails_twice_raises(self):
+        with patch.object(attendance_service, "frappe") as mock_frappe:
+            mock_frappe.get_all.side_effect = RuntimeError("table is locked")
+            with self.assertRaises(RuntimeError):
+                attendance_service._fetch_checkins(
+                    ["HR-EMP-1"], getdate("2026-09-10"), getdate("2026-09-10")
+                )
+
+    def test_a_missing_optional_field_still_falls_back(self):
+        """The minimal-field retry exists for older HRMS schemas and must stay."""
+        calls = []
+
+        def fake_get_all(doctype, **kwargs):
+            calls.append(kwargs["fields"])
+            if len(calls) == 1:
+                raise RuntimeError("Unknown column 'shift_actual_end'")
+            return [{"name": "CI-1"}]
+
+        with patch.object(attendance_service, "frappe") as mock_frappe:
+            mock_frappe.get_all.side_effect = fake_get_all
+            rows = attendance_service._fetch_checkins(
+                ["HR-EMP-1"], getdate("2026-09-10"), getdate("2026-09-10")
+            )
+        self.assertEqual(rows, [{"name": "CI-1"}])
+        self.assertEqual(calls[1], attendance_service.CHECKIN_FIELDS_MINIMAL)
+
+
+class TestRefusalDoesNotEnumerateEmployees(unittest.TestCase):
+    """An out-of-scope caller must not learn which ids exist or whose they are.
+
+    Existence used to be checked first, so a bad id answered "No such employee"
+    and a real one answered "<name> is not at one of your branches". This drives
+    ``api/attendance.py`` itself, which nothing else in the suite calls.
+    """
+
+    def _api(self, exists, locations):
+        from jarz_pos.api import attendance as attendance_api
+
+        def fake_throw(msg, exc=None):
+            raise _Refused(str(msg))
+
+        with patch.object(attendance_api, "frappe") as api_frappe, patch.object(
+            attendance_service, "frappe"
+        ) as svc_frappe, patch.object(
+            attendance_service, "ensure_attendance_access"
+        ), patch.object(
+            attendance_service, "allowed_shift_locations", return_value={"Nasr City"}
+        ), patch.object(
+            attendance_service, "NOT_AVAILABLE_MESSAGE", return_value="not available"
+        ), patch.object(
+            attendance_service, "get_employee", return_value={}
+        ):
+            api_frappe.throw.side_effect = fake_throw
+            svc_frappe.throw.side_effect = fake_throw
+            api_frappe.db.exists.return_value = exists
+            svc_frappe.get_all.side_effect = lambda doctype, **kw: [
+                {"shift_location": loc} for loc in locations
+            ]
+            svc_frappe.db.get_value.return_value = "Ali"
+            try:
+                attendance_api.get_employee("HR-EMP-9")
+                return "allowed"
+            except _Refused as refusal:
+                return str(refusal)
+
+    def test_a_missing_id_and_another_branchs_id_read_the_same(self):
+        self.assertEqual(self._api(exists=False, locations=[]), "not available")
+        self.assertEqual(self._api(exists=True, locations=["Dokki"]), "not available")
+
+    def test_the_refusal_never_carries_the_name(self):
+        self.assertNotIn("Ali", self._api(exists=True, locations=["Dokki"]))
+
+    def test_an_in_scope_employee_is_served(self):
+        self.assertEqual(self._api(exists=True, locations=["Nasr City"]), "allowed")
+
+
 if __name__ == "__main__":
     unittest.main()
