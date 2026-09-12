@@ -364,10 +364,19 @@ def advance_balance_fields() -> List[str]:
 def open_advance_balance(row: Dict[str, Any]) -> float:
     """What is still owed back on one submitted advance, floored at 0.
 
-    ``paid - claimed - returned - settled``. Floored because a negative "open
-    balance" is not money the employee is owed; it is an over-recovery, and
-    letting it go negative would silently cancel out another advance's real
-    balance when the two are summed.
+    ``paid - claimed - returned``. ``custom_jarz_settled_amount`` is NOT
+    subtracted: HRMS's ``EmployeeAdvance.set_total_advance_paid`` derives
+    ``return_amount`` from every Advance Payment Ledger Entry against the
+    advance that is not an Expense Claim, and the salary-settlement Journal
+    Entry in ``api/monthly_expenses`` creates one. Subtracting the jarz column
+    too would count the same recovery twice — which a partial settlement would
+    turn into writing off the unrecovered half. The column is provenance (how
+    much of the return came from a salary deduction rather than returned cash),
+    not a term in the balance.
+
+    Floored because a negative "open balance" is not money the employee is
+    owed; it is an over-recovery, and letting it go negative would silently
+    cancel out another advance's real balance when the two are summed.
 
     A missing key reads as 0, so the same function works whether or not the
     jarz columns exist yet on this bench.
@@ -383,7 +392,6 @@ def open_advance_balance(row: Dict[str, Any]) -> float:
         _num(F_PAID_AMOUNT)
         - _num(F_CLAIMED_AMOUNT)
         - _num(F_RETURN_AMOUNT)
-        - _num(F_SETTLED_AMOUNT)
     )
     return balance if balance > 0 else 0.0
 
@@ -402,8 +410,8 @@ def open_advance_balance_expr(alias: str = "") -> str:
         f"IFNULL({prefix}`{F_CLAIMED_AMOUNT}`, 0)",
         f"IFNULL({prefix}`{F_RETURN_AMOUNT}`, 0)",
     ]
-    if advance_has_field(F_SETTLED_AMOUNT):
-        terms.append(f"IFNULL({prefix}`{F_SETTLED_AMOUNT}`, 0)")
+    # No settled term, for the reason spelled out in `open_advance_balance`:
+    # HRMS has already folded the settlement into `return_amount`.
     return "GREATEST(" + " - ".join(terms) + ", 0)"
 
 

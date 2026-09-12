@@ -498,14 +498,26 @@ def _serialize_penalty(row: Dict[str, Any]) -> Dict[str, Any]:
 def _advance_open_amount(row: Dict[str, Any]) -> float:
     """What is still owed on one Employee Advance, floored at zero.
 
-    ``paid_amount - claimed_amount - return_amount - custom_jarz_settled_amount``.
+    ``paid_amount - claimed_amount - return_amount``.
 
-    ``claimed_amount`` is HRMS's own recovery (an Expense Claim consumed the
-    advance) and ``return_amount`` is cash handed back; the jarz column is the
-    third route, added because HRMS drives ``claimed_amount`` ONLY from Expense
-    Claims — ``update_claimed_amount`` recomputes it from
-    ``Expense Claim Advance``, so writing it from here is overwritten on the
-    advance's next touch.
+    ``custom_jarz_settled_amount`` is deliberately NOT subtracted, even though
+    this module writes it. HRMS derives ``return_amount`` in
+    ``EmployeeAdvance.set_total_advance_paid`` by summing every
+    Advance Payment Ledger Entry against the advance whose voucher is not an
+    Expense Claim — and the settlement Journal Entry this module posts creates
+    exactly such an entry. So HRMS already counts the recovery, and subtracting
+    the jarz column as well counts it twice.
+
+    A staging run proved it: settling 100 of a 100 advance left
+    ``return_amount = 100`` AND ``custom_jarz_settled_amount = 100``, i.e.
+    ``100 - 0 - 100 - 100 = -100``. The floor hid it at full settlement; a
+    PARTIAL settlement would not have been hidden — recovering 50 of 100 would
+    have read as fully closed and quietly written off the other 50.
+
+    The jarz column stays, as PROVENANCE: it says how much of the return came
+    from a salary deduction rather than cash handed back, which
+    ``return_amount`` alone cannot distinguish. ``custom_jarz_settled_via``
+    names the Journal Entry.
 
     Starts from ``paid_amount``, not ``advance_amount``: an approved-but-unpaid
     advance is a promise, not a debt, and deducting it from a salary would
@@ -515,7 +527,6 @@ def _advance_open_amount(row: Dict[str, Any]) -> float:
         flt(row.get("paid_amount"))
         - flt(row.get("claimed_amount"))
         - flt(row.get("return_amount"))
-        - flt(row.get(F_SETTLED_AMOUNT))
     )
     return open_amount if open_amount > 0 else 0.0
 

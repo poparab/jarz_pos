@@ -2130,7 +2130,7 @@ class TestAdvancesAndOrdersOnThePayrollRow(unittest.TestCase):
 
 	def test_an_already_settled_advance_is_not_recovered_twice(self):
 		row = _payroll(
-			advances_by_employee={"HR-EMP-00001": [_advance(paid=500.0, settled=500.0)]}
+			advances_by_employee={"HR-EMP-00001": [_advance(paid=500.0, returned=500.0, settled=500.0)]}
 		)["HR-EMP-00001"]
 		self.assertEqual(row["advance_total"], 0.0)
 
@@ -2418,8 +2418,33 @@ class TestAdvanceBalanceReadsDegradeWithoutHrms(unittest.TestCase):
 		self.assertEqual(len(grouped["HR-EMP-00001"]), 2)
 
 	def test_a_fully_settled_advance_is_history_and_is_dropped(self):
-		grouped, _readable = self._load(rows=[_advance(paid=500.0, settled=500.0)])
+		# A settlement reaches the balance through HRMS's `return_amount`, not
+		# through the jarz column — see the next two tests.
+		grouped, _readable = self._load(rows=[_advance(paid=500.0, returned=500.0)])
 		self.assertEqual(grouped, {})
+
+	def test_a_settlement_is_counted_once_not_twice(self):
+		# HRMS derives `return_amount` from the Advance Payment Ledger Entry that
+		# our settlement Journal Entry creates (set_total_advance_paid sums every
+		# non-Expense-Claim voucher against the advance). So after settling 500
+		# of 500, BOTH return_amount and custom_jarz_settled_amount read 500.
+		# Subtracting both gives -500; the floor hides that at full settlement.
+		grouped, _readable = self._load(
+			rows=[_advance(paid=500.0, returned=500.0, settled=500.0)]
+		)
+		self.assertEqual(grouped, {})
+
+	def test_a_partial_settlement_does_not_write_off_the_rest(self):
+		# This is the case the floor could NOT hide, and the reason the jarz
+		# column is out of the balance: recovering 200 of a 500 advance leaves
+		# 300 genuinely owed. Counting the recovery twice reads 500 - 200 - 200
+		# = 100, quietly writing off 200 the employee still owes.
+		from jarz_pos.api.monthly_expenses import _advance_open_amount
+
+		grouped, _readable = self._load(
+			rows=[_advance(paid=500.0, returned=200.0, settled=200.0)]
+		)
+		self.assertEqual(_advance_open_amount(grouped["HR-EMP-00001"][0]), 300.0)
 
 	def test_rows_still_render_when_advances_cannot_be_read(self):
 		# The payroll table is built from maps, so an empty advance map costs the
@@ -2489,7 +2514,7 @@ class TestAdvanceSettlementPlanning(unittest.TestCase):
 		# now covers the whole payout, so there is nothing left to recover.
 		mock_frappe, plan = self._plan(
 			[{"name": "HR-EAD-2026-00004", "amount": None}],
-			advances=[_advance(paid=500.0, settled=500.0)],
+			advances=[_advance(paid=500.0, returned=500.0, settled=500.0)],
 		)
 		self.assertIsNone(plan)
 		self.assertIn("already been", str(mock_frappe.throw.call_args[0][0]))
@@ -2497,7 +2522,7 @@ class TestAdvanceSettlementPlanning(unittest.TestCase):
 	def test_a_partly_settled_advance_only_offers_what_is_left(self):
 		_frappe, plan = self._plan(
 			[{"name": "HR-EAD-2026-00004", "amount": None}],
-			advances=[_advance(paid=500.0, settled=300.0)],
+			advances=[_advance(paid=500.0, returned=300.0, settled=300.0)],
 		)
 		self.assertEqual(plan[0]["amount"], 200.0)
 		self.assertEqual(plan[0]["settled_before"], 300.0)
