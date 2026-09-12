@@ -29,6 +29,8 @@ screen ends up reporting September's rent as paid when it was August's.
 from __future__ import annotations
 
 import calendar
+import json
+import re
 from datetime import date
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -36,6 +38,7 @@ import frappe
 from frappe import _
 from frappe.utils import flt, getdate, now_datetime, today
 
+from jarz_pos.api.employee_advances import _advance_has_field
 from jarz_pos.api.expenses import (
     _account_label_map,
     _cashlike_accounts,
@@ -57,7 +60,34 @@ from jarz_pos.api.recurring_expenses import (
     _month_bounds,
     _payroll_expense_accounts,
 )
-from jarz_pos.utils.posting_datetime import split_posting_datetime
+from jarz_pos.utils.employee_link import (
+    ADVANCE_DOCTYPE,
+    EMPLOYEE_ORDER_PURPOSE,
+    customers_for_employees,
+    employee_display_names,
+    hrms_available,
+)
+from jarz_pos.utils.posting_datetime import (
+    apply_ledger_posting_datetime,
+    join_posting_datetime,
+    split_posting_datetime,
+)
+
+# The two jarz-owned settlement columns on ``Employee Advance``, seeded by
+# ``jarz_pos.setup.employee_link_setup``. Imported, never re-spelled: the
+# settlement writer here and the balance reader must agree on the column name,
+# and a typo in one of them would silently stop recovering advances.
+#
+# Hard imports, deliberately. A deploy moves this whole app to one commit, so a
+# bench carrying this module but not `utils.employee_link` or the penalty
+# controller cannot exist — and a fallback that restates the fieldnames or the
+# conversion here is a SECOND definition waiting to drift from the first.
+from jarz_pos.utils.employee_link import F_SETTLED_AMOUNT, F_SETTLED_VIA
+from jarz_pos.doctype.jarz_employee_penalty.jarz_employee_penalty import (
+    DAYS_PER_MONTH,
+    PENALTY_UNITS,
+    convert_penalty,
+)
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -91,6 +121,82 @@ DEFAULT_CATEGORIES = [
 REGISTRY_STATUSES = ("Active", "Paused", "Ended")
 
 PAYROLL_CATEGORY = "Salaries (HRMS)"
+
+#: Penalties are recorded against this submittable jarz DocType.
+PENALTY_DOCTYPE = "Jarz Employee Penalty"
+
+#: ``PENALTY_UNITS`` and ``DAYS_PER_MONTH`` are imported from the DocType
+#: controller above rather than restated here. The units mirror the ``unit``
+#: Select options and the Flutter segmented control is built from the list this
+#: endpoint publishes, so a third spelling of "Half Days" would put the app,
+#: the API and the schema out of step with nothing to catch it.
+#:
+#: ``DAYS_PER_MONTH = 30`` is the owner's decision (2026-09-12): a day of salary
+#: is a THIRTIETH of the monthly salary — a fixed calendar basis, not the days
+#: in the month and not the days actually worked. A February penalty and an
+#: August one must cost the same, or the same offence is priced differently by
+#: the calendar.
+
+#: The dedup/provenance tag on the settlement Journal Entry. Read back by
+#: ``_load_settlements`` to credit a month with what it discharged in kind.
+SETTLEMENT_JE_TAG = "SALARY_SETTLEMENT"
+
+_SETTLEMENT_TAG_RE = re.compile(
+    r"\[JARZ-JE:" + SETTLEMENT_JE_TAG + r":([^:\]]+):(\d{4}-\d{2})\]"
+)
+
+_PENALTY_FIELDS = [
+    "name",
+    "employee",
+    "employee_name",
+    "company",
+    "penalty_date",
+    "period_month",
+    "unit",
+    "quantity",
+    "amount",
+    "day_rate",
+    "equivalent_days",
+    "currency",
+    "reason",
+    "settled",
+    "settled_via",
+]
+
+#: Columns read off ``Employee Advance``. Deliberately the same set
+#: ``manager._employee_ledger_advance_rows`` reads, so one person's balance is
+#: the same number on both screens.
+_ADVANCE_FIELDS = [
+    "name",
+    "employee",
+    "employee_name",
+    "posting_date",
+    "advance_amount",
+    "paid_amount",
+    "claimed_amount",
+    "return_amount",
+    "status",
+    "purpose",
+    "advance_account",
+    "currency",
+    "company",
+]
+
+_ORDER_FIELDS = [
+    "name",
+    "customer",
+    "customer_name",
+    "posting_date",
+    "grand_total",
+    "outstanding_amount",
+    "status",
+]
+
+#: An ``advance_account`` whose ``account_name`` contains none of these is not
+#: an employee-advance ledger. Production's three open advances all sit on
+#: ``Debtors - J`` (customer AR), which is reported as a gap and never repointed
+#: from here — moving a submitted advance's account rewrites posted GL.
+_ADVANCE_ACCOUNT_HINTS = ("advance", "staff", "employee")
 
 _REQUEST_FIELDS = [
     "name",
@@ -336,6 +442,125 @@ def _guard_overpay(
         )
     )
     return excess  # pragma: no cover - frappe.throw does not return
+
+
+# ── deductions: penalties, advances, employee orders ──────────────────────
+
+
+def _day_rate(gross_due: Any, days_per_month: int = DAYS_PER_MONTH) -> float:
+    """One day of this salary. 0 when there is no salary to divide.
+
+    Off-payroll people (no Salary Structure Assignment) have a gross of 0, so a
+    day-based penalty cannot be priced for them at all — ``add_employee_penalty``
+    refuses and tells the caller to enter the money amount instead, rather than
+    booking a 0 EGP penalty that reads as recorded and deducts nothing.
+    """
+    gross = flt(gross_due)
+    if gross <= 0:
+        return 0.0
+    return flt(gross) / float(days_per_month or DAYS_PER_MONTH)
+
+
+def _penalty_amounts(
+    unit: Optional[str], quantity: Any, amount: Any, day_rate: Any
+) -> Tuple[float, float]:
+    """``(amount, equivalent_days)`` for one penalty. Pure.
+
+    Delegates to the DocType controller's ``convert_penalty`` rather than
+    repeating the arithmetic. The API needs the money value BEFORE the document
+    exists — the month's penalty total is guarded against ``gross_due`` first —
+    and the DocType needs it because a penalty entered in Desk must come out
+    identical. Two callers, ONE formula: a second copy here would agree on the
+    day it was written and drift the first time either rounding changed.
+
+    Both directions are always produced: ``Money`` still reports how many days
+    it cost, so an employee shown "500 EGP" can be told "that is 1.67 days".
+    """
+    return convert_penalty(unit, quantity, amount, day_rate)
+
+
+def _serialize_penalty(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": row.get("name"),
+        "penalty_date": row.get("penalty_date"),
+        "period_month": row.get("period_month"),
+        "unit": row.get("unit"),
+        "quantity": flt(row.get("quantity")),
+        "amount": _money(row.get("amount")),
+        "equivalent_days": flt(row.get("equivalent_days")),
+        "day_rate": _money(row.get("day_rate")),
+        "reason": row.get("reason"),
+        "settled": _as_bool(row.get("settled")),
+        "settled_via": row.get("settled_via"),
+    }
+
+
+def _advance_open_amount(row: Dict[str, Any]) -> float:
+    """What is still owed on one Employee Advance, floored at zero.
+
+    ``paid_amount - claimed_amount - return_amount - custom_jarz_settled_amount``.
+
+    ``claimed_amount`` is HRMS's own recovery (an Expense Claim consumed the
+    advance) and ``return_amount`` is cash handed back; the jarz column is the
+    third route, added because HRMS drives ``claimed_amount`` ONLY from Expense
+    Claims — ``update_claimed_amount`` recomputes it from
+    ``Expense Claim Advance``, so writing it from here is overwritten on the
+    advance's next touch.
+
+    Starts from ``paid_amount``, not ``advance_amount``: an approved-but-unpaid
+    advance is a promise, not a debt, and deducting it from a salary would
+    recover money that never left the company.
+    """
+    open_amount = (
+        flt(row.get("paid_amount"))
+        - flt(row.get("claimed_amount"))
+        - flt(row.get("return_amount"))
+        - flt(row.get(F_SETTLED_AMOUNT))
+    )
+    return open_amount if open_amount > 0 else 0.0
+
+
+def _serialize_advance(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": row.get("name"),
+        "posting_date": row.get("posting_date"),
+        "amount": _money(row.get("advance_amount")),
+        "paid_amount": _money(row.get("paid_amount")),
+        "claimed_amount": _money(row.get("claimed_amount")),
+        "return_amount": _money(row.get("return_amount")),
+        "settled_amount": _money(row.get(F_SETTLED_AMOUNT)),
+        "outstanding": _money(_advance_open_amount(row)),
+        "purpose": row.get("purpose"),
+        "status": row.get("status"),
+        "advance_account": row.get("advance_account"),
+        "currency": row.get("currency"),
+    }
+
+
+def _serialize_order(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "invoice": row.get("name"),
+        "posting_date": row.get("posting_date"),
+        "customer": row.get("customer"),
+        "customer_name": row.get("customer_name"),
+        "grand_total": _money(row.get("grand_total")),
+        "outstanding": _money(row.get("outstanding_amount")),
+        "status": row.get("status"),
+    }
+
+
+def _is_advance_ledger(account_name: Optional[str]) -> bool:
+    """Does this account's name read as an employee-advance ledger?
+
+    Name-based on purpose: ``root_type`` cannot tell the two apart (both are
+    Receivable), and the thing that goes wrong in practice is an advance booked
+    to plain customer AR, where it sits inside the same balance as real
+    customers' debt and nobody ever notices.
+    """
+    text = str(account_name or "").strip().lower()
+    if not text:
+        return False
+    return any(hint in text for hint in _ADVANCE_ACCOUNT_HINTS)
 
 
 # ── attribution: turning GL money into per-item "paid" ────────────────────
@@ -632,28 +857,96 @@ def _build_payroll_rows(
     payments_by_employee: Optional[Dict[str, Any]] = None,
     slips_by_employee: Optional[Dict[str, Any]] = None,
     salary_account: Optional[str] = None,
+    penalties_by_employee: Optional[Dict[str, Any]] = None,
+    advances_by_employee: Optional[Dict[str, Any]] = None,
+    orders_by_employee: Optional[Dict[str, Any]] = None,
+    settled_by_employee: Optional[Dict[str, Any]] = None,
+    off_payroll_rows: Optional[Sequence[Dict[str, Any]]] = None,
+    days_per_month: int = DAYS_PER_MONTH,
     tolerance: float = MONEY_TOLERANCE,
 ) -> List[Dict[str, Any]]:
     """Per-employee salary money for one month. Pure — no DB access.
 
     Salary GL is a single account for the whole company, so it can never be split
     per employee. Nothing is inferred here: an employee's ``paid_amount`` is only
-    ever the sum of app payments explicitly linked to them.
+    ever the sum of app payments explicitly linked to them, plus what a
+    settlement Journal Entry discharged in kind.
+
+    Every deduction arrives as a pre-loaded MAP, exactly like
+    ``paid_linked_by_employee``. Keeping this function free of DB access is not
+    style: it is what lets the money model be tested at all, and what stops the
+    payroll table issuing a query per employee.
+
+    ── One asymmetry, deliberate ────────────────────────────────────────────
+    ``penalty_total`` is MONTH-scoped (a penalty is deducted from the salary
+    month it was recorded against). ``advance_total`` and ``order_total`` are
+    ALL-TIME open balances, mirroring ``manager.get_employee_ledger``. That is
+    not an oversight to be tidied up later: windowing a balance to the month
+    hides exactly the stale debt worth chasing — a 5,000 EGP advance drawn in
+    July would vanish from August's screen while still being owed.
+
+    ``off_payroll_rows`` are people with NO Salary Structure Assignment who
+    nonetheless carry an advance, an order or a penalty. They get a row with
+    ``gross_due`` 0 so their debt is visible; production has two (Kareem Mamdouh
+    and the CEO), and an advance to either must not be invisible.
     """
     paid_linked_by_employee = paid_linked_by_employee or {}
     payments_by_employee = payments_by_employee or {}
     slips_by_employee = slips_by_employee or {}
+    penalties_by_employee = penalties_by_employee or {}
+    advances_by_employee = advances_by_employee or {}
+    orders_by_employee = orders_by_employee or {}
+    settled_by_employee = settled_by_employee or {}
+
+    prepared = [(raw, False) for raw in payroll_rows]
+    prepared += [(raw, True) for raw in (off_payroll_rows or [])]
 
     rows: List[Dict[str, Any]] = []
-    for raw in payroll_rows:
+    for raw, off_payroll in prepared:
         employee = raw.get("employee")
-        due_amount = flt(raw.get("monthly"))
-        if not due_amount:
-            due_amount = flt(raw.get("base")) + flt(raw.get("variable"))
-        paid_amount = flt(paid_linked_by_employee.get(employee))
+
+        if off_payroll:
+            gross_due = 0.0
+        else:
+            gross_due = flt(raw.get("monthly"))
+            if not gross_due:
+                gross_due = flt(raw.get("base")) + flt(raw.get("variable"))
+
+        penalties = [_serialize_penalty(p) for p in (penalties_by_employee.get(employee) or [])]
+        penalty_total = sum(flt(p["amount"]) for p in penalties)
+        penalty_days = sum(flt(p["equivalent_days"]) for p in penalties)
+
+        # THE definition of what the company owes for the month. A penalty
+        # lowers it here and nowhere else, so `_summarize`, `_build_categories`
+        # and the overpay guard all see the reduced obligation without knowing
+        # penalties exist. Floored at zero: a penalty larger than the salary
+        # (possible only via `allow_overpay=1`) means nothing is owed — carrying
+        # a negative due into the roll-up would silently cancel out somebody
+        # else's unpaid salary.
+        due_amount = gross_due - penalty_total
+        if due_amount < 0:
+            due_amount = 0.0
+
+        paid_linked = flt(paid_linked_by_employee.get(employee))
+        settled_amount = flt(settled_by_employee.get(employee))
+        paid_amount = paid_linked + settled_amount
         remaining = due_amount - paid_amount
         if remaining < 0:
             remaining = 0.0
+
+        advances = [_serialize_advance(a) for a in (advances_by_employee.get(employee) or [])]
+        advance_total = sum(flt(a["outstanding"]) for a in advances)
+        orders = [_serialize_order(o) for o in (orders_by_employee.get(employee) or [])]
+        order_total = sum(flt(o["outstanding"]) for o in orders)
+
+        # Cash to hand over NOW: what is still owed for the month, less the
+        # balances this payment can clear. Floored at zero — an employee who owes
+        # the company more than this month's salary gets nothing, they do not get
+        # a negative payslip, and the remainder stays on the advance.
+        net_payable = remaining - advance_total - order_total
+        if net_payable < 0:
+            net_payable = 0.0
+
         has_slip = bool(slips_by_employee.get(employee))
         rows.append(
             {
@@ -664,10 +957,23 @@ def _build_payroll_rows(
                 "salary_structure": raw.get("salary_structure"),
                 "base": _money(raw.get("base")),
                 "variable": _money(raw.get("variable")),
+                "gross_due": _money(gross_due),
+                "day_rate": _money(_day_rate(gross_due, days_per_month)),
+                "penalty_total": _money(penalty_total),
+                "penalty_days": flt(penalty_days, 2),
+                "penalties": penalties,
                 "due_amount": _money(due_amount),
                 "paid_amount": _money(paid_amount),
-                "paid_linked": _money(paid_amount),
+                "paid_linked": _money(paid_linked),
+                "settled_amount": _money(settled_amount),
                 "remaining": _money(remaining),
+                "advance_total": _money(advance_total),
+                "advances": advances,
+                "order_total": _money(order_total),
+                "orders": orders,
+                "deductions_total": _money(penalty_total + advance_total + order_total),
+                "net_payable": _money(net_payable),
+                "off_payroll": off_payroll,
                 "payment_status": _payment_status(
                     due_amount, paid_amount, due_amount > 0, tolerance
                 ),
@@ -677,8 +983,75 @@ def _build_payroll_rows(
                 "payments": list(payments_by_employee.get(employee) or []),
             }
         )
-    rows.sort(key=lambda r: (-flt(r["remaining"]), r["employee_name"] or ""))
+    # Off-payroll rows tie-break AFTER payroll rows: they always have
+    # `remaining` 0, so without the flag they would interleave with paid staff
+    # by name alone and read as part of the payroll.
+    rows.sort(
+        key=lambda r: (
+            -flt(r["remaining"]),
+            r["off_payroll"],
+            -flt(r["deductions_total"]),
+            r["employee_name"] or "",
+        )
+    )
     return rows
+
+
+def _build_deductions(
+    payroll_rows: Sequence[Dict[str, Any]],
+    advances_readable: bool = True,
+    employee_orders_present: bool = False,
+    advances_by_employee: Optional[Dict[str, Any]] = None,
+    tolerance: float = MONEY_TOLERANCE,
+) -> Dict[str, Any]:
+    """The month's deduction totals, rolled up from the rows. Pure.
+
+    Summed from the SAME row fields the screen renders, never recomputed from
+    the source documents: a total that disagrees with the rows under it is worse
+    than no total, because the manager cannot tell which one to act on.
+    """
+    advances_by_employee = advances_by_employee or {}
+
+    penalty_total = sum(flt(r.get("penalty_total")) for r in payroll_rows)
+    penalty_days = sum(flt(r.get("penalty_days")) for r in payroll_rows)
+    advance_total = sum(flt(r.get("advance_total")) for r in payroll_rows)
+    order_total = sum(flt(r.get("order_total")) for r in payroll_rows)
+    net_payable = sum(flt(r.get("net_payable")) for r in payroll_rows)
+
+    # Open advances booked somewhere that is not an employee-advance ledger.
+    # Reported, never repointed: `advance_account` is on a SUBMITTED document
+    # and is the account the original payout credited, so changing it here would
+    # leave the posted GL and the document disagreeing.
+    suspect: Dict[str, Dict[str, Any]] = {}
+    for rows in advances_by_employee.values():
+        for row in rows or []:
+            account = row.get("advance_account")
+            if not account or _is_advance_ledger(account):
+                continue
+            bucket = suspect.setdefault(account, {"account": account, "count": 0, "total": 0.0})
+            bucket["count"] += 1
+            bucket["total"] += _advance_open_amount(row)
+
+    return {
+        "penalty_total": _money(penalty_total),
+        "penalty_days": flt(penalty_days, 2),
+        "advance_total": _money(advance_total),
+        "order_total": _money(order_total),
+        "total": _money(penalty_total + advance_total + order_total),
+        "net_payable": _money(net_payable),
+        "advances_readable": bool(advances_readable),
+        "employee_orders_present": bool(employee_orders_present),
+        "penalty_units": list(PENALTY_UNITS),
+        "days_per_month": DAYS_PER_MONTH,
+        "advance_accounts_suspect": [
+            {
+                "account": b["account"],
+                "count": b["count"],
+                "total": _money(b["total"]),
+            }
+            for b in sorted(suspect.values(), key=lambda b: -flt(b["total"]))
+        ],
+    }
 
 
 def _summarize(
@@ -788,8 +1161,12 @@ def _build_gaps(
     registry_present: bool,
     leftovers: Dict[str, float],
     payroll: Dict[str, Any],
+    deductions: Optional[Dict[str, Any]] = None,
     tolerance: float = MONEY_TOLERANCE,
 ) -> List[Dict[str, str]]:
+    # `deductions` is optional and trailing so the four-argument call every
+    # existing caller (and test) makes keeps working unchanged.
+    deductions = deductions or {}
     gaps: List[Dict[str, str]] = []
 
     if not registry_present:
@@ -873,6 +1250,56 @@ def _build_gaps(
             }
         )
 
+    # ── deductions ────────────────────────────────────────────────────────
+    # Only when the block was actually computed: an older caller passing four
+    # arguments gets exactly the gaps it got before, rather than three new ones
+    # asserting things this call never looked at.
+    if deductions:
+        if deductions.get("advances_readable") is False:
+            gaps.append(
+                {
+                    "code": "advances_unreadable",
+                    "severity": "warning",
+                    "message": _(
+                        "Employee advances could not be read from HRMS, so no advance is "
+                        "deducted from any salary below. An employee may be paid in full "
+                        "while still owing the company an advance."
+                    ),
+                }
+            )
+
+        if not deductions.get("employee_orders_present"):
+            gaps.append(
+                {
+                    "code": "employee_orders_unused",
+                    "severity": "info",
+                    "message": _(
+                        "Staff purchases only appear here when the order is rung up with "
+                        "the Employee Order policy. No order has ever been, so jar debt "
+                        "reads as zero for everyone."
+                    ),
+                }
+            )
+
+        suspect = deductions.get("advance_accounts_suspect") or []
+        if suspect:
+            gaps.append(
+                {
+                    "code": "advance_account_is_debtors",
+                    "severity": "warning",
+                    "message": _(
+                        "{0} open advance(s) worth {1} sit on {2}, which is not an "
+                        "employee-advance ledger — that balance is mixed in with real "
+                        "customers' debt. Settling from this screen credits the same "
+                        "account it was booked to, so nothing is repointed here."
+                    ).format(
+                        sum(int(s.get("count") or 0) for s in suspect),
+                        _money(sum(flt(s.get("total")) for s in suspect)),
+                        ", ".join(str(s.get("account")) for s in suspect[:5]),
+                    ),
+                }
+            )
+
     return gaps
 
 
@@ -908,6 +1335,281 @@ def _load_period_requests(month_key: str, company: Optional[str]) -> List[Dict[s
         order_by="expense_date asc, creation asc",
         limit_page_length=0,
     )
+
+
+def _penalty_doctype_ready() -> bool:
+    """True when ``Jarz Employee Penalty`` has actually been migrated in.
+
+    Same shape as ``_period_fields_ready``: the DocType ships with this release,
+    so between deploying the code and running ``bench migrate`` the table does
+    not exist and querying it raises. Penalties simply do not exist yet on such
+    a bench — an empty list is the truth, not a degraded answer.
+    """
+    try:
+        return bool(frappe.db.table_exists(PENALTY_DOCTYPE))
+    except Exception:
+        _log("monthly_expenses: penalty table probe")
+        return False
+
+
+def _load_penalties(
+    month_key: str, company: Optional[str]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """ACTIVE penalties for one salary month, keyed by employee.
+
+    MONTH-scoped, unlike advances and orders: ``period_month`` says which
+    salary a penalty comes out of, and a September penalty must not keep
+    deducting from October.
+
+    ``docstatus=1`` only — cancelling a penalty (docstatus 2) is how it is
+    undone, so a cancelled one must stop reducing the salary immediately.
+    """
+    if not _penalty_doctype_ready():
+        return {}
+    filters: Dict[str, Any] = {"docstatus": 1, "period_month": month_key}
+    if company:
+        filters["company"] = company
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        rows = frappe.get_all(
+            PENALTY_DOCTYPE,
+            filters=filters,
+            fields=_PENALTY_FIELDS,
+            order_by="penalty_date asc, creation asc",
+            limit_page_length=0,
+        ) or []
+        # Grouped INSIDE the try: the read and the shaping of its result fail
+        # the same way, and a screen that dies half-way through building a map
+        # is no more use than one that never read it.
+        for row in rows:
+            grouped.setdefault(row.get("employee"), []).append(row)
+    except Exception:
+        _log("monthly_expenses: penalty load")
+        return {}
+    return grouped
+
+
+def _load_advances(
+    company: Optional[str],
+) -> Tuple[Dict[str, List[Dict[str, Any]]], bool]:
+    """Open Employee Advance balances, ALL-TIME, keyed by employee.
+
+    Returns ``(grouped, readable)``. ``readable`` is False when HRMS is absent
+    or the query failed — the screen then renders every other number and
+    ``_build_gaps`` says advances are missing, rather than showing a confident
+    zero next to a salary that is about to be overpaid.
+
+    Not month-scoped, deliberately: see ``_build_payroll_rows``. Fully settled
+    advances are dropped here rather than shown with a zero balance; they are
+    history, and the row is a list of what is still owed.
+    """
+    if not hrms_available():
+        return {}, False
+
+    fields = list(_ADVANCE_FIELDS)
+    has_settled = _advance_has_field(F_SETTLED_AMOUNT)
+    if has_settled:
+        fields.append(F_SETTLED_AMOUNT)
+    if _advance_has_field(F_SETTLED_VIA):
+        fields.append(F_SETTLED_VIA)
+
+    filters: Dict[str, Any] = {"docstatus": 1}
+    if company:
+        filters["company"] = company
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        rows = frappe.get_all(
+            ADVANCE_DOCTYPE,
+            filters=filters,
+            fields=fields,
+            order_by="posting_date desc, modified desc",
+            limit_page_length=0,
+        ) or []
+        for row in rows:
+            if _advance_open_amount(row) <= MONEY_TOLERANCE:
+                continue
+            grouped.setdefault(row.get("employee"), []).append(row)
+    except Exception:
+        _log("monthly_expenses: employee advance load")
+        return {}, False
+    return grouped, True
+
+
+def _employee_order_field_ready() -> bool:
+    """True when ``Sales Invoice.custom_order_purpose`` exists.
+
+    A pre-fixture bench has no such column, and filtering on it raises. Empty is
+    the correct answer there: with no purpose field, no order can be flagged as
+    staff.
+    """
+    try:
+        return bool(frappe.get_meta("Sales Invoice").get_field("custom_order_purpose"))
+    except Exception:
+        return False
+
+
+def _employee_orders_exist(company: Optional[str]) -> bool:
+    """Has ANY order ever been rung up with the Employee purpose?
+
+    Separate from the balance query and deliberately unfiltered by outstanding:
+    production has zero such invoices, which is why jar debt legitimately reads
+    zero, and the gap that says so must distinguish "nobody owes anything" from
+    "the flow has never been used".
+    """
+    if not _employee_order_field_ready():
+        return False
+    filters: Dict[str, Any] = {
+        "docstatus": 1,
+        "custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
+    }
+    if company:
+        filters["company"] = company
+    try:
+        return bool(frappe.db.count("Sales Invoice", filters))
+    except Exception:
+        _log("monthly_expenses: employee order probe")
+        return False
+
+
+def _load_employee_orders(
+    employees: Sequence[str], company: Optional[str]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Unpaid Employee-purpose invoices, ALL-TIME, keyed by employee.
+
+    The join is ``employee_link.customers_for_employees`` and the filter is
+    ``custom_order_purpose = "Employee"``. BOTH are required, and the owner ruled
+    out the shortcut of trusting ``Customer.custom_employee`` alone: production
+    carries 48 such links and they are misused — one employee is linked to 25
+    customers who are not her, so counting those customers' invoices would
+    invent tens of thousands of pounds of staff debt.
+    """
+    if not employees or not _employee_order_field_ready():
+        return {}
+    try:
+        by_employee = customers_for_employees(employees) or {}
+    except Exception:
+        _log("monthly_expenses: employee customer join")
+        return {}
+    if not by_employee:
+        return {}
+    # Inverted from the same map, so an order can only ever be attributed to the
+    # employee that map already points at.
+    employee_of_customer = {cust: emp for emp, cust in by_employee.items()}
+
+    filters: Dict[str, Any] = {
+        "docstatus": 1,
+        "custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
+        "customer": ["in", sorted(employee_of_customer)],
+        "outstanding_amount": [">", 0],
+    }
+    if company:
+        filters["company"] = company
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        rows = frappe.get_all(
+            "Sales Invoice",
+            filters=filters,
+            fields=_ORDER_FIELDS,
+            order_by="posting_date desc, modified desc",
+            limit_page_length=0,
+        ) or []
+        for row in rows:
+            employee = employee_of_customer.get(row.get("customer"))
+            if employee:
+                grouped.setdefault(employee, []).append(row)
+    except Exception:
+        _log("monthly_expenses: employee order load")
+        return {}
+    return grouped
+
+
+def _load_settlements(month_key: str, company: Optional[str]) -> Dict[str, float]:
+    """What each employee's salary month was discharged IN KIND, by employee.
+
+    A settlement is a Journal Entry, not a ``Jarz Expense Request``, so
+    ``paid_linked_by_employee`` cannot see it. It is found by its tag —
+    ``[JARZ-JE:SALARY_SETTLEMENT:<employee>:<month>]`` — the same provenance
+    mechanism every other jarz-posted Journal Entry uses.
+
+    ``docstatus=1`` only, which is what makes this self-healing: cancelling the
+    settlement Journal Entry in Desk immediately puts the salary back to unpaid,
+    with no second document to remember to undo.
+    """
+    like = "%[JARZ-JE:{0}:%:{1}]%".format(SETTLEMENT_JE_TAG, month_key)
+    filters: Dict[str, Any] = {"docstatus": 1, "user_remark": ["like", like]}
+    if company:
+        filters["company"] = company
+    settled: Dict[str, float] = {}
+    try:
+        rows = frappe.get_all(
+            "Journal Entry",
+            filters=filters,
+            fields=["name", "user_remark", "total_debit"],
+            limit_page_length=0,
+        ) or []
+        for row in rows:
+            # The LIKE is a prefilter; the regex is the decision. `%` in the
+            # pattern would happily match a remark whose employee segment
+            # contains a colon or a second tag, and the employee is read out of
+            # the tag, so it has to be matched exactly.
+            match = _SETTLEMENT_TAG_RE.search(str(row.get("user_remark") or ""))
+            if not match or match.group(2) != month_key:
+                continue
+            employee = match.group(1)
+            settled[employee] = flt(settled.get(employee)) + flt(row.get("total_debit"))
+    except Exception:
+        _log("monthly_expenses: settlement lookup")
+        return {}
+    return settled
+
+
+def _off_payroll_stubs(
+    employees: Sequence[str],
+    penalties_by_employee: Optional[Dict[str, Any]] = None,
+    advances_by_employee: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Minimal payroll-row seeds for people with debt but no salary structure.
+
+    The display name is taken from a document that already names them —
+    ``employee_name`` is denormalised onto both Employee Advance and the penalty
+    — and only the leftovers cost a query. On a bench with no HRMS the lookup
+    returns nothing and the row falls back to the employee ID, which is still a
+    visible row: the whole point is that an advance to the CEO cannot be
+    invisible just because he draws no salary.
+    """
+    penalties_by_employee = penalties_by_employee or {}
+    advances_by_employee = advances_by_employee or {}
+    if not employees:
+        return []
+
+    names: Dict[str, str] = {}
+    for source in (advances_by_employee, penalties_by_employee):
+        for employee, rows in source.items():
+            for row in rows or []:
+                label = str(row.get("employee_name") or "").strip()
+                if label and employee not in names:
+                    names[employee] = label
+
+    unknown = [e for e in employees if e not in names]
+    if unknown:
+        try:
+            names.update(employee_display_names(unknown) or {})
+        except Exception:
+            _log("monthly_expenses: off-payroll employee names")
+
+    return [
+        {
+            "employee": employee,
+            "employee_name": names.get(employee) or employee,
+            "designation": None,
+            "department": None,
+            "salary_structure": None,
+            "base": 0.0,
+            "variable": 0.0,
+            "monthly": 0.0,
+        }
+        for employee in employees
+    ]
 
 
 def _empty_payroll() -> Dict[str, Any]:
@@ -1116,12 +1818,52 @@ def _compute_month(
     slips = _submitted_salary_slips(employees, month_start, month_end)
     salary_account = _resolve_salary_account(payroll_accounts, payable_set)
 
+    # ── deductions ────────────────────────────────────────────────────────
+    # Loaded HERE and handed to `_build_payroll_rows` as maps, the same way the
+    # payment index is. The builder stays pure and issues no query per row.
+    penalties_by_employee = _load_penalties(month_key, company)
+    advances_by_employee, advances_readable = _load_advances(company)
+    settled_by_employee = _load_settlements(month_key, company)
+
+    # Anyone the month has anything to say about, whether or not payroll knows
+    # them. Orders can only be joined for a known employee (see
+    # `_load_employee_orders`), so the candidate set is built first.
+    on_payroll = set(employees)
+    candidates = sorted(
+        on_payroll
+        | set(penalties_by_employee)
+        | set(advances_by_employee)
+        # Somebody settled off-payroll this month: their advance may now be
+        # closed and carry no balance, but the month still discharged money in
+        # their name and has to be able to show it.
+        | set(settled_by_employee)
+    )
+    orders_by_employee = _load_employee_orders(candidates, company)
+
+    off_payroll_ids = sorted(
+        (
+            set(penalties_by_employee)
+            | set(advances_by_employee)
+            | set(orders_by_employee)
+            | set(settled_by_employee)
+        )
+        - on_payroll
+    )
+    off_payroll_rows = _off_payroll_stubs(
+        off_payroll_ids, penalties_by_employee, advances_by_employee
+    )
+
     payroll_rows = _build_payroll_rows(
         payroll_raw.get("rows") or [],
         paid_linked_by_employee=index["paid_linked_by_employee"],
         payments_by_employee=index["payments_by_employee"],
         slips_by_employee=slips,
         salary_account=salary_account,
+        penalties_by_employee=penalties_by_employee,
+        advances_by_employee=advances_by_employee,
+        orders_by_employee=orders_by_employee,
+        settled_by_employee=settled_by_employee,
+        off_payroll_rows=off_payroll_rows,
     )
 
     payroll_unlinked = _unlinked_by_account(
@@ -1152,6 +1894,13 @@ def _compute_month(
         "missing": payroll_raw.get("missing") or [],
     }
 
+    deductions = _build_deductions(
+        payroll_rows,
+        advances_readable=advances_readable,
+        employee_orders_present=_employee_orders_exist(company),
+        advances_by_employee=advances_by_employee,
+    )
+
     registry_run_rate = sum(
         flt(r.get("monthly_equivalent"))
         for r in registry_rows
@@ -1173,6 +1922,7 @@ def _compute_month(
         "registry": registry_rows,
         "leftovers": leftovers,
         "payroll": payroll,
+        "deductions": deductions,
         "summary": summary,
         "account_labels": account_labels,
         "payable_accounts": payable_accounts,
@@ -1222,6 +1972,9 @@ def get_monthly_expenses(
         "by_category": _build_categories(context["registry"], context["payroll"]),
         "recurring": context["registry"],
         "payroll": context["payroll"],
+        # What REDUCES the payroll: penalties for this month, plus the all-time
+        # advance and staff-order balances a payment can clear.
+        "deductions": context["deductions"],
         "payment_sources": payment_sources,
         "expense_accounts": context["expense_accounts"],
         "cost_centers": _cost_centers(company),
@@ -1241,6 +1994,7 @@ def get_monthly_expenses(
             context["registry_present"],
             context["leftovers"],
             context["payroll"],
+            context["deductions"],
         ),
         "can_manage": True,
         # Cancelling a payment reverses a posted Journal Entry, and
@@ -1492,6 +2246,350 @@ def pay_recurring_expense(
     }
 
 
+def _parse_settlement_list(value: Any, key: str) -> List[Dict[str, Any]]:
+    """Normalise ``settle_advances`` / ``settle_orders`` to ``[{key, amount}]``.
+
+    Three wire shapes are accepted because three callers exist: a JSON string
+    (Frappe hands every HTTP argument over as text), a list of dicts (the
+    Flutter sheet, which knows the amount each checkbox settles), and a bare
+    list of names — "settle the full open balance of each", which is what a
+    curl-driven fix-up or a bench console call will reach for.
+
+    ``amount`` is left as ``None`` when unstated. It is NOT defaulted to zero:
+    zero is a refusal ("settle nothing"), while unstated means "all of it", and
+    collapsing the two would silently post an empty settlement.
+    """
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            frappe.throw(_("{0} must be a JSON list.").format(key))
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        frappe.throw(_("{0} must be a list.").format(key))
+
+    parsed: List[Dict[str, Any]] = []
+    for entry in value:
+        if isinstance(entry, str):
+            name, requested = entry.strip(), None
+        elif isinstance(entry, dict):
+            name = str(entry.get(key) or entry.get("name") or "").strip()
+            requested = entry.get("amount")
+            if requested in (None, ""):
+                requested = None
+            else:
+                requested = flt(requested)
+        else:
+            frappe.throw(_("{0} entries must be a name or an object.").format(key))
+            continue  # pragma: no cover - frappe.throw does not return
+        if not name:
+            frappe.throw(_("{0} entries must name a document.").format(key))
+        parsed.append({key: name, "amount": requested})
+    return parsed
+
+
+def _plan_advance_settlements(
+    employee: str, company: str, requests: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Validate each requested advance and cap it at its OPEN balance.
+
+    Every row is locked and re-read from the database rather than trusted from
+    the payload or from the month context: the open balance is the only thing
+    standing between "recover an advance" and "recover the same advance every
+    month forever", and it must be read inside the same lock the write happens
+    under.
+    """
+    if not requests:
+        # Nothing asked for, nothing read: the ordinary cash-only payslip must
+        # not touch HRMS at all, so a bench without it keeps working.
+        return []
+
+    plan: List[Dict[str, Any]] = []
+    seen: set = set()
+    fields = [
+        "name",
+        "employee",
+        "company",
+        "advance_account",
+        "currency",
+        "docstatus",
+        "advance_amount",
+        "paid_amount",
+        "claimed_amount",
+        "return_amount",
+    ]
+    if _advance_has_field(F_SETTLED_AMOUNT):
+        fields.append(F_SETTLED_AMOUNT)
+
+    for request in requests:
+        name = request.get("name")
+        if name in seen:
+            frappe.throw(_("Advance {0} is listed twice in this settlement.").format(name))
+        seen.add(name)
+
+        # Locked BEFORE the balance is read, so a second settlement of the same
+        # advance queues here and then sees the balance this one leaves behind.
+        _lock_row(ADVANCE_DOCTYPE, name)
+        row = frappe.db.get_value(ADVANCE_DOCTYPE, name, fields, as_dict=True)
+        if not row:
+            frappe.throw(_("Employee Advance {0} not found.").format(name))
+        if int(row.get("docstatus") or 0) != 1:
+            frappe.throw(
+                _("Employee Advance {0} is not submitted and cannot be settled.").format(name)
+            )
+        if str(row.get("employee") or "") != employee:
+            frappe.throw(
+                _("Employee Advance {0} belongs to {1}, not {2}.").format(
+                    name, row.get("employee"), employee
+                )
+            )
+        if company and row.get("company") and str(row["company"]) != company:
+            frappe.throw(
+                _("Employee Advance {0} belongs to company {1}.").format(name, row["company"])
+            )
+        if not row.get("advance_account"):
+            frappe.throw(
+                _(
+                    "Employee Advance {0} has no advance account, so there is nothing "
+                    "to credit. Set it on the advance first."
+                ).format(name)
+            )
+
+        open_amount = _advance_open_amount(row)
+        if open_amount <= MONEY_TOLERANCE:
+            frappe.throw(
+                _(
+                    "Employee Advance {0} has nothing left to recover — it has already "
+                    "been claimed, returned or settled."
+                ).format(name)
+            )
+
+        requested = request.get("amount")
+        settled = open_amount if requested is None else flt(requested)
+        if settled <= 0:
+            frappe.throw(_("Settlement amount for {0} must be greater than zero.").format(name))
+        if settled > open_amount + MONEY_TOLERANCE:
+            frappe.throw(
+                _(
+                    "Cannot settle {0} against advance {1}: only {2} is still open. "
+                    "Recovering more than the open balance would take the same money "
+                    "from the employee twice."
+                ).format(_money(settled), name, _money(open_amount))
+            )
+        # Inside tolerance, the open balance wins: a client that rounded 499.996
+        # up to 500 must not leave a fraction of a pound open forever.
+        settled = min(settled, open_amount)
+
+        plan.append(
+            {
+                "name": name,
+                "amount": _money(settled),
+                "account": row["advance_account"],
+                "open_amount": _money(open_amount),
+                "settled_before": flt(row.get(F_SETTLED_AMOUNT)),
+            }
+        )
+    return plan
+
+
+def _plan_order_settlements(
+    employee: str, company: str, requests: Sequence[Dict[str, Any]], allowed_invoices: Iterable[str]
+) -> List[Dict[str, Any]]:
+    """Validate each requested staff invoice and cap it at its outstanding.
+
+    ``allowed_invoices`` is the set the month context already attributed to this
+    employee through ``employee_link``. Anything outside it is refused rather
+    than joined a second, looser way here — the whole reason the Employee-order
+    policy exists is that ``Customer.custom_employee`` alone attributes orders to
+    the wrong people.
+    """
+    if not requests:
+        return []
+
+    allowed = set(allowed_invoices or [])
+    plan: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    for request in requests:
+        name = request.get("invoice")
+        if name in seen:
+            frappe.throw(_("Invoice {0} is listed twice in this settlement.").format(name))
+        seen.add(name)
+        if name not in allowed:
+            frappe.throw(
+                _(
+                    "Invoice {0} is not an open Employee-purpose order for {1}, so it "
+                    "cannot be settled from this salary."
+                ).format(name, employee)
+            )
+
+        _lock_row("Sales Invoice", name)
+        row = frappe.db.get_value(
+            "Sales Invoice",
+            name,
+            ["name", "customer", "company", "debit_to", "outstanding_amount", "docstatus"],
+            as_dict=True,
+        )
+        if not row:
+            frappe.throw(_("Sales Invoice {0} not found.").format(name))
+        if int(row.get("docstatus") or 0) != 1:
+            frappe.throw(_("Sales Invoice {0} is not submitted.").format(name))
+        if company and row.get("company") and str(row["company"]) != company:
+            frappe.throw(
+                _("Sales Invoice {0} belongs to company {1}.").format(name, row["company"])
+            )
+        if not row.get("debit_to"):
+            frappe.throw(
+                _("Sales Invoice {0} has no receivable account to credit.").format(name)
+            )
+
+        outstanding = flt(row.get("outstanding_amount"))
+        if outstanding <= MONEY_TOLERANCE:
+            frappe.throw(_("Invoice {0} is already paid.").format(name))
+
+        requested = request.get("amount")
+        settled = outstanding if requested is None else flt(requested)
+        if settled <= 0:
+            frappe.throw(_("Settlement amount for {0} must be greater than zero.").format(name))
+        if settled > outstanding + MONEY_TOLERANCE:
+            frappe.throw(
+                _(
+                    "Cannot settle {0} against invoice {1}: only {2} is outstanding."
+                ).format(_money(settled), name, _money(outstanding))
+            )
+        settled = min(settled, outstanding)
+
+        plan.append(
+            {
+                "invoice": name,
+                "amount": _money(settled),
+                "account": row["debit_to"],
+                "customer": row.get("customer"),
+                "outstanding": _money(outstanding),
+            }
+        )
+    return plan
+
+
+def _post_settlement_journal_entry(
+    *,
+    company: str,
+    employee: str,
+    month_key: str,
+    salary_account: str,
+    advance_plan: Sequence[Dict[str, Any]],
+    order_plan: Sequence[Dict[str, Any]],
+    posting_date: Optional[str],
+    posting_time: Optional[str],
+    remarks: Optional[str],
+) -> str:
+    """The ONE Journal Entry that discharges a salary in kind.
+
+    ``Dr Salary`` for the whole settled amount, then one credit per balance it
+    clears. Two details carry all the weight:
+
+    * ``reference_type`` / ``reference_name`` on the credit rows is what makes
+      ERPNext reduce a Sales Invoice's ``outstanding_amount`` and reconcile an
+      advance. Without them the money still lands on the right account, but the
+      invoice stays "Unpaid" forever and the employee is asked for it again.
+    * ``party_type`` / ``party`` keep the Employee's and the Customer's
+      sub-ledgers right. An advance account carries a per-Employee balance and a
+      receivable a per-Customer one; a partyless credit to either leaves the
+      account total correct and every party statement wrong.
+
+    Built here rather than by teaching ``JarzExpenseRequest.on_submit`` a second
+    shape: that DocType's two-line Journal Entry is what its ``on_cancel``
+    reverses, and anything else posted through it would be reversed by a cancel
+    that was only ever written for cash.
+    """
+    from jarz_pos.services.delivery_handling import _strip_je_tag_lookalikes
+
+    total = sum(flt(p["amount"]) for p in advance_plan) + sum(
+        flt(p["amount"]) for p in order_plan
+    )
+
+    je = frappe.new_doc("Journal Entry")
+    je.voucher_type = "Journal Entry"
+    je.company = company
+    je.posting_date = posting_date or today()
+
+    # The free text is sanitised before it is concatenated with the tag. Every
+    # `[JARZ-JE:<type>:<key>]` lookup in this app is a company-wide
+    # `user_remark LIKE '%<tag>%'`, so a remark carrying a forged tag satisfies
+    # somebody else's idempotency guard — see the long note in
+    # `JarzExpenseRequest.on_submit`. Here it would also let one employee's
+    # remark be counted as another employee's settlement by `_load_settlements`.
+    tag = "[JARZ-JE:{0}:{1}:{2}]".format(SETTLEMENT_JE_TAG, employee, month_key)
+    free_text = _strip_je_tag_lookalikes(remarks) or _(
+        "Salary settlement {0} {1}"
+    ).format(employee, month_key)
+    je.user_remark = "{0} {1}".format(tag, free_text)
+
+    apply_ledger_posting_datetime(
+        je, join_posting_datetime(je.posting_date, posting_time)
+    )
+
+    je.append(
+        "accounts",
+        {
+            "account": salary_account,
+            "debit_in_account_currency": flt(total),
+            "credit_in_account_currency": 0,
+            "user_remark": _("Salary settled against balances"),
+        },
+    )
+    for plan in advance_plan:
+        je.append(
+            "accounts",
+            {
+                "account": plan["account"],
+                "credit_in_account_currency": flt(plan["amount"]),
+                "debit_in_account_currency": 0,
+                "party_type": "Employee",
+                "party": employee,
+                "reference_type": ADVANCE_DOCTYPE,
+                "reference_name": plan["name"],
+                "is_advance": "Yes",
+                "user_remark": _("Advance {0}").format(plan["name"]),
+            },
+        )
+    for plan in order_plan:
+        je.append(
+            "accounts",
+            {
+                "account": plan["account"],
+                "credit_in_account_currency": flt(plan["amount"]),
+                "debit_in_account_currency": 0,
+                "party_type": "Customer",
+                "party": plan.get("customer"),
+                "reference_type": "Sales Invoice",
+                "reference_name": plan["invoice"],
+                "user_remark": _("Employee order {0}").format(plan["invoice"]),
+            },
+        )
+
+    je.flags.ignore_permissions = True
+    je.insert(ignore_permissions=True)
+    je.submit()
+
+    # Stamped AFTER the submit, so a Journal Entry that failed validation never
+    # leaves an advance marked as recovered by a document that does not exist.
+    if _advance_has_field(F_SETTLED_AMOUNT):
+        for plan in advance_plan:
+            values = {
+                F_SETTLED_AMOUNT: _money(flt(plan.get("settled_before")) + flt(plan["amount"]))
+            }
+            if _advance_has_field(F_SETTLED_VIA):
+                values[F_SETTLED_VIA] = je.name
+            frappe.db.set_value(
+                ADVANCE_DOCTYPE, plan["name"], values, update_modified=False
+            )
+    return je.name
+
+
 @frappe.whitelist()
 def pay_salary(
     employee: str,
@@ -1501,6 +2599,8 @@ def pay_salary(
     payment_date: Optional[str] = None,
     remarks: Optional[str] = None,
     allow_overpay: Any = 0,
+    settle_advances: Any = None,
+    settle_orders: Any = None,
 ) -> Dict[str, Any]:
     """Pay one employee's salary for a month, collapsing the two HRMS entries.
 
@@ -1508,6 +2608,16 @@ def pay_salary(
     That is only correct while HRMS payroll is not being run — so this refuses
     outright if a SUBMITTED Salary Slip overlaps the month, because that slip has
     already booked the expense and paying again would post it twice.
+
+    ``amount`` is the CASH handed over and keeps exactly that meaning.
+    ``settle_advances`` / ``settle_orders`` are ADDITIONAL discharge: the same
+    salary, paid in kind by clearing what the employee already owes. The two
+    together are what the month is credited with, which is why the overpay guard
+    measures their sum.
+
+    ``amount=0`` with settlements is a legitimate payslip — the whole salary went
+    on advances and no cash moves — so the old "amount must be greater than
+    zero" applies to the TOTAL discharge, not to the cash half.
     """
     _ensure_manager()
     _require_period_fields()
@@ -1517,8 +2627,19 @@ def pay_salary(
         frappe.throw(_("Employee is required."))
 
     amount = flt(amount)
-    if amount <= 0:
-        frappe.throw(_("Amount must be greater than zero."))
+    if amount < 0:
+        frappe.throw(_("Amount cannot be negative."))
+
+    advance_requests = _parse_settlement_list(settle_advances, "name")
+    order_requests = _parse_settlement_list(settle_orders, "invoice")
+
+    if amount <= 0 and not (advance_requests or order_requests):
+        frappe.throw(
+            _(
+                "Amount must be greater than zero, or an advance or staff order must "
+                "be settled."
+            )
+        )
 
     allow = _as_bool(allow_overpay)
 
@@ -1552,7 +2673,25 @@ def pay_salary(
             )
         )
 
-    account = _resolve_paying_account(paying_account, company)
+    # Only the cash half needs a source of money. Resolving an account for a
+    # settlement-only payslip would refuse it for the wrong reason — no cash is
+    # leaving any drawer.
+    account = _resolve_paying_account(paying_account, company) if amount > 0 else None
+
+    # Planned (and capped) BEFORE the guard, because the guard measures the
+    # TOTAL discharge and the plan is what decides that total: asking to settle
+    # 5,000 against an advance with 500 open discharges 500, not 5,000.
+    advance_plan = _plan_advance_settlements(employee, company, advance_requests)
+    order_plan = _plan_order_settlements(
+        employee,
+        company,
+        order_requests,
+        [o.get("invoice") for o in ((row or {}).get("orders") or [])],
+    )
+    settle_total = _money(
+        sum(flt(p["amount"]) for p in advance_plan)
+        + sum(flt(p["amount"]) for p in order_plan)
+    )
 
     due_amount = flt(row.get("due_amount")) if row else 0.0
     already_paid = flt(row.get("paid_amount")) if row else 0.0
@@ -1581,7 +2720,11 @@ def pay_salary(
     unattributed = flt(payroll.get("unattributed_gl"))
     payroll_due = flt(payroll.get("due"))
     payroll_linked = flt(payroll.get("paid"))
-    salary_total_after = payroll_linked + unattributed + amount
+    # The settlement Journal Entry debits the SAME salary account the cash half
+    # does, so it is salary expense for the month exactly like cash is and
+    # belongs in this total. Leaving it out would let the month's salary expense
+    # be run past the payroll by settling advances instead of paying cash.
+    salary_total_after = payroll_linked + unattributed + amount + settle_total
     if (
         unattributed > MONEY_TOLERANCE
         and payroll_due > 0
@@ -1599,25 +2742,61 @@ def pay_salary(
                 _money(unattributed),
                 payroll.get("salary_account_label") or salary_account,
                 month_key,
-                _money(amount),
+                _money(amount + settle_total),
                 _money(salary_total_after),
                 _money(payroll_due),
             )
         )
 
-    _guard_overpay(label, due_amount, already_paid, amount, allow, month_key)
+    # The guard measures the TOTAL discharge against what is still owed. Cash and
+    # settlement both reduce the same obligation, so counting only the cash half
+    # would let a full salary be paid in cash and then paid again in kind.
+    _guard_overpay(label, due_amount, already_paid, amount + settle_total, allow, month_key)
 
-    doc = _create_payment(
-        company=company,
-        amount=amount,
-        reason_account=salary_account,
-        paying_account=account,
-        payment_date=payment_date,
-        remarks=remarks or "{0} — {1} {2}".format(label, _("salary"), month_key),
-        expense_kind="Salary",
-        period_month=month_key,
-        employee=employee,
-    )
+    # ── the two halves, one transaction ───────────────────────────────────
+    # Nothing commits between them. A cash payment that posts while the
+    # settlement fails is the worst outcome available: the advance stays open,
+    # the employee has the money, and the company chases them for it again.
+    # Frappe rolls the whole request back on any exception raised below, which
+    # is why neither half swallows one.
+    doc = None
+    if amount > 0:
+        doc = _create_payment(
+            company=company,
+            amount=amount,
+            reason_account=salary_account,
+            paying_account=account,
+            payment_date=payment_date,
+            remarks=remarks or "{0} — {1} {2}".format(label, _("salary"), month_key),
+            expense_kind="Salary",
+            period_month=month_key,
+            employee=employee,
+        )
+
+    settlement = None
+    if advance_plan or order_plan:
+        posting_date, posting_time = split_posting_datetime(payment_date or today())
+        journal_entry = _post_settlement_journal_entry(
+            company=company,
+            employee=employee,
+            month_key=month_key,
+            salary_account=salary_account,
+            advance_plan=advance_plan,
+            order_plan=order_plan,
+            posting_date=posting_date,
+            posting_time=posting_time,
+            remarks=remarks,
+        )
+        settlement = {
+            "journal_entry": journal_entry,
+            "total": settle_total,
+            "advances": [
+                {"name": p["name"], "amount": p["amount"]} for p in advance_plan
+            ],
+            "orders": [
+                {"invoice": p["invoice"], "amount": p["amount"]} for p in order_plan
+            ],
+        }
 
     refreshed = _compute_month(month_key, company)
     updated = next(
@@ -1625,14 +2804,200 @@ def pay_salary(
     )
     return {
         "success": True,
-        "payment": _serialize_expense(doc.as_dict()),
+        "payment": _serialize_expense(doc.as_dict()) if doc else None,
+        "settlement": settlement,
         "row": updated,
         "payroll": {
             "due": refreshed["payroll"]["due"],
             "paid": refreshed["payroll"]["paid"],
             "remaining": refreshed["payroll"]["remaining"],
         },
+        # `.get`, not `[...]`: every caller that stubs `_compute_month` (and the
+        # pay path's own older tests) hands back a context without this key.
+        "deductions": refreshed.get("deductions"),
         "summary": refreshed["summary"],
+    }
+
+
+# ── penalties ─────────────────────────────────────────────────────────────
+
+
+@frappe.whitelist()
+def add_employee_penalty(
+    employee: str,
+    month: Optional[str] = None,
+    unit: str = "Days",
+    quantity: Any = None,
+    amount: Any = None,
+    reason: Optional[str] = None,
+    penalty_date: Optional[str] = None,
+    company: Optional[str] = None,
+    allow_overpay: Any = 0,
+) -> Dict[str, Any]:
+    """Record a penalty against one employee's salary month.
+
+    Posts NO Journal Entry, deliberately. Salary is expensed when it is PAID
+    (``Jarz Expense Request`` debits the salary account), so paying less already
+    books less expense; a penalty that also posted somewhere would count the
+    same reduction twice, and inventing a "penalty income" account would turn a
+    deduction into revenue the company never earned.
+
+    The ``day_rate`` is SNAPSHOT onto the document. A raise six months later
+    must not silently re-price a penalty already agreed with the employee.
+    """
+    _ensure_manager()
+    _require_period_fields()
+
+    employee = (employee or "").strip()
+    if not employee:
+        frappe.throw(_("Employee is required."))
+
+    unit = (unit or "Days").strip()
+    if unit not in PENALTY_UNITS:
+        frappe.throw(_("Penalty unit must be one of {0}.").format(", ".join(PENALTY_UNITS)))
+
+    reason = (reason or "").strip()
+    if not reason:
+        frappe.throw(
+            _(
+                "A reason is required. A deduction from someone's pay with no stated "
+                "reason cannot be defended to them."
+            )
+        )
+
+    if not _penalty_doctype_ready():
+        frappe.throw(
+            _(
+                "Employee penalties need the {0} DocType. Run `bench migrate` on this site."
+            ).format(PENALTY_DOCTYPE)
+        )
+
+    allow = _as_bool(allow_overpay)
+
+    # Before the state the guard below reads, same as `pay_salary`.
+    _lock_row("Employee", employee)
+
+    _month_start, _month_end, month_key, company, currency = _month_context(month, company)
+    context = _compute_month(month_key, company)
+    row = next(
+        (r for r in context["payroll"]["rows"] if r["employee"] == employee), None
+    )
+
+    gross_due = flt(row.get("gross_due")) if row else 0.0
+    day_rate = flt(row.get("day_rate")) if row else 0.0
+    already = flt(row.get("penalty_total")) if row else 0.0
+
+    if unit in ("Days", "Half Days"):
+        if flt(quantity) <= 0:
+            frappe.throw(_("Number of days must be greater than zero."))
+        if day_rate <= 0:
+            frappe.throw(
+                _(
+                    "{0} has no Salary Structure Assignment, so a day of their salary "
+                    "has no value and a day-based penalty cannot be priced. Enter the "
+                    "penalty as an amount of money instead."
+                ).format((row or {}).get("employee_name") or employee)
+            )
+    elif flt(amount) <= 0:
+        frappe.throw(_("Penalty amount must be greater than zero."))
+
+    penalty_amount, equivalent_days = _penalty_amounts(unit, quantity, amount, day_rate)
+
+    if gross_due > 0 and already + penalty_amount > gross_due + MONEY_TOLERANCE and not allow:
+        frappe.throw(
+            _(
+                "Penalties for {0} would total {1} against a salary of {2}. "
+                "Re-send with allow_overpay=1 if the whole month is genuinely forfeit."
+            ).format(month_key, _money(already + penalty_amount), _money(gross_due))
+        )
+
+    doc = frappe.get_doc(
+        {
+            "doctype": PENALTY_DOCTYPE,
+            "employee": employee,
+            "company": company,
+            "penalty_date": penalty_date or today(),
+            "period_month": month_key,
+            "unit": unit,
+            "quantity": flt(quantity),
+            "amount": _money(penalty_amount),
+            "day_rate": _money(day_rate),
+            "equivalent_days": flt(equivalent_days, 2),
+            "currency": currency,
+            "reason": reason,
+        }
+    )
+    doc.flags.ignore_permissions = True
+    doc.insert(ignore_permissions=True)
+    doc.submit()
+    doc.reload()
+
+    refreshed = _compute_month(month_key, company)
+    updated = next(
+        (r for r in refreshed["payroll"]["rows"] if r["employee"] == employee), row
+    )
+    return {
+        "success": True,
+        "penalty": _serialize_penalty(doc.as_dict()),
+        "row": updated,
+        "deductions": refreshed.get("deductions"),
+        "summary": refreshed["summary"],
+    }
+
+
+@frappe.whitelist()
+def cancel_employee_penalty(name: str, reason: str) -> Dict[str, Any]:
+    """Undo a penalty. Cancels the document; the salary goes back up.
+
+    Refused once the penalty is ``settled``: at that point the reduced salary
+    has already been paid, and un-deducting it here would silently re-open a
+    month that was settled with the employee. The way back from there is to pay
+    the difference, which leaves a document saying so.
+    """
+    _ensure_manager()
+    _require_period_fields()  # reaches `_compute_month`, which needs the columns
+
+    name = (name or "").strip()
+    if not name:
+        frappe.throw(_("Penalty is required."))
+    reason = (reason or "").strip()
+    if not reason:
+        frappe.throw(_("A reason is required to cancel a penalty."))
+
+    doc = frappe.get_doc(PENALTY_DOCTYPE, name)
+    if int(doc.docstatus or 0) == 2:
+        frappe.throw(_("Penalty {0} is already cancelled.").format(name))
+    if _as_bool(getattr(doc, "settled", 0)):
+        frappe.throw(
+            _(
+                "Penalty {0} has already been settled with {1} and cannot be cancelled. "
+                "Pay the difference instead, so the correction is a document of its own."
+            ).format(name, getattr(doc, "settled_via", None) or _("a payment"))
+        )
+
+    employee = doc.employee
+    month_key = doc.period_month
+    company = doc.company
+
+    doc.flags.ignore_permissions = True
+    doc.cancel()
+    try:
+        doc.add_comment("Comment", _("Cancelled: {0}").format(reason))
+    except Exception:
+        # A missing audit comment must not undo the cancellation the caller
+        # asked for; the docstatus change is the outcome that matters.
+        _log("monthly_expenses: penalty cancel comment")
+
+    context = _compute_month(month_key, company)
+    updated = next(
+        (r for r in context["payroll"]["rows"] if r["employee"] == employee), None
+    )
+    return {
+        "success": True,
+        "penalty": name,
+        "row": updated,
+        "deductions": context.get("deductions"),
+        "summary": context["summary"],
     }
 
 

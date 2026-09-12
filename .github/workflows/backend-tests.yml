@@ -460,6 +460,14 @@ jobs:
             # the same month and September reads as paid by a payment that was
             # for August.
             test_api_monthly_expenses
+            # The penalty DocType's own conversion — days / half days / money,
+            # both directions, from the ONE definition the API above delegates
+            # to. It lives under `jarz_pos/tests/` rather than beside the
+            # DocType because the runner below only ever invokes
+            # `jarz_pos.tests.<module>`: a test in the DocType folder is not run
+            # here at all, which is the same way test_api_recurring_expenses sat
+            # unexecuted for a month.
+            test_doctype_jarz_employee_penalty
             # The Desk recurring-expenses overview these maths build on. It
             # shipped in 985d01f with 29 tests and was never added to this
             # array, so it has never run in CI once.

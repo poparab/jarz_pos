@@ -1862,6 +1862,1237 @@ class TestComputeMonthWiring(unittest.TestCase):
 		self.assertFalse(any("HRMS" in g["message"] for g in gaps), gaps)
 
 
+# ── deductions: penalties, advances, employee orders ──────────────────────
+#
+# The money model these cover, once, so the assertions below read as arithmetic:
+#
+#     gross_due        the Salary Structure Assignment's base + variable
+#     penalty_total    ACTIVE penalties for THIS month
+#     due_amount       gross_due - penalty_total   <- what the company owes
+#     paid_amount      linked cash payments + what a settlement discharged
+#     remaining        max(due_amount - paid_amount, 0)
+#     advance_total    OPEN advance balance, ALL-TIME
+#     order_total      OPEN Employee-purpose invoice balance, ALL-TIME
+#     net_payable      max(remaining - advance_total - order_total, 0)
+#
+# The all-time/month-scoped asymmetry is deliberate and is asserted below
+# (`test_an_advance_from_another_month_is_still_deducted`): a windowed balance
+# hides exactly the stale debt worth collecting.
+
+
+def _penalty(name="JPEN-00001", employee="HR-EMP-00001", **overrides):
+	row = {
+		"name": name,
+		"employee": employee,
+		"employee_name": "Employee 00001",
+		"penalty_date": date(2026, 8, 3),
+		"period_month": MONTH_KEY,
+		"unit": "Days",
+		"quantity": 1.0,
+		"amount": 225.0,
+		"day_rate": 225.0,
+		"equivalent_days": 1.0,
+		"currency": "EGP",
+		"reason": "Absent without notice",
+		"settled": 0,
+		"settled_via": None,
+	}
+	row.update(overrides)
+	return row
+
+
+def _advance(
+	name="HR-EAD-2026-00004",
+	employee="HR-EMP-00001",
+	paid=500.0,
+	claimed=0.0,
+	returned=0.0,
+	settled=0.0,
+	account="Employee Advances - J",
+	**overrides,
+):
+	from jarz_pos.api.monthly_expenses import F_SETTLED_AMOUNT
+
+	row = {
+		"name": name,
+		"employee": employee,
+		"employee_name": "Employee 00001",
+		"posting_date": date(2026, 7, 4),
+		"advance_amount": paid,
+		"paid_amount": paid,
+		"claimed_amount": claimed,
+		"return_amount": returned,
+		"status": "Paid",
+		"purpose": "Personal",
+		"advance_account": account,
+		"currency": "EGP",
+		"company": "JARZ",
+		"docstatus": 1,
+		F_SETTLED_AMOUNT: settled,
+	}
+	row.update(overrides)
+	return row
+
+
+def _order(name="ACC-SINV-2026-18146", customer="CUST-0001", outstanding=184.0, **overrides):
+	row = {
+		"name": name,
+		"customer": customer,
+		"customer_name": "Employee 00001",
+		"posting_date": date(2026, 8, 2),
+		"grand_total": 184.0,
+		"outstanding_amount": outstanding,
+		"status": "Unpaid",
+	}
+	row.update(overrides)
+	return row
+
+
+def _payroll(employees=None, **kwargs):
+	from jarz_pos.api.monthly_expenses import _build_payroll_rows
+
+	kwargs.setdefault("salary_account", "Salary - J")
+	rows = _build_payroll_rows(
+		[_employee()] if employees is None else employees, **kwargs
+	)
+	return {r["employee"]: r for r in rows}
+
+
+class TestPenaltyConversion(unittest.TestCase):
+	"""One offence, three ways of writing it down, one money value.
+
+	``day_rate`` is a THIRTIETH of the monthly salary — a fixed calendar basis,
+	so the same offence costs the same in February as in August.
+	"""
+
+	def _convert(self, unit, quantity=None, amount=None, day_rate=225.0):
+		from jarz_pos.api.monthly_expenses import _penalty_amounts
+
+		return _penalty_amounts(unit, quantity, amount, day_rate)
+
+	def test_a_day_costs_a_thirtieth_of_the_monthly_salary(self):
+		from jarz_pos.api.monthly_expenses import _day_rate
+
+		self.assertEqual(_day_rate(6750.0), 225.0)
+		self.assertEqual(_day_rate(9000.0), 300.0)
+
+	def test_no_salary_structure_means_no_day_rate(self):
+		from jarz_pos.api.monthly_expenses import _day_rate
+
+		self.assertEqual(_day_rate(0.0), 0.0)
+		self.assertEqual(_day_rate(None), 0.0)
+
+	def test_days_are_priced_at_the_day_rate(self):
+		amount, days = self._convert("Days", quantity=2)
+		self.assertEqual(amount, 450.0)
+		self.assertEqual(days, 2.0)
+
+	def test_half_days_are_priced_at_half_the_day_rate(self):
+		amount, days = self._convert("Half Days", quantity=3)
+		self.assertEqual(amount, 337.5)
+		self.assertEqual(days, 1.5)
+
+	def test_money_is_taken_as_given_and_reported_back_in_days(self):
+		# Both directions are always stored: an employee told "450 EGP" can also
+		# be told "that is two days", which is the conversation that actually
+		# happens.
+		amount, days = self._convert("Money", amount=450)
+		self.assertEqual(amount, 450.0)
+		self.assertEqual(days, 2.0)
+
+	def test_money_without_a_day_rate_is_still_a_valid_penalty(self):
+		# Off-payroll: there is no salary to divide, so the day equivalent is
+		# unknowable. It must not be a division by zero.
+		amount, days = self._convert("Money", amount=450, day_rate=0)
+		self.assertEqual(amount, 450.0)
+		self.assertEqual(days, 0.0)
+
+	def test_the_api_and_the_doctype_share_one_conversion(self):
+		# The API needs the money value before the document exists (to guard the
+		# month's penalty total); the DocType needs it because a penalty entered
+		# in Desk must come out identical. Two callers, one formula.
+		# Imported hard, never behind a skip: a skipTest here would turn the one
+		# assertion that keeps the two in step into a silent no-op on exactly the
+		# bench where they had drifted.
+		from jarz_pos.api.monthly_expenses import _penalty_amounts
+		from jarz_pos.doctype.jarz_employee_penalty.jarz_employee_penalty import (
+			convert_penalty as doctype_amounts,
+		)
+
+		for unit, quantity, amount in (
+			("Days", 2, None),
+			("Half Days", 3, None),
+			("Money", 0, 450),
+		):
+			self.assertEqual(
+				_penalty_amounts(unit, quantity, amount, 225.0),
+				doctype_amounts(unit, quantity, amount, 225.0),
+				unit,
+			)
+
+
+class TestPenaltyOnThePayrollRow(unittest.TestCase):
+	"""A penalty lowers what the company owes — and nothing else."""
+
+	def test_a_penalty_lowers_due_amount_below_gross(self):
+		rows = _payroll(penalties_by_employee={"HR-EMP-00001": [_penalty()]})
+		row = rows["HR-EMP-00001"]
+		self.assertEqual(row["gross_due"], 6750.0)
+		self.assertEqual(row["day_rate"], 225.0)
+		self.assertEqual(row["penalty_total"], 225.0)
+		self.assertEqual(row["penalty_days"], 1.0)
+		self.assertEqual(row["due_amount"], 6525.0)
+		self.assertEqual(row["remaining"], 6525.0)
+		self.assertEqual(row["payment_status"], "Unpaid")
+
+	def test_base_and_variable_are_not_repurposed(self):
+		# The screen still shows what the structure says; only `due_amount`
+		# moves. Rewriting `base` would make the salary itself look reduced.
+		row = _payroll(penalties_by_employee={"HR-EMP-00001": [_penalty()]})["HR-EMP-00001"]
+		self.assertEqual(row["base"], 6000.0)
+		self.assertEqual(row["variable"], 750.0)
+
+	def test_several_penalties_add_up(self):
+		rows = _payroll(
+			penalties_by_employee={
+				"HR-EMP-00001": [
+					_penalty(),
+					_penalty(name="JPEN-00002", unit="Half Days", quantity=1, amount=112.5, equivalent_days=0.5),
+				]
+			}
+		)
+		row = rows["HR-EMP-00001"]
+		self.assertEqual(row["penalty_total"], 337.5)
+		self.assertEqual(row["penalty_days"], 1.5)
+		self.assertEqual(row["due_amount"], 6412.5)
+
+	def test_the_penalties_are_listed_on_the_row(self):
+		row = _payroll(penalties_by_employee={"HR-EMP-00001": [_penalty()]})["HR-EMP-00001"]
+		self.assertEqual(len(row["penalties"]), 1)
+		penalty = row["penalties"][0]
+		self.assertEqual(penalty["name"], "JPEN-00001")
+		self.assertEqual(penalty["unit"], "Days")
+		self.assertEqual(penalty["amount"], 225.0)
+		self.assertEqual(penalty["equivalent_days"], 1.0)
+		self.assertFalse(penalty["settled"])
+
+	def test_a_penalty_bigger_than_the_salary_owes_nothing_rather_than_less_than_nothing(self):
+		# Only reachable with allow_overpay=1, but a negative due would flow into
+		# the roll-up and silently cancel out somebody else's unpaid salary.
+		row = _payroll(
+			penalties_by_employee={"HR-EMP-00001": [_penalty(amount=9000.0, equivalent_days=40.0)]}
+		)["HR-EMP-00001"]
+		self.assertEqual(row["due_amount"], 0.0)
+		self.assertEqual(row["net_payable"], 0.0)
+		self.assertEqual(row["payment_status"], "Not Due")
+
+	def test_the_penalty_reaches_the_month_summary(self):
+		from jarz_pos.api.monthly_expenses import _summarize
+
+		rows = list(_payroll(penalties_by_employee={"HR-EMP-00001": [_penalty()]}).values())
+		summary = _summarize([], rows, 0.0, 0.0)
+		# 6750 gross, 225 penalty: the month's payroll obligation is 6525.
+		self.assertEqual(summary["due"], 6525.0)
+		self.assertEqual(summary["remaining"], 6525.0)
+
+	def test_a_penalty_for_another_employee_does_not_touch_this_row(self):
+		rows = _payroll(penalties_by_employee={"HR-EMP-99999": [_penalty(employee="HR-EMP-99999")]})
+		self.assertEqual(rows["HR-EMP-00001"]["penalty_total"], 0.0)
+		self.assertEqual(rows["HR-EMP-00001"]["due_amount"], 6750.0)
+
+
+class TestAdvancesAndOrdersOnThePayrollRow(unittest.TestCase):
+	def test_an_open_advance_is_deducted_from_the_cash_to_hand_over(self):
+		rows = _payroll(advances_by_employee={"HR-EMP-00001": [_advance()]})
+		row = rows["HR-EMP-00001"]
+		self.assertEqual(row["advance_total"], 500.0)
+		# The DUE is untouched: the company still owes the salary, it just hands
+		# over less cash because part of it is already in the employee's pocket.
+		self.assertEqual(row["due_amount"], 6750.0)
+		self.assertEqual(row["remaining"], 6750.0)
+		self.assertEqual(row["net_payable"], 6250.0)
+		self.assertEqual(row["deductions_total"], 500.0)
+
+	def test_an_advance_from_another_month_is_still_deducted(self):
+		# ALL-TIME on purpose. The fixture's advance is dated July and the month
+		# under test is August; windowing it would make a real debt disappear.
+		row = _payroll(
+			advances_by_employee={"HR-EMP-00001": [_advance(posting_date=date(2026, 3, 1))]}
+		)["HR-EMP-00001"]
+		self.assertEqual(row["advance_total"], 500.0)
+
+	def test_a_claimed_advance_carries_no_balance(self):
+		row = _payroll(
+			advances_by_employee={"HR-EMP-00001": [_advance(paid=500.0, claimed=500.0)]}
+		)["HR-EMP-00001"]
+		self.assertEqual(row["advance_total"], 0.0)
+		self.assertEqual(row["net_payable"], 6750.0)
+
+	def test_an_already_settled_advance_is_not_recovered_twice(self):
+		row = _payroll(
+			advances_by_employee={"HR-EMP-00001": [_advance(paid=500.0, settled=500.0)]}
+		)["HR-EMP-00001"]
+		self.assertEqual(row["advance_total"], 0.0)
+
+	def test_an_unpaid_staff_order_is_deducted(self):
+		row = _payroll(orders_by_employee={"HR-EMP-00001": [_order()]})["HR-EMP-00001"]
+		self.assertEqual(row["order_total"], 184.0)
+		self.assertEqual(row["net_payable"], 6566.0)
+		self.assertEqual(row["orders"][0]["invoice"], "ACC-SINV-2026-18146")
+
+	def test_net_payable_is_remaining_less_advances_and_orders(self):
+		row = _payroll(
+			penalties_by_employee={"HR-EMP-00001": [_penalty()]},
+			advances_by_employee={"HR-EMP-00001": [_advance()]},
+			orders_by_employee={"HR-EMP-00001": [_order()]},
+			paid_linked_by_employee={"HR-EMP-00001": 1000.0},
+		)["HR-EMP-00001"]
+		# 6750 gross - 225 penalty = 6525 due; 1000 already paid leaves 5525
+		# remaining; less 500 advance and 184 jars.
+		self.assertEqual(row["due_amount"], 6525.0)
+		self.assertEqual(row["remaining"], 5525.0)
+		self.assertEqual(row["net_payable"], 4841.0)
+		self.assertEqual(row["deductions_total"], 909.0)
+
+	def test_net_payable_is_floored_at_zero(self):
+		# Owing the company more than a month's salary does not produce a
+		# negative payslip; the remainder stays on the advance.
+		row = _payroll(
+			advances_by_employee={"HR-EMP-00001": [_advance(paid=5000.0)]},
+			orders_by_employee={"HR-EMP-00001": [_order(outstanding=3000.0)]},
+		)["HR-EMP-00001"]
+		self.assertEqual(row["net_payable"], 0.0)
+
+	def test_a_settlement_counts_as_paid_without_a_cash_payment(self):
+		row = _payroll(settled_by_employee={"HR-EMP-00001": 500.0})["HR-EMP-00001"]
+		self.assertEqual(row["paid_linked"], 0.0)
+		self.assertEqual(row["settled_amount"], 500.0)
+		self.assertEqual(row["paid_amount"], 500.0)
+		self.assertEqual(row["remaining"], 6250.0)
+		self.assertEqual(row["payment_status"], "Partial")
+
+
+class TestOffPayrollRows(unittest.TestCase):
+	"""Kareem Mamdouh and the CEO draw no salary and still owe money.
+
+	"Make sure it appears here" is the whole request: an advance to someone with
+	no Salary Structure Assignment must be visible, not silently absent because
+	payroll has never heard of them.
+	"""
+
+	STUB = {
+		"employee": "HR-EMP-00009",
+		"employee_name": "Kareem Mamdouh",
+		"base": 0.0,
+		"variable": 0.0,
+		"monthly": 0.0,
+	}
+
+	def _rows(self, **kwargs):
+		return _payroll(off_payroll_rows=[self.STUB], **kwargs)
+
+	def test_an_off_payroll_employee_with_an_advance_gets_a_row(self):
+		rows = self._rows(
+			advances_by_employee={"HR-EMP-00009": [_advance(employee="HR-EMP-00009", paid=5000.0)]}
+		)
+		row = rows["HR-EMP-00009"]
+		self.assertTrue(row["off_payroll"])
+		self.assertEqual(row["gross_due"], 0.0)
+		self.assertEqual(row["day_rate"], 0.0)
+		self.assertEqual(row["advance_total"], 5000.0)
+		self.assertEqual(row["deductions_total"], 5000.0)
+
+	def test_a_zero_due_row_owes_nothing_and_is_not_payable_money(self):
+		rows = self._rows(
+			advances_by_employee={"HR-EMP-00009": [_advance(employee="HR-EMP-00009", paid=5000.0)]}
+		)
+		row = rows["HR-EMP-00009"]
+		self.assertEqual(row["due_amount"], 0.0)
+		self.assertEqual(row["remaining"], 0.0)
+		self.assertEqual(row["net_payable"], 0.0)
+		self.assertEqual(row["payment_status"], "Not Due")
+
+	def test_a_zero_due_row_does_not_inflate_the_unpaid_count(self):
+		# A 0-due 0-paid row read as "Unpaid" would put a phantom outstanding
+		# item on the manager's dashboard every single month.
+		from jarz_pos.api.monthly_expenses import _summarize
+
+		rows = list(
+			self._rows(
+				advances_by_employee={"HR-EMP-00009": [_advance(employee="HR-EMP-00009", paid=5000.0)]}
+			).values()
+		)
+		summary = _summarize([], rows, 0.0, 0.0)
+		self.assertEqual(summary["items_total"], 1)  # the salaried employee only
+		self.assertEqual(summary["items_unpaid"], 1)
+		self.assertEqual(summary["due"], 6750.0)
+		self.assertEqual(summary["overpaid"], 0.0)
+
+	def test_off_payroll_rows_sort_below_the_payroll(self):
+		from jarz_pos.api.monthly_expenses import _build_payroll_rows
+
+		rows = _build_payroll_rows(
+			[_employee()],
+			salary_account="Salary - J",
+			off_payroll_rows=[self.STUB],
+			advances_by_employee={"HR-EMP-00009": [_advance(employee="HR-EMP-00009")]},
+		)
+		self.assertEqual([r["employee"] for r in rows], ["HR-EMP-00001", "HR-EMP-00009"])
+
+	def test_a_salaried_employee_is_never_marked_off_payroll(self):
+		self.assertFalse(self._rows()["HR-EMP-00001"]["off_payroll"])
+
+
+class TestDeductionsRollUp(unittest.TestCase):
+	def _deductions(self, rows=None, **kwargs):
+		from jarz_pos.api.monthly_expenses import _build_deductions
+
+		if rows is None:
+			rows = list(
+				_payroll(
+					penalties_by_employee={"HR-EMP-00001": [_penalty()]},
+					advances_by_employee={"HR-EMP-00001": [_advance()]},
+					orders_by_employee={"HR-EMP-00001": [_order()]},
+				).values()
+			)
+		return _build_deductions(rows, **kwargs)
+
+	def test_the_totals_are_the_sum_of_the_rows_beneath_them(self):
+		deductions = self._deductions()
+		self.assertEqual(deductions["penalty_total"], 225.0)
+		self.assertEqual(deductions["penalty_days"], 1.0)
+		self.assertEqual(deductions["advance_total"], 500.0)
+		self.assertEqual(deductions["order_total"], 184.0)
+		self.assertEqual(deductions["total"], 909.0)
+		self.assertEqual(deductions["net_payable"], 5841.0)
+
+	def test_the_client_is_told_the_units_and_the_day_basis(self):
+		deductions = self._deductions([])
+		self.assertEqual(deductions["penalty_units"], ["Days", "Half Days", "Money"])
+		self.assertEqual(deductions["days_per_month"], 30)
+
+	def test_an_advance_on_a_customer_receivable_is_reported(self):
+		# Production's three advances all sit on `Debtors - J`, i.e. customer AR,
+		# where the balance is mixed in with real customers' debt.
+		deductions = self._deductions(
+			[], advances_by_employee={"HR-EMP-00001": [_advance(account="Debtors - J")]}
+		)
+		suspect = deductions["advance_accounts_suspect"]
+		self.assertEqual(len(suspect), 1)
+		self.assertEqual(suspect[0]["account"], "Debtors - J")
+		self.assertEqual(suspect[0]["total"], 500.0)
+
+	def test_a_real_advance_ledger_is_not_reported(self):
+		deductions = self._deductions(
+			[], advances_by_employee={"HR-EMP-00001": [_advance()]}
+		)
+		self.assertEqual(deductions["advance_accounts_suspect"], [])
+
+
+class TestDeductionGaps(unittest.TestCase):
+	def _gaps(self, **deductions):
+		from jarz_pos.api.monthly_expenses import _build_deductions, _build_gaps
+
+		block = _build_deductions([], **deductions)
+		return {
+			g.get("code"): g
+			for g in _build_gaps([], True, {}, {}, block)
+			if g.get("code")
+		}
+
+	def test_zero_employee_purpose_invoices_is_reported_as_a_gap(self):
+		# Production has none, so jar debt legitimately reads zero — and the
+		# screen has to say WHY, or the zero reads as "nobody takes jars".
+		gap = self._gaps(employee_orders_present=False).get("employee_orders_unused")
+		self.assertIsNotNone(gap)
+		self.assertEqual(gap["severity"], "info")
+		self.assertIn("Employee Order", gap["message"])
+
+	def test_the_gap_disappears_once_the_flow_is_used(self):
+		self.assertNotIn(
+			"employee_orders_unused", self._gaps(employee_orders_present=True)
+		)
+
+	def test_unreadable_advances_are_a_warning_not_a_silent_zero(self):
+		gap = self._gaps(advances_readable=False).get("advances_unreadable")
+		self.assertIsNotNone(gap)
+		self.assertEqual(gap["severity"], "warning")
+
+	def test_readable_advances_raise_no_such_gap(self):
+		self.assertNotIn("advances_unreadable", self._gaps(advances_readable=True))
+
+	def test_an_advance_on_customer_ar_is_a_warning(self):
+		gap = self._gaps(
+			advances_by_employee={"HR-EMP-00001": [_advance(account="Debtors - J")]}
+		).get("advance_account_is_debtors")
+		self.assertIsNotNone(gap)
+		self.assertIn("Debtors - J", gap["message"])
+
+	def test_an_older_four_argument_call_gains_no_new_gaps(self):
+		# `_build_gaps` is called with four arguments from several places and
+		# from the existing tests; those calls looked at no deductions at all and
+		# must not start asserting things about them.
+		from jarz_pos.api.monthly_expenses import _build_gaps
+
+		gaps = _build_gaps([], True, {}, {})
+		self.assertEqual([g for g in gaps if g.get("code")], [])
+
+
+class TestAdvanceBalanceReadsDegradeWithoutHrms(unittest.TestCase):
+	"""HRMS is not a required app. Half a screen beats none."""
+
+	def _load(self, hrms=True, rows=None, raises=False):
+		from jarz_pos.api import monthly_expenses
+
+		mock_frappe = MagicMock()
+		if raises:
+			mock_frappe.get_all.side_effect = RuntimeError("no such table")
+		else:
+			mock_frappe.get_all.return_value = list(rows or [])
+
+		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
+			monthly_expenses, "hrms_available", return_value=hrms
+		), patch.object(
+			monthly_expenses, "_advance_has_field", return_value=True
+		):
+			return monthly_expenses._load_advances("JARZ")
+
+	def test_no_hrms_means_no_advances_and_an_explicit_unreadable_flag(self):
+		grouped, readable = self._load(hrms=False)
+		self.assertEqual(grouped, {})
+		self.assertFalse(readable)
+
+	def test_a_failed_query_is_unreadable_rather_than_zero(self):
+		grouped, readable = self._load(raises=True)
+		self.assertEqual(grouped, {})
+		self.assertFalse(readable)
+
+	def test_open_advances_are_grouped_by_employee(self):
+		grouped, readable = self._load(rows=[_advance(), _advance(name="HR-EAD-2", paid=5000.0)])
+		self.assertTrue(readable)
+		self.assertEqual(len(grouped["HR-EMP-00001"]), 2)
+
+	def test_a_fully_settled_advance_is_history_and_is_dropped(self):
+		grouped, _readable = self._load(rows=[_advance(paid=500.0, settled=500.0)])
+		self.assertEqual(grouped, {})
+
+	def test_rows_still_render_when_advances_cannot_be_read(self):
+		# The payroll table is built from maps, so an empty advance map costs the
+		# advance column and nothing else.
+		rows = _payroll(advances_by_employee={})
+		row = rows["HR-EMP-00001"]
+		self.assertEqual(row["due_amount"], 6750.0)
+		self.assertEqual(row["advance_total"], 0.0)
+		self.assertEqual(row["net_payable"], 6750.0)
+
+
+# ── settlement: capping, refusing, and posting ────────────────────────────
+
+
+class TestAdvanceSettlementPlanning(unittest.TestCase):
+	"""The cap is the only thing between recovery and double recovery."""
+
+	EMPLOYEE = "HR-EMP-00001"
+
+	def _plan(self, requests, advances=None):
+		from jarz_pos.api import monthly_expenses
+
+		advances = {a["name"]: a for a in (advances or [_advance()])}
+
+		def _get_value(doctype, name, fields, **kwargs):
+			if kwargs.get("for_update"):
+				return name
+			return advances.get(name)
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = RuntimeError("refused")
+		mock_frappe.db.get_value.side_effect = _get_value
+
+		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
+			monthly_expenses, "_advance_has_field", return_value=True
+		):
+			try:
+				plan = monthly_expenses._plan_advance_settlements(
+					self.EMPLOYEE, "JARZ", requests
+				)
+			except RuntimeError:
+				return mock_frappe, None
+		return mock_frappe, plan
+
+	def test_an_unstated_amount_settles_the_whole_open_balance(self):
+		_frappe, plan = self._plan([{"name": "HR-EAD-2026-00004", "amount": None}])
+		self.assertEqual(plan[0]["amount"], 500.0)
+		self.assertEqual(plan[0]["account"], "Employee Advances - J")
+
+	def test_a_partial_settlement_is_taken_as_asked(self):
+		_frappe, plan = self._plan([{"name": "HR-EAD-2026-00004", "amount": 200.0}])
+		self.assertEqual(plan[0]["amount"], 200.0)
+
+	def test_settling_more_than_is_open_is_refused(self):
+		mock_frappe, plan = self._plan([{"name": "HR-EAD-2026-00004", "amount": 900.0}])
+		self.assertIsNone(plan)
+		message = str(mock_frappe.throw.call_args[0][0])
+		self.assertIn("500", message)
+		self.assertIn("twice", message)
+
+	def test_a_rounding_overshoot_is_capped_not_refused(self):
+		_frappe, plan = self._plan([{"name": "HR-EAD-2026-00004", "amount": 500.3}])
+		self.assertEqual(plan[0]["amount"], 500.0)
+
+	def test_the_same_advance_cannot_be_settled_a_second_time(self):
+		# The state the FIRST settlement left behind: `custom_jarz_settled_amount`
+		# now covers the whole payout, so there is nothing left to recover.
+		mock_frappe, plan = self._plan(
+			[{"name": "HR-EAD-2026-00004", "amount": None}],
+			advances=[_advance(paid=500.0, settled=500.0)],
+		)
+		self.assertIsNone(plan)
+		self.assertIn("already been", str(mock_frappe.throw.call_args[0][0]))
+
+	def test_a_partly_settled_advance_only_offers_what_is_left(self):
+		_frappe, plan = self._plan(
+			[{"name": "HR-EAD-2026-00004", "amount": None}],
+			advances=[_advance(paid=500.0, settled=300.0)],
+		)
+		self.assertEqual(plan[0]["amount"], 200.0)
+		self.assertEqual(plan[0]["settled_before"], 300.0)
+
+	def test_another_employees_advance_is_refused(self):
+		mock_frappe, plan = self._plan(
+			[{"name": "HR-EAD-2026-00004", "amount": None}],
+			advances=[_advance(employee="HR-EMP-99999")],
+		)
+		self.assertIsNone(plan)
+		self.assertIn("HR-EMP-99999", str(mock_frappe.throw.call_args[0][0]))
+
+	def test_the_same_advance_listed_twice_in_one_call_is_refused(self):
+		mock_frappe, plan = self._plan(
+			[
+				{"name": "HR-EAD-2026-00004", "amount": 200.0},
+				{"name": "HR-EAD-2026-00004", "amount": 300.0},
+			]
+		)
+		self.assertIsNone(plan)
+		self.assertIn("twice", str(mock_frappe.throw.call_args[0][0]))
+
+	def test_the_row_is_locked_before_its_balance_is_read(self):
+		# Two settlements racing: the second must block here and then see the
+		# balance the first one left, not the balance it started from.
+		mock_frappe, _plan = self._plan([{"name": "HR-EAD-2026-00004", "amount": None}])
+		first = mock_frappe.db.get_value.call_args_list[0]
+		self.assertTrue(first.kwargs.get("for_update"))
+		self.assertEqual(first.args[1], "HR-EAD-2026-00004")
+
+	def test_nothing_requested_reads_nothing_at_all(self):
+		mock_frappe, plan = self._plan([])
+		self.assertEqual(plan, [])
+		mock_frappe.db.get_value.assert_not_called()
+
+
+class TestSettlementListParsing(unittest.TestCase):
+	def _parse(self, value, key="name"):
+		from jarz_pos.api import monthly_expenses
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = RuntimeError("refused")
+		with patch.object(monthly_expenses, "frappe", mock_frappe):
+			try:
+				return monthly_expenses._parse_settlement_list(value, key)
+			except RuntimeError:
+				return None
+
+	def test_a_json_string_is_accepted(self):
+		self.assertEqual(
+			self._parse('[{"name": "HR-EAD-1", "amount": 500}]'),
+			[{"name": "HR-EAD-1", "amount": 500.0}],
+		)
+
+	def test_a_bare_list_of_names_means_the_whole_open_balance(self):
+		# `None`, not 0: zero is "settle nothing", unstated is "settle it all".
+		self.assertEqual(self._parse(["HR-EAD-1"]), [{"name": "HR-EAD-1", "amount": None}])
+
+	def test_nothing_parses_to_nothing(self):
+		for value in (None, "", []):
+			self.assertEqual(self._parse(value), [])
+
+	def test_the_orders_list_is_keyed_on_invoice(self):
+		self.assertEqual(
+			self._parse('[{"invoice": "ACC-SINV-1", "amount": 184}]', key="invoice"),
+			[{"invoice": "ACC-SINV-1", "amount": 184.0}],
+		)
+
+	def test_malformed_json_is_refused(self):
+		self.assertIsNone(self._parse("not json"))
+
+	def test_an_entry_with_no_name_is_refused(self):
+		self.assertIsNone(self._parse([{"amount": 500}]))
+
+
+class TestPaySalaryWithSettlements(unittest.TestCase):
+	"""Cash and settlement are two documents and one transaction."""
+
+	EMPLOYEE = "HR-EMP-00001"
+
+	def _context(self, due=6750.0, paid=0.0):
+		row = {
+			"employee": self.EMPLOYEE,
+			"employee_name": "Employee 00001",
+			"gross_due": due,
+			"due_amount": due,
+			"paid_amount": paid,
+			"remaining": max(due - paid, 0.0),
+			"advance_total": 500.0,
+			"advances": [{"name": "HR-EAD-2026-00004", "outstanding": 500.0}],
+			"order_total": 184.0,
+			"orders": [{"invoice": "ACC-SINV-2026-18146", "outstanding": 184.0}],
+			"has_salary_slip": False,
+			"can_pay": True,
+		}
+		return {
+			"month": MONTH_KEY,
+			"company": "JARZ",
+			"registry": [],
+			"payroll": {
+				"rows": [row],
+				"salary_account": "Salary - J",
+				"salary_account_label": "Salary",
+				"unattributed_gl": 0.0,
+				"due": due,
+				"paid": paid,
+				"remaining": max(due - paid, 0.0),
+			},
+			"deductions": {"advance_total": 500.0},
+			"summary": {},
+		}
+
+	def _pay(
+		self,
+		amount=0,
+		settle_advances=None,
+		settle_orders=None,
+		advance_plan=None,
+		order_plan=None,
+		**context_kwargs,
+	):
+		from jarz_pos.api import monthly_expenses
+
+		fake_doc = _FakeDoc()
+		guard_calls = []
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_doc.return_value = fake_doc
+		mock_frappe.throw.side_effect = RuntimeError("refused")
+
+		default_advance_plan = [
+			{
+				"name": "HR-EAD-2026-00004",
+				"amount": 500.0,
+				"account": "Employee Advances - J",
+				"open_amount": 500.0,
+				"settled_before": 0.0,
+			}
+		]
+
+		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
+			monthly_expenses, "_ensure_manager"
+		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
+			monthly_expenses, "_default_company", return_value="JARZ"
+		), patch.object(
+			monthly_expenses, "_submitted_salary_slips", return_value={}
+		), patch.object(
+			monthly_expenses, "_compute_month", return_value=self._context(**context_kwargs)
+		), patch.object(
+			monthly_expenses, "_resolve_paying_account", return_value="Cash - J"
+		) as resolve, patch.object(
+			monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}
+		), patch.object(
+			monthly_expenses,
+			"_plan_advance_settlements",
+			return_value=(default_advance_plan if advance_plan is None else advance_plan),
+		) as plan_advances, patch.object(
+			monthly_expenses, "_plan_order_settlements", return_value=(order_plan or [])
+		) as plan_orders, patch.object(
+			monthly_expenses,
+			"_post_settlement_journal_entry",
+			return_value="ACC-JV-2026-00042",
+		) as post_je, patch.object(
+			monthly_expenses,
+			"_guard_overpay",
+			side_effect=lambda *args, **kwargs: guard_calls.append(args) or 0.0,
+		):
+			try:
+				result = monthly_expenses.pay_salary(
+					self.EMPLOYEE,
+					month=MONTH_KEY,
+					amount=amount,
+					paying_account="Cash - J",
+					settle_advances=settle_advances,
+					settle_orders=settle_orders,
+				)
+				refused = False
+			except RuntimeError:
+				result, refused = None, True
+		return {
+			"result": result,
+			"refused": refused,
+			"frappe": mock_frappe,
+			"doc": fake_doc,
+			"post_je": post_je,
+			"plan_advances": plan_advances,
+			"plan_orders": plan_orders,
+			"resolve": resolve,
+			"guard_calls": guard_calls,
+		}
+
+	# ── a settlement-only payslip ─────────────────────────────────────────
+
+	def test_zero_cash_with_a_settlement_posts_only_the_settlement(self):
+		# The whole salary went on advances: no cash moves, so no Jarz Expense
+		# Request and no cash Journal Entry — but the advance must still close.
+		out = self._pay(amount=0, settle_advances=["HR-EAD-2026-00004"])
+		self.assertFalse(out["refused"])
+		out["post_je"].assert_called_once()
+		out["frappe"].get_doc.assert_not_called()
+		out["doc"].submit.assert_not_called()
+		self.assertIsNone(out["result"]["payment"])
+		self.assertEqual(out["result"]["settlement"]["journal_entry"], "ACC-JV-2026-00042")
+		self.assertEqual(out["result"]["settlement"]["total"], 500.0)
+
+	def test_a_settlement_only_payslip_needs_no_paying_account(self):
+		# No cash leaves any drawer, so refusing for want of a cash account would
+		# be refusing for the wrong reason.
+		out = self._pay(amount=0, settle_advances=["HR-EAD-2026-00004"])
+		out["resolve"].assert_not_called()
+
+	def test_zero_cash_and_no_settlement_is_still_refused(self):
+		out = self._pay(amount=0, advance_plan=[])
+		self.assertTrue(out["refused"])
+		out["post_je"].assert_not_called()
+		out["frappe"].get_doc.assert_not_called()
+
+	def test_a_negative_amount_is_refused_before_anything_is_planned(self):
+		out = self._pay(amount=-100, advance_plan=[])
+		self.assertTrue(out["refused"])
+		out["plan_advances"].assert_not_called()
+
+	# ── cash and settlement together ──────────────────────────────────────
+
+	def test_both_halves_are_posted_for_a_mixed_payslip(self):
+		out = self._pay(amount=6250, settle_advances=["HR-EAD-2026-00004"])
+		self.assertFalse(out["refused"])
+		out["doc"].submit.assert_called_once()
+		out["post_je"].assert_called_once()
+		self.assertEqual(out["result"]["payment"], {"name": "JER-0009"})
+		self.assertEqual(out["result"]["settlement"]["total"], 500.0)
+
+	def test_the_guard_measures_cash_plus_settlement(self):
+		# Paying 6,250 in cash and settling 500 discharges the whole 6,750. The
+		# guard has to see 6,750, or a second 500 could be paid on top.
+		out = self._pay(amount=6250, settle_advances=["HR-EAD-2026-00004"])
+		_label, due, already_paid, requested, _allow, _month = out["guard_calls"][0]
+		self.assertEqual(due, 6750.0)
+		self.assertEqual(already_paid, 0.0)
+		self.assertEqual(requested, 6750.0)
+
+	def test_the_settlement_journal_entry_is_told_the_employee_and_the_month(self):
+		out = self._pay(amount=0, settle_advances=["HR-EAD-2026-00004"])
+		kwargs = out["post_je"].call_args.kwargs
+		self.assertEqual(kwargs["employee"], self.EMPLOYEE)
+		self.assertEqual(kwargs["month_key"], MONTH_KEY)
+		self.assertEqual(kwargs["salary_account"], "Salary - J")
+
+	def test_only_this_employees_open_orders_may_be_settled(self):
+		out = self._pay(amount=0, settle_orders=["ACC-SINV-2026-18146"])
+		allowed = out["plan_orders"].call_args.args[3]
+		self.assertEqual(list(allowed), ["ACC-SINV-2026-18146"])
+
+
+class TestSettlementJournalEntryShape(unittest.TestCase):
+	"""What ERPNext needs in order to actually reduce the two balances."""
+
+	def _post(self, advance_plan=None, order_plan=None, remarks=None):
+		from jarz_pos.api import monthly_expenses
+
+		je = MagicMock()
+		je.accounts = []
+		je.name = "ACC-JV-2026-00042"
+
+		def _append(table, row):
+			je.accounts.append(row)
+
+		je.append.side_effect = _append
+
+		mock_frappe = MagicMock()
+		mock_frappe.new_doc.return_value = je
+
+		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
+			monthly_expenses, "_advance_has_field", return_value=True
+		), patch.object(
+			monthly_expenses, "apply_ledger_posting_datetime"
+		), patch.object(
+			monthly_expenses, "join_posting_datetime", return_value="2026-08-31 12:00:00"
+		):
+			name = monthly_expenses._post_settlement_journal_entry(
+				company="JARZ",
+				employee="HR-EMP-00001",
+				month_key=MONTH_KEY,
+				salary_account="Salary - J",
+				advance_plan=advance_plan
+				if advance_plan is not None
+				else [
+					{
+						"name": "HR-EAD-2026-00004",
+						"amount": 500.0,
+						"account": "Employee Advances - J",
+						"settled_before": 0.0,
+					}
+				],
+				order_plan=order_plan or [],
+				posting_date="2026-08-31",
+				posting_time="12:00:00",
+				remarks=remarks,
+			)
+		return name, je, mock_frappe
+
+	def test_the_salary_account_is_debited_for_the_whole_settlement(self):
+		_name, je, _frappe = self._post(
+			order_plan=[
+				{
+					"invoice": "ACC-SINV-2026-18146",
+					"amount": 184.0,
+					"account": "Debtors - J",
+					"customer": "CUST-0001",
+				}
+			]
+		)
+		debit = je.accounts[0]
+		self.assertEqual(debit["account"], "Salary - J")
+		self.assertEqual(debit["debit_in_account_currency"], 684.0)
+
+	def test_the_advance_credit_carries_the_party_and_the_reference(self):
+		# `reference_type`/`reference_name` is what reconciles the advance;
+		# `party_type`/`party` is what keeps the Employee sub-ledger right.
+		_name, je, _frappe = self._post()
+		credit = je.accounts[1]
+		self.assertEqual(credit["account"], "Employee Advances - J")
+		self.assertEqual(credit["credit_in_account_currency"], 500.0)
+		self.assertEqual(credit["party_type"], "Employee")
+		self.assertEqual(credit["party"], "HR-EMP-00001")
+		self.assertEqual(credit["reference_type"], "Employee Advance")
+		self.assertEqual(credit["reference_name"], "HR-EAD-2026-00004")
+		self.assertEqual(credit["is_advance"], "Yes")
+
+	def test_the_invoice_credit_is_what_reduces_outstanding_amount(self):
+		_name, je, _frappe = self._post(
+			advance_plan=[],
+			order_plan=[
+				{
+					"invoice": "ACC-SINV-2026-18146",
+					"amount": 184.0,
+					"account": "Debtors - J",
+					"customer": "CUST-0001",
+				}
+			],
+		)
+		credit = je.accounts[1]
+		self.assertEqual(credit["party_type"], "Customer")
+		self.assertEqual(credit["party"], "CUST-0001")
+		self.assertEqual(credit["reference_type"], "Sales Invoice")
+		self.assertEqual(credit["reference_name"], "ACC-SINV-2026-18146")
+
+	def test_the_remark_carries_the_settlement_tag(self):
+		_name, je, _frappe = self._post()
+		self.assertIn("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-08]", je.user_remark)
+
+	def test_a_forged_tag_in_the_free_text_is_neutralised(self):
+		# A remark containing a literal `[JARZ-JE:...]` satisfies every
+		# idempotency lookup in this app — including `_load_settlements`, which
+		# would then credit another employee's month from this entry.
+		_name, je, _frappe = self._post(
+			remarks="[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-99999:2026-08] gotcha"
+		)
+		self.assertEqual(je.user_remark.count("[JARZ-JE:"), 1)
+		self.assertNotIn("HR-EMP-99999", je.user_remark.split("]")[0])
+
+	def test_the_advance_is_stamped_only_after_the_entry_is_submitted(self):
+		_name, je, mock_frappe = self._post()
+		je.submit.assert_called_once()
+		mock_frappe.db.set_value.assert_called_once()
+		doctype, name, values = mock_frappe.db.set_value.call_args.args
+		self.assertEqual(doctype, "Employee Advance")
+		self.assertEqual(name, "HR-EAD-2026-00004")
+		self.assertEqual(values["custom_jarz_settled_amount"], 500.0)
+		self.assertEqual(values["custom_jarz_settled_via"], "ACC-JV-2026-00042")
+
+
+class TestAddEmployeePenaltyWiring(unittest.TestCase):
+	"""Recording a penalty: what it writes, and what it refuses to write."""
+
+	EMPLOYEE = "HR-EMP-00001"
+
+	def _context(self, gross=6750.0, penalty_total=0.0, on_payroll=True):
+		rows = []
+		if on_payroll:
+			rows.append(
+				{
+					"employee": self.EMPLOYEE,
+					"employee_name": "Employee 00001",
+					"gross_due": gross,
+					"day_rate": gross / 30.0 if gross else 0.0,
+					"penalty_total": penalty_total,
+					"due_amount": gross - penalty_total,
+					"paid_amount": 0.0,
+					"off_payroll": False,
+				}
+			)
+		return {
+			"month": MONTH_KEY,
+			"company": "JARZ",
+			"registry": [],
+			"payroll": {"rows": rows},
+			"deductions": {},
+			"summary": {},
+		}
+
+	def _add(self, **kwargs):
+		from jarz_pos.api import monthly_expenses
+
+		payload = {
+			"unit": "Days",
+			"quantity": 1,
+			"reason": "Absent without notice",
+			"penalty_date": "2026-08-03",
+		}
+		payload.update({k: v for k, v in kwargs.items() if k not in ("context",)})
+
+		fake_doc = _FakeDoc("JPEN-00001")
+		captured = {}
+		order = []
+
+		def _get_doc(data):
+			captured.update(data)
+			return fake_doc
+
+		mock_frappe = MagicMock()
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe.throw.side_effect = RuntimeError("refused")
+		mock_frappe.db.get_value.side_effect = lambda *a, **kw: order.append(("lock", a, kw))
+
+		context = kwargs.get("context") or self._context()
+
+		def _compute(*_args, **_kwargs):
+			order.append(("compute", None, None))
+			return context
+
+		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
+			monthly_expenses, "_ensure_manager"
+		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
+			monthly_expenses, "_penalty_doctype_ready", return_value=True
+		), patch.object(
+			monthly_expenses,
+			"_month_context",
+			return_value=(MONTH_START, MONTH_END, MONTH_KEY, "JARZ", "EGP"),
+		), patch.object(
+			monthly_expenses, "_compute_month", side_effect=_compute
+		):
+			try:
+				result = monthly_expenses.add_employee_penalty(self.EMPLOYEE, **payload)
+				refused = False
+			except RuntimeError:
+				result, refused = None, True
+		return {
+			"result": result,
+			"refused": refused,
+			"captured": captured,
+			"doc": fake_doc,
+			"frappe": mock_frappe,
+			"order": order,
+		}
+
+	def test_a_day_penalty_is_stored_as_money_and_as_days(self):
+		out = self._add(unit="Days", quantity=2)
+		self.assertFalse(out["refused"])
+		captured = out["captured"]
+		self.assertEqual(captured["doctype"], "Jarz Employee Penalty")
+		self.assertEqual(captured["employee"], self.EMPLOYEE)
+		self.assertEqual(captured["period_month"], MONTH_KEY)
+		self.assertEqual(captured["unit"], "Days")
+		self.assertEqual(captured["amount"], 450.0)
+		self.assertEqual(captured["equivalent_days"], 2.0)
+		self.assertEqual(captured["day_rate"], 225.0)
+		out["doc"].submit.assert_called_once()
+
+	def test_a_half_day_penalty_is_half_the_day_rate(self):
+		out = self._add(unit="Half Days", quantity=1)
+		self.assertEqual(out["captured"]["amount"], 112.5)
+		self.assertEqual(out["captured"]["equivalent_days"], 0.5)
+
+	def test_a_money_penalty_is_taken_as_given_and_converted_back_to_days(self):
+		out = self._add(unit="Money", quantity=0, amount=450)
+		self.assertEqual(out["captured"]["amount"], 450.0)
+		self.assertEqual(out["captured"]["equivalent_days"], 2.0)
+
+	def test_the_day_rate_is_snapshotted_onto_the_document(self):
+		# A raise six months later must not silently re-price a penalty already
+		# agreed with the employee.
+		out = self._add(unit="Days", quantity=1)
+		self.assertEqual(out["captured"]["day_rate"], 225.0)
+
+	def test_a_penalty_with_no_reason_is_refused(self):
+		out = self._add(reason="  ")
+		self.assertTrue(out["refused"])
+		out["frappe"].get_doc.assert_not_called()
+		self.assertIn("reason", str(out["frappe"].throw.call_args[0][0]))
+
+	def test_an_unknown_unit_is_refused(self):
+		out = self._add(unit="Weeks")
+		self.assertTrue(out["refused"])
+		out["frappe"].get_doc.assert_not_called()
+
+	def test_a_day_penalty_without_a_salary_structure_is_refused_with_advice(self):
+		out = self._add(unit="Days", quantity=1, context=self._context(on_payroll=False))
+		self.assertTrue(out["refused"])
+		message = str(out["frappe"].throw.call_args[0][0])
+		self.assertIn("money", message)
+		out["frappe"].get_doc.assert_not_called()
+
+	def test_a_money_penalty_is_still_allowed_off_payroll(self):
+		# The off-payroll escape hatch: no day has a price, but 450 EGP does.
+		out = self._add(
+			unit="Money", quantity=0, amount=450, context=self._context(on_payroll=False)
+		)
+		self.assertFalse(out["refused"])
+		self.assertEqual(out["captured"]["amount"], 450.0)
+		self.assertEqual(out["captured"]["day_rate"], 0.0)
+
+	def test_penalties_beyond_the_whole_salary_are_refused(self):
+		out = self._add(
+			unit="Days", quantity=1, context=self._context(penalty_total=6700.0)
+		)
+		self.assertTrue(out["refused"])
+		out["frappe"].get_doc.assert_not_called()
+		self.assertIn("allow_overpay", str(out["frappe"].throw.call_args[0][0]))
+
+	def test_allow_overpay_forfeits_the_whole_month_deliberately(self):
+		out = self._add(
+			unit="Days",
+			quantity=1,
+			allow_overpay=1,
+			context=self._context(penalty_total=6700.0),
+		)
+		self.assertFalse(out["refused"])
+		out["doc"].submit.assert_called_once()
+
+	def test_a_zero_quantity_is_refused(self):
+		out = self._add(unit="Days", quantity=0)
+		self.assertTrue(out["refused"])
+
+	def test_the_employee_row_is_locked_before_the_state_the_guard_reads(self):
+		out = self._add()
+		step, args, kwargs = out["order"][0]
+		self.assertEqual(step, "lock")
+		self.assertEqual(args[0], "Employee")
+		self.assertEqual(args[1], self.EMPLOYEE)
+		self.assertTrue(kwargs.get("for_update"))
+		self.assertIn("compute", [s for s, _a, _kw in out["order"]])
+
+
+class TestCancelEmployeePenalty(unittest.TestCase):
+	def _cancel(self, settled=0, docstatus=1, reason="Wrong person"):
+		from jarz_pos.api import monthly_expenses
+
+		doc = MagicMock()
+		doc.docstatus = docstatus
+		doc.settled = settled
+		doc.settled_via = "JER-0009" if settled else None
+		doc.employee = "HR-EMP-00001"
+		doc.period_month = MONTH_KEY
+		doc.company = "JARZ"
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_doc.return_value = doc
+		mock_frappe.throw.side_effect = RuntimeError("refused")
+
+		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
+			monthly_expenses, "_ensure_manager"
+		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
+			monthly_expenses,
+			"_compute_month",
+			return_value={"payroll": {"rows": []}, "summary": {}, "deductions": {}},
+		):
+			try:
+				result = monthly_expenses.cancel_employee_penalty("JPEN-00001", reason)
+				refused = False
+			except RuntimeError:
+				result, refused = None, True
+		return result, refused, doc, mock_frappe
+
+	def test_an_active_penalty_is_cancelled(self):
+		result, refused, doc, _frappe = self._cancel()
+		self.assertFalse(refused)
+		doc.cancel.assert_called_once()
+		self.assertTrue(result["success"])
+
+	def test_a_settled_penalty_cannot_be_cancelled(self):
+		# The reduced salary has already been paid; un-deducting it here would
+		# silently re-open a month that was settled with the employee.
+		_result, refused, doc, mock_frappe = self._cancel(settled=1)
+		self.assertTrue(refused)
+		doc.cancel.assert_not_called()
+		self.assertIn("JER-0009", str(mock_frappe.throw.call_args[0][0]))
+
+	def test_an_already_cancelled_penalty_is_refused(self):
+		_result, refused, doc, _frappe = self._cancel(docstatus=2)
+		self.assertTrue(refused)
+		doc.cancel.assert_not_called()
+
+	def test_a_cancellation_needs_a_reason(self):
+		_result, refused, doc, _frappe = self._cancel(reason="   ")
+		self.assertTrue(refused)
+		doc.cancel.assert_not_called()
+
+
+class TestSettlementReadBack(unittest.TestCase):
+	"""A settlement is a Journal Entry, so the month finds it by its tag."""
+
+	def _load(self, remarks_and_totals):
+		from jarz_pos.api import monthly_expenses
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_all.return_value = [
+			{"name": "ACC-JV-{0}".format(i), "user_remark": remark, "total_debit": total}
+			for i, (remark, total) in enumerate(remarks_and_totals)
+		]
+		with patch.object(monthly_expenses, "frappe", mock_frappe):
+			return monthly_expenses._load_settlements(MONTH_KEY, "JARZ")
+
+	def test_the_employee_and_month_are_read_out_of_the_tag(self):
+		settled = self._load(
+			[("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-08] salary", 684.0)]
+		)
+		self.assertEqual(settled, {"HR-EMP-00001": 684.0})
+
+	def test_another_months_settlement_is_not_credited_to_this_one(self):
+		settled = self._load(
+			[("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-07] salary", 684.0)]
+		)
+		self.assertEqual(settled, {})
+
+	def test_an_untagged_entry_is_ignored(self):
+		self.assertEqual(self._load([("Ordinary journal entry", 5000.0)]), {})
+
+	def test_two_settlements_for_one_employee_add_up(self):
+		settled = self._load(
+			[
+				("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-08] a", 500.0),
+				("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-08] b", 184.0),
+			]
+		)
+		self.assertEqual(settled, {"HR-EMP-00001": 684.0})
+
+
 # ── access gate ───────────────────────────────────────────────────────────
 
 
@@ -1954,6 +3185,8 @@ class TestAccessGateIsShared(unittest.TestCase):
 				"save_recurring_expense",
 				"set_recurring_expense_status",
 				"cancel_expense_payment",
+				"add_employee_penalty",
+				"cancel_employee_penalty",
 			},
 			found,
 		)

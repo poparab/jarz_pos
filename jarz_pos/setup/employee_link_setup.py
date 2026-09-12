@@ -53,6 +53,8 @@ import frappe
 from jarz_pos.utils.employee_link import (
     ADVANCE_DOCTYPE,
     CUSTOMER_EMPLOYEE_FIELD,
+    F_SETTLED_AMOUNT,
+    F_SETTLED_VIA,
     hrms_available,
 )
 
@@ -97,7 +99,9 @@ CUSTOMER_FIELDS: List[Dict[str, Any]] = [
     },
 ]
 
-#: Everything the Jarz advance flow needs that HRMS does not carry. Every
+#: Everything the Jarz advance flow needs that HRMS does not carry — the payout
+#: columns, the chosen posting time, and the two settlement columns written when
+#: a salary payment recovers an advance. Every
 #: fieldname is prefixed ``custom_jarz_`` so it can never collide with a field
 #: HRMS adds later — the whole point of the prefix is that an HRMS upgrade
 #: introducing its own ``paying_account`` cannot quietly take ours over.
@@ -193,6 +197,50 @@ ADVANCE_FIELDS: List[Dict[str, Any]] = [
             "Entry raised at approval."
         ),
     },
+    {
+        # WHY a jarz-owned column instead of HRMS's own `claimed_amount`:
+        # `EmployeeAdvance.update_claimed_amount` RECOMPUTES claimed_amount from
+        # the Expense Claim Advance rows, so anything written into it by hand is
+        # erased the next time the advance is touched. HRMS's supported route
+        # for recovering an advance from payroll is an `Additional Salary`
+        # consumed by a Salary Slip, and this business has produced zero Salary
+        # Slips ever. Neither is usable, so the recovery is recorded here.
+        #
+        # The fieldname is not spelled literally anywhere else: readers import
+        # `F_SETTLED_AMOUNT` from `jarz_pos.utils.employee_link`, which is also
+        # where `open_advance_balance()` subtracts it.
+        "fieldname": F_SETTLED_AMOUNT,
+        "label": "Settled Amount (Jarz)",
+        "fieldtype": "Currency",
+        "insert_after": "custom_jarz_posting_time",
+        "read_only": 1,
+        # Written back after the advance is already submitted, exactly like
+        # custom_jarz_payment_entry above — without this the write is silently
+        # filtered out and the advance stays open forever on every screen.
+        "allow_on_submit": 1,
+        "module": "jarz pos",
+        "description": (
+            "Part of this advance already recovered from a salary payment on the "
+            "Monthly Expenses board. HRMS's own claimed_amount cannot be used: it "
+            "is recomputed from Expense Claims on every save."
+        ),
+    },
+    {
+        "fieldname": F_SETTLED_VIA,
+        "label": "Settled Via (Jarz)",
+        # Data, not Link: the settling document is a Journal Entry today, and
+        # making it a Link would both hard-couple this column to one DocType and
+        # block the settlement JE from ever being cancelled without first
+        # clearing every advance that references it.
+        "fieldtype": "Data",
+        "insert_after": F_SETTLED_AMOUNT,
+        "read_only": 1,
+        "allow_on_submit": 1,
+        "module": "jarz pos",
+        "description": (
+            "Journal Entry that recovered this advance against a salary payment."
+        ),
+    },
 ]
 
 
@@ -267,7 +315,12 @@ def _ensure_customer_employee_field(log: Dict[str, List[str]]) -> None:
 
 
 def _ensure_advance_jarz_fields(log: Dict[str, List[str]]) -> None:
-    """Seed the six ``custom_jarz_*`` fields on ``Employee Advance``."""
+    """Seed every ``custom_jarz_*`` field on ``Employee Advance``.
+
+    The list has grown past the original six: the payout columns the approve
+    path reads, the posting time, and the two settlement columns the Monthly
+    Expenses board writes when a salary payment recovers an advance.
+    """
     if not hrms_available():
         log.setdefault("skipped", []).append(f"{ADVANCE_DOCTYPE}: HRMS not installed")
         return

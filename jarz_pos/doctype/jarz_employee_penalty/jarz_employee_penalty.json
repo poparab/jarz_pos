@@ -1,0 +1,239 @@
+{
+ "doctype": "DocType",
+ "name": "Jarz Employee Penalty",
+ "module": "jarz pos",
+ "custom": 0,
+ "istable": 0,
+ "editable_grid": 0,
+ "track_changes": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "naming_rule": "Naming Series",
+ "autoname": "naming_series:",
+ "is_submittable": 1,
+ "allow_copy": 0,
+ "allow_rename": 0,
+ "submit_on_creation": 0,
+ "show_name_in_global_search": 1,
+ "index_web_pages_for_search": 0,
+ "engine": "InnoDB",
+ "title_field": "employee_name",
+ "search_fields": "employee,period_month,unit,amount",
+ "field_order": [
+  "naming_series",
+  "employee",
+  "employee_name",
+  "column_break_main",
+  "company",
+  "penalty_date",
+  "period_month",
+  "section_break_amount",
+  "unit",
+  "quantity",
+  "day_rate",
+  "column_break_amount",
+  "amount",
+  "equivalent_days",
+  "currency",
+  "section_break_reason",
+  "reason",
+  "section_break_settlement",
+  "settled",
+  "settled_via"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "JPEN-.#####",
+   "default": "JPEN-.#####",
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "employee_name",
+   "fieldtype": "Data",
+   "label": "Employee Name",
+   "fetch_from": "employee.employee_name",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "penalty_date",
+   "fieldtype": "Date",
+   "label": "Penalty Date",
+   "reqd": 1,
+   "default": "Today",
+   "in_standard_filter": 1,
+   "description": "When the incident happened. Not necessarily the month it is deducted from."
+  },
+  {
+   "fieldname": "period_month",
+   "fieldtype": "Data",
+   "label": "Period (YYYY-MM)",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "The salary month this is deducted from, as YYYY-MM. Defaults to the penalty date's month; set it explicitly when an incident is carried into the next payroll."
+  },
+  {
+   "fieldname": "section_break_amount",
+   "fieldtype": "Section Break",
+   "label": "Deduction"
+  },
+  {
+   "fieldname": "unit",
+   "fieldtype": "Select",
+   "label": "Unit",
+   "options": "Days\nHalf Days\nMoney",
+   "default": "Days",
+   "reqd": 1,
+   "in_standard_filter": 1,
+   "description": "How the penalty was agreed with the employee. Both the money and the day equivalent are always stored, whichever unit was used."
+  },
+  {
+   "fieldname": "quantity",
+   "fieldtype": "Float",
+   "label": "Quantity",
+   "description": "Number of days or half-days. Zero when the unit is Money."
+  },
+  {
+   "fieldname": "day_rate",
+   "fieldtype": "Currency",
+   "label": "Day Rate",
+   "options": "currency",
+   "read_only": 1,
+   "description": "Snapshot of monthly salary / 30 at the moment the penalty was entered. Never re-derived on save: a later raise must not silently re-price a penalty already agreed with the employee."
+  },
+  {
+   "fieldname": "column_break_amount",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Amount",
+   "options": "currency",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "equivalent_days",
+   "fieldtype": "Float",
+   "label": "Equivalent Days",
+   "read_only": 1,
+   "description": "The same penalty expressed in days, so a money penalty is still readable as time off pay."
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency"
+  },
+  {
+   "fieldname": "section_break_reason",
+   "fieldtype": "Section Break",
+   "label": "Reason"
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Reason",
+   "reqd": 1,
+   "description": "Mandatory: a deduction with no stated reason is not defensible to the employee."
+  },
+  {
+   "fieldname": "section_break_settlement",
+   "fieldtype": "Section Break",
+   "label": "Settlement"
+  },
+  {
+   "fieldname": "settled",
+   "fieldtype": "Check",
+   "label": "Settled",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "in_standard_filter": 1,
+   "description": "Set when a salary payment has already been reduced by this penalty."
+  },
+  {
+   "fieldname": "settled_via",
+   "fieldtype": "Link",
+   "label": "Settled Via",
+   "options": "Jarz Expense Request",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "description": "The salary payment that absorbed this penalty."
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  },
+  {
+   "role": "JARZ Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "export": 1,
+   "report": 1
+  }
+ ],
+ "links": [],
+ "actions": [],
+ "allow_import": 1
+}

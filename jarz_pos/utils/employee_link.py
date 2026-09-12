@@ -41,6 +41,27 @@ CUSTOMER_EMPLOYEE_FIELD = "custom_employee"
 #: reports.
 ADVANCE_DOCTYPE = "Employee Advance"
 
+#: The two jarz-owned columns on ``Employee Advance`` that record a recovery
+#: made from a salary payment on the Monthly Expenses board. They are CREATED by
+#: ``jarz_pos.setup.employee_link_setup.ADVANCE_FIELDS`` and READ here and in
+#: ``jarz_pos.api.monthly_expenses``; the names live in this module because this
+#: is already the single place that knows how employee money is joined, and a
+#: fieldname spelled in three files is a fieldname that will eventually be
+#: spelled three ways.
+#:
+#: They exist at all because HRMS's own ``claimed_amount`` is not writable in
+#: any lasting sense — ``EmployeeAdvance.update_claimed_amount`` recomputes it
+#: from ``Expense Claim Advance`` rows on the next touch — and its supported
+#: salary-recovery route runs through an ``Additional Salary`` consumed by a
+#: Salary Slip, which this business has never produced one of.
+F_SETTLED_AMOUNT = "custom_jarz_settled_amount"
+F_SETTLED_VIA = "custom_jarz_settled_via"
+
+#: HRMS's own columns that make up the rest of the balance below.
+F_PAID_AMOUNT = "paid_amount"
+F_CLAIMED_AMOUNT = "claimed_amount"
+F_RETURN_AMOUNT = "return_amount"
+
 
 def hrms_available() -> bool:
     """True when the HRMS app's Employee Advance DocType is present.
@@ -308,6 +329,82 @@ def employees_for_customers(customers: Iterable[str]) -> Dict[str, str]:
         )
 
     return mapping
+
+
+def advance_has_field(fieldname: str) -> bool:
+    """True when ``Employee Advance`` really carries ``fieldname``.
+
+    Same guard, same reason as :func:`customer_has_employee_field`: the two
+    ``custom_jarz_settled_*`` columns are seeded on ``after_migrate``, so between
+    deploying this code and the first migrate they do not exist — and selecting
+    or filtering on a missing column raises rather than returning nothing.
+    """
+    if not hrms_available():
+        return False
+    try:
+        return bool(frappe.get_meta(ADVANCE_DOCTYPE).get_field(fieldname))
+    except Exception:
+        return False
+
+
+def advance_balance_fields() -> List[str]:
+    """The fields to select so :func:`open_advance_balance` can be computed.
+
+    ``F_SETTLED_AMOUNT`` is included only when the column exists, which is what
+    makes every caller safe on a bench that has the code but not yet the field.
+    """
+    fields = ["name", F_PAID_AMOUNT, F_CLAIMED_AMOUNT, F_RETURN_AMOUNT]
+    if advance_has_field(F_SETTLED_AMOUNT):
+        fields.append(F_SETTLED_AMOUNT)
+    if advance_has_field(F_SETTLED_VIA):
+        fields.append(F_SETTLED_VIA)
+    return fields
+
+
+def open_advance_balance(row: Dict[str, Any]) -> float:
+    """What is still owed back on one submitted advance, floored at 0.
+
+    ``paid - claimed - returned - settled``. Floored because a negative "open
+    balance" is not money the employee is owed; it is an over-recovery, and
+    letting it go negative would silently cancel out another advance's real
+    balance when the two are summed.
+
+    A missing key reads as 0, so the same function works whether or not the
+    jarz columns exist yet on this bench.
+    """
+
+    def _num(key: str) -> float:
+        try:
+            return float(row.get(key) or 0)
+        except Exception:
+            return 0.0
+
+    balance = (
+        _num(F_PAID_AMOUNT)
+        - _num(F_CLAIMED_AMOUNT)
+        - _num(F_RETURN_AMOUNT)
+        - _num(F_SETTLED_AMOUNT)
+    )
+    return balance if balance > 0 else 0.0
+
+
+def open_advance_balance_expr(alias: str = "") -> str:
+    """The same arithmetic as SQL, for callers that aggregate in the database.
+
+    ``alias`` is the table alias to qualify the columns with (``""`` for none).
+    The settled term is dropped when the column is absent, so this expression is
+    valid on a bench where the migrate has not run yet — which is exactly the
+    case the Python helper above also covers.
+    """
+    prefix = f"{alias}." if alias else ""
+    terms = [
+        f"IFNULL({prefix}`{F_PAID_AMOUNT}`, 0)",
+        f"IFNULL({prefix}`{F_CLAIMED_AMOUNT}`, 0)",
+        f"IFNULL({prefix}`{F_RETURN_AMOUNT}`, 0)",
+    ]
+    if advance_has_field(F_SETTLED_AMOUNT):
+        terms.append(f"IFNULL({prefix}`{F_SETTLED_AMOUNT}`, 0)")
+    return "GREATEST(" + " - ".join(terms) + ", 0)"
 
 
 def employee_display_names(employees: Iterable[str]) -> Dict[str, str]:

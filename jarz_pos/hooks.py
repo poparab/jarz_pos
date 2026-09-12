@@ -137,8 +137,10 @@ after_migrate = [
     # what is missing and never overwrites a rate somebody set. The one-time
     # corrective pass is opt-in (ensure_b2b_base_prices(realign=True), by hand).
     "jarz_pos.setup.b2b_pricing.ensure_b2b_base_prices",
-    # Employee-advance schema: Customer.custom_employee plus the six custom_jarz_*
-    # columns on Employee Advance. Guarded on HRMS being installed, never raises.
+    # Employee-advance schema: Customer.custom_employee plus the custom_jarz_*
+    # columns on Employee Advance — the payout ones, and the two settlement ones
+    # the Monthly Expenses board writes when a salary payment recovers an
+    # advance. Guarded on HRMS being installed, never raises.
     # After b2b_master_data because the name-matching fallback in
     # utils/employee_link.py is scoped to the "Employee" Customer Group it seeds.
     "jarz_pos.setup.employee_link_setup.ensure_employee_link_fields",
