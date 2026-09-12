@@ -96,6 +96,13 @@ CUSTOMER_FIELDS: List[Dict[str, Any]] = [
         # silently drop the field to the bottom of the form on a site where the
         # fixture has not imported yet.
         "insert_after": "customer_group",
+        # Indexed on purpose. services.employee_customers takes a LOCKING read
+        # (`WHERE custom_employee = %s FOR UPDATE`) so two cashiers picking the
+        # same employee cannot create two staff customers. Without an index that
+        # read scans, and InnoDB locks every Customer row it scans until commit.
+        # create_custom_fields updates the existing field and updatedb adds the
+        # index on the next migrate.
+        "search_index": 1,
         "module": "jarz pos",
         "description": (
             "Staff member this customer account belongs to. Read by "
@@ -656,3 +663,54 @@ def ensure_employee_link_fields() -> Dict[str, List[str]]:
         logger.error("ensure_employee_link_fields failed unexpectedly", exc_info=True)
 
     return log
+
+
+def ensure_employee_customers() -> Dict[str, Any]:
+    """Give every Active employee its one staff Customer. Safe on every migrate.
+
+    Runs right after :func:`ensure_employee_link_fields`, which creates (and
+    indexes) ``Customer.custom_employee`` — this cannot do anything before that
+    column exists. The work itself lives in
+    ``jarz_pos.services.employee_customers.ensure_customers_for_all_employees``
+    (idempotent: an employee that already has its staff customer is reported as
+    ``existing`` and nothing is written). Customers outside the ``Employee``
+    group that carry a stale link are only REPORTED as conflicts, never changed.
+
+    Never raises: a raising seeder aborts the shared migrate for every app.
+    """
+    logger = _logger()
+    summary: Dict[str, Any] = {}
+    try:
+        if not hrms_available():
+            logger.error("employee_customers: skipped, HRMS not installed")
+            return summary
+
+        # Lazy: keeps this module importable with no top-level service imports.
+        from jarz_pos.services.employee_customers import ensure_customers_for_all_employees
+
+        summary = ensure_customers_for_all_employees() or {}
+
+        def _names(key: str) -> List[str]:
+            return [
+                str(item.get("customer") or item.get("employee") or "")
+                for item in (summary.get(key) or [])
+            ]
+
+        line = (
+            "employee_customers: created=%s adopted=%s existing=%d skipped=%s conflicts=%s"
+            % (
+                _names("created"),
+                _names("adopted"),
+                len(summary.get("existing") or []),
+                summary.get("skipped") or [],
+                summary.get("conflicts") or [],
+            )
+        )
+        # ERROR level for the same reason as ensure_employee_link_fields: .info()
+        # is discarded off a dev server. print() lands in the migrate output.
+        logger.error(line)
+        print(line)
+    except Exception:
+        logger.error("ensure_employee_customers failed unexpectedly", exc_info=True)
+
+    return summary

@@ -384,15 +384,24 @@ def get_commercial_policies(profile: str | None = None):
         profile_company = frappe.db.get_value("POS Profile", profile, "company")
 
     user_roles = set(frappe.get_roles(frappe.session.user) or [])
+    policy_fields = [
+        "name", "policy_name", "order_purpose", "price_list",
+        "discount_percentage", "shipping_income_behavior",
+        "shipping_expense_behavior", "courier_behavior",
+        "require_role", "company", "pos_profile",
+    ]
+    # fulfilment_behavior was added after the DocType shipped. Probed, not
+    # assumed: selecting a column a bench has not migrated yet raises and would
+    # take the whole Order Purpose selector down with it.
+    try:
+        if frappe.db.has_column("Jarz Commercial Policy", "fulfilment_behavior"):
+            policy_fields.append("fulfilment_behavior")
+    except Exception:
+        pass
     rows = frappe.get_all(
         "Jarz Commercial Policy",
         filters={"enabled": 1},
-        fields=[
-            "name", "policy_name", "order_purpose", "price_list",
-            "discount_percentage", "shipping_income_behavior",
-            "shipping_expense_behavior", "courier_behavior",
-            "require_role", "company", "pos_profile",
-        ],
+        fields=policy_fields,
         order_by="priority asc, policy_name asc",
         limit_page_length=QUERY_LIMITS.DEFAULT_LIST,
     )
@@ -417,6 +426,9 @@ def get_commercial_policies(profile: str | None = None):
             "discount_percentage": float(row.get("discount_percentage") or 0),
             "waives_shipping_income": (row.get("shipping_income_behavior") == "Zero"),
             "no_courier": (row.get("courier_behavior") == "No Courier"),
+            # Additive: the goods are handed over at the counter (Employee
+            # Order), so the POS can skip the delivery address / slot steps.
+            "deliver_at_branch": (row.get("fulfilment_behavior") == "Deliver at Branch"),
         })
     return results
 

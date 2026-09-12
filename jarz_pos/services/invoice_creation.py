@@ -1571,7 +1571,22 @@ def create_pos_invoice(
         # resolved value itself is left exactly as-is; this only shouts and, at STEP
         # 10.5, files a review row. A catch, not a gate: order taking never stops.
         stamped_territory = effective_order_territory or getattr(invoice_doc, "territory", None)
-        if is_unresolved_territory(stamped_territory):
+        # `is True`, not truthiness: the decision is a dataclass bool, and a mocked
+        # decision must never be able to silence the F-09 catch by accident.
+        if is_unresolved_territory(stamped_territory) and (
+            getattr(policy_decision, "deliver_at_branch", False) is True
+        ):
+            # A Deliver-at-Branch order (Employee Order: staff collect at the
+            # counter) never travels and waives shipping by design, and a staff
+            # customer carries no delivery address — so "no territory" is the
+            # expected shape here, not a routing defect. No marker, no Error Log
+            # entry; the review-queue recorder skips it on the same policy
+            # (services.territory_exceptions._is_counter_fulfilled). The territory
+            # value itself is left exactly as resolved.
+            print(
+                "   🏪 Territory unresolved on a Deliver-at-Branch order – expected, not flagged"
+            )
+        elif is_unresolved_territory(stamped_territory):
             _unresolved_source = _describe_unresolved_territory_source(
                 resolved_shipping_address=resolved_shipping_address,
                 shipping_address_name=resolved_shipping_address_name or shipping_address_name,

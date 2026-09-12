@@ -125,6 +125,9 @@ jobs:
             test_branch_fulfilment
             test_employee_advances
             test_employee_ledger
+            # Staff customers: one Employee-group Customer per active employee,
+            # the POS staff picker endpoints, and the deterministic ledger join.
+            test_employee_customers
             test_employee_pricing
             test_pricing_manager_gate
             test_settlement_accounting

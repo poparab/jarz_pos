@@ -110,7 +110,17 @@ _OPTIONAL_INVOICE_FIELDS = (
     "custom_kanban_profile",
     "woo_source_type",
     "woo_transaction_id",
+    # This app's own policy snapshot. Read so a Deliver-at-Branch order (staff
+    # purchase collected at the counter) is not filed as "Territory Unresolved":
+    # it never travels and waives shipping by design, so there is no territory
+    # to correct. See ``_is_counter_fulfilled``.
+    "custom_commercial_policy",
 )
+
+#: ``Jarz Commercial Policy.fulfilment_behavior`` value meaning the goods are
+#: handed over at the counter. Kept in step with the DocType Select option and
+#: ``services.commercial_policy.resolve_commercial_policy``.
+_DELIVER_AT_BRANCH = "Deliver at Branch"
 
 #: Per-process memo of which optional columns actually exist, keyed by
 #: ``(site, fieldname)``. The schema only changes at ``bench migrate``, which
@@ -530,6 +540,7 @@ def build_snapshot(invoice_doc: Any) -> Dict[str, Any]:
             woo_source_type=optional.get("woo_source_type"),
             woo_transaction_id=optional.get("woo_transaction_id"),
         ),
+        "commercial_policy": _clean(optional.get("custom_commercial_policy")) or None,
     }
 
     snapshot["expected_territory"] = _resolve_expected_territory(snapshot)
@@ -614,8 +625,33 @@ def _record(invoice_doc: Any) -> Optional[str]:
     )
     if not exception_type:
         return None
+    if exception_type == TYPE_TERRITORY_UNRESOLVED and _is_counter_fulfilled(snapshot):
+        return None
 
     return _insert_exception(snapshot, exception_type)
+
+
+def _is_counter_fulfilled(snapshot: Dict[str, Any]) -> bool:
+    """True when the order's commercial policy hands the goods over at the counter.
+
+    Only ever used to silence ``Territory Unresolved``. A staff purchase under
+    the Employee Order policy is collected at the branch as it is rung in, waives
+    shipping and has no courier — a staff customer carries no delivery address,
+    so "no territory" is the expected shape, not a routing defect. A branch
+    MISMATCH is still recorded for these orders; only the unresolved case is
+    skipped.
+
+    Reads the policy's current ``fulfilment_behavior`` by name. Never raises: a
+    lookup failure answers False, which keeps the pre-existing behaviour.
+    """
+    policy = _clean(snapshot.get("commercial_policy"))
+    if not policy:
+        return False
+    try:
+        behavior = frappe.db.get_value("Jarz Commercial Policy", policy, "fulfilment_behavior")
+    except Exception:
+        return False
+    return isinstance(behavior, str) and behavior.strip() == _DELIVER_AT_BRANCH
 
 
 def _existing_exception(invoice_name: str, exception_type: str) -> Optional[str]:
@@ -961,7 +997,9 @@ def _backfill_one(row: Dict[str, Any], summary: Dict[str, Any], dry_run: bool) -
             pos_profile=snapshot.get("pos_profile_used"),
             territory_pos_profile=snapshot.get("territory_pos_profile"),
         )
-        if not exception_type:
+        if not exception_type or (
+            exception_type == TYPE_TERRITORY_UNRESOLVED and _is_counter_fulfilled(snapshot)
+        ):
             summary["clean"] += 1
             return
 

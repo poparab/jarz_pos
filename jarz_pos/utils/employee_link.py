@@ -198,6 +198,14 @@ def customers_for_employees(employees: Iterable[str]) -> Dict[str, str]:
 
     Explicit ``Customer.custom_employee`` links win. Anything still unmatched
     falls back to a name comparison inside the ``Employee`` customer group.
+
+    When several Customers link the same Employee the choice is DETERMINISTIC:
+    a Customer in the ``Employee`` group beats one outside it, then the oldest
+    ``creation`` wins, then ``name``. That is exactly the order
+    ``services.employee_customers.ensure_customer_for_employee`` uses to pick
+    the staff customer the POS bills, so the customer an Employee Order is
+    placed on and the customer the salary board attributes are the same one.
+    (It used to be "first row the database returned", with no ``order_by``.)
     """
     wanted = [str(e).strip() for e in (employees or []) if str(e or "").strip()]
     if not wanted:
@@ -211,15 +219,26 @@ def customers_for_employees(employees: Iterable[str]) -> Dict[str, str]:
                 frappe.get_all(
                     "Customer",
                     filters={CUSTOMER_EMPLOYEE_FIELD: ["in", wanted]},
-                    fields=["name", CUSTOMER_EMPLOYEE_FIELD],
+                    fields=["name", CUSTOMER_EMPLOYEE_FIELD, "customer_group"],
+                    order_by="creation asc, name asc",
                     limit_page_length=0,
                 )
                 or []
             )
+            # Stable sort: the database already ordered by creation, name, so
+            # moving Employee-group rows to the front keeps that order inside
+            # each partition.
+            rows = sorted(
+                rows,
+                key=lambda r: 0
+                if str(r.get("customer_group") or "").strip() == EMPLOYEE_CUSTOMER_GROUP
+                else 1,
+            )
             for row in rows:
                 emp = str(row.get(CUSTOMER_EMPLOYEE_FIELD) or "").strip()
-                # First link wins; a second Customer pointing at the same
-                # Employee is a data problem, not something to silently merge.
+                # First link wins in the order above; a second Customer pointing
+                # at the same Employee is a data problem, not something to
+                # silently merge.
                 if emp and emp not in mapping:
                     mapping[emp] = row["name"]
         except Exception:

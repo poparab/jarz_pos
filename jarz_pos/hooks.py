@@ -144,6 +144,11 @@ after_migrate = [
     # After b2b_master_data because the name-matching fallback in
     # utils/employee_link.py is scoped to the "Employee" Customer Group it seeds.
     "jarz_pos.setup.employee_link_setup.ensure_employee_link_fields",
+    # One staff Customer per Active employee (Employee group, custom_employee set,
+    # never pushed to WooCommerce) for the POS staff-order picker. Must run right
+    # AFTER ensure_employee_link_fields, which creates and indexes the column it
+    # writes. Idempotent, reports stale links as conflicts, never raises.
+    "jarz_pos.setup.employee_link_setup.ensure_employee_customers",
     # Customer credit schema: custom_credit_allowed / custom_credit_days /
     # custom_credit_limit_amount. An after_migrate seeder rather than a fixture
     # because fixtures sync at the very end of a migrate while the deployed code
@@ -351,6 +356,15 @@ doc_events = {
     # already resolved and can be trusted.
     "Employee Checkin": {
         "validate": "jarz_pos.events.employee_checkin.enforce_roster_on_checkin",
+    },
+    # Staff-order picker: keep one staff Customer per Active employee as people
+    # are hired or reactivated, so the POS never has to create one mid-order.
+    # The handler NEVER raises and is fenced by a savepoint — saving an Employee
+    # must not fail over a customer side effect. Guarded on HRMS + the
+    # Customer.custom_employee column, so it is a no-op before the first migrate.
+    "Employee": {
+        "after_insert": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
+        "on_update": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
     },
     # Keep Address.custom_geo_confidence in step with custom_geo_source. This
     # fires on EVERY Address save site-wide, including the WooCommerce bulk
