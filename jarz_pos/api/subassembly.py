@@ -22,9 +22,17 @@ This module is that missing screen's read side.  Two endpoints, both read-only:
     That rate feeds the identical cover/target/status maths the jar board runs,
     against the identical Jarz Forecast Settings row.
 
+    It also says **how each base is entered**.  Not every base has a batch:
+    Fudge Cake is counted by its 30 eggs, but Blueberry mix is 1 Kg of fruit and
+    1 Kg of jelly with nothing countable in it, and it is made by the kilo.
+    ``entry_mode``/``batch_unit`` carry that distinction, and ``jar_consumers``
+    carries the per-jar rates so a screen can take jar counts for a mix and work
+    the Kg out — which is the number the floor actually has in mind.
+
 ``preview_base_batch``
     What one specific run would consume, cost and produce, in the exact shape
-    ``api/manufacturing.start_production_batch`` wants next.
+    ``api/manufacturing.start_production_batch`` wants next.  Sized either in
+    batches or in a quantity, because half the catalogue has no batch to count.
 
 Nothing here writes.  Starting and finishing a batch stays entirely with
 ``api/manufacturing``, which is already item-generic — the client converts
@@ -67,6 +75,13 @@ DEMAND_SOURCE_SUGGESTIONS = "suggestions"
 DEMAND_SOURCE_NONE = "none"
 DRIVER_PLAN = "today's plan"
 DRIVER_SUGGESTIONS = "board suggestions"
+
+# How a base is entered on the screen.  ``batch`` means the item has a countable
+# component to step by — 30 eggs is one batch of Fudge Cake — and ``quantity``
+# means it does not, so the only honest unit is its stock UOM: Blueberry mix is
+# made by the kilo and a half-batch stepper for it is a fiction.
+ENTRY_MODE_BATCH = "batch"
+ENTRY_MODE_QUANTITY = "quantity"
 
 
 # ── Access ──────────────────────────────────────────────────────────────
@@ -431,6 +446,157 @@ def _resolve_jar_bom_rows(bom_names: Iterable[str]) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows or []]
 
 
+def _resolve_base_component_rows(bom_names: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """One-level component rows of the **bases' own** BOMs, keyed by BOM name.
+
+    One query for the whole screen, then grouped in Python — the alternative is
+    a read per card, and this list is every producible non-jar item on site.
+
+    ``stock_qty`` and ``stock_uom``, never ``qty``/``uom``, for the reason
+    documented on ``_resolve_jar_bom_rows``: a BOM line may be typed in a display
+    unit that is not the item's stock unit, and reading the two halves from
+    different scales is how "30 eggs" becomes 30 of something else.
+
+    The quantities are deliberately **not** divided by ``bom.quantity``.  A BOM
+    is one batch by definition, so ``stock_qty`` is already the per-batch figure;
+    dividing would report 3.24 eggs per Kg of Fudge Cake, which is not a unit
+    anybody on the floor counts.
+    """
+    names = sorted({_coerce_str(b) for b in (bom_names or []) if _coerce_str(b)})
+    if not names:
+        return {}
+
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT
+                bi.parent     AS bom_name,
+                bi.item_code  AS item_code,
+                bi.item_name  AS item_name,
+                bi.stock_qty  AS qty,
+                bi.stock_uom  AS uom
+            FROM `tabBOM Item` bi
+            WHERE bi.parent IN %(names)s
+              AND bi.parenttype = 'BOM'
+            """,
+            {"names": names},
+            as_dict=True,
+        )
+    except Exception:
+        # Degrades to "no batch unit" for every base, which the client renders as
+        # quantity entry — the honest fallback, since typing Kg is always valid
+        # and offering a batch stepper we cannot size is not.
+        _log_failure(
+            "JARZ Bases – base component read failed",
+            f"boms={names}\n{frappe.get_traceback()}",
+        )
+        return {}
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows or []:
+        bom_name = _coerce_str(row.get("bom_name"))
+        if not bom_name:
+            continue
+        grouped.setdefault(bom_name, []).append(dict(row))
+    return grouped
+
+
+def _resolve_jar_consumers(base_item_codes: Set[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """``{base_item_code: [{item_code, item_name, qty_per_jar}, ...]}``.
+
+    Everything whose **default, active, submitted** one-level BOM lists the base,
+    with how much of it one unit eats — the map that lets the floor type jar
+    counts for a mix and have the Kg worked out.
+
+    ``qty_per_jar = stock_qty / bom.quantity``, and a BOM whose ``quantity`` is
+    missing or zero is skipped rather than divided by: substituting 1 would
+    multiply the rate by the real batch size, the same trap ``derive_base_demand``
+    documents.
+
+    Two rows for one consumer are summed, not listed twice, for the same reason
+    that walk accumulates them: a BOM listing a base on two lines really does eat
+    both, and publishing the jar twice would make it appear twice on a screen
+    somebody is typing counts into.
+
+    No item-group filter.  Restricting this to ``FINISHED_GOODS_GROUPS`` would
+    silently drop a sub-assembly that eats another sub-assembly, and a count
+    typed against that is exactly as valid as one typed against a jar.
+    """
+    codes = sorted({c for c in (base_item_codes or set()) if c})
+    if not codes:
+        return {}
+
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT
+                bi.item_code  AS base_item_code,
+                b.item        AS item_code,
+                b.item_name   AS item_name,
+                bi.stock_qty  AS qty,
+                b.quantity    AS bom_quantity
+            FROM `tabBOM Item` bi
+            INNER JOIN `tabBOM` b ON b.name = bi.parent
+            WHERE bi.item_code IN %(codes)s
+              AND bi.parenttype = 'BOM'
+              AND b.is_default = 1
+              AND b.docstatus = 1
+              AND b.is_active = 1
+            """,
+            {"codes": codes},
+            as_dict=True,
+        )
+    except Exception:
+        _log_failure(
+            "JARZ Bases – jar consumer read failed",
+            f"bases={codes}\n{frappe.get_traceback()}",
+        )
+        return {}
+
+    accumulated: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for row in rows or []:
+        base_code = _coerce_str(row.get("base_item_code"))
+        consumer_code = _coerce_str(row.get("item_code"))
+        if not base_code or not consumer_code:
+            continue
+
+        bom_quantity = bases.to_float(row.get("bom_quantity"), 0.0)
+        if bom_quantity <= 0:
+            continue
+
+        per_jar = bases.countable(row.get("qty")) / bom_quantity
+        if per_jar <= bases.QTY_EPSILON:
+            continue
+
+        bucket = accumulated.setdefault(base_code, {})
+        existing = bucket.get(consumer_code)
+        if existing is None:
+            bucket[consumer_code] = {
+                "item_code": consumer_code,
+                "item_name": _coerce_str(row.get("item_name")) or consumer_code,
+                "qty_per_jar": per_jar,
+            }
+        else:
+            existing["qty_per_jar"] += per_jar
+
+    consumers: Dict[str, List[Dict[str, Any]]] = {}
+    for base_code, bucket in accumulated.items():
+        shaped = [
+            {
+                "item_code": entry["item_code"],
+                "item_name": entry["item_name"],
+                "qty_per_jar": round(entry["qty_per_jar"], bases.QTY_PRECISION),
+            }
+            for entry in bucket.values()
+        ]
+        # Ascending rate, then code: Medium lands before Large on the card, and
+        # two requests cannot order the same jars differently.
+        shaped.sort(key=lambda entry: (entry["qty_per_jar"], entry["item_code"]))
+        consumers[base_code] = shaped
+
+    return consumers
+
+
 def _resolve_sop_index(item_codes: Sequence[str]) -> Dict[str, Dict[str, Any]]:
     """Active SOP and its per-batch step durations for a batch of items.
 
@@ -757,6 +923,11 @@ def get_base_items(
     mix_item = _resolve_mix_item()
     mix_run_sizes = _resolve_mix_run_sizes()
 
+    # How each base is entered, resolved for the whole screen in two queries.
+    # Per-card reads here would be one BOM read per producible non-jar item.
+    component_rows = _resolve_base_component_rows([row.get("default_bom") for row in rows])
+    jar_consumers = _resolve_jar_consumers(set(item_codes))
+
     demand_map: Dict[str, float] = {}
     demand_source = DEMAND_SOURCE_NONE
     driver: Optional[str] = None
@@ -774,6 +945,13 @@ def get_base_items(
         on_hand = bases.to_float(on_hand_map.get(item_code), 0.0)
         capacity = capacity_map.get(item_code) or {}
         sop = sop_index.get(item_code)
+
+        # ``None`` here is a real answer — every component is divisible, so this
+        # base has no batch and is made by the kilo — and must reach the client as
+        # ``null``, never as an empty object.
+        batch_unit = bases.pick_batch_unit(
+            component_rows.get(_coerce_str(row.get("default_bom"))) or []
+        )
 
         demand_block = None
         if driver is not None and item_code in demand_map:
@@ -819,6 +997,17 @@ def get_base_items(
                 "run_sizes": bases.run_sizes_for_item(
                     item_code, mix_item=mix_item, mix_run_sizes=mix_run_sizes
                 ),
+                # ── How this base is entered ──
+                # Published explicitly rather than left for the client to
+                # re-derive from ``batch_unit``: the rule for which items have a
+                # batch belongs in one place, and a second implementation of it
+                # in Dart would disagree the first time the UOM list grows.
+                "entry_mode": ENTRY_MODE_BATCH if batch_unit else ENTRY_MODE_QUANTITY,
+                "batch_unit": batch_unit,
+                # ``[]``, never ``null``: an empty list says "nothing's BOM lists
+                # this base", which is a fact, and a client iterating it needs no
+                # special case for the mix nobody consumes yet.
+                "jar_consumers": jar_consumers.get(item_code, []),
                 "has_sop": sop is not None,
                 "sop_total_duration_mins": _sop_duration_for_batch(sop, batch_yield),
                 "demand": demand_block,
@@ -860,13 +1049,27 @@ def preview_base_batch(
     batches: Any = 1,
     company: Optional[str] = None,
     material_selections: Any = None,
+    qty: Any = None,
 ) -> Dict[str, Any]:
     """What one run of a base would consume, cost and produce.
 
     ``item_qty`` is the number the client hands straight to
-    ``api/manufacturing.start_production_batch`` — batches are this screen's
-    unit, units are ERPNext's, and the conversion happens exactly once, here,
-    off the BOM's own yield.
+    ``api/manufacturing.start_production_batch`` — and it stays the single place
+    either unit is converted, off the BOM's own yield.
+
+    The run is sized **one** of two ways:
+
+    * ``batches`` — this screen's original unit, for a base the floor counts in
+      whole mixer loads.
+    * ``qty`` — the item's stock UOM directly, for a base that has no batch to
+      count.  Blueberry mix is 2 Kg of nothing countable; asking for it in
+      batches would make somebody divide Kg by 2 in their head.
+
+    ``qty`` wins when it is given and positive, and ``batches`` is then reported
+    back as the fraction it works out to.  A ``qty`` that is given but zero or
+    negative **throws**, exactly as ``batches`` does: falling back to the batch
+    path there would quietly return a preview of a run nobody asked for, which
+    the client would then start.
 
     Read-only.  A shortage is reported, never enforced: the material precheck
     inside ``start_production_batch`` is the gate, and duplicating it here would
@@ -882,8 +1085,17 @@ def preview_base_batch(
     if not item:
         frappe.throw(_("Item {0} not found").format(item_code))
 
+    # "Given" is not-None and not blank: a client that leaves the field empty
+    # sends ``""`` over HTTP and means "size this in batches", while a client
+    # that sends a 0 is asking for a run of nothing and gets told so.
+    requested_qty: Optional[float] = None
+    if qty is not None and str(qty).strip() != "":
+        requested_qty = bases.to_float(qty, 0.0)
+        if requested_qty <= 0:
+            frappe.throw(_("Quantity to produce must be greater than zero"))
+
     batch_count = bases.to_float(batches, 0.0)
-    if batch_count <= 0:
+    if requested_qty is None and batch_count <= 0:
         frappe.throw(_("Batches must be greater than zero"))
 
     bom_name = _coerce_str(bom_name)
@@ -910,7 +1122,15 @@ def preview_base_batch(
         frappe.throw(_("BOM {0} has no yield quantity to produce against").format(bom_name))
 
     company = _coerce_str(company) or _coerce_str(bom.get("company")) or _resolve_company(None)
-    item_qty = batch_count * batch_yield
+
+    if requested_qty is not None:
+        item_qty = requested_qty
+        # Reported back through the module's own conversion rather than a bare
+        # division, so the batch figure on a quantity-sized run reads exactly like
+        # the one on every other screen.
+        batch_count = bases.batches_from_qty(qty=item_qty, batch_yield=batch_yield)
+    else:
+        item_qty = batch_count * batch_yield
 
     rows = _resolve_required_material_rows(
         bom_name, company, item_qty, material_selections=material_selections

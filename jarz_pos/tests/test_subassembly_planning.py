@@ -185,6 +185,207 @@ class TestMatchesRunSize(unittest.TestCase):
         self.assertFalse(self._call("abc", [1.5]))
 
 
+class TestPickBatchUnit(unittest.TestCase):
+    """Which component the floor counts a batch by — or none at all."""
+
+    def _call(self, rows):
+        from jarz_pos.services.subassembly_planning import pick_batch_unit
+
+        return pick_batch_unit(rows)
+
+    def _row(self, item_code, qty, uom, item_name=None):
+        return {
+            "item_code": item_code,
+            "item_name": item_name or item_code,
+            "qty": qty,
+            "uom": uom,
+        }
+
+    def test_eggs_beat_the_kilo_components(self):
+        # Fudge Cake: the BOM yields 9.258 Kg, the floor says "30 eggs".
+        unit = self._call(
+            [
+                self._row("Flour", 2.5, "Kg"),
+                self._row("Sugar", 1.8, "Kg"),
+                self._row("Eggs", 30, "piece", item_name="Fresh Eggs"),
+            ]
+        )
+        self.assertEqual("Eggs", unit["item_code"])
+        self.assertEqual("Fresh Eggs", unit["item_name"])
+        self.assertEqual("piece", unit["uom"])
+        self.assertEqual(30.0, unit["qty_per_batch"])
+
+    def test_a_mix_has_no_batch_unit_and_returns_none(self):
+        # Blueberry mix is 1 Kg fruit + 1 Kg jelly and is made by the kilo.
+        # None must survive to the client as null; an empty dict would render as
+        # a batch unit with no name.
+        self.assertIsNone(
+            self._call([self._row("Blueberry", 1.0, "Kg"), self._row("Jelly", 1.0, "Kg")])
+        )
+        self.assertIsNone(self._call([]))
+        self.assertIsNone(self._call(None))
+
+    def test_volume_units_are_divisible_too(self):
+        self.assertIsNone(
+            self._call([self._row("Cream", 2.0, "Litre"), self._row("Water", 500, "Millilitre")])
+        )
+
+    def test_uom_matching_ignores_case_and_padding(self):
+        self.assertIsNone(self._call([self._row("Flour", 2.5, "  KG ")]))
+
+    def test_an_undeclared_unit_reads_as_countable(self):
+        # The blacklist is divisible units on purpose: guessing "divisible" for a
+        # packaging unit nobody declared is what offers 0.37 of an egg.
+        unit = self._call([self._row("Cake Sheet", 4, "Tray")])
+        self.assertEqual("Cake Sheet", unit["item_code"])
+        self.assertEqual(4.0, unit["qty_per_batch"])
+
+    def test_largest_countable_qty_wins(self):
+        unit = self._call(
+            [
+                self._row("Vanilla Pod", 2, "piece"),
+                self._row("Eggs", 30, "piece"),
+                self._row("Flour", 900, "Kg"),
+            ]
+        )
+        self.assertEqual("Eggs", unit["item_code"])
+
+    def test_a_tie_resolves_by_item_code_so_two_requests_agree(self):
+        rows = [self._row("Zaatar", 12, "piece"), self._row("Almond", 12, "piece")]
+        self.assertEqual("Almond", self._call(rows)["item_code"])
+        self.assertEqual("Almond", self._call(list(reversed(rows)))["item_code"])
+
+    def test_a_non_positive_qty_never_qualifies(self):
+        self.assertIsNone(self._call([self._row("Eggs", 0, "piece")]))
+        self.assertIsNone(self._call([self._row("Eggs", -30, "piece")]))
+        self.assertIsNone(self._call([self._row("Eggs", None, "piece")]))
+        unit = self._call([self._row("Eggs", 0, "piece"), self._row("Vanilla Pod", 2, "piece")])
+        self.assertEqual("Vanilla Pod", unit["item_code"])
+
+    def test_a_blank_item_code_or_uom_never_qualifies(self):
+        # A blank unit is unknown, not countable.
+        self.assertIsNone(self._call([self._row("", 30, "piece")]))
+        self.assertIsNone(self._call([self._row("Eggs", 30, "")]))
+        self.assertIsNone(self._call([self._row("Eggs", 30, None)]))
+
+    def test_item_name_falls_back_to_the_code(self):
+        unit = self._call([{"item_code": "Eggs", "qty": 30, "uom": "piece"}])
+        self.assertEqual("Eggs", unit["item_name"])
+
+    def test_the_unit_carries_exactly_the_documented_keys(self):
+        self.assertEqual(
+            {"item_code", "item_name", "uom", "qty_per_batch"},
+            set(self._call([self._row("Eggs", 30, "piece")]).keys()),
+        )
+
+
+class TestQtyForJarCounts(unittest.TestCase):
+    """Jar counts in, Kg of base out — the by-the-kilo screen's arithmetic."""
+
+    CONSUMERS = (
+        {"item_code": "Blueberry Medium", "qty_per_jar": 0.030},
+        {"item_code": "Blueberry Large", "qty_per_jar": 0.040},
+    )
+
+    def _call(self, counts, consumers=None):
+        from jarz_pos.services.subassembly_planning import qty_for_jar_counts
+
+        return qty_for_jar_counts(counts, self.CONSUMERS if consumers is None else consumers)
+
+    def test_one_jar_size(self):
+        self.assertEqual(0.36, self._call({"Blueberry Medium": 12}))
+
+    def test_two_jar_sizes_accumulate(self):
+        self.assertEqual(0.56, self._call({"Blueberry Medium": 12, "Blueberry Large": 5}))
+
+    def test_a_count_for_an_item_nobody_consumes_is_ignored_not_guessed(self):
+        # The only honest answer for a jar whose BOM does not list this base is
+        # that it needs none of it.
+        self.assertEqual(0.36, self._call({"Blueberry Medium": 12, "Mango Large": 40}))
+
+    def test_a_negative_count_never_subtracts_another_jars_demand(self):
+        self.assertEqual(
+            self._call({"Blueberry Medium": 12}),
+            self._call({"Blueberry Medium": 12, "Blueberry Large": -500}),
+        )
+
+    def test_a_zero_or_blank_count_contributes_nothing(self):
+        self.assertEqual(0.0, self._call({"Blueberry Medium": 0}))
+        self.assertEqual(0.0, self._call({"Blueberry Medium": None}))
+        self.assertEqual(0.0, self._call({"Blueberry Medium": ""}))
+
+    def test_counts_arriving_as_strings_over_http_still_count(self):
+        self.assertEqual(0.36, self._call({"Blueberry Medium": "12"}))
+
+    def test_a_consumer_with_no_rate_contributes_nothing(self):
+        self.assertEqual(
+            0.0,
+            self._call(
+                {"Blueberry Medium": 12},
+                consumers=[{"item_code": "Blueberry Medium", "qty_per_jar": 0}],
+            ),
+        )
+
+    def test_nothing_typed_is_zero(self):
+        self.assertEqual(0.0, self._call({}))
+        self.assertEqual(0.0, self._call(None))
+        self.assertEqual(0.0, self._call({"Blueberry Medium": 12}, consumers=[]))
+
+    def test_float_noise_does_not_leak_into_the_quantity(self):
+        # 3 x 0.030 lands on 0.09000000000000001 in float.
+        self.assertEqual(0.09, self._call({"Blueberry Medium": 3}))
+
+
+class TestJarsFromQty(unittest.TestCase):
+    def _call(self, qty, qty_per_jar=0.030):
+        from jarz_pos.services.subassembly_planning import jars_from_qty
+
+        return jars_from_qty(qty, qty_per_jar)
+
+    def test_whole_jars(self):
+        self.assertEqual(12, self._call(0.36))
+
+    def test_a_part_jar_is_not_a_jar(self):
+        # Rounding up would tell the floor it has stock for an order it cannot
+        # fill.
+        self.assertEqual(19, self._call(0.58))
+        self.assertEqual(0, self._call(0.02))
+
+    def test_float_error_never_loses_a_jar(self):
+        # 0.3 / 0.1 lands on 2.9999999999999996 and 0.7 / 0.1 on
+        # 6.999999999999999; a bare floor reports 2 and 6.
+        self.assertEqual(3, self._call(0.3, qty_per_jar=0.1))
+        self.assertEqual(7, self._call(0.7, qty_per_jar=0.1))
+        self.assertEqual(2, self._call(0.06))
+        self.assertEqual(3, self._call(0.09))
+
+    def test_the_relative_epsilon_does_not_invent_a_jar(self):
+        self.assertEqual(19, self._call(0.5999))
+        self.assertEqual(2, self._call(0.29999, qty_per_jar=0.1))
+
+    def test_a_missing_rate_is_not_a_division_error(self):
+        self.assertEqual(0, self._call(0.36, qty_per_jar=0))
+        self.assertEqual(0, self._call(0.36, qty_per_jar=None))
+        self.assertEqual(0, self._call(0.36, qty_per_jar=-0.03))
+        self.assertEqual(0, self._call(0.36, qty_per_jar="abc"))
+
+    def test_negative_or_junk_stock_fills_no_jars(self):
+        self.assertEqual(0, self._call(-5.0))
+        self.assertEqual(0, self._call(None))
+        self.assertEqual(0, self._call("abc"))
+
+    def test_the_result_is_a_whole_int_not_a_float(self):
+        self.assertIsInstance(self._call(0.36), int)
+
+    def test_it_round_trips_with_qty_for_jar_counts(self):
+        from jarz_pos.services.subassembly_planning import qty_for_jar_counts
+
+        qty = qty_for_jar_counts(
+            {"Blueberry Medium": 12}, [{"item_code": "Blueberry Medium", "qty_per_jar": 0.030}]
+        )
+        self.assertEqual(12, self._call(qty))
+
+
 class TestDeriveBaseDemand(unittest.TestCase):
     BASES = ("Sponge Cake", "Fudge Cake", "Cheesecake Mix")
 

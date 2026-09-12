@@ -206,6 +206,199 @@ def matches_run_size(batches: Any, run_sizes: Optional[Sequence[float]]) -> bool
     return any(abs(value - to_float(size, 0.0)) <= RUN_SIZE_TOLERANCE for size in run_sizes)
 
 
+# ── Entry unit: is this base made in batches at all? ────────────────────
+#
+# Everything above assumes a base is made in whole mixer/oven batches with a
+# half-batch stepper.  That is true of half the catalogue and false of the other
+# half.  Fudge Cake, Red Velvet, Savoiardi, Sponge Cake and Butter Biscuit are
+# all counted on the floor by their eggs — "30 eggs" is one batch, "45 eggs" is
+# one and a half — while Blueberry mix, Mango mix and Chocolate ganache have no
+# countable component at all and are simply made by the kilo, in whatever
+# quantity the jars need.  Offering a batch stepper for the second group asks the
+# floor to convert Kg to batches in their head, which is the arithmetic this
+# whole feature exists to do for them.
+#
+# The two are told apart by the UOM of the components, not by a hand-kept list of
+# item codes: a list would be one more thing to update the day somebody adds a
+# base, and the day it is forgotten the screen lies.
+
+# UOM names, lower-cased, that measure something **divisible**: mass and volume.
+# Deliberately a blacklist of divisible units rather than a whitelist of
+# countable ones.  A packaging unit nobody here has declared — "Tray", "Sheet",
+# "Box" — therefore reads as countable, which is the safe direction to be wrong
+# in: guessing "divisible" is what lets a screen offer 0.37 of an egg.
+CONTINUOUS_UOMS: frozenset[str] = frozenset(
+    {
+        "kg",
+        "kilogram",
+        "gram",
+        "g",
+        "milligram",
+        "microgram",
+        "tonne",
+        "quintal",
+        "pound",
+        "ounce",
+        "carat",
+        "stone",
+        "litre",
+        "liter",
+        "millilitre",
+        "milliliter",
+        "ml",
+        "centilitre",
+        "decilitre",
+        "cubic meter",
+        "cubic centimeter",
+        "cup",
+        "teaspoon",
+        "tablespoon (us)",
+        "fluid ounce (uk)",
+        "fluid ounce (us)",
+        "gallon (uk)",
+        "gallon liquid (us)",
+        "pint (uk)",
+        "pint, liquid (us)",
+        "quart (uk)",
+        "quart liquid (us)",
+    }
+)
+
+
+def pick_batch_unit(component_rows: Iterable[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The component the floor counts one batch of this base by, if any.
+
+    ``component_rows`` are **one batch's** worth of BOM lines —
+    ``{"item_code", "item_name", "qty", "uom"}`` — so ``qty`` is already the
+    quantity per batch and needs no scaling.
+
+    The winner is the component whose UOM is not in ``CONTINUOUS_UOMS``: eggs in
+    ``piece`` beat flour in ``Kg``, because "30 eggs" is what the floor says and
+    "9.258 Kg of Fudge Cake" is what ERPNext says.  Largest ``qty`` wins when
+    several components are countable — 30 eggs is a better handle on the batch
+    than the 2 vanilla pods beside them — and ``item_code`` breaks the tie so two
+    equal components cannot return a different answer on two requests.
+
+    A row with ``qty <= 0`` or a blank ``item_code``/``uom`` never qualifies:
+    a zero-quantity line describes no batch, and a blank unit is unknown, not
+    countable.
+
+    ``None`` is the answer for Blueberry mix and Chocolate ganache — every
+    component is divisible, so **this base has no batch, it is made by the
+    kilo**.  That is a real answer and must reach the client as ``null``; an
+    empty dict would render as a batch unit with no name.
+    """
+    candidates: List[Dict[str, Any]] = []
+
+    for row in component_rows or []:
+        row = row or {}
+        item_code = str(row.get("item_code") or "").strip()
+        if not item_code:
+            continue
+
+        uom = str(row.get("uom") or "").strip()
+        if not uom or uom.lower() in CONTINUOUS_UOMS:
+            continue
+
+        qty = to_float(row.get("qty"), 0.0)
+        if qty <= 0:
+            continue
+
+        candidates.append(
+            {
+                "item_code": item_code,
+                "item_name": str(row.get("item_name") or "").strip() or item_code,
+                "uom": uom,
+                "qty_per_batch": qty,
+            }
+        )
+
+    if not candidates:
+        return None
+
+    return min(candidates, key=lambda c: (-c["qty_per_batch"], c["item_code"]))
+
+
+def qty_for_jar_counts(
+    counts: Mapping[str, Any],
+    consumers: Iterable[Mapping[str, Any]],
+) -> float:
+    """Quantity of a base needed to fill a set of jar counts.
+
+    ``counts`` is ``{jar_item_code: number}`` as typed on the screen and
+    ``consumers`` is ``[{"item_code", "qty_per_jar"}]`` as published by
+    ``get_base_items`` — so 12 Blueberry Medium at 0.030 Kg plus 5 Blueberry
+    Large at 0.040 Kg is 0.56 Kg of mix.
+
+    Counted over the **consumers**, never over the counts: a count typed against
+    an item no consumer lists is ignored rather than multiplied by a guessed
+    rate, because the only honest answer for a jar whose BOM does not mention
+    this base is that it needs none of it.
+
+    A negative count contributes nothing — the same rule ``derive_base_demand``
+    applies to a negative target, and for the same reason: a typo must never
+    subtract the demand another jar genuinely created.
+    """
+    if not counts or not consumers:
+        return 0.0
+
+    # Anything that is not a mapping carries no counts at all, and raising here
+    # would fail a whole screen over one malformed field.
+    pairs = getattr(counts, "items", None)
+    if not callable(pairs):
+        return 0.0
+
+    typed = {str(code).strip(): value for code, value in pairs() if str(code).strip()}
+
+    total = 0.0
+    for consumer in consumers or []:
+        consumer = consumer or {}
+        item_code = str(consumer.get("item_code") or "").strip()
+        if not item_code or item_code not in typed:
+            continue
+
+        count = countable(typed.get(item_code))
+        if count <= 0:
+            continue
+
+        per_jar = countable(consumer.get("qty_per_jar"))
+        if per_jar <= 0:
+            continue
+
+        total += count * per_jar
+
+    return round(total, QTY_PRECISION)
+
+
+def jars_from_qty(qty: Any, qty_per_jar: Any) -> int:
+    """Whole jars a quantity of a base fills.
+
+    The reverse of :func:`qty_for_jar_counts` for one consumer, so the screen can
+    answer "0.58 Kg of Blueberry mix is 19 Medium jars" while somebody types.
+    Floored: a part jar is not a jar, and rounding up would tell the floor it has
+    stock for an order it cannot fill.
+
+    ``0`` when the rate is missing or zero, for the same reason
+    ``batches_from_qty`` returns ``0.0``: it cannot be divided by and inventing a
+    rate of 1 would report a Kg figure as a jar count.
+
+    The epsilon is relative, unlike the absolute one in
+    ``cover_suggested_batches``, because the error here scales with the answer:
+    ``0.3 / 0.1`` lands on ``2.9999999999999996`` and must be 3 jars, while
+    ``0.58 / 0.03`` lands on ``19.333`` and must stay 19.  A bare ``floor`` would
+    lose the first jar and a nudge sized in absolute terms would eventually
+    invent one at the far end of the scale.
+    """
+    per_jar = to_float(qty_per_jar, 0.0)
+    if per_jar <= 0:
+        return 0
+
+    raw = countable(qty) / per_jar
+    if raw <= 0:
+        return 0
+    return max(0, int(math.floor(raw * (1 + 1e-9))))
+
+
 # ── Demand derivation ───────────────────────────────────────────────────
 
 

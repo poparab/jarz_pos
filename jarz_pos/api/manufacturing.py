@@ -2676,6 +2676,36 @@ def start_production_batch(
     if selections:
         line["material_selections"] = selections
 
+    return _start_production_batch_impl(line, scheduled_at)
+
+
+def _start_production_batch_impl(
+    line: Dict[str, Any],
+    scheduled_at: str | None = None,
+) -> Dict[str, Any]:
+    """Open one batch, with no access gate of its own.
+
+    Shared verbatim by :func:`start_production_batch` (one line, its own
+    coercion) and :func:`start_production_batches` (a basket, coerced by
+    ``_coerce_lines``) — the same arrangement ``_submit_work_orders_impl`` has
+    with the two produce routes, and for the same reason: two copies of "create
+    the Work Order and post the transfer" is two places for the SOP stamp or the
+    value cap to go missing from.  Every caller MUST run its own gate first, so
+    this is never whitelisted.
+
+    ``line`` is already coerced: ``item_code``, ``bom_name``, ``item_qty``, and
+    optionally ``material_selections``, ``wip_warehouse``, ``fg_warehouse``.
+    """
+    item_code = _coerce_str(line.get("item_code"))
+    bom_name = _coerce_str(line.get("bom_name"))
+    qty = _flt(line.get("item_qty"))
+    # Re-asserted rather than assumed: ``_coerce_lines`` rejects a missing or zero
+    # ``item_qty`` but passes a negative one straight through, and a negative
+    # transfer moves material *out* of WIP for a batch that never started.
+    if qty <= 0:
+        frappe.throw(_("Quantity to produce must be greater than zero"))
+    selections = line.get("material_selections")
+
     company = _get_bom_company(bom_name) or _get_default_company()
     if not company:
         frappe.throw(_("Company is not configured on BOM and no Default Company set"))
@@ -2754,6 +2784,92 @@ def start_production_batch(
             for c in (priced.get("components") or [])
         ],
     }
+
+
+@frappe.whitelist()
+def start_production_batches(lines: Any, strict_basket: Any = 1) -> Dict[str, Any]:
+    """Open several batches in one call — "make these three mixes".
+
+    Posts **only** the ``Material Transfer for Manufacture`` per line, exactly as
+    :func:`start_production_batch` does.  The ``Manufacture`` entry stays with
+    :func:`finish_production_batch`, because that is the only call that knows what
+    actually came out of the mixer; a basket route that booked finished goods up
+    front would be the quick-produce path wearing a different name.
+
+    This exists rather than letting the client loop over
+    :func:`start_production_batch` N times, because that loop skips the one check
+    that cannot be made per line.  ``_assert_material_availability`` measures
+    every line against the same available stock, so three mixes can each pass on
+    their own and still bust the store between them — and since each start
+    commits, discovering it on the third leaves the first two transfers real, the
+    material out of the store, and an operator reading "2 of 3".
+    ``_get_basket_shortages`` answers for the whole basket **before** anything
+    moves, which is the same reason ``_submit_work_orders_impl`` runs it.
+
+    Args:
+      lines: JSON/list of objects with keys: item_code, bom_name, item_qty,
+        scheduled_at (optional ISO), material_selections / wip_warehouse /
+        fg_warehouse (optional).
+      strict_basket: when true (default), refuse the whole basket up front if the
+        lines are collectively short, even where each passes on its own.
+
+    Per-line results mirror :func:`submit_work_orders` field for field —
+    ``ok``/``error``/``line`` — so one client parser reads both routes.
+    """
+    _ensure_production_execute_access()
+
+    lines = _coerce_lines(lines)
+
+    if _coerce_flag(strict_basket, default=True):
+        basket_company = _get_default_company()
+        for ln in lines:
+            company_for_line = _get_bom_company(ln.get("bom_name"))
+            if company_for_line:
+                basket_company = company_for_line
+                break
+
+        basket_shortages = _get_basket_shortages(lines, basket_company)
+        if basket_shortages:
+            message = _format_basket_shortage_message(basket_shortages)
+            return {
+                "results": [{"ok": False, "error": message, "line": ln} for ln in lines],
+                "basket_shortages": basket_shortages,
+            }
+
+    results: List[Dict[str, Any]] = []
+    release_savepoint = getattr(frappe.db, "release_savepoint", None)
+    for index, ln in enumerate(lines):
+        save_point = _build_submit_savepoint_name(index, ln)
+        frappe.db.savepoint(save_point)
+        try:
+            payload = _start_production_batch_impl(ln, ln.get("scheduled_at"))
+            # The single-line response reports the Work Order's own status under
+            # ``status``; on this route ``status`` is the per-line outcome, the way
+            # ``_submit_work_orders_impl`` reports it, so the WO's status moves to
+            # ``wo_status`` rather than being dropped.
+            result = dict(payload)
+            result["wo_status"] = payload.get("status")
+            result.update({"ok": True, "status": "success", "line": ln})
+            results.append(result)
+            if callable(release_savepoint):
+                release_savepoint(save_point)
+            frappe.db.commit()
+        except Exception as e:
+            try:
+                frappe.db.rollback(save_point=save_point)
+            except Exception:
+                frappe.db.rollback()
+            try:
+                frappe.log_error(
+                    title="JARZ – Batch start failed",
+                    message=f"Line: {ln}\nError: {e}",
+                )
+            except Exception:
+                # Swallow logging issues to not mask original error in response
+                pass
+            results.append({"ok": False, "error": str(e), "line": ln})
+
+    return {"results": results}
 
 
 @frappe.whitelist()
