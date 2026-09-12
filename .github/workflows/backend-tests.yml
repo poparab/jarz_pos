@@ -386,6 +386,15 @@ jobs:
             # thing in this app that can stop a real person from clocking in --
             # each of its allow-paths is pinned individually.
             test_roster
+            # Attendance reporting. Three reasons this must be in CI: the whole
+            # feature is derived on read from raw check-ins, so a wrong rule
+            # never errors -- it reports a person who was at work as absent; the
+            # day-grouping has to attach a 00:49 check-out to the shift that
+            # started at 16:00 the day before, which a wall-clock grouping splits
+            # in half; and the roster horizon ends 2026-11-19, so the "past the
+            # horizon is not_rostered, NOT absent" case is the difference between
+            # an ungenerated rota and a screen reporting a company-wide walkout.
+            test_attendance
             # Module history (Stock Transfer, Cash Transfer, Inventory Count,
             # Shift). Two reasons this must be in CI: the cash transfer history
             # has no marker to filter on and recognises a transfer purely by

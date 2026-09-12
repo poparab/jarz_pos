@@ -127,6 +127,14 @@ SEED_DEFAULTS: Dict[str, Any] = {
     # the owner's rule, kept as settings so payroll can move it without a deploy.
     "roster_courier_overtime_multiplier": 2.0,
     "roster_default_overtime_multiplier": 1.0,
+    # Attendance reporting. Seeded for the same reason roster_enforce_checkin is:
+    # the declared doctype default of 15 never lands on an already-populated
+    # Single, so Desk would show an empty box for a grace period that is very
+    # much in effect. `services.attendance.grace_minutes` reads it through
+    # `single_int`, which applies the same 15 when nobody has written the field —
+    # seeding makes the form agree with the behaviour rather than inviting an
+    # operator to "fix" a blank by typing 0 and grading everyone late.
+    "attendance_late_grace_minutes": 15,
 }
 
 
