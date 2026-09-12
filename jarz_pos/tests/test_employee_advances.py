@@ -202,6 +202,7 @@ class TestRequestGate(unittest.TestCase):
                     },
                 ), \
                 patch(f"{MODULE}._validate_paying_account", return_value={"name": "Dokki - J"}), \
+                patch(f"{MODULE}._resolve_advance_account", return_value="Employee Advances - J"), \
                 patch(f"{MODULE}._serialize_one", return_value={"name": "HR-EAD-2026-00001"}):
             result = create_employee_advance_request(
                 employee="HR-EMP-00001",
@@ -217,6 +218,12 @@ class TestRequestGate(unittest.TestCase):
         self.assertEqual(captured["advance_amount"], 1500.0)
         self.assertEqual(captured["currency"], "EGP")
         self.assertEqual(captured["company"], "Jarz")
+        # The draft carries the ledger from the start. It is NOT left empty for
+        # a later fallback to fill: the DocType would fetch
+        # Employee.employee_advance_account into it at insert, and every
+        # downstream ``if not advance_account`` guard would then be a no-op.
+        # See TestAdvanceAccountResolution.
+        self.assertEqual(captured["advance_account"], "Employee Advances - J")
         # status is read-only and derived by EmployeeAdvance.set_status(); writing
         # it by hand produces a row whose status disagrees with its own amounts.
         self.assertNotIn("status", captured)
@@ -823,6 +830,209 @@ class TestAdvanceAccountTyping(unittest.TestCase):
         with patch(f"{self.SETUP_MODULE}.frappe", mock):
             els._type_unused_advance_account("JARZ", log)  # must not raise
         mock.db.set_value.assert_not_called()
+
+
+class TestAdvanceAccountResolution(unittest.TestCase):
+    """``_resolve_advance_account`` — the production misrouting of 2026-09-12.
+
+    Three submitted advances on production (6,000 EGP) were booked to
+    ``Debtors - J``, the company's CUSTOMER receivable, while
+    ``Employee Advances - J`` sat empty and the company default pointed at it
+    correctly the whole time.
+
+    Nothing in the resolve chain was wrong; the chain was simply never entered.
+    ``Employee Advance.advance_account`` is declared
+    ``fetch_from: employee.employee_advance_account`` with ``fetch_if_empty``,
+    and 15 of 24 production Employee records carry ``Debtors - J`` in that
+    field, typed into the Desk in June. Frappe fetches it at insert, so the
+    field is already populated by the time HRMS's ``before_submit`` and this
+    module's own approval-time resolve look at it — and both were spelled
+    ``if not advance_account``. HRMS then copies the value onto the Payment
+    Entry's ``paid_to``.
+
+    So the cases below are about CORRECTING a populated value, not filling an
+    empty one. The empty case never occurs on the site that broke.
+    """
+
+    COMPANY = "JARZ"
+    AR = "Debtors - J"
+    ADVANCES = "Employee Advances - J"
+
+    def _mock(self, accounts, company_default=None, named_fallback=""):
+        """A ``frappe`` double whose Account/Company lookups answer from dicts."""
+        if company_default is None:
+            company_default = self.ADVANCES
+        mock = _mock_frappe(set())
+
+        def get_value(doctype, filters, fieldname=None, **kwargs):
+            if doctype == "Company":
+                if fieldname == "default_employee_advance_account":
+                    return company_default
+                if fieldname == "default_receivable_account":
+                    return self.AR
+                return None
+            if doctype == "Account":
+                if isinstance(filters, dict):
+                    # the account_name == "Employee Advances" fallback lookup
+                    return named_fallback
+                return accounts.get(filters)
+            return None
+
+        mock.db.get_value.side_effect = get_value
+        mock.db.has_column.return_value = True
+        return mock
+
+    def _accounts(self, **over):
+        """Both real production accounts, in their real shapes."""
+        rows = {
+            self.ADVANCES: {
+                "company": self.COMPANY, "is_group": 0,
+                "root_type": "Asset", "account_type": "Receivable",
+            },
+            self.AR: {
+                "company": self.COMPANY, "is_group": 0,
+                "root_type": "Asset", "account_type": "Receivable",
+            },
+        }
+        rows.update(over)
+        return rows
+
+    def _resolve(self, current, accounts=None, **kw):
+        from jarz_pos.api import employee_advances as mod
+
+        mock = self._mock(accounts or self._accounts(), **kw)
+        with patch(MODULE + ".frappe", mock):
+            return mod._resolve_advance_account(self.COMPANY, current)
+
+    # -- the actual defect ---------------------------------------------------
+
+    def test_customer_ar_is_overridden_by_the_company_default(self):
+        """The one that matters. Debtors passes every structural check —
+        leaf, Asset, Receivable, right company — and is still wrong."""
+        self.assertEqual(self._resolve(self.AR), self.ADVANCES)
+
+    def test_a_genuine_advance_ledger_is_kept(self):
+        """A per-employee override is a real HRMS feature and is not clobbered."""
+        self.assertEqual(self._resolve(self.ADVANCES), self.ADVANCES)
+
+    def test_an_empty_value_still_falls_back(self):
+        self.assertEqual(self._resolve(""), self.ADVANCES)
+
+    # -- structural rejections, each of which HRMS would throw on later ------
+
+    def test_a_payable_account_is_rejected(self):
+        accounts = self._accounts()
+        accounts["Creditors - J"] = {
+            "company": self.COMPANY, "is_group": 0,
+            "root_type": "Liability", "account_type": "Payable",
+        }
+        self.assertEqual(
+            self._resolve("Creditors - J", accounts=accounts), self.ADVANCES
+        )
+
+    def test_a_group_account_is_rejected(self):
+        accounts = self._accounts()
+        accounts["Loans and Advances (Assets) - J"] = {
+            "company": self.COMPANY, "is_group": 1,
+            "root_type": "Asset", "account_type": "Receivable",
+        }
+        self.assertEqual(
+            self._resolve("Loans and Advances (Assets) - J", accounts=accounts),
+            self.ADVANCES,
+        )
+
+    def test_an_untyped_account_is_rejected(self):
+        """The 2026-08-29 staging shape: right node, empty ``account_type``.
+        HRMS's validate_advance_account_type throws on it, so accepting it here
+        only moves the failure to the moment cash is handed over."""
+        accounts = self._accounts()
+        accounts["Employee Advances - J"]["account_type"] = ""
+        with self.assertRaises(ValueError):
+            self._resolve(self.ADVANCES, accounts=accounts)
+
+    def test_an_account_of_another_company_is_rejected(self):
+        accounts = self._accounts()
+        accounts["Employee Advances - X"] = {
+            "company": "OTHER", "is_group": 0,
+            "root_type": "Asset", "account_type": "Receivable",
+        }
+        self.assertEqual(
+            self._resolve("Employee Advances - X", accounts=accounts), self.ADVANCES
+        )
+
+    def test_an_unknown_account_is_rejected(self):
+        self.assertEqual(self._resolve("Ghost - J"), self.ADVANCES)
+
+    # -- the company default gets the same treatment ------------------------
+
+    def test_a_company_default_pointing_at_customer_ar_is_refused(self):
+        """Otherwise the guard is defeated one level up, by the same mistake."""
+        with self.assertRaises(ValueError) as ctx:
+            self._resolve(self.AR, company_default=self.AR)
+        self.assertIn("Employee Advances", str(ctx.exception))
+
+    def test_no_configuration_at_all_throws(self):
+        with self.assertRaises(ValueError):
+            self._resolve("", company_default="", named_fallback="")
+
+
+class TestRequestStampsTheAdvanceAccount(unittest.TestCase):
+    """The draft must carry the resolved ledger BEFORE it is inserted.
+
+    Leaving the field empty and trusting a later fallback is what failed: the
+    DocType's ``fetch_if_empty`` fetch fires at insert and fills it from the
+    Employee, so by the time any ``if not advance_account`` guard runs there is
+    nothing left to fill. Writing it onto the document pre-empts the fetch.
+    """
+
+    def _request(self, employee_override):
+        from jarz_pos.api import employee_advances as mod
+
+        mock = _mock_frappe(ROLES.LINE_MANAGER_TIER)
+        mock.db.get_value.return_value = employee_override
+        mock.db.exists.return_value = True
+        captured = {}
+
+        def get_doc(payload):
+            captured["payload"] = payload
+            return _FakeAdvanceDoc(**payload)
+
+        mock.get_doc.side_effect = get_doc
+
+        patches = [
+            patch(MODULE + ".frappe", mock),
+            patch(MODULE + ".flt", _flt),
+            patch(MODULE + "._ensure_hrms", lambda: None),
+            patch(MODULE + "._advance_has_field", lambda f: True),
+            patch(MODULE + "._validate_employee",
+                  lambda e: {"company": "JARZ", "salary_currency": "EGP"}),
+            patch(MODULE + "._validate_paying_account", lambda c, a: {}),
+            patch(MODULE + "._resolve_advance_account",
+                  lambda company, current="": "RESOLVED(" + (current or "") + ")"),
+            patch(MODULE + "._serialize_one", lambda d: {}),
+            patch(MODULE + ".today", lambda: "2026-09-12"),
+            patch(MODULE + ".getdate", lambda v: v),
+            patch(MODULE + ".split_posting_datetime", lambda v: ("2026-09-12", None)),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            mod.create_employee_advance_request(
+                employee="HR-EMP-000002", amount=500, purpose="Advance",
+                paying_account="Nasr city - J",
+            )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        return captured["payload"]
+
+    def test_the_draft_carries_a_resolved_account_not_an_empty_field(self):
+        payload = self._request("Debtors - J")
+        self.assertEqual(payload["advance_account"], "RESOLVED(Debtors - J)")
+
+    def test_an_employee_with_no_override_still_gets_an_account(self):
+        payload = self._request("")
+        self.assertEqual(payload["advance_account"], "RESOLVED()")
 
 
 if __name__ == "__main__":

@@ -766,20 +766,98 @@ def _validate_paying_account(company: str, account: str) -> Dict[str, Any]:
     return row
 
 
-def _resolve_advance_account(company: str) -> str:
+def _advance_account_is_sane(company: str, account: str) -> bool:
+    """Is ``account`` a ledger an employee advance may legitimately be booked to?
+
+    HRMS lets a site override the advance ledger per person, via
+    ``Employee.employee_advance_account``, and that override is a legitimate
+    feature — a company with one advance ledger per branch needs it. What it
+    must never be allowed to name is the company's CUSTOMER receivable account.
+
+    That is not a hypothetical. On production 15 of 24 Employee records carry
+    ``employee_advance_account = "Debtors - J"`` — the company's
+    ``default_receivable_account`` — set by hand in the Desk on 2026-06-24,
+    months before this module existed. Because
+    ``Employee Advance.advance_account`` is declared
+    ``fetch_from: employee.employee_advance_account`` with ``fetch_if_empty``,
+    Frappe fills that value in at insert, so every downstream fallback that
+    reads ``if not advance_account`` — HRMS's ``before_submit``, and this
+    module's own resolve on approval — sees a field that is already populated
+    and leaves it alone. HRMS then copies it onto the Payment Entry's
+    ``paid_to`` (``hrms/overrides/employee_payment_entry.py::get_party_account``),
+    and the payout debits customer AR. Six thousand EGP of staff advances sat
+    inside Debtors before anyone looked.
+
+    So the rule enforced here is narrow and absolute: an advance ledger must be
+    a leaf Receivable asset account of this company, and it must not be the
+    account ERPNext reserves for customer receivables. Anything else is
+    overridden by the company default rather than trusted.
+    """
+    account = str(account or "").strip()
+    if not account:
+        return False
+
+    try:
+        row = frappe.db.get_value(
+            "Account",
+            account,
+            ["company", "is_group", "root_type", "account_type"],
+            as_dict=True,
+        )
+    except Exception:
+        return False
+    if not row:
+        return False
+
+    if str(row.get("company") or "") != company:
+        return False
+    if int(row.get("is_group") or 0):
+        return False
+    if str(row.get("root_type") or "") != "Asset":
+        return False
+    if str(row.get("account_type") or "") != "Receivable":
+        # HRMS's own validate_advance_account_type throws on this, so letting it
+        # through here only moves the failure later.
+        return False
+
+    # The one that actually bit. Customer AR is never an employee advance ledger,
+    # however deliberately somebody typed it onto the Employee record.
+    try:
+        customer_ar = str(
+            frappe.db.get_value("Company", company, "default_receivable_account") or ""
+        ).strip()
+    except Exception:
+        customer_ar = ""
+    if customer_ar and account == customer_ar:
+        return False
+
+    return True
+
+
+def _resolve_advance_account(company: str, current: str = "") -> str:
     """The Receivable ledger the advance is booked against.
+
+    ``current`` is whatever is already on the document — typically the value
+    Frappe fetched from ``Employee.employee_advance_account``. It is KEPT only
+    if it passes ``_advance_account_is_sane``; otherwise the company default
+    wins. Taking a value and correcting it, rather than only filling an empty
+    one, is the whole fix: the field is never empty on this site, so an
+    ``if not advance_account`` guard is dead code here.
 
     ``EmployeeAdvance.before_submit`` already falls back to
     ``Company.default_employee_advance_account`` and throws a good message when
-    it is empty — but only that field. Resolving here as well means a site that
-    has an ``Employee Advances`` ledger but never set the Company default still
-    works, instead of failing at the moment of approval.
+    it is empty — but only that field, and only when it is empty. Resolving here
+    as well means a site that has an ``Employee Advances`` ledger but never set
+    the Company default still works, instead of failing at the moment of
+    approval.
 
-    Nothing is written back to Company: pointing the company default at an
-    account is ``setup/employee_link_setup.py``'s job, at migrate time, where an
-    operator reads the summary. An API call is not the place to reconfigure the
-    chart of accounts.
+    Nothing is written back to Company or to Employee: pointing a default at an
+    account is ``setup/``'s job, at migrate time, where an operator reads the
+    summary. An API call is not the place to reconfigure the chart of accounts.
     """
+    if _advance_account_is_sane(company, current):
+        return str(current).strip()
+
     account = ""
     try:
         if frappe.db.has_column("Company", "default_employee_advance_account"):
@@ -807,12 +885,24 @@ def _resolve_advance_account(company: str) -> str:
         except Exception:
             account = ""
 
+    # The company default gets the SAME check the per-employee override got.
+    # Without this the guard above would be trivially defeated by a site that
+    # pointed Default Employee Advance Account at Debtors — which is exactly the
+    # shape of mistake being defended against, one level up.
+    if account and not _advance_account_is_sane(company, account):
+        _log(
+            "employee_advances: company default advance account %s is not a usable "
+            "advance ledger for %s; refusing it" % (account, company)
+        )
+        account = ""
+
     if not account:
         frappe.throw(
             _(
                 "No employee advance account is configured for {0}. Create a "
-                "Receivable account named 'Employee Advances' and set it as the "
-                "company's Default Employee Advance Account."
+                "Receivable account named 'Employee Advances' under the company's "
+                "assets, and set it as the company's Default Employee Advance "
+                "Account. The customer receivable account cannot be used."
             ).format(company)
         )
     return account
@@ -982,6 +1072,21 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
     # so fall back to the company currency explicitly.
     currency = str(employee_row.get("salary_currency") or "") or _company_currency(company)
 
+    # ``advance_account`` is set HERE, explicitly, rather than being left to the
+    # DocType's ``fetch_from: employee.employee_advance_account``. That fetch has
+    # ``fetch_if_empty``, so it fires at insert and fills the field from the
+    # Employee record — and on production 15 of 24 Employee records name
+    # ``Debtors - J``, the company's CUSTOMER receivable. Leaving the field empty
+    # and trusting a later fallback does not work: by the time anything looks,
+    # the fetch has already populated it, so every ``if not advance_account``
+    # guard downstream (HRMS's ``before_submit``, and this module's own resolve
+    # on approval) is a no-op. Writing the resolved value onto the document
+    # before insert pre-empts the fetch entirely, and it means the DRAFT a
+    # manager reads in the Desk already shows the ledger the cash will hit.
+    employee_override = str(
+        frappe.db.get_value("Employee", employee, "employee_advance_account") or ""
+    ).strip()
+
     doc = frappe.get_doc(
         {
             "doctype": ADVANCE_DOCTYPE,
@@ -991,6 +1096,7 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
             "advance_amount": amount,
             "currency": currency,
             "company": company,
+            "advance_account": _resolve_advance_account(company, employee_override),
             # ``status`` is deliberately absent: it is read-only and derived by
             # EmployeeAdvance.set_status(). Setting it by hand produces a row
             # whose status disagrees with its own amounts.
@@ -1161,9 +1267,15 @@ def approve_employee_advance(name: str) -> Dict[str, Any]:
     if _advance_has_field(F_APPROVED_ON):
         doc.set(F_APPROVED_ON, now_datetime())
 
-    # 2) advance_account is effectively mandatory at submit.
-    if not doc.get("advance_account"):
-        doc.advance_account = _resolve_advance_account(company)
+    # 2) advance_account is effectively mandatory at submit — and, on this site,
+    #    never empty: the DocType fetches it from the Employee record at insert.
+    #    So this RESOLVES rather than fills: a value that is not a sane advance
+    #    ledger (customer AR above all) is replaced with the company default.
+    #    This is also what repairs drafts filed before the fix, which still carry
+    #    whatever the fetch gave them.
+    resolved_account = _resolve_advance_account(company, doc.get("advance_account"))
+    if str(doc.get("advance_account") or "") != resolved_account:
+        doc.advance_account = resolved_account
 
     # 3) Submit. ignore_permissions because no JARZ role holds a DocPerm on
     #    Employee Advance — see the module docstring.
