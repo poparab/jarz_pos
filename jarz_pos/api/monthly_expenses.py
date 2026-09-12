@@ -1002,6 +1002,7 @@ def _build_deductions(
     advances_readable: bool = True,
     employee_orders_present: bool = False,
     advances_by_employee: Optional[Dict[str, Any]] = None,
+    unattributed_orders: Optional[Sequence[Dict[str, Any]]] = None,
     tolerance: float = MONEY_TOLERANCE,
 ) -> Dict[str, Any]:
     """The month's deduction totals, rolled up from the rows. Pure.
@@ -1032,6 +1033,14 @@ def _build_deductions(
             bucket["count"] += 1
             bucket["total"] += _advance_open_amount(row)
 
+    # Open staff orders that belong to nobody on this board. Kept OUT of
+    # `order_total` and out of every row — attributing them would be a guess —
+    # but listed, and raised as a gap, so the money is visible and somebody can
+    # link the Customer to the Employee. Dropping them is what made the board
+    # report zero jar debt on staging while a 92 EGP order sat unpaid.
+    orphan_rows = [_serialize_order(r) for r in (unattributed_orders or [])]
+    orphan_total = sum(flt(r.get("outstanding")) for r in orphan_rows)
+
     return {
         "penalty_total": _money(penalty_total),
         "penalty_days": flt(penalty_days, 2),
@@ -1039,6 +1048,8 @@ def _build_deductions(
         "order_total": _money(order_total),
         "total": _money(penalty_total + advance_total + order_total),
         "net_payable": _money(net_payable),
+        "unattributed_order_total": _money(orphan_total),
+        "unattributed_orders": orphan_rows,
         "advances_readable": bool(advances_readable),
         "employee_orders_present": bool(employee_orders_present),
         "penalty_units": list(PENALTY_UNITS),
@@ -1281,6 +1292,32 @@ def _build_gaps(
                 }
             )
 
+        orphans = deductions.get("unattributed_orders") or []
+        if orphans:
+            gaps.append(
+                {
+                    "code": "employee_orders_unattributed",
+                    "severity": "warning",
+                    "message": _(
+                        "{0} staff order(s) worth {1} are not linked to anyone, so they "
+                        "are not deducted from any salary. Set the Employee field on "
+                        "each of those customers ({2}) and they will land on that "
+                        "person's row."
+                    ).format(
+                        len(orphans),
+                        _money(deductions.get("unattributed_order_total")),
+                        ", ".join(
+                            sorted(
+                                {
+                                    str(o.get("customer_name") or o.get("customer"))
+                                    for o in orphans
+                                }
+                            )[:5]
+                        ),
+                    ),
+                }
+            )
+
         suspect = deductions.get("advance_accounts_suspect") or []
         if suspect:
             gaps.append(
@@ -1473,7 +1510,7 @@ def _employee_orders_exist(company: Optional[str]) -> bool:
 
 def _load_employee_orders(
     employees: Sequence[str], company: Optional[str]
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
     """Unpaid Employee-purpose invoices, ALL-TIME, keyed by employee.
 
     The join is ``employee_link.customers_for_employees`` and the filter is
@@ -1482,29 +1519,38 @@ def _load_employee_orders(
     carries 48 such links and they are misused — one employee is linked to 25
     customers who are not her, so counting those customers' invoices would
     invent tens of thousands of pounds of staff debt.
+
+    Returns ``(grouped, unattributed)``. EVERY open staff order is in one or the
+    other — an invoice whose customer maps to no employee goes into
+    ``unattributed`` rather than being dropped. Staging proved why: its one staff
+    order (92 EGP, still outstanding) sits on a Customer whose
+    ``custom_employee`` is empty, so a join-and-forget implementation showed it
+    on nobody's row and the board reported zero jar debt while a real unpaid
+    order existed. Silence is the one answer this screen must never give about
+    money — the same rule ``unattributed_gl`` already follows for the registry.
     """
-    if not employees or not _employee_order_field_ready():
-        return {}
+    if not _employee_order_field_ready():
+        return {}, []
     try:
-        by_employee = customers_for_employees(employees) or {}
+        by_employee = customers_for_employees(employees) if employees else {}
     except Exception:
         _log("monthly_expenses: employee customer join")
-        return {}
-    if not by_employee:
-        return {}
+        by_employee = {}
     # Inverted from the same map, so an order can only ever be attributed to the
     # employee that map already points at.
-    employee_of_customer = {cust: emp for emp, cust in by_employee.items()}
+    employee_of_customer = {cust: emp for emp, cust in (by_employee or {}).items()}
 
+    # Unfiltered by customer on purpose: the attribution happens below, so an
+    # order for an unlinked customer is still SEEN.
     filters: Dict[str, Any] = {
         "docstatus": 1,
         "custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
-        "customer": ["in", sorted(employee_of_customer)],
         "outstanding_amount": [">", 0],
     }
     if company:
         filters["company"] = company
     grouped: Dict[str, List[Dict[str, Any]]] = {}
+    unattributed: List[Dict[str, Any]] = []
     try:
         rows = frappe.get_all(
             "Sales Invoice",
@@ -1517,10 +1563,12 @@ def _load_employee_orders(
             employee = employee_of_customer.get(row.get("customer"))
             if employee:
                 grouped.setdefault(employee, []).append(row)
+            else:
+                unattributed.append(row)
     except Exception:
         _log("monthly_expenses: employee order load")
-        return {}
-    return grouped
+        return {}, []
+    return grouped, unattributed
 
 
 def _load_settlements(month_key: str, company: Optional[str]) -> Dict[str, float]:
@@ -1838,7 +1886,7 @@ def _compute_month(
         # their name and has to be able to show it.
         | set(settled_by_employee)
     )
-    orders_by_employee = _load_employee_orders(candidates, company)
+    orders_by_employee, unattributed_orders = _load_employee_orders(candidates, company)
 
     off_payroll_ids = sorted(
         (
@@ -1899,6 +1947,7 @@ def _compute_month(
         advances_readable=advances_readable,
         employee_orders_present=_employee_orders_exist(company),
         advances_by_employee=advances_by_employee,
+        unattributed_orders=unattributed_orders,
     )
 
     registry_run_rate = sum(

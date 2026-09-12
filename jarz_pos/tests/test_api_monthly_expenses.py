@@ -2313,6 +2313,51 @@ class TestDeductionGaps(unittest.TestCase):
 			"employee_orders_unused", self._gaps(employee_orders_present=True)
 		)
 
+	def test_a_staff_order_linked_to_nobody_is_surfaced_not_dropped(self):
+		# Staging carried exactly this: one Employee-purpose invoice, 92 EGP
+		# still outstanding, on a Customer whose `custom_employee` was empty.
+		# Attributing it would be a guess, so it stays off every row AND out of
+		# `order_total` — but it must not vanish, or the board reports zero jar
+		# debt while a real unpaid staff order exists.
+		block = self._gaps(
+			employee_orders_present=True,
+			unattributed_orders=[
+				{
+					"name": "ACC-SINV-2026-18146",
+					"customer": "E2E EMPFEAT Staff Tester",
+					"customer_name": "E2E EMPFEAT Staff Tester",
+					"outstanding_amount": 92.0,
+					"grand_total": 92.0,
+				}
+			],
+		)
+		gap = block.get("employee_orders_unattributed")
+		self.assertIsNotNone(gap)
+		self.assertEqual(gap["severity"], "warning")
+		self.assertIn("E2E EMPFEAT Staff Tester", gap["message"])
+
+	def test_no_orphan_orders_raises_no_orphan_gap(self):
+		self.assertNotIn(
+			"employee_orders_unattributed",
+			self._gaps(employee_orders_present=True, unattributed_orders=[]),
+		)
+
+	def test_an_orphan_order_stays_out_of_the_deducted_total(self):
+		# It is money the company is owed, but not money any named person's
+		# salary can be reduced by — so it is listed separately and never added
+		# into `order_total`, which the rows must continue to sum to.
+		from jarz_pos.api.monthly_expenses import _build_deductions
+
+		block = _build_deductions(
+			[],
+			unattributed_orders=[
+				{"name": "ACC-SINV-1", "customer": "X", "outstanding_amount": 92.0}
+			],
+		)
+		self.assertEqual(block["order_total"], 0.0)
+		self.assertEqual(block["unattributed_order_total"], 92.0)
+		self.assertEqual(len(block["unattributed_orders"]), 1)
+
 	def test_unreadable_advances_are_a_warning_not_a_silent_zero(self):
 		gap = self._gaps(advances_readable=False).get("advances_unreadable")
 		self.assertIsNotNone(gap)
