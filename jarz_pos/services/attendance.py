@@ -854,6 +854,67 @@ def _fetch_checkins(employees: List[str], start: date_cls, end: date_cls) -> Lis
             raise
 
 
+def _checkin_visible(
+    row: Dict[str, Any],
+    redacted: Set[Tuple[str, str]],
+    roster_cells: Dict[str, Dict[str, Dict[str, Any]]],
+    shift_times: Dict[str, Tuple[Optional[str], Optional[str]]],
+    start: date_cls,
+) -> bool:
+    """May a branch-scoped caller see this raw punch at all?
+
+    Decided on the RAW row, before grouping, so every derived field -- status,
+    first in, worked hours, geo_ok, the coordinate list -- is computed only from
+    punches the caller is allowed to see.
+
+    The day a punch belongs to mirrors ``group_checkins``: its shift_start date,
+    else its wall clock. That fallback is the hole: a check-out past the
+    previous shift's window matches no shift and is dated by the clock, so the
+    02:30 check-out from a Dokki night shift lands on the next day. If that
+    next day is a Nasr City day, the Nasr City manager would get its GPS. So an
+    unmatched punch EARLIER than its day's scheduled start is treated as the
+    tail of the previous day, and hidden unless the previous day is also the
+    caller's -- or when the previous day is before the range, and so unknown.
+    """
+    employee = row.get("employee")
+    try:
+        when = get_datetime(row.get("time"))
+    except Exception:
+        return False
+    if not employee or when is None:
+        return False
+
+    shift_start = None
+    if row.get("shift_start"):
+        try:
+            shift_start = get_datetime(row.get("shift_start"))
+        except Exception:
+            shift_start = None
+
+    day = getdate(shift_start or when)
+    key = str(day)
+    if (employee, key) in redacted:
+        return False
+    if shift_start is not None:
+        return True
+
+    assignment = roster_cells.get(employee, {}).get(key) or {}
+    scheduled_start = shift_times.get(assignment.get("shift_type") or "", (None, None))[0]
+    if not scheduled_start:
+        return True
+    try:
+        hour, minute = (int(part) for part in str(scheduled_start).split(":")[:2])
+    except Exception:
+        return True
+    if (when.hour, when.minute) >= (hour, minute):
+        return True
+
+    previous = add_days(day, -1)
+    if getdate(previous) < getdate(start):
+        return False
+    return (employee, str(getdate(previous))) not in redacted
+
+
 def build_grid(
     start: date_cls,
     end: date_cls,
@@ -974,9 +1035,13 @@ def build_grid(
     shift_times = shift_time_map()
     locations = shift_location_map()
     holidays = _holidays(names, start, end)
-    groups = group_checkins(_fetch_checkins(names, start, end))
 
     roster_cells: Dict[str, Dict[str, Dict[str, Any]]] = {n: {} for n in names}
+    # Every branch an employee is rostered at on a day, not just the last row
+    # read. Two assignments can overlap (HRMS permits it from Desk and from
+    # schedule generation); keeping only one let a day be attributed to the
+    # caller's branch while its punches belonged to the other.
+    day_locations: Dict[Tuple[str, str], Set[Optional[str]]] = {}
     lookup = set(names)
     for row in assignments:
         name = row["employee"]
@@ -986,16 +1051,46 @@ def build_grid(
         last = min(getdate(row["end_date"]), end) if row.get("end_date") else end
         for day in _date_range(first, last):
             roster_cells[name][str(day)] = row
+            day_locations.setdefault((name, str(day)), set()).add(
+                row.get("shift_location") or None
+            )
 
     day_off_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for row in day_offs:
         day_off_index[(row["employee"], str(getdate(row["off_date"])))] = row
 
+    # Scope is decided PER DAY, not per person. ``in_scope`` admits an employee
+    # if any of their shifts ever touched one of the caller's branches -- right
+    # for who appears on the screen, wrong for what it shows about them.
+    # Somebody who covered one day at Nasr City would otherwise hand the Nasr
+    # City manager a year of their arrival times and raw GPS at Dokki; with a
+    # zero or mis-set radius, that GPS is a home address. A day is redacted
+    # unless EVERY branch it is rostered at is the caller's -- a day with no
+    # branch at all included.
+    redacted: Set[Tuple[str, str]] = set()
+    if allowed is not None:
+        for name in names:
+            for day in _date_range(start, end):
+                key = str(day)
+                locs = set(day_locations.get((name, key), set()))
+                if not locs:
+                    day_off_row = day_off_index.get((name, key))
+                    locs = {(day_off_row or {}).get("shift_location") or None}
+                if any(loc not in allowed for loc in locs):
+                    redacted.add((name, key))
+
+    raw_checkins = _fetch_checkins(names, start, end)
+    if allowed is not None:
+        raw_checkins = [
+            row
+            for row in raw_checkins
+            if _checkin_visible(row, redacted, roster_cells, shift_times, start)
+        ]
+    groups = group_checkins(raw_checkins)
+
     grace = grace_minutes()
     employees_payload: List[Dict[str, Any]] = []
     cells_by_employee: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    # (employee, day) pairs that belong to a branch outside the caller's scope.
-    redacted: Set[Tuple[str, str]] = set()
 
     for name in names:
         row = employee_rows.get(name, {})
@@ -1014,18 +1109,9 @@ def build_grid(
                 resolved_location = day_off_row.get("shift_location")
             scheduled = shift_times.get(shift_type or "", (None, None))
 
-            # Scope is decided PER DAY, not per person. ``in_scope`` admits an
-            # employee if any of their shifts ever touched one of the caller's
-            # branches -- right for who appears on the screen, wrong for what
-            # it shows about them. Somebody who covered one day at Nasr City
-            # would otherwise hand the Nasr City manager a year of their
-            # arrival times and raw GPS at Dokki; with a zero or mis-set
-            # radius, that GPS is a home address. A day this caller cannot
-            # attribute to their own branch -- including a day with no branch
-            # at all -- is reported as a blank, unrostered day and carries no
-            # clock, no coordinates and no day-off detail.
-            if allowed is not None and resolved_location not in allowed:
-                redacted.add((name, key))
+            # A redacted day is a blank, unrostered day: no clock, no
+            # coordinates, no day-off detail.
+            if (name, key) in redacted:
                 cells[key] = build_cell(
                     date_str=key,
                     shift_type=None,
@@ -1066,21 +1152,26 @@ def build_grid(
                 "employee_name": row.get("employee_name") or name,
                 "designation": designation,
                 "department": row.get("department"),
-                "shift_locations": sorted(locations_by_employee.get(name, set())),
+                # Only the caller's branches: the full list names every branch
+                # this person ever worked at, which is not this caller's to see.
+                "shift_locations": sorted(
+                    loc
+                    for loc in locations_by_employee.get(name, set())
+                    if allowed is None or loc in allowed
+                ),
                 "is_courier": _is_courier(name, designation),
                 "exempt": exempt,
             }
         )
 
-    # The raw check-in groups feed ``get_employee``'s coordinate list, so the
-    # redacted days have to leave here too, not just their cells.
-    if redacted:
-        groups = {pair: group for pair, group in groups.items() if pair not in redacted}
-
     return {
         "employees": employees_payload,
         "cells": cells_by_employee,
         "groups": groups,
+        # Consumers that bucket by branch must SKIP these, not count them: a
+        # redacted day has no branch, and bucketing it would show every shared
+        # colleague working elsewhere as an unmatched person on this board.
+        "redacted": redacted,
         "scope": scope_payload(allowed),
         "grace_minutes": grace,
         "start": start,
@@ -1232,7 +1323,10 @@ def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) ->
     buckets: Dict[Optional[str], Dict[str, Any]] = {}
     every_cell: List[Dict[str, Any]] = []
 
+    redacted = grid.get("redacted") or set()
     for employee_row in grid["employees"]:
+        if (employee_row["employee"], str(day)) in redacted:
+            continue
         cell = grid["cells"].get(employee_row["employee"], {}).get(str(day))
         if not cell:
             continue
@@ -1323,8 +1417,11 @@ def get_employee(
     cells = grid["cells"].get(employee, {})
     days = [cells[key] for key in sorted(cells.keys())]
 
+    redacted = grid.get("redacted") or set()
     by_branch: Dict[Optional[str], Dict[str, Any]] = {}
     for cell in days:
+        if (employee, cell.get("date")) in redacted:
+            continue
         location = cell.get("shift_location")
         bucket = by_branch.setdefault(location, {"shift_location": location, "_cells": []})
         bucket["_cells"].append(cell)
@@ -1483,9 +1580,12 @@ def get_summary(
     every_cell: List[Dict[str, Any]] = []
     all_employees: Set[str] = set()
 
+    redacted = grid.get("redacted") or set()
     for name, cells in grid["cells"].items():
         meta = meta_by_employee.get(name, {})
         for key in sorted(cells.keys()):
+            if (name, key) in redacted:
+                continue
             cell = cells[key]
             every_cell.append(cell)
             all_employees.add(name)

@@ -1998,5 +1998,171 @@ class TestRefusalDoesNotEnumerateEmployees(unittest.TestCase):
         self.assertEqual(self._api(exists=True, locations=["Nasr City"]), "allowed")
 
 
+class TestUnmatchedTailOfAnotherBranchsNight(AttendanceGridCase):
+    """A check-out past the window is dated by the clock, not by its shift.
+
+    Ali closes a Dokki night shift (16:00 -> 01:00) on the 10th and opens at Nasr
+    City on the 11th. He clocks out at 02:30 -- past the window, so HRMS matches
+    no shift and the punch carries the 11th. The 11th is a Nasr City day. Without
+    this, the Nasr City manager gets that punch's coordinates.
+    """
+
+    NIGHT_THEN_DAY = [
+        _assignment("HR-EMP-1", "Night Close", "Dokki", "2026-09-10", "2026-09-10"),
+        _assignment("HR-EMP-1", "Branch Opening", "Nasr City", "2026-09-11", "2026-09-11"),
+    ]
+    TIMES = {"Night Close": ("16:00", "01:00"), "Branch Opening": ("12:30", "21:30")}
+
+    @staticmethod
+    def _unmatched(name, when):
+        return {
+            "name": name,
+            "employee": "HR-EMP-1",
+            "time": when,
+            "log_type": "OUT",
+            "shift": None,
+            "shift_start": None,
+            "offshift": 1,
+            "latitude": 29.99,
+            "longitude": 31.10,
+        }
+
+    def _run(self, allowed, assignments=None, checkins=None, start="2026-09-10"):
+        return self._grid(
+            assignments=assignments or self.NIGHT_THEN_DAY,
+            employees=[ALI],
+            checkins=checkins or [self._unmatched("CI-TAIL", "2026-09-11 02:30:00")],
+            start=start,
+            end="2026-09-11",
+            allowed=allowed,
+            shift_times=self.TIMES,
+            locations=FENCES,
+        )
+
+    def test_the_tail_is_hidden_from_the_next_days_branch(self):
+        grid = self._run({"Nasr City"})
+        self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 0)
+        self.assertNotIn(("HR-EMP-1", "2026-09-11"), grid["groups"])
+
+    def test_an_unrestricted_caller_still_sees_it(self):
+        grid = self._run(None)
+        self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 1)
+
+    def test_the_tail_of_the_callers_own_night_is_kept(self):
+        both_nasr = [
+            _assignment("HR-EMP-1", "Night Close", "Nasr City", "2026-09-10", "2026-09-10"),
+            _assignment("HR-EMP-1", "Branch Opening", "Nasr City", "2026-09-11", "2026-09-11"),
+        ]
+        grid = self._run({"Nasr City"}, assignments=both_nasr)
+        self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 1)
+
+    def test_a_genuinely_late_unmatched_arrival_on_the_callers_day_is_kept(self):
+        """After the scheduled start it is an arrival for this day, not a tail."""
+        grid = self._run(
+            {"Nasr City"}, checkins=[self._unmatched("CI-LATE", "2026-09-11 23:10:00")]
+        )
+        cell = grid["cells"]["HR-EMP-1"]["2026-09-11"]
+        self.assertEqual((cell["status"], cell["checkin_count"]), ("late_unmatched", 1))
+
+    def test_an_early_unmatched_punch_on_the_first_day_of_the_range_is_hidden(self):
+        """The previous day is outside the range, so it cannot be attributed."""
+        grid = self._run({"Nasr City"}, start="2026-09-11")
+        self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 0)
+
+
+class TestOverlappingAssignmentsRedactTheDay(AttendanceGridCase):
+    """Two branches on one day: the day is redacted whichever row is read last.
+
+    Keeping only the last assignment read made attribution depend on database
+    order, so a day could read as Nasr City while holding Dokki's punches.
+    """
+
+    TWO = [
+        _assignment("HR-EMP-1", "Branch Opening", "Nasr City", "2026-09-10", "2026-09-10"),
+        _assignment("HR-EMP-1", "Branch Closing", "Dokki", "2026-09-10", "2026-09-10"),
+    ]
+
+    def _cell(self, assignments):
+        grid = self._grid(
+            assignments=assignments,
+            employees=[ALI],
+            checkins=[_punch("CI-DOKKI", "2026-09-10", 30.03, 31.21)],
+            allowed={"Nasr City"},
+            locations=FENCES,
+        )
+        return grid["cells"]["HR-EMP-1"]["2026-09-10"], grid["groups"]
+
+    def test_nasr_city_read_last(self):
+        cell, groups = self._cell(list(reversed(self.TWO)))
+        self.assertEqual((cell["status"], cell["checkin_count"]), ("not_rostered", 0))
+        self.assertEqual(groups, {})
+
+    def test_dokki_read_last(self):
+        cell, groups = self._cell(self.TWO)
+        self.assertEqual((cell["status"], cell["checkin_count"]), ("not_rostered", 0))
+        self.assertEqual(groups, {})
+
+
+class TestRedactedDaysAreNotUnmatchedPeople(AttendanceGridCase):
+    """A redacted day has no branch, and must be skipped -- not bucketed as one.
+
+    Bucketing it put every shared colleague working elsewhere into the "No
+    branch" group, which the app explains as people who could not be matched to
+    a branch. Managers would chase a data fault that does not exist, every day.
+    """
+
+    def _shared_grid(self):
+        grid = self._grid(
+            assignments=[
+                _assignment("HR-EMP-1", "Branch Opening", "Nasr City", "2026-09-10", "2026-09-10"),
+                _assignment("HR-EMP-1", "Branch Opening", "Dokki", "2026-09-11", "2026-09-11"),
+                _assignment("HR-EMP-2", "Branch Opening", "Nasr City", "2026-09-11", "2026-09-11"),
+            ],
+            employees=[ALI, SARA],
+            start="2026-09-10",
+            end="2026-09-11",
+            allowed={"Nasr City"},
+        )
+        grid.pop("captured", None)
+        return grid
+
+    def test_the_day_board_has_no_phantom_no_branch_bucket(self):
+        grid = self._shared_grid()
+        with patch.object(attendance_service, "hrms_available", return_value=True), patch.object(
+            attendance_service, "build_grid", return_value=grid
+        ):
+            data = attendance_service.get_day(date="2026-09-11")
+        self.assertEqual([b["shift_location"] for b in data["branches"]], ["Nasr City"])
+        self.assertEqual(
+            [r["employee"] for r in data["branches"][0]["rows"]], ["HR-EMP-2"]
+        )
+        self.assertEqual(data["totals"]["rostered"], 1)
+
+    def test_the_branch_summary_has_no_phantom_no_branch_row(self):
+        grid = self._shared_grid()
+        with patch.object(attendance_service, "hrms_available", return_value=True), patch.object(
+            attendance_service, "build_grid", return_value=grid
+        ):
+            data = attendance_service.get_summary(
+                from_date="2026-09-10", to_date="2026-09-11", group_by="branch"
+            )
+        self.assertEqual([r["key"] for r in data["rows"]], ["Nasr City"])
+
+    def test_the_employee_tab_has_no_empty_no_branch_row(self):
+        grid = self._shared_grid()
+        with patch.object(attendance_service, "hrms_available", return_value=True), patch.object(
+            attendance_service, "build_grid", return_value=grid
+        ), patch.object(attendance_service, "shift_location_map", return_value={}):
+            data = attendance_service.get_employee(
+                "HR-EMP-1", from_date="2026-09-10", to_date="2026-09-11"
+            )
+        self.assertEqual([b["shift_location"] for b in data["by_branch"]], ["Nasr City"])
+
+    def test_other_branch_names_are_not_listed_for_the_employee(self):
+        grid = self._shared_grid()
+        ali = next(r for r in grid["employees"] if r["employee"] == "HR-EMP-1")
+        self.assertEqual(ali["shift_locations"], ["Nasr City"])
+
+
 if __name__ == "__main__":
     unittest.main()
