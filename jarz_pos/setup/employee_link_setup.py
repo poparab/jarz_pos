@@ -65,6 +65,12 @@ LOGGER_NAME = "employee_link_setup"
 #: first — on a bench without HRMS the column simply is not there.
 COMPANY_ADVANCE_FIELD = "default_employee_advance_account"
 
+#: The PER-EMPLOYEE override HRMS puts on Employee, and the field that actually
+#: decided where production's advances went. ``Employee Advance.advance_account``
+#: is ``fetch_from`` this column with ``fetch_if_empty``, so it beats the Company
+#: default every time it is set. Also an HRMS Custom Field, so probe before read.
+EMPLOYEE_ADVANCE_FIELD = "employee_advance_account"
+
 #: The ledger name HRMS's own ``set_default_hr_accounts`` looks for when it
 #: seeds ``Company.default_employee_advance_account``. Matching that name is
 #: what makes this routine agree with HRMS instead of inventing a second
@@ -458,6 +464,63 @@ def _type_unused_advance_account(company: str, log: Dict[str, List[str]]) -> Non
             _logger().error(f"Failed typing {account} as {ADVANCE_ACCOUNT_TYPE}", exc_info=True)
 
 
+def _warn_employee_advance_overrides(company: str, log: Dict[str, List[str]]) -> None:
+    """Name the Employee records whose advance ledger is CUSTOMER receivable.
+
+    ``Employee Advance.advance_account`` is declared
+    ``fetch_from: employee.employee_advance_account`` with ``fetch_if_empty``, so
+    Frappe fills it at insert from the Employee record and every later
+    ``if not advance_account`` fallback — HRMS's ``before_submit`` included —
+    becomes a no-op. A Company default that is perfectly correct therefore
+    guarantees nothing.
+
+    That is not theory. On 2026-09-12 fifteen of twenty-four production Employee
+    records carried ``Debtors - J``, the company's ``default_receivable_account``,
+    typed into the Desk in June; three submitted advances totalling 6,000 EGP were
+    booked into customer AR while the advances ledger held zero GL entries.
+
+    ``api/employee_advances.py`` now refuses such a value, but it can only do so
+    on the two endpoints it owns. An advance raised directly in the Desk — which
+    is HRMS's own intended flow — still takes whatever the Employee record says.
+    This is the migrate-time detector for the master data itself: it REPORTS and
+    never writes, because clearing a field somebody may have set deliberately is
+    an operator's decision, not a seeder's.
+    """
+    try:
+        if not frappe.db.has_column("Employee", EMPLOYEE_ADVANCE_FIELD):
+            return
+
+        customer_ar = str(
+            frappe.db.get_value("Company", company, "default_receivable_account") or ""
+        ).strip()
+        if not customer_ar:
+            return
+
+        rows = frappe.get_all(
+            "Employee",
+            filters={EMPLOYEE_ADVANCE_FIELD: customer_ar, "company": company},
+            fields=["name", "employee_name"],
+            limit=50,
+        ) or []
+        if not rows:
+            return
+
+        names = ", ".join(f"{r['name']} ({r['employee_name']})" for r in rows[:10])
+        more = f" and {len(rows) - 10} more" if len(rows) > 10 else ""
+        log.setdefault("warnings", []).append(
+            f"{company}: {len(rows)} Employee record(s) have "
+            f"{EMPLOYEE_ADVANCE_FIELD} = {customer_ar!r}, which is the CUSTOMER "
+            f"receivable account — advances raised for them in the Desk will be "
+            f"booked into customer AR. Clear the field so the Company default "
+            f"applies: {names}{more}"
+        )
+    except Exception:
+        # A detector must never be the thing that aborts a shared migrate.
+        _logger().error(
+            f"Failed to check employee advance-account overrides for {company}", exc_info=True
+        )
+
+
 def _verify_advance_accounts(log: Dict[str, List[str]]) -> None:
     """Report — and only where it is unambiguous, repair — the advance account.
 
@@ -504,6 +567,7 @@ def _verify_advance_accounts(log: Dict[str, List[str]]) -> None:
             # branch below into the success branch on the same migrate, instead
             # of reporting a gap that nothing ever closes.
             _type_unused_advance_account(company, log)
+            _warn_employee_advance_overrides(company, log)
 
             configured = str(
                 frappe.db.get_value("Company", company, COMPANY_ADVANCE_FIELD) or ""

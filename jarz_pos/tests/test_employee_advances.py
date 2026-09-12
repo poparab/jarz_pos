@@ -858,10 +858,19 @@ class TestAdvanceAccountResolution(unittest.TestCase):
     AR = "Debtors - J"
     ADVANCES = "Employee Advances - J"
 
-    def _mock(self, accounts, company_default=None, named_fallback=""):
-        """A ``frappe`` double whose Account/Company lookups answer from dicts."""
+    def _mock(self, accounts, company_default=None, named_fallback="",
+              company_ar_rows=None, ar_lookup_raises=False, customer_party_account=""):
+        """A ``frappe`` double whose Account/Company lookups answer from dicts.
+
+        ``company_ar_rows`` is what ``tabCompany`` reports as its configured
+        receivable accounts, and it defaults to the real one. Being able to make
+        it EMPTY is the point: an unset ``default_receivable_account`` is the
+        shape that silently disarmed the first version of this guard.
+        """
         if company_default is None:
             company_default = self.ADVANCES
+        if company_ar_rows is None:
+            company_ar_rows = [self.AR]
         mock = _mock_frappe(set())
 
         def get_value(doctype, filters, fieldname=None, **kwargs):
@@ -878,7 +887,24 @@ class TestAdvanceAccountResolution(unittest.TestCase):
                 return accounts.get(filters)
             return None
 
+        def sql_list(*args, **kwargs):
+            if ar_lookup_raises:
+                raise RuntimeError("db gone")
+            return list(company_ar_rows)
+
         mock.db.get_value.side_effect = get_value
+        mock.db.sql_list.side_effect = sql_list
+        # Answers for ONE account, not every account. A blanket True also marked
+        # the company default as customer AR, so the resolver had nothing left to
+        # fall back to and threw — the double, not the code, being wrong.
+        def exists(doctype, filters=None, **kwargs):
+            return bool(
+                customer_party_account
+                and isinstance(filters, dict)
+                and filters.get("account") == customer_party_account
+            )
+
+        mock.db.exists.side_effect = exists
         mock.db.has_column.return_value = True
         return mock
 
@@ -888,21 +914,23 @@ class TestAdvanceAccountResolution(unittest.TestCase):
             self.ADVANCES: {
                 "company": self.COMPANY, "is_group": 0,
                 "root_type": "Asset", "account_type": "Receivable",
+                "account_currency": "EGP",
             },
             self.AR: {
                 "company": self.COMPANY, "is_group": 0,
                 "root_type": "Asset", "account_type": "Receivable",
+                "account_currency": "EGP",
             },
         }
         rows.update(over)
         return rows
 
-    def _resolve(self, current, accounts=None, **kw):
+    def _resolve(self, current, accounts=None, currency="", **kw):
         from jarz_pos.api import employee_advances as mod
 
         mock = self._mock(accounts or self._accounts(), **kw)
         with patch(MODULE + ".frappe", mock):
-            return mod._resolve_advance_account(self.COMPANY, current)
+            return mod._resolve_advance_account(self.COMPANY, current, currency)
 
     # -- the actual defect ---------------------------------------------------
 
@@ -944,11 +972,85 @@ class TestAdvanceAccountResolution(unittest.TestCase):
     def test_an_untyped_account_is_rejected(self):
         """The 2026-08-29 staging shape: right node, empty ``account_type``.
         HRMS's validate_advance_account_type throws on it, so accepting it here
-        only moves the failure to the moment cash is handed over."""
+        only moves the failure to the moment cash is handed over.
+
+        Deliberately a DISTINCT account, leaving the company default healthy: an
+        earlier version of this test blanked the type on the default itself, so
+        it passed off the default being refused rather than off the candidate
+        being rejected, and would have stayed green with the candidate check
+        deleted."""
         accounts = self._accounts()
-        accounts["Employee Advances - J"]["account_type"] = ""
-        with self.assertRaises(ValueError):
-            self._resolve(self.ADVANCES, accounts=accounts)
+        accounts["Staff Advances (untyped) - J"] = {
+            "company": self.COMPANY, "is_group": 0,
+            "root_type": "Asset", "account_type": "",
+        }
+        self.assertEqual(
+            self._resolve("Staff Advances (untyped) - J", accounts=accounts), self.ADVANCES
+        )
+
+    def test_a_mismatched_currency_account_is_rejected(self):
+        """HRMS's validate_advance_account_currency throws during validate(), so
+        a mismatch now fails at INSERT — the field is always populated."""
+        accounts = self._accounts()
+        accounts["Employee Advances USD - J"] = {
+            "company": self.COMPANY, "is_group": 0,
+            "root_type": "Asset", "account_type": "Receivable",
+            "account_currency": "USD",
+        }
+        self.assertEqual(
+            self._resolve("Employee Advances USD - J", accounts=accounts, currency="EGP"),
+            self.ADVANCES,
+        )
+
+    # -- the guard must not fail OPEN ---------------------------------------
+
+    def test_customer_ar_is_still_refused_when_no_company_declares_one(self):
+        """The critical regression. The first version of this guard read
+        ``if customer_ar and account == customer_ar``, so an unset
+        ``default_receivable_account`` — not a mandatory field in ERPNext — made
+        ``Debtors - J`` pass every structural check and the money went back into
+        customer AR with nothing logged. Unprovable must mean refused."""
+        self.assertEqual(self._resolve(self.AR, company_ar_rows=[]), self.ADVANCES)
+
+    def test_customer_ar_is_still_refused_when_the_lookup_raises(self):
+        """A lock-wait timeout mid-transaction must not bless customer AR."""
+        self.assertEqual(self._resolve(self.AR, ar_lookup_raises=True), self.ADVANCES)
+
+    def test_an_account_attached_to_a_customer_is_refused(self):
+        """A Party Account override is customer AR even when it is no company's
+        default."""
+        accounts = self._accounts()
+        accounts["Debtors Retail - J"] = {
+            "company": self.COMPANY, "is_group": 0,
+            "root_type": "Asset", "account_type": "Receivable",
+        }
+        self.assertEqual(
+            self._resolve("Debtors Retail - J", accounts=accounts,
+                          customer_party_account="Debtors Retail - J"),
+            self.ADVANCES,
+        )
+
+    def test_customer_ar_is_matched_case_insensitively(self):
+        """MariaDB resolves a Link case-insensitively; Python's == does not, so a
+        row written as "debtors - J" by an import would sail past an exact
+        compare."""
+        accounts = self._accounts()
+        accounts["debtors - J"] = {
+            "company": self.COMPANY, "is_group": 0,
+            "root_type": "Asset", "account_type": "Receivable",
+        }
+        self.assertEqual(
+            self._resolve("debtors - J", accounts=accounts), self.ADVANCES
+        )
+
+    def test_the_company_default_survives_an_unreadable_customer_ar(self):
+        """The opposite default, and deliberately so. The FALLBACK is judged with
+        ``trust_when_unknown=True``: refusing it because we could not prove a
+        negative would throw at the exact moment a manager is handing cash over.
+        Distinct from the test above — there the unprovable value is the
+        CANDIDATE and must be dropped; here it is the account we fall back TO and
+        must be kept."""
+        self.assertEqual(self._resolve("", ar_lookup_raises=True), self.ADVANCES)
 
     def test_an_account_of_another_company_is_rejected(self):
         accounts = self._accounts()
@@ -1008,7 +1110,8 @@ class TestRequestStampsTheAdvanceAccount(unittest.TestCase):
                   lambda e: {"company": "JARZ", "salary_currency": "EGP"}),
             patch(MODULE + "._validate_paying_account", lambda c, a: {}),
             patch(MODULE + "._resolve_advance_account",
-                  lambda company, current="": "RESOLVED(" + (current or "") + ")"),
+                  lambda company, current="", currency="":
+                      "RESOLVED(" + (current or "") + "|" + (currency or "") + ")"),
             patch(MODULE + "._serialize_one", lambda d: {}),
             patch(MODULE + ".today", lambda: "2026-09-12"),
             patch(MODULE + ".getdate", lambda v: v),
@@ -1028,11 +1131,78 @@ class TestRequestStampsTheAdvanceAccount(unittest.TestCase):
 
     def test_the_draft_carries_a_resolved_account_not_an_empty_field(self):
         payload = self._request("Debtors - J")
-        self.assertEqual(payload["advance_account"], "RESOLVED(Debtors - J)")
+        self.assertEqual(payload["advance_account"], "RESOLVED(Debtors - J|EGP)")
 
     def test_an_employee_with_no_override_still_gets_an_account(self):
         payload = self._request("")
-        self.assertEqual(payload["advance_account"], "RESOLVED()")
+        self.assertEqual(payload["advance_account"], "RESOLVED(|EGP)")
+
+
+class TestApproveRepairsTheAccount(unittest.TestCase):
+    """The approve path must CORRECT a bad ledger, and do it before submit.
+
+    Drafts filed before the fix still carry whatever the ``fetch_from`` gave
+    them, and approve is the last gate before the Payment Entry is built — HRMS
+    reads ``advance_account`` straight off the submitted document and copies it
+    onto ``paid_to``. Two things therefore have to hold, and neither was pinned:
+    the value is replaced, and it is replaced BEFORE ``doc.submit()``. Move the
+    assignment below the submit and nothing else in this file notices, yet every
+    legacy draft would submit against Debtors.
+    """
+
+    def _approve(self, advance_account):
+        from jarz_pos.api import employee_advances as mod
+
+        order = []
+        doc = _FakeAdvanceDoc(
+            name="HR-EAD-2026-00001", company="JARZ", currency="EGP",
+            advance_account=advance_account, docstatus=0, status="Draft",
+            custom_jarz_paying_account="Nasr city - J",
+        )
+        doc.submit = MagicMock(side_effect=lambda: order.append("submit"))
+
+        mock = _mock_frappe(ROLES.ADMIN | {ROLES.JARZ_MANAGER})
+        mock.get_doc.return_value = doc
+
+        def resolve(company, current="", currency=""):
+            order.append("resolve")
+            return "Employee Advances - J"
+
+        patches = [
+            patch(MODULE + ".frappe", mock),
+            patch(MODULE + "._ensure_hrms", lambda: None),
+            patch(MODULE + "._advance_has_field", lambda f: True),
+            patch(MODULE + "._validate_paying_account", lambda c, a: {}),
+            patch(MODULE + "._resolve_advance_account", resolve),
+            patch(MODULE + "._build_and_submit_payment_entry",
+                  lambda d, a: SimpleNamespace(name="ACC-PAY-2026-000001")),
+            patch(MODULE + "._serialize_one", lambda d: {}),
+            patch(MODULE + ".now_datetime", lambda: "2026-09-12 00:00:00"),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            mod.approve_employee_advance("HR-EAD-2026-00001")
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        return doc, order
+
+    def test_a_legacy_draft_on_customer_ar_is_corrected(self):
+        doc, _ = self._approve("Debtors - J")
+        # Read the ATTRIBUTE, not .get(): the production code assigns
+        # `doc.advance_account = ...`, and _FakeAdvanceDoc.get() reads only its
+        # `_data` dict. __getattr__ still falls back to `_data` when nothing was
+        # assigned, so this spelling is right for both outcomes.
+        self.assertEqual(doc.advance_account, "Employee Advances - J")
+
+    def test_the_account_is_resolved_before_the_document_is_submitted(self):
+        _, order = self._approve("Debtors - J")
+        self.assertEqual(order, ["resolve", "submit"])
+
+    def test_an_already_correct_draft_is_left_as_it_is(self):
+        doc, _ = self._approve("Employee Advances - J")
+        self.assertEqual(doc.advance_account, "Employee Advances - J")
 
 
 if __name__ == "__main__":

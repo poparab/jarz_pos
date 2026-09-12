@@ -766,15 +766,72 @@ def _validate_paying_account(company: str, account: str) -> Dict[str, Any]:
     return row
 
 
-def _advance_account_is_sane(company: str, account: str) -> bool:
+def _customer_receivable_verdict(account: str) -> str:
+    """Is ``account`` a ledger ERPNext uses for CUSTOMER receivables?
+
+    Returns ``"yes"``, ``"no"`` or ``"unknown"``. The three-way answer matters:
+    "I could not find out" is not the same as "no", and the two callers want
+    opposite things when the answer is unknown — see ``_advance_account_is_sane``.
+
+    Three tests, because the original guard compared against exactly one string
+    and so defended against exactly the one value somebody happened to type:
+
+      * any company's ``default_receivable_account``, not just this company's —
+        a second company's AR node is still customer AR;
+      * any account attached to a Customer through the ``Party Account`` child
+        table, which is customer AR in every sense that matters and is usually
+        NOT a company default;
+      * compared case-insensitively, because MariaDB resolves a Link
+        case-insensitively while Python does not, so a row written as
+        ``"debtors - J"`` by an import or a raw ``set_value`` would sail past an
+        ``==`` comparison.
+    """
+    target = str(account or "").strip().casefold()
+    if not target:
+        return "unknown"
+
+    try:
+        defaults = frappe.db.sql_list(
+            """select distinct default_receivable_account from `tabCompany`
+               where ifnull(default_receivable_account, '') != ''"""
+        )
+    except Exception:
+        return "unknown"
+
+    if not defaults:
+        # Nothing on the site declares a customer receivable account, so there is
+        # no way to clear this candidate. Absence of evidence is not evidence of
+        # absence for the ONE check this guard exists for — answering "no" here
+        # is how the first version let ``Debtors - J`` through.
+        return "unknown"
+
+    for value in defaults or []:
+        if str(value or "").strip().casefold() == target:
+            return "yes"
+
+    try:
+        if frappe.db.exists("Party Account", {"account": account, "parenttype": "Customer"}):
+            return "yes"
+    except Exception:
+        return "unknown"
+
+    return "no"
+
+
+def _advance_account_is_sane(
+    company: str,
+    account: str,
+    currency: str = "",
+    trust_when_unknown: bool = False,
+) -> bool:
     """Is ``account`` a ledger an employee advance may legitimately be booked to?
 
     HRMS lets a site override the advance ledger per person, via
     ``Employee.employee_advance_account``, and that override is a legitimate
     feature — a company with one advance ledger per branch needs it. What it
-    must never be allowed to name is the company's CUSTOMER receivable account.
+    must never be allowed to name is a CUSTOMER receivable account.
 
-    That is not a hypothetical. On production 15 of 24 Employee records carry
+    That is not a hypothetical. On production 15 of 24 Employee records carried
     ``employee_advance_account = "Debtors - J"`` — the company's
     ``default_receivable_account`` — set by hand in the Desk on 2026-06-24,
     months before this module existed. Because
@@ -788,10 +845,26 @@ def _advance_account_is_sane(company: str, account: str) -> bool:
     and the payout debits customer AR. Six thousand EGP of staff advances sat
     inside Debtors before anyone looked.
 
-    So the rule enforced here is narrow and absolute: an advance ledger must be
-    a leaf Receivable asset account of this company, and it must not be the
-    account ERPNext reserves for customer receivables. Anything else is
-    overridden by the company default rather than trusted.
+    ``trust_when_unknown`` is the whole reason the customer-AR test returns three
+    values rather than a bool, and the two callers need OPPOSITE defaults:
+
+      * a CANDIDATE (the per-employee override) is judged with ``False`` — if we
+        cannot prove it is not customer AR, we do not use it, and the company
+        default takes over. Anything else re-arms the defect: the first version
+        of this guard read ``if customer_ar and account == customer_ar``, so an
+        unset ``default_receivable_account`` or one failed read made
+        ``Debtors - J`` pass every test and the money went back into customer AR
+        with nothing logged.
+      * the COMPANY DEFAULT is judged with ``True`` — it is the fallback, and
+        refusing it on an inability to prove a negative would throw at the exact
+        moment a manager is handing cash over. A default that is positively
+        identified as customer AR is still rejected.
+
+    ``currency``, when given, must match the account's. HRMS's
+    ``validate_advance_account_currency`` throws on a mismatch during
+    ``validate()`` — i.e. at INSERT, not merely at submit — and since this module
+    now always populates the field at create, a mismatched fallback would refuse
+    the request with an English HRMS error the line manager cannot act on.
     """
     account = str(account or "").strip()
     if not account:
@@ -801,7 +874,7 @@ def _advance_account_is_sane(company: str, account: str) -> bool:
         row = frappe.db.get_value(
             "Account",
             account,
-            ["company", "is_group", "root_type", "account_type"],
+            ["company", "is_group", "root_type", "account_type", "account_currency"],
             as_dict=True,
         )
     except Exception:
@@ -819,22 +892,19 @@ def _advance_account_is_sane(company: str, account: str) -> bool:
         # HRMS's own validate_advance_account_type throws on this, so letting it
         # through here only moves the failure later.
         return False
+    if currency and str(row.get("account_currency") or "") != str(currency):
+        return False
 
-    # The one that actually bit. Customer AR is never an employee advance ledger,
-    # however deliberately somebody typed it onto the Employee record.
-    try:
-        customer_ar = str(
-            frappe.db.get_value("Company", company, "default_receivable_account") or ""
-        ).strip()
-    except Exception:
-        customer_ar = ""
-    if customer_ar and account == customer_ar:
+    verdict = _customer_receivable_verdict(account)
+    if verdict == "yes":
+        return False
+    if verdict == "unknown" and not trust_when_unknown:
         return False
 
     return True
 
 
-def _resolve_advance_account(company: str, current: str = "") -> str:
+def _resolve_advance_account(company: str, current: str = "", currency: str = "") -> str:
     """The Receivable ledger the advance is booked against.
 
     ``current`` is whatever is already on the document — typically the value
@@ -851,12 +921,20 @@ def _resolve_advance_account(company: str, current: str = "") -> str:
     the Company default still works, instead of failing at the moment of
     approval.
 
+    Every substitution of a non-empty ``current`` is logged. The predicate cannot
+    tell "this is not a valid advance ledger" from "I could not read the Account
+    row", so a substitution can also be the symptom of a transient database
+    failure rather than of bad configuration — and rerouting money to a
+    different ledger than the operator chose must never be the one thing that
+    leaves no trace.
+
     Nothing is written back to Company or to Employee: pointing a default at an
     account is ``setup/``'s job, at migrate time, where an operator reads the
     summary. An API call is not the place to reconfigure the chart of accounts.
     """
-    if _advance_account_is_sane(company, current):
-        return str(current).strip()
+    current = str(current or "").strip()
+    if _advance_account_is_sane(company, current, currency):
+        return current
 
     account = ""
     try:
@@ -868,31 +946,30 @@ def _resolve_advance_account(company: str, current: str = "") -> str:
         account = ""
 
     if not account:
+        filters = {
+            "company": company,
+            "is_group": 0,
+            "account_name": "Employee Advances",
+            "account_type": "Receivable",
+        }
+        if currency:
+            filters["account_currency"] = currency
         try:
-            account = str(
-                frappe.db.get_value(
-                    "Account",
-                    {
-                        "company": company,
-                        "is_group": 0,
-                        "account_name": "Employee Advances",
-                        "account_type": "Receivable",
-                    },
-                    "name",
-                )
-                or ""
-            ).strip()
+            account = str(frappe.db.get_value("Account", filters, "name") or "").strip()
         except Exception:
             account = ""
 
-    # The company default gets the SAME check the per-employee override got.
-    # Without this the guard above would be trivially defeated by a site that
-    # pointed Default Employee Advance Account at Debtors — which is exactly the
-    # shape of mistake being defended against, one level up.
-    if account and not _advance_account_is_sane(company, account):
+    # The company default gets the SAME structural check the candidate got, so
+    # the guard cannot be defeated one level up by a site that pointed Default
+    # Employee Advance Account at Debtors. It is judged with
+    # ``trust_when_unknown`` because it is the fallback: see the docstring above.
+    if account and not _advance_account_is_sane(
+        company, account, currency, trust_when_unknown=True
+    ):
         _log(
             "employee_advances: company default advance account %s is not a usable "
-            "advance ledger for %s; refusing it" % (account, company)
+            "advance ledger for %s (currency %s); refusing it"
+            % (account, company, currency or "-")
         )
         account = ""
 
@@ -904,6 +981,12 @@ def _resolve_advance_account(company: str, current: str = "") -> str:
                 "assets, and set it as the company's Default Employee Advance "
                 "Account. The customer receivable account cannot be used."
             ).format(company)
+        )
+
+    if current:
+        _log(
+            "employee_advances: advance account %s rejected for %s (currency %s); "
+            "using %s instead" % (current, company, currency or "-", account)
         )
     return account
 
@@ -1083,9 +1166,19 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
     # on approval) is a no-op. Writing the resolved value onto the document
     # before insert pre-empts the fetch entirely, and it means the DRAFT a
     # manager reads in the Desk already shows the ledger the cash will hit.
-    employee_override = str(
-        frappe.db.get_value("Employee", employee, "employee_advance_account") or ""
-    ).strip()
+    #
+    # The read is wrapped because ``Employee.employee_advance_account`` is an
+    # HRMS CUSTOM field (hrms/setup.py), not a standard column, and
+    # ``_ensure_hrms()`` only proves the Employee Advance DocType exists. On a
+    # bench where HRMS is installed but its custom fields have not been made,
+    # an unguarded read raises "Unknown column" and 500s the endpoint with a raw
+    # SQL error. An empty override is handled correctly by the resolver.
+    try:
+        employee_override = str(
+            frappe.db.get_value("Employee", employee, "employee_advance_account") or ""
+        ).strip()
+    except Exception:
+        employee_override = ""
 
     doc = frappe.get_doc(
         {
@@ -1096,7 +1189,9 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
             "advance_amount": amount,
             "currency": currency,
             "company": company,
-            "advance_account": _resolve_advance_account(company, employee_override),
+            "advance_account": _resolve_advance_account(
+                company, employee_override, currency
+            ),
             # ``status`` is deliberately absent: it is read-only and derived by
             # EmployeeAdvance.set_status(). Setting it by hand produces a row
             # whose status disagrees with its own amounts.
@@ -1273,7 +1368,9 @@ def approve_employee_advance(name: str) -> Dict[str, Any]:
     #    ledger (customer AR above all) is replaced with the company default.
     #    This is also what repairs drafts filed before the fix, which still carry
     #    whatever the fetch gave them.
-    resolved_account = _resolve_advance_account(company, doc.get("advance_account"))
+    resolved_account = _resolve_advance_account(
+        company, doc.get("advance_account"), str(doc.get("currency") or "")
+    )
     if str(doc.get("advance_account") or "") != resolved_account:
         doc.advance_account = resolved_account
 
