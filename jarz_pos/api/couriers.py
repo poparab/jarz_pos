@@ -900,19 +900,9 @@ def generate_settlement_preview(invoice: str, party_type: str | None = None, par
 
     # include resolved party if not provided – from any existing CT linked to invoice
     if not (party_type and party):
-        existing_party = frappe.get_all(
-            "Courier Transaction",
-            filters={
-                "reference_invoice": inv.name,
-                "party_type": ["not in", [None, ""]],
-                "party": ["not in", [None, ""]],
-            },
-            fields=["party_type", "party"],
-            limit=1,
-        )
-        if existing_party:
-            party_type = existing_party[0].get("party_type")
-            party = existing_party[0].get("party")
+        derived_type, derived_party = _delivery_services._existing_courier_party(inv.name)
+        if derived_party:
+            party_type, party = derived_type, derived_party
 
     token = _mint_settle_preview_token(
         {

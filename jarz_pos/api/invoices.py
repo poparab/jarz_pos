@@ -654,21 +654,15 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
 
-    # Derive party if missing from any CT
+    # Derive party if missing: the courier holding an open row first, then any courier
+    # on record. Open first matters because the rows read below are then scoped to
+    # this party, and deriving an earlier, already-settled courier would hide them.
     if not (party_type and party):
-        existing_party = frappe.get_all(
-            "Courier Transaction",
-            filters={
-                "reference_invoice": invoice_name,
-                "party_type": ["not in", [None, ""]],
-                "party": ["not in", [None, ""]],
-            },
-            fields=["party_type", "party"],
-            limit=1,
-        )
-        if existing_party:
-            party_type = existing_party[0].get("party_type")
-            party = existing_party[0].get("party")
+        derived_type, derived_party = _delivery._existing_courier_party(invoice_name, open_only=True)
+        if not derived_party:
+            derived_type, derived_party = _delivery._existing_courier_party(invoice_name)
+        if derived_party:
+            party_type, party = derived_type, derived_party
 
     # Read shipping from the stored SI value first, fallback to territory calculation
     _stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)

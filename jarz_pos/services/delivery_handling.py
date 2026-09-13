@@ -1120,6 +1120,40 @@ def ensure_delivery_note_for_invoice(invoice_name: str) -> dict:
         return out
 
 
+def _existing_courier_party(invoice_name: str, *, open_only: bool = False) -> tuple[str | None, str | None]:
+    """Return ``(party_type, party)`` from the newest Courier Transaction on the invoice.
+
+    Recovers the courier a caller omitted from the rows already written for this
+    order; ``open_only`` restricts that to rows not yet Settled. ``(None, None)``
+    when no row names a party.
+
+    "is set", never ``["not in", [None, ""]]``: Frappe compiles that to
+    ``IFNULL(party,'') NOT IN (NULL,'')``, which SQL evaluates as UNKNOWN for every
+    row. All eight copies of this lookup were written that way and matched none of
+    production's 927 Courier Transactions (measured 2026-09-14), so every
+    "derive the party" fallback was unreachable and fell through to its throw or to
+    an unscoped read. Newest first, because an order handed to a second courier
+    carries rows for both.
+    """
+    filters = {
+        "reference_invoice": invoice_name,
+        "party_type": ["is", "set"],
+        "party": ["is", "set"],
+    }
+    if open_only:
+        filters["status"] = ["!=", "Settled"]
+    rows = frappe.get_all(
+        "Courier Transaction",
+        filters=filters,
+        fields=["party_type", "party"],
+        order_by="creation desc",
+        limit=1,
+    )
+    if not rows:
+        return None, None
+    return rows[0].get("party_type"), rows[0].get("party")
+
+
 @frappe.whitelist()
 def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None, delivery_trip: str | None = None, shipping_override: float | None = None):
     """Allocate outstanding to Courier Outstanding and create Courier Transaction atomically (relying on Frappe's request transaction).
@@ -1198,20 +1232,9 @@ def _mark_courier_outstanding_locked(
 
     # Derive party if omitted
     if not (party_type and party):
-        existing_party = frappe.get_all(
-            "Courier Transaction",
-            filters={
-                "reference_invoice": invoice_name,
-                "status": ["!=", "Settled"],
-                "party_type": ["not in", [None, ""]],
-                "party": ["not in", [None, ""]],
-            },
-            fields=["party_type", "party"],
-            limit=1,
-        )
+        existing_type, existing_party = _existing_courier_party(invoice_name, open_only=True)
         if existing_party:
-            party_type = existing_party[0].party_type
-            party = existing_party[0].party
+            party_type, party = existing_type, existing_party
             derived_existing_party = True
         else:
             frappe.throw("party_type & party are required (courier must be an Employee or Supplier)")
@@ -3006,20 +3029,9 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted.")
     if not (party_type and party):
-        existing_party = frappe.get_all(
-            "Courier Transaction",
-            filters={
-                "reference_invoice": invoice_name,
-                "status": ["!=", "Settled"],
-                "party_type": ["not in", [None, ""]],
-                "party": ["not in", [None, ""]],
-            },
-            fields=["party_type", "party"],
-            limit=1,
-        )
+        existing_type, existing_party = _existing_courier_party(invoice_name, open_only=True)
         if existing_party:
-            party_type = existing_party[0].get("party_type")
-            party = existing_party[0].get("party")
+            party_type, party = existing_type, existing_party
         else:
             frappe.throw("party_type & party are required (courier must be an Employee or Supplier)")
 
@@ -3394,20 +3406,9 @@ def handle_out_for_delivery_paid(invoice_name: str, courier: str, settlement: st
         frappe.throw("courier required (legacy label)")
     derived_existing_party = False
     if not (party_type and party):
-        fallback = frappe.get_all(
-            "Courier Transaction",
-            filters={
-                "reference_invoice": invoice_name,
-                "status": ["!=", "Settled"],
-                "party_type": ["not in", [None, ""]],
-                "party": ["not in", [None, ""]],
-            },
-            fields=["party_type", "party"],
-            limit=1,
-        )
-        if fallback:
-            party_type = fallback[0].get("party_type")
-            party = fallback[0].get("party")
+        existing_type, existing_party = _existing_courier_party(invoice_name, open_only=True)
+        if existing_party:
+            party_type, party = existing_type, existing_party
             derived_existing_party = True
         else:
             frappe.throw("party_type & party required (must pass Employee/Supplier courier)")
@@ -3835,31 +3836,11 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
         frappe.throw("pos_profile required to resolve cash account")
 
     if not (party_type and party):
-        existing_party = frappe.get_all(
-            "Courier Transaction",
-            filters={
-                "reference_invoice": invoice_name,
-                "status": ["!=", "Settled"],
-                "party_type": ["not in", [None, ""]],
-                "party": ["not in", [None, ""]],
-            },
-            fields=["party_type", "party"],
-            limit=1,
-        )
+        existing_type, existing_party = _existing_courier_party(invoice_name, open_only=True)
         if not existing_party:
-            existing_party = frappe.get_all(
-                "Courier Transaction",
-                filters={
-                    "reference_invoice": invoice_name,
-                    "party_type": ["not in", [None, ""]],
-                    "party": ["not in", [None, ""]],
-                },
-                fields=["party_type", "party"],
-                limit=1,
-            )
+            existing_type, existing_party = _existing_courier_party(invoice_name)
         if existing_party:
-            party_type = existing_party[0].get("party_type")
-            party = existing_party[0].get("party")
+            party_type, party = existing_type, existing_party
         else:
             frappe.throw("party_type & party required (unable to derive from existing courier transactions)")
 

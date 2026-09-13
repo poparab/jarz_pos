@@ -530,6 +530,12 @@ jobs:
             # expressible in a mock, so these run against the site: real rows,
             # real isolation levels, and a second connection.
             test_settlement_reversal_real_db
+            # The same dead filter, everywhere. `['not in', [None, '']]` killed
+            # the list above, the kanban collection-change badge, and eight
+            # copies of the "derive the courier the caller omitted" lookup. A
+            # source scan refuses the shape app-wide, and the shared lookup that
+            # replaced the eight copies runs against real Courier Transactions.
+            test_not_in_null_filters
             # Both of these settle endpoints shipped with NO permission guard --
             # any authenticated user could post the weekly partner bank transfer
             # or a commission entry. These pin the guard, and pin that it runs
