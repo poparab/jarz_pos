@@ -5,6 +5,7 @@ Only handles cart items - never treats shipping as an item.
 """
 
 from __future__ import annotations
+import datetime
 import frappe
 import json
 import logging
@@ -941,6 +942,37 @@ def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = N
     }
 
 
+def _assert_delivery_slot_not_ended(delivery_date, delivery_time_from, delivery_duration) -> None:
+    """Refuse a reschedule onto a delivery window that has already ended.
+
+    The Kanban reschedule dialog lists the slot that is running right now. Left
+    open past that slot's end and then saved, it posted a window that was
+    already over, and the order was stored in it. A running slot is still fine:
+    only a window whose end is at or before the site clock is refused.
+    """
+    try:
+        start = frappe.utils.get_datetime(f"{delivery_date} {delivery_time_from}")
+    except Exception:
+        start = None
+    if start is None:
+        frappe.throw(
+            frappe._("Invalid delivery date or time: {0} {1}").format(delivery_date, delivery_time_from),
+            frappe.ValidationError,
+        )
+    try:
+        duration_seconds = max(int(float(delivery_duration or 0)), 0)
+    except (TypeError, ValueError):
+        duration_seconds = 0
+    end = start + datetime.timedelta(seconds=duration_seconds)
+    if end <= frappe.utils.now_datetime():
+        frappe.throw(
+            frappe._(
+                "This delivery slot ended at {0}. Reopen the slot list and pick a slot that has not ended."
+            ).format(end.strftime("%I:%M %p")),
+            frappe.ValidationError,
+        )
+
+
 @frappe.whitelist()
 def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_time_from: str, delivery_duration: int, delivery_slot_label: str = ""):
     """Update delivery slot for a submitted Sales Invoice.
@@ -955,6 +987,10 @@ def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_t
     Returns:
         dict: Success status and message
     """
+    # Before the try: its handler re-wraps every error as "Failed to update
+    # delivery slot: ...", and this refusal should read as itself.
+    _assert_delivery_slot_not_ended(delivery_date, delivery_time_from, delivery_duration)
+
     try:
         frappe.logger().info(f"Updating delivery slot for invoice {invoice_id}")
         frappe.logger().info(f"New slot: {delivery_date} {delivery_time_from}, duration: {delivery_duration}s")

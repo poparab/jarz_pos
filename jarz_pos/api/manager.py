@@ -877,19 +877,47 @@ def _derive_delivery_end_datetime(inv: Any) -> Optional[str]:
         return None
 
 
+def _is_source_delivery_start(requested: Optional[str], source_invoice: Any) -> bool:
+    """Whether an amendment keeps the delivery start its order already has.
+
+    That window was chosen when the order was placed, so it stays even if its
+    slot is running by the time the order is amended - an address or income
+    edit must not move an order that is on its way to the next slot.
+    """
+    source_start = _derive_required_delivery_datetime(source_invoice)
+    if not requested or not source_start:
+        return False
+    try:
+        requested_dt = frappe.utils.get_datetime(requested)
+        source_dt = frappe.utils.get_datetime(source_start)
+    except Exception:
+        return False
+    return requested_dt.replace(second=0, microsecond=0) == source_dt.replace(
+        second=0, microsecond=0
+    )
+
+
 @contextmanager
 def _temporary_invoice_creation_form_context(
     *,
     required_delivery_datetime: Optional[str] = None,
     delivery_end_datetime: Optional[str] = None,
+    delivery_slot_explicit: bool = False,
 ) -> Any:
-    """Temporarily seed form_dict so invoice creation keeps the chosen slot duration."""
+    """Temporarily seed form_dict so invoice creation keeps the chosen slot duration.
+
+    ``delivery_slot_explicit`` marks the window as deliberate, so a slot that is
+    running right now is kept rather than snapped to the next one. Without it a
+    flag the client sent with the request still carries through.
+    """
     previous_form_dict = getattr(frappe, "form_dict", None)
     next_form_dict = frappe._dict(dict(previous_form_dict or {}))
     if required_delivery_datetime:
         next_form_dict["required_delivery_datetime"] = required_delivery_datetime
     if delivery_end_datetime:
         next_form_dict["delivery_end_datetime"] = delivery_end_datetime
+    if delivery_slot_explicit:
+        next_form_dict["delivery_slot_explicit"] = 1
     frappe.form_dict = next_form_dict
     try:
         yield
@@ -1943,6 +1971,9 @@ def _run_invoice_amendment_job(
         with _temporary_invoice_creation_form_context(
             required_delivery_datetime=effective_required_delivery_datetime,
             delivery_end_datetime=effective_delivery_end_datetime,
+            delivery_slot_explicit=_is_source_delivery_start(
+                effective_required_delivery_datetime, source_invoice
+            ),
         ):
             creation_result = _create_amendment_invoice(
                 cart_json,

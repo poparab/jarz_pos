@@ -494,13 +494,25 @@ def _generate_day_slots(
             logger.debug("Slot %s - %s has ended; skipping", start, end)
             continue
         is_current = bool(current_datetime and start < current_datetime)
-        slots.append(_build_slot(target_date, start, end, is_current=is_current))
+        slots.append(
+            _build_slot(
+                target_date,
+                start,
+                end,
+                is_current=is_current,
+                today=current_datetime.date() if current_datetime else None,
+            )
+        )
     logger.debug("Total slots generated for %s: %s", target_date, len(slots))
     return slots
 
 
 def _build_slot(
-    target_date: datetime.date, start: datetime, end: datetime, is_current: bool = False
+    target_date: datetime.date,
+    start: datetime,
+    end: datetime,
+    is_current: bool = False,
+    today: datetime.date | None = None,
 ) -> Dict[str, Any]:
     """Shape one slot the way the POS and the preview both expect.
 
@@ -510,14 +522,25 @@ def _build_slot(
     The kanban reschedule dialog posts ``date`` + ``time`` straight to the
     backend, so a business-day ``date`` there rescheduled the order a full day
     early. ``business_date`` keeps the day the slot is sold under, which is what
-    ``day_label`` is derived from - except for a slot that is running right now,
-    which is labelled by its real start so yesterday's after-midnight tail reads
-    "Today" rather than yesterday's weekday.
+    ``day_label`` is derived from - except for a slot of a business day that is
+    already over (``today`` is past ``target_date``).
+
+    Only yesterday's after-midnight tail survives filtering against the clock,
+    and every slot of it either runs now or starts today. Just past midnight on
+    a Friday grid that closes 01:30, both the running 23:00-00:30 slot and the
+    upcoming 00:30-01:30 one used to read "Friday" and sat above "Today" in both
+    pickers, and that label was saved onto the invoice. They are labelled by
+    their real start instead, never earlier than ``today``, so they read
+    "Today". ``today`` is only passed on the clock-filtered path; the timetable
+    preview renders a reference week and keeps business-day labels.
 
     ``is_current`` marks a slot that has already started but not ended. It is
     offered so staff can still book it; it is never the default.
     """
-    day_label = _get_day_label(start.date() if is_current else target_date)
+    label_date = target_date
+    if today is not None and target_date < today:
+        label_date = max(start.date(), today)
+    day_label = _get_day_label(label_date)
     time_label = f"{start.strftime('%I:%M %p')} - {end.strftime('%I:%M %p')}"
     return {
         "date": start.date().isoformat(),
@@ -569,6 +592,7 @@ def normalize_delivery_window(
     pos_profile_name: str | None,
     start: datetime | None,
     end: datetime | None = None,
+    explicit: bool = False,
 ) -> tuple[datetime | None, datetime | None, str]:
     """Snap a requested delivery window onto the profile's real slot grid.
 
@@ -583,7 +607,10 @@ def normalize_delivery_window(
     Returns ``(start, end, note)``:
 
     - ``"matched"``  — the start IS a real slot; that slot's own end is used,
-      which also repairs a missing or contradictory end.
+      which also repairs a missing or contradictory end. The slot running right
+      now only matches when ``explicit`` is set: the operator picked it on
+      purpose (the POS sends ``delivery_slot_explicit=1``), or an amendment is
+      keeping the window its order already had.
     - ``"snapped"``  — the start had passed; the next available slot is used.
     - ``"kept"``     — a future, off-grid start (manual entry) is left alone.
     - ``"unresolved"`` — no profile, no timetable or no slots left; the caller
@@ -624,11 +651,17 @@ def normalize_delivery_window(
     # Exact slot the caller asked for. Minute resolution: the POS sends whole
     # minutes and a stored Time keeps seconds, so a second-level compare would
     # miss a slot the operator really did pick.
-    # A slot that is running right now is in the list too, so a staff member who
-    # deliberately picked the current slot lands here rather than being snapped.
-    for slot_start, slot_end, _is_current in parsed:
-        if slot_start.replace(second=0, microsecond=0) == start.replace(second=0, microsecond=0):
-            return slot_start, slot_end or end, "matched"
+    # A slot that is running right now is in the list too, but its start alone
+    # cannot say whether staff chose it or the cart's auto-default simply aged
+    # into it (the app's own stale-slot refresh can fail, and a device clock can
+    # run behind). Only an explicit pick keeps it; anything else falls through
+    # and is snapped to the next slot that has not started.
+    for slot_start, slot_end, is_current in parsed:
+        if slot_start.replace(second=0, microsecond=0) != start.replace(second=0, microsecond=0):
+            continue
+        if is_current and not explicit:
+            break
+        return slot_start, slot_end or end, "matched"
 
     now = frappe.utils.now_datetime()
     if start > now:

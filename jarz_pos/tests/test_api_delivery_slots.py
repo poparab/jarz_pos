@@ -340,6 +340,119 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		self.assertTrue(slots[0]["label"].startswith("Today, "))
 		self.assertEqual(upcoming[0]["day_label"], "Today")
 
+	def _friday_slots(self, now):
+		"""The production Friday grid (14:00-01:30), filtered against ``now``."""
+		from jarz_pos.api.delivery_slots import _generate_day_slots
+
+		return _generate_day_slots(
+			target_date=datetime.date(2030, 1, 4),  # A Friday
+			opening_time=datetime.time(14, 0),
+			closing_time=datetime.time(1, 30),
+			same_day="Next Day",
+			slot_duration_minutes=90,
+			current_datetime=now,
+			last_slot_duration_minutes=60,
+			anchor_last_slot_to_closing=True,
+		)
+
+	def _with_clock(self, now, fn):
+		from unittest import mock
+		from jarz_pos.api import delivery_slots
+
+		with mock.patch.object(delivery_slots.frappe.utils, "now_datetime", return_value=now):
+			return fn()
+
+	def test_friday_night_tail_is_today_past_midnight(self):
+		"""Saturday 00:10: the running 23:00 slot and the 00:30 default are Today.
+
+		Both used to read "Friday", sat above "Today" in both pickers, and the
+		label was saved onto the invoice.
+		"""
+		now = datetime.datetime(2030, 1, 5, 0, 10)
+		slots = self._with_clock(now, lambda: self._friday_slots(now))
+
+		self.assertEqual(self._hhmm(slots), ["23:00-00:30", "00:30-01:30"])
+		self.assertEqual(self._current(slots), ["23:00-00:30"])
+		self.assertEqual([s["day_label"] for s in slots], ["Today", "Today"])
+		self.assertTrue(all(s["label"].startswith("Today, ") for s in slots))
+		# Dates and the business day are unchanged: only the label moved.
+		self.assertEqual([s["date"] for s in slots], ["2030-01-04", "2030-01-05"])
+		self.assertEqual({s["business_date"] for s in slots}, {"2030-01-04"})
+
+	def test_friday_night_tail_at_exactly_midnight(self):
+		"""00:00:00 is already Saturday: nothing of Friday's tail reads Friday."""
+		now = datetime.datetime(2030, 1, 5, 0, 0, 0)
+		friday = self._with_clock(now, lambda: self._friday_slots(now))
+		grid_a = self._with_clock(
+			now, lambda: self._today_slots(now, target=datetime.date(2030, 1, 4))
+		)
+
+		self.assertEqual(self._hhmm(friday), ["23:00-00:30", "00:30-01:30"])
+		self.assertEqual([s["day_label"] for s in friday], ["Today", "Today"])
+		# A tail slot starting exactly at midnight is upcoming, and still Today.
+		self.assertEqual(self._hhmm(grid_a), ["00:00-01:00"])
+		self.assertEqual(self._current(grid_a), [])
+		self.assertEqual(grid_a[0]["day_label"], "Today")
+
+	def test_before_midnight_the_tail_keeps_its_business_day(self):
+		"""At 23:59:59 Friday is still today; the labels are not touched."""
+		now = datetime.datetime(2030, 1, 4, 23, 59, 59)
+		slots = self._with_clock(now, lambda: self._friday_slots(now))
+
+		self.assertEqual([s["day_label"] for s in slots], ["Today", "Today"])
+
+	def test_unfiltered_slots_keep_business_day_labels(self):
+		"""The timetable preview passes no clock, so nothing is relabelled."""
+		from jarz_pos.api.delivery_slots import _build_slot
+
+		now = datetime.datetime(2030, 1, 5, 0, 10)
+		slot = self._with_clock(now, lambda: _build_slot(
+			datetime.date(2030, 1, 4),
+			datetime.datetime(2030, 1, 5, 0, 30),
+			datetime.datetime(2030, 1, 5, 1, 30),
+		))
+
+		self.assertEqual(slot["day_label"], "Friday")
+
+	def test_the_picker_never_lists_a_weekday_above_today(self):
+		"""Through the endpoint: past midnight on Saturday the list starts with Today."""
+		from types import SimpleNamespace
+		from unittest import mock
+		from jarz_pos.api import delivery_slots
+
+		config = SimpleNamespace(
+			name="TT", slot_hours=1, slot_minutes=30, has_custom_last_slot=1,
+			last_slot_hours=1, last_slot_minutes=0, anchor_last_slot_to_closing=1,
+		)
+
+		def timing(day, opening, closing):
+			return SimpleNamespace(
+				day=day, opening_time=opening, closing_time=closing, same_day="Next Day",
+				get=lambda key, default=None: "Next Day" if key == "same_day" else default,
+			)
+
+		timings = [
+			timing(day, datetime.timedelta(hours=13), datetime.timedelta(hours=1))
+			for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Saturday", "Sunday")
+		]
+		timings.append(
+			timing("Friday", datetime.timedelta(hours=14), datetime.timedelta(hours=1, minutes=30))
+		)
+
+		with mock.patch("jarz_pos.utils.validation_utils.assert_pos_profile_enabled"), \
+			mock.patch.object(delivery_slots.frappe, "get_value", return_value=config), \
+			mock.patch.object(delivery_slots.frappe, "get_all", return_value=timings), \
+			mock.patch.object(
+				delivery_slots.frappe.utils, "now_datetime",
+				return_value=datetime.datetime(2030, 1, 5, 0, 10),
+			):
+			slots = delivery_slots.get_available_delivery_slots("Test POS Profile")
+
+		labels = [s["day_label"] for s in slots]
+		self.assertEqual(labels[:3], ["Today", "Today", "Today"])
+		self.assertNotIn("Friday", labels[: labels.index("Tomorrow")])
+		self.assertTrue(slots[1]["is_default"])
+
 	def test_an_ended_day_offers_nothing(self):
 		self.assertEqual(self._today_slots(self._at(1, 0, days=1)), [])
 
@@ -439,7 +552,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		self.assertEqual(slot["time"], "00:00:00")
 		self.assertEqual(slot["business_date"], "2030-01-06")
 
-	def _normalize(self, start, end=None, slots=None, now=None):
+	def _normalize(self, start, end=None, slots=None, now=None, explicit=False):
 		"""Run normalize_delivery_window against a fixed grid and clock."""
 		from unittest import mock
 		from jarz_pos.api import delivery_slots
@@ -456,7 +569,9 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			"now_datetime",
 			return_value=now or datetime.datetime(2030, 1, 6, 22, 19, 21),
 		):
-			return delivery_slots.normalize_delivery_window("Test POS Profile", start, end)
+			return delivery_slots.normalize_delivery_window(
+				"Test POS Profile", start, end, explicit=explicit
+			)
 
 	def test_a_slot_that_has_passed_snaps_to_the_next_one(self):
 		"""The 16906 case: a cart left open submits a slot that already started."""
@@ -474,11 +589,117 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			{"datetime": "2030-01-06T22:00:00", "end_datetime": "2030-01-06T23:30:00", "is_current": True},
 			{"datetime": "2030-01-07T00:00:00", "end_datetime": "2030-01-07T01:00:00"},
 		]
-		start, end, note = self._normalize(datetime.datetime(2030, 1, 6, 22, 0), slots=grid)
+		start, end, note = self._normalize(
+			datetime.datetime(2030, 1, 6, 22, 0), slots=grid, explicit=True
+		)
 
 		self.assertEqual(note, "matched")
 		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 0))
 		self.assertEqual(end, datetime.datetime(2030, 1, 6, 23, 30))
+
+	RUNNING_GRID = [
+		{"datetime": "2030-01-06T21:00:00", "end_datetime": "2030-01-06T22:30:00", "is_current": True},
+		{"datetime": "2030-01-06T22:30:00", "end_datetime": "2030-01-07T00:00:00"},
+	]
+
+	def test_an_aged_default_on_the_running_slot_snaps_to_the_next_one(self):
+		"""Cart opened 20:50 with the 21:00 default, submitted 21:20.
+
+		The app's stale-slot refresh failed (or the device clock ran behind), so
+		the start still says 21:00. Without the explicit flag that is not a
+		choice anyone made: book the next slot, 22:30, not the running one.
+		"""
+		start, end, note = self._normalize(
+			datetime.datetime(2030, 1, 6, 21, 0), datetime.datetime(2030, 1, 6, 22, 30),
+			slots=self.RUNNING_GRID, now=datetime.datetime(2030, 1, 6, 21, 20),
+		)
+
+		self.assertEqual(note, "snapped")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 30))
+		self.assertEqual(end, datetime.datetime(2030, 1, 7, 0, 0))
+
+	def test_an_explicit_pick_of_the_running_slot_is_kept(self):
+		start, end, note = self._normalize(
+			datetime.datetime(2030, 1, 6, 21, 0), datetime.datetime(2030, 1, 6, 22, 30),
+			slots=self.RUNNING_GRID, now=datetime.datetime(2030, 1, 6, 21, 20), explicit=True,
+		)
+
+		self.assertEqual(note, "matched")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 21, 0))
+		self.assertEqual(end, datetime.datetime(2030, 1, 6, 22, 30))
+
+	def test_the_flag_is_irrelevant_for_a_slot_that_has_not_started(self):
+		for explicit in (False, True):
+			start, _end, note = self._normalize(
+				datetime.datetime(2030, 1, 6, 22, 30), slots=self.RUNNING_GRID,
+				now=datetime.datetime(2030, 1, 6, 21, 20), explicit=explicit,
+			)
+
+			self.assertEqual(note, "matched", explicit)
+			self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 30), explicit)
+
+	def test_the_explicit_flag_is_read_from_the_request(self):
+		from unittest import mock
+		from jarz_pos.services import invoice_creation
+
+		cases = [
+			(None, False), ("", False), ("0", False), (0, False), (False, False), ("false", False),
+			("1", True), (1, True), (True, True), ("true", True), (" Yes ", True),
+		]
+		for raw, expected in cases:
+			form = {} if raw is None else {"delivery_slot_explicit": raw}
+			with mock.patch.object(invoice_creation.frappe, "form_dict", form, create=True):
+				self.assertIs(invoice_creation._requested_delivery_slot_explicit(), expected, raw)
+
+	def test_invoice_creation_forwards_the_explicit_flag(self):
+		from unittest import mock
+		from jarz_pos.services import invoice_creation
+		from jarz_pos.api import delivery_slots
+
+		start = datetime.datetime(2030, 1, 6, 21, 0)
+		for raw, expected in ((None, False), ("1", True)):
+			form = {} if raw is None else {"delivery_slot_explicit": raw}
+			with mock.patch.object(invoice_creation.frappe, "form_dict", form, create=True), \
+				mock.patch.object(
+					delivery_slots, "normalize_delivery_window",
+					return_value=(start, None, "matched"),
+				) as normalize:
+				invoice_creation._normalize_delivery_window("Test POS Profile", start, mock.Mock())
+
+			self.assertIs(normalize.call_args.kwargs["explicit"], expected, raw)
+
+	def test_an_amendment_keeping_its_own_window_counts_as_explicit(self):
+		"""Editing an order's address while its slot runs must not move the order."""
+		import frappe
+		from jarz_pos.api import manager
+
+		source = frappe._dict(custom_delivery_date="2030-01-06", custom_delivery_time_from="21:00:00")
+
+		self.assertTrue(manager._is_source_delivery_start("2030-01-06 21:00:00", source))
+		self.assertTrue(manager._is_source_delivery_start("2030-01-06 21:00:37", source))
+		self.assertFalse(manager._is_source_delivery_start("2030-01-06 22:30:00", source))
+		self.assertFalse(manager._is_source_delivery_start(None, source))
+		self.assertFalse(manager._is_source_delivery_start("2030-01-06 21:00:00", frappe._dict()))
+
+		previous = getattr(frappe, "form_dict", None)
+		try:
+			frappe.form_dict = frappe._dict()
+			with manager._temporary_invoice_creation_form_context(
+				required_delivery_datetime="2030-01-06 21:00:00", delivery_slot_explicit=True,
+			):
+				self.assertEqual(frappe.form_dict.get("delivery_slot_explicit"), 1)
+			with manager._temporary_invoice_creation_form_context(
+				required_delivery_datetime="2030-01-06 22:30:00",
+			):
+				self.assertIsNone(frappe.form_dict.get("delivery_slot_explicit"))
+			# A flag the client sent with the request is carried through.
+			frappe.form_dict = frappe._dict(delivery_slot_explicit="1")
+			with manager._temporary_invoice_creation_form_context(
+				required_delivery_datetime="2030-01-06 22:30:00",
+			):
+				self.assertEqual(frappe.form_dict.get("delivery_slot_explicit"), "1")
+		finally:
+			frappe.form_dict = previous
 
 	def test_a_passed_off_grid_start_never_snaps_onto_the_running_slot(self):
 		grid = [
@@ -549,3 +770,57 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 		self.assertEqual(note, "unresolved")
 		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 0))
+
+
+class TestRescheduleRefusesEndedSlot(unittest.TestCase):
+	"""update_invoice_delivery_slot must not store an order in a finished window."""
+
+	NOW = datetime.datetime(2030, 1, 6, 22, 30)
+
+	def _assert(self, date, time, duration):
+		from unittest import mock
+		from jarz_pos.api import invoices
+
+		with mock.patch.object(invoices.frappe.utils, "now_datetime", return_value=self.NOW):
+			return invoices._assert_delivery_slot_not_ended(date, time, duration)
+
+	def test_a_slot_that_ended_is_refused(self):
+		import frappe
+
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._assert("2030-01-06", "20:30:00", 90 * 60)  # ended 22:00
+
+		self.assertIn("ended at 10:00 PM", str(ctx.exception))
+
+	def test_a_slot_ending_exactly_now_is_refused(self):
+		import frappe
+
+		with self.assertRaises(frappe.ValidationError):
+			self._assert("2030-01-06", "21:00:00", 90 * 60)  # ends 22:30
+
+	def test_the_running_slot_is_still_allowed(self):
+		self._assert("2030-01-06", "22:00:00", 90 * 60)  # ends 23:30
+
+	def test_a_future_slot_is_allowed(self):
+		self._assert("2030-01-07", "00:00:00", "3600")
+
+	def test_an_unparseable_window_is_refused(self):
+		import frappe
+
+		with self.assertRaises(frappe.ValidationError):
+			self._assert("not-a-date", "", 3600)
+
+	def test_the_endpoint_refuses_before_touching_the_invoice(self):
+		import frappe
+		from unittest import mock
+		from jarz_pos.api import invoices
+
+		with mock.patch.object(invoices.frappe.utils, "now_datetime", return_value=self.NOW), \
+			mock.patch.object(invoices.frappe, "get_doc") as get_doc:
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				invoices.update_invoice_delivery_slot(
+					"ACC-SINV-TEST", "2030-01-06", "20:30:00", 90 * 60, "Today, 08:30 PM - 10:00 PM"
+				)
+
+		get_doc.assert_not_called()
+		self.assertNotIn("Failed to update delivery slot", str(ctx.exception))

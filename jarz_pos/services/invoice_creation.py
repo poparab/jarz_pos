@@ -1097,6 +1097,19 @@ def _requested_delivery_end():
         return None
 
 
+def _requested_delivery_slot_explicit() -> bool:
+    """Whether the operator deliberately picked the slot, rather than the POS
+    pre-selecting it. Only then may a slot that is already running be booked;
+    see ``normalize_delivery_window``. Absent (older clients) means no."""
+    try:
+        raw = getattr(frappe, "form_dict", {}).get("delivery_slot_explicit")
+    except Exception:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _normalize_delivery_window(pos_profile_name, delivery_datetime, logger):
     """Return ``(start, end)`` for a delivery window a timetable really sells.
 
@@ -1113,7 +1126,10 @@ def _normalize_delivery_window(pos_profile_name, delivery_datetime, logger):
         from jarz_pos.api.delivery_slots import normalize_delivery_window
 
         start, end, note = normalize_delivery_window(
-            pos_profile_name, delivery_datetime, requested_end
+            pos_profile_name,
+            delivery_datetime,
+            requested_end,
+            explicit=_requested_delivery_slot_explicit(),
         )
     except Exception as exc:  # never fail an order over slot normalisation
         logger.error(f"Delivery slot normalisation failed: {exc}")
