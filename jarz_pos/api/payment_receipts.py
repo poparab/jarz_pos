@@ -421,14 +421,39 @@ def _allowed_pos_profiles() -> list[str]:
     return list(_current_user_allowed_profiles() or [])
 
 
-def _has_receipt_branch_access(pos_profile: str | None) -> bool:
-    """Whether the caller may write to a receipt filed against *pos_profile*.
+def _receipt_branch_scope() -> list[str]:
+    """The caller's assigned POS Profiles, cleaned: the one branch scope for receipts.
 
-    ``list_payment_receipts`` has always scoped what a user can SEE to the POS
-    Profiles they are assigned to, but the write endpoints scoped nothing — so
-    any ``Sales User`` who knew a receipt name could replace or drop another
-    branch's proof of transfer. This mirrors the scoping half of
-    :func:`_has_payment_receipt_confirm_access` so seeing and editing agree.
+    Every receipt read and write resolves the caller's branches through here,
+    so the list filter and the per-receipt check cannot come to disagree about
+    what "assigned" means again.
+
+    An EMPTY result means "assigned to no branch", never "unrestricted".
+    ``get_user_pos_profiles`` already hands ``Administrator`` every enabled
+    profile, so no legitimate all-branches user reaches here with nothing. The
+    read endpoints used to treat empty as "apply no filter", which showed a user
+    with no branch at all every receipt of every branch -- customer names,
+    invoice ids and transfer screenshots -- while the write endpoints refused
+    that same user everything.
+    """
+    seen: list[str] = []
+    for allowed in _allowed_pos_profiles():
+        profile = str(allowed or "").strip()
+        if profile and profile not in seen:
+            seen.append(profile)
+    return seen
+
+
+def _has_receipt_branch_access(pos_profile: str | None) -> bool:
+    """Whether the caller may read or write a receipt filed against *pos_profile*.
+
+    The write endpoints once scoped nothing, so any ``Sales User`` who knew a
+    receipt name could replace or drop another branch's proof of transfer; the
+    read endpoints then turned out to be looser than the writes (an explicit
+    ``pos_profile`` was trusted as given, and an empty branch list meant no
+    filter). Both now answer through this one rule, which mirrors the scoping
+    half of :func:`_has_payment_receipt_confirm_access`, so seeing and editing
+    agree.
 
     ``Administrator`` passes because ``get_user_pos_profiles`` hands the
     unrestricted user every enabled profile.
@@ -440,12 +465,7 @@ def _has_receipt_branch_access(pos_profile: str | None) -> bool:
         # refusing here would brick it for everyone.
         return True
 
-    allowed_profiles = {
-        str(allowed or "").strip()
-        for allowed in _allowed_pos_profiles()
-        if str(allowed or "").strip()
-    }
-    return profile in allowed_profiles
+    return profile in _receipt_branch_scope()
 
 
 def _ensure_receipt_branch_access(pos_profile: str | None) -> None:
@@ -539,11 +559,14 @@ def get_payment_receipt(receipt_name: str):
     which returns every non-Changed receipt of the branch with no limit and
     loads a Sales Invoice for each one — to look at a single row.
 
-    Scoping mirrors the list exactly: a user with assigned POS Profiles sees
-    only receipts filed against one of them, and an empty allowed list is
-    unrestricted, as the list treats it. Like the list it reads with
-    ``frappe.get_all``, which does NOT apply DocPerm read rules — the branch
-    check above is the only gate, the same one the list relies on.
+    Scoping is :func:`_has_receipt_branch_access`, the rule every write endpoint
+    enforces: the receipt must be filed against a POS Profile the caller is
+    assigned to. A caller assigned to no branch is refused rather than let
+    through -- this read used to copy the list's old "empty allowed list means
+    unrestricted", which handed a branchless user any receipt by name. A legacy
+    row with no ``pos_profile`` stays readable, exactly as it stays writable.
+    Like the list it reads with ``frappe.get_all``, which does NOT apply DocPerm
+    read rules, so the branch check is the only gate.
 
     Unlike the list, ``Changed`` receipts are returned: the caller asked for this
     row by name, and its ``status`` is what tells the sheet it was superseded.
@@ -571,14 +594,8 @@ def get_payment_receipt(receipt_name: str):
         )
     receipt = rows[0]
 
-    from jarz_pos.api.manager import _current_user_allowed_profiles
-
-    accessible_profiles = _current_user_allowed_profiles()
-    if accessible_profiles and receipt.get('pos_profile') not in accessible_profiles:
-        frappe.throw(
-            _("This payment receipt belongs to a branch you are not assigned to."),
-            FrappePermissionError,
-        )
+    # Refused before the invoice is loaded, so nothing of the order leaks.
+    _ensure_receipt_branch_access(receipt.get('pos_profile'))
 
     return {'success': True, 'receipt': _decorate_receipt_row(receipt)}
 
@@ -586,33 +603,46 @@ def get_payment_receipt(receipt_name: str):
 @frappe.whitelist()
 def list_payment_receipts(pos_profile: str = None, status: str = None):
     """List payment receipts filtered by POS profile and status.
-    
+
+    Branch scoping is the same rule the write endpoints enforce
+    (:func:`_has_receipt_branch_access`), because the rows carry customer names,
+    invoice ids and transfer screenshots:
+
+    * An explicit ``pos_profile`` the caller is not assigned to is refused with a
+      ``PermissionError``. It used to be trusted as given, so anyone logged in
+      could read any branch's receipts by naming the branch.
+    * With no ``pos_profile``, the list is limited to the caller's branches, and
+      a caller assigned to no branch gets an empty list. Empty used to mean "no
+      filter" -- every receipt of every branch. This case returns ``[]`` rather
+      than throwing because the Payment Receipts screen and the kanban badge
+      call it with no profile, and "nothing for you" is the true answer there.
+
     Args:
         pos_profile: Filter by POS profile (optional)
         status: Filter by status: Unconfirmed/Confirmed/Changed (optional)
-    
+
     Returns:
         list: List of payment receipt records
     """
     try:
         filters = {}
-        
+
         if pos_profile:
+            _ensure_receipt_branch_access(pos_profile)
             filters['pos_profile'] = pos_profile
-        
+
         if status:
             filters['status'] = status
         else:
             filters['status'] = ['!=', RECEIPT_STATUS_CHANGED]
-        
-        # Get accessible POS profiles for the current user
-        from jarz_pos.api.manager import _current_user_allowed_profiles
-        accessible_profiles = _current_user_allowed_profiles()
-        
-        # If pos_profile not specified, filter by accessible profiles
-        if not pos_profile and accessible_profiles:
+
+        # If pos_profile not specified, filter by the caller's own branches.
+        if not pos_profile:
+            accessible_profiles = _receipt_branch_scope()
+            if not accessible_profiles:
+                return []
             filters['pos_profile'] = ['in', accessible_profiles]
-        
+
         receipts = frappe.get_all(
             'POS Payment Receipt',
             filters=filters,
@@ -627,7 +657,11 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
         frappe.logger().info(f"Retrieved {len(receipts)} payment receipts")
         
         return receipts
-    
+
+    except FrappePermissionError:
+        # A branch refusal is a 403 and says so; the catch-all below would
+        # relabel it "Failed to list payment receipts", which reads as a bug.
+        raise
     except Exception as e:
         frappe.logger().error(f"Failed to list payment receipts: {str(e)}")
         frappe.throw(f"Failed to list payment receipts: {str(e)}")

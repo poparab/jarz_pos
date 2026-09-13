@@ -60,12 +60,27 @@ def _seconds_since(value) -> int | None:
 def list_unconfirmed_online_payment_escalations(pos_profile: str | None = None) -> dict:
     """List the unpaid online-intent orders currently past the escalation threshold.
 
-    Mirrors ``jarz_pos.api.couriers.list_unconfirmed_online_orders`` for branch
-    scoping (accessible POS Profiles only — an explicit ``pos_profile`` still has
-    to be one of them) and shares the exact filter shape
+    Shares the exact filter shape
     ``jarz_pos.tasks.escalate_unconfirmed_online_payments`` uses to decide an
     order is aging, so this list is always the set the hourly job would (or
     already did) alert on.
+
+    Branch scoping is the same rule
+    ``jarz_pos.services.delivery_handling.list_unconfirmed_online_orders``
+    enforces, on top of the manager-role gate:
+
+    * An explicit ``pos_profile`` the caller is not assigned to is refused with
+      ``BranchAccessError`` (a ``PermissionError``), before anything is queried.
+      It used to be trusted as given, so any manager could read another
+      branch's aging orders just by naming the branch.
+    * With no ``pos_profile``, the list is limited to the caller's branches, and
+      a caller assigned to no branch gets an empty ``orders`` list without a
+      query. Empty used to mean "no filter" -- every escalated order of every
+      branch.
+
+    ``Administrator`` is unaffected: ``get_user_pos_profiles`` hands the
+    unrestricted user every enabled profile, so an empty list genuinely means
+    "assigned to no branch" and never "sees everything".
 
     Returns:
         {
@@ -92,22 +107,35 @@ def list_unconfirmed_online_payment_escalations(pos_profile: str | None = None) 
     _ensure_escalation_access()
 
     from jarz_pos.api.manager import _current_user_allowed_profiles
-
-    hours = get_unconfirmed_online_payment_alert_hours()
-    cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-hours)
+    from jarz_pos.utils.access_control import BranchAccessError
 
     pos_profile = (pos_profile or "").strip()
+    accessible_profiles = _current_user_allowed_profiles() or []
+
+    # Refuse another branch before reading settings or querying anything.
+    if pos_profile and pos_profile not in accessible_profiles:
+        frappe.throw(
+            _("This order belongs to a branch you are not assigned to."),
+            BranchAccessError,
+        )
+
+    hours = get_unconfirmed_online_payment_alert_hours()
+
+    if pos_profile:
+        branch_filter: object = pos_profile
+    elif accessible_profiles:
+        branch_filter = ["in", accessible_profiles]
+    else:
+        # Assigned to no branch: nothing is theirs to see.
+        return {"success": True, "threshold_hours": hours, "orders": []}
+
+    cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-hours)
     filters: dict[str, object] = {
         "docstatus": 1,
         "custom_payment_confirmation_status": "Awaiting Payment",
         "custom_ofd_unconfirmed_since": ["<=", cutoff],
+        "custom_kanban_profile": branch_filter,
     }
-
-    accessible_profiles = _current_user_allowed_profiles() or []
-    if pos_profile:
-        filters["custom_kanban_profile"] = pos_profile
-    elif accessible_profiles:
-        filters["custom_kanban_profile"] = ["in", accessible_profiles]
 
     rows = frappe.get_all(
         "Sales Invoice",

@@ -2134,11 +2134,29 @@ def deliver_online_unconfirmed(
 def list_unconfirmed_online_orders(pos_profile: str | None = None) -> dict:
     """Endpoint logic: list submitted SIs awaiting online payment confirmation.
 
-    Scoped to the POS profiles the current user can access (same approach as
-    ``list_payment_receipts``). Joins the latest linked POS Payment Receipt for
-    the screenshot status/image and exposes a per-order ``can_confirm`` flag.
+    Joins the latest linked POS Payment Receipt for the screenshot status/image
+    and exposes a per-order ``can_confirm`` flag.
+
+    Branch scoping is the rule ``list_payment_receipts`` now enforces, because
+    every row carries a customer name, an amount and that customer's transfer
+    screenshot:
+
+    * An explicit ``pos_profile`` the caller is not assigned to is refused with
+      ``BranchAccessError`` (a ``PermissionError``), before anything is queried.
+      It used to be trusted as given, so anyone logged in could read another
+      branch's awaiting orders and receipt images just by naming the branch.
+    * With no ``pos_profile``, the list is limited to the caller's branches, and
+      a caller assigned to no branch gets an empty list. Empty used to mean "no
+      filter" -- every awaiting order of every branch. This returns rather than
+      throws because the reconciliation screen calls it with no profile, and
+      "nothing for you" is the true answer there.
+
+    ``Administrator`` is unaffected: ``get_user_pos_profiles`` hands the
+    unrestricted user every enabled profile, so an empty list genuinely means
+    "assigned to no branch" and never "sees everything".
     """
     from jarz_pos.api.manager import _current_user_allowed_profiles
+    from jarz_pos.utils.access_control import BranchAccessError
 
     pos_profile = (pos_profile or "").strip()
     filters: dict[str, object] = {
@@ -2148,9 +2166,16 @@ def list_unconfirmed_online_orders(pos_profile: str | None = None) -> dict:
 
     accessible_profiles = _current_user_allowed_profiles() or []
     if pos_profile:
+        if pos_profile not in accessible_profiles:
+            frappe.throw(
+                _("This order belongs to a branch you are not assigned to."),
+                BranchAccessError,
+            )
         filters["custom_kanban_profile"] = pos_profile
     elif accessible_profiles:
         filters["custom_kanban_profile"] = ["in", accessible_profiles]
+    else:
+        return {"success": True, "orders": []}
 
     rows = frappe.get_all(
         "Sales Invoice",

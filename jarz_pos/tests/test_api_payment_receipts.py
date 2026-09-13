@@ -573,16 +573,49 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		self.assertEqual(result["receipt"]["status"], "Changed")
 		self.assertNotIn("status", mock_frappe.get_all.call_args.kwargs["filters"])
 
-	def test_unrestricted_user_reads_any_branch(self):
+	def test_refuses_a_caller_assigned_to_no_branch(self):
+		"""Empty allowed profiles means "no branch", not "every branch".
+
+		This used to read the receipt anyway, copying the list's old rule, while
+		every write endpoint refused the same user. ``Administrator`` is not
+		affected: ``get_user_pos_profiles`` hands it every enabled profile.
+		"""
 		from jarz_pos.api.payment_receipts import get_payment_receipt
 
 		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
 				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=[]):
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=[]):
+			with self.assertRaises(FrappePermissionError) as exc:
+				get_payment_receipt("PPR-0001")
+
+		self.assertIn("branch you are not assigned to", str(exc.exception))
+		mock_frappe.get_doc.assert_not_called()
+
+	def test_a_branchless_caller_still_reads_a_legacy_receipt_with_no_profile(self):
+		from jarz_pos.api.payment_receipts import get_payment_receipt
+
+		# Same rule as the writes: a row predating ``pos_profile`` has nothing to
+		# scope against, and refusing it would brick it for everyone.
+		mock_frappe = self._frappe([_receipt_row(pos_profile="")])
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=[]):
 			result = get_payment_receipt("PPR-0001")
 
-		# An empty allowed list applies no branch filter in the list either.
+		self.assertTrue(result["success"])
+		self.assertEqual(result["receipt"]["pos_profile"], "")
+
+	def test_an_all_profiles_user_reads_any_branch(self):
+		from jarz_pos.api.payment_receipts import get_payment_receipt
+
+		# The Administrator shape: every enabled profile, not an empty list.
+		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki", "Nasr city"]):
+			result = get_payment_receipt("PPR-0001")
+
 		self.assertEqual(result["receipt"]["pos_profile"], "Nasr city")
 
 	def test_refuses_a_receipt_of_another_branch(self):
@@ -626,6 +659,91 @@ class TestGetPaymentReceipt(unittest.TestCase):
 				get_payment_receipt("   ")
 
 		mock_frappe.get_all.assert_not_called()
+
+
+class TestListPaymentReceiptsBranchScope(unittest.TestCase):
+	"""The receipts list obeys the same branch rule as the receipt writes.
+
+	It used to trust an explicit ``pos_profile`` as given -- anyone logged in
+	could read another branch's customer names, invoice ids and transfer
+	screenshots by naming the branch -- and to treat an empty allowed list as
+	"no filter", so a user assigned to no branch saw every receipt there was.
+	"""
+
+	def _frappe(self, rows=None):
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_all.return_value = rows if rows is not None else [_receipt_row()]
+		mock_frappe.get_doc.return_value = _FakeInvoiceDoc()
+		return mock_frappe
+
+	def _list(self, mock_frappe, allowed, **kwargs):
+		from jarz_pos.api.payment_receipts import list_payment_receipts
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False), \
+				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=allowed):
+			return list_payment_receipts(**kwargs)
+
+	def test_refuses_an_explicit_branch_the_caller_is_not_assigned_to(self):
+		mock_frappe = self._frappe()
+		with self.assertRaises(FrappePermissionError) as exc:
+			self._list(mock_frappe, ["Dokki"], pos_profile="Nasr city")
+
+		# A 403 with the write endpoints' wording, not the catch-all's
+		# "Failed to list payment receipts".
+		self.assertIn("branch you are not assigned to", str(exc.exception))
+		mock_frappe.get_all.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
+
+	def test_a_branchless_caller_naming_a_branch_is_refused(self):
+		mock_frappe = self._frappe()
+		with self.assertRaises(FrappePermissionError):
+			self._list(mock_frappe, [], pos_profile="Dokki")
+
+		mock_frappe.get_all.assert_not_called()
+
+	def test_a_caller_assigned_to_no_branch_gets_an_empty_list(self):
+		# Not a throw: the receipts screen and the kanban badge call this with
+		# no profile, and "nothing for you" is the true answer.
+		mock_frappe = self._frappe()
+		result = self._list(mock_frappe, [])
+
+		self.assertEqual(result, [])
+		mock_frappe.get_all.assert_not_called()
+		mock_frappe.throw.assert_not_called()
+
+	def test_an_assigned_user_is_scoped_to_their_branches(self):
+		mock_frappe = self._frappe()
+		result = self._list(mock_frappe, ["Dokki"])
+
+		self.assertEqual(len(result), 1)
+		filters = mock_frappe.get_all.call_args.kwargs["filters"]
+		self.assertEqual(filters["pos_profile"], ["in", ["Dokki"]])
+		self.assertEqual(filters["status"], ["!=", "Changed"])
+		self.assertEqual(mock_frappe.get_all.call_args.kwargs["order_by"], "creation desc")
+
+		mock_frappe = self._frappe()
+		self._list(mock_frappe, ["Dokki"], pos_profile="Dokki", status="Confirmed")
+		filters = mock_frappe.get_all.call_args.kwargs["filters"]
+		self.assertEqual(filters["pos_profile"], "Dokki")
+		self.assertEqual(filters["status"], "Confirmed")
+
+	def test_an_all_profiles_user_lists_every_branch(self):
+		# The Administrator shape: get_user_pos_profiles returns every enabled
+		# profile, so the unrestricted user never depends on "empty = all".
+		everything = ["Dokki", "Nasr city"]
+
+		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
+		result = self._list(mock_frappe, everything, pos_profile="Nasr city")
+		self.assertEqual(result[0]["pos_profile"], "Nasr city")
+
+		mock_frappe = self._frappe()
+		self._list(mock_frappe, everything)
+		self.assertEqual(
+			mock_frappe.get_all.call_args.kwargs["filters"]["pos_profile"],
+			["in", everything],
+		)
 
 
 class TestConfirmOnlinePaymentGate(unittest.TestCase):

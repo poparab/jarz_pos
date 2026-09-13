@@ -190,7 +190,12 @@ def deliver_credit_on_account(invoice_name: str, pos_profile: str, party_type: s
 
 @frappe.whitelist()  # type: ignore[attr-defined]
 def list_unconfirmed_online_orders(pos_profile: str | None = None):
-    """List submitted orders awaiting online payment confirmation (scoped to accessible profiles)."""
+    """List submitted orders awaiting online payment confirmation.
+
+    Branch scoping lives in the service, not here: a ``pos_profile`` the caller
+    is not assigned to raises ``BranchAccessError``, and a caller assigned to no
+    branch gets an empty list (see ``services.delivery_handling``).
+    """
     return _list_unconfirmed_online_orders(pos_profile)
 
 

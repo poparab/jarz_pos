@@ -3,7 +3,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def _raise_throw(message, *args, **kwargs):
@@ -549,6 +549,123 @@ class TestConfirmOnlinePayment(unittest.TestCase):
         self.assertEqual(result["payment_confirmation_status"], "Payment Confirmed")
         module._create_payment_entry.assert_not_called()
         module._confirm_receipt_record.assert_not_called()
+
+
+def _raise_with_exc(message, exc=None, *args, **kwargs):
+    """``frappe.throw`` that keeps the exception class.
+
+    The shared stub's ``_raise_throw`` raises a bare ``Exception`` whatever class
+    was passed, so a branch refusal would be indistinguishable from any other
+    failure. The scoping tests below must prove it is a PermissionError.
+    """
+    if isinstance(exc, type) and issubclass(exc, BaseException):
+        raise exc(message)
+    raise Exception(message)
+
+
+class TestListUnconfirmedOnlineOrdersBranchScope(unittest.TestCase):
+    """list_unconfirmed_online_orders: the receipt-list branch rule.
+
+    The rows carry customer names, amounts and transfer screenshots. An explicit
+    ``pos_profile`` used to be trusted as given, and a caller assigned to no
+    branch got an unfiltered query -- every branch's awaiting orders.
+    """
+
+    _ROW = {
+        "name": "INV-AWAIT-001",
+        "customer": "CUST-1",
+        "customer_name": "Jarz Test Customer",
+        "grand_total": 150.0,
+        "outstanding_amount": 150.0,
+        "custom_payment_method": "Instapay",
+        "custom_ofd_unconfirmed_since": "2026-09-13 09:00:00",
+        "custom_courier_party_type": "Employee",
+        "custom_courier_party": "EMP-1",
+        "pos_profile": "Dokki",
+        "custom_kanban_profile": "Dokki",
+        "woo_order_id": None,
+    }
+
+    def _module(self):
+        module, stub_frappe = _import_delivery_handling()
+        stub_frappe.throw = MagicMock(side_effect=_raise_with_exc)
+        module._latest_active_payment_receipt = MagicMock(return_value={
+            "name": "PPR-1",
+            "status": "Unconfirmed",
+            "receipt_image_url": "/files/receipt.png",
+        })
+        module._resolve_party_display_name = MagicMock(return_value="Courier One")
+        module._seconds_since_datetime = MagicMock(return_value=60)
+        module._has_payment_receipt_confirm_access = MagicMock(return_value=True)
+        module.normalize_woo_order_id = MagicMock(return_value=None)
+        return module, stub_frappe
+
+    def test_explicit_profile_of_another_branch_is_refused(self):
+        from jarz_pos.utils.access_control import BranchAccessError
+
+        module, stub_frappe = self._module()
+        stub_frappe.get_all = MagicMock(return_value=[dict(self._ROW)])
+
+        with patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+            with self.assertRaises(BranchAccessError) as exc:
+                module.list_unconfirmed_online_orders(pos_profile="Nasr city")
+
+        self.assertIn("branch you are not assigned to", str(exc.exception))
+        # Refused before the query: nothing of the other branch is read.
+        stub_frappe.get_all.assert_not_called()
+        module._latest_active_payment_receipt.assert_not_called()
+
+    def test_explicit_profile_is_refused_for_a_branchless_caller(self):
+        from jarz_pos.utils.access_control import BranchAccessError
+
+        module, stub_frappe = self._module()
+
+        with patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=[]):
+            with self.assertRaises(BranchAccessError):
+                module.list_unconfirmed_online_orders(pos_profile="Dokki")
+
+        stub_frappe.get_all.assert_not_called()
+
+    def test_branchless_caller_without_profile_gets_empty_list(self):
+        module, stub_frappe = self._module()
+        stub_frappe.get_all = MagicMock(return_value=[dict(self._ROW)])
+
+        with patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=[]):
+            result = module.list_unconfirmed_online_orders()
+
+        self.assertEqual(result, {"success": True, "orders": []})
+        # No unfiltered query is issued at all.
+        stub_frappe.get_all.assert_not_called()
+        module._latest_active_payment_receipt.assert_not_called()
+
+    def test_assigned_user_without_profile_is_scoped_to_their_branches(self):
+        module, stub_frappe = self._module()
+        stub_frappe.get_all = MagicMock(return_value=[dict(self._ROW)])
+
+        with patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki", "Nasr city"]):
+            result = module.list_unconfirmed_online_orders()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(result["orders"]), 1)
+        order = result["orders"][0]
+        self.assertEqual(order["invoice"], "INV-AWAIT-001")
+        self.assertEqual(order["receipt_name"], "PPR-1")
+        self.assertEqual(order["receipt_image_url"], "/files/receipt.png")
+        self.assertTrue(order["can_confirm"])
+        _, kwargs = stub_frappe.get_all.call_args
+        self.assertEqual(kwargs["filters"]["custom_kanban_profile"], ["in", ["Dokki", "Nasr city"]])
+        self.assertEqual(kwargs["filters"]["custom_payment_confirmation_status"], "Awaiting Payment")
+
+    def test_assigned_user_explicit_own_profile_narrows_filter(self):
+        module, stub_frappe = self._module()
+        stub_frappe.get_all = MagicMock(return_value=[dict(self._ROW)])
+
+        with patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki", "Nasr city"]):
+            result = module.list_unconfirmed_online_orders(pos_profile=" Dokki ")
+
+        self.assertEqual(len(result["orders"]), 1)
+        _, kwargs = stub_frappe.get_all.call_args
+        self.assertEqual(kwargs["filters"]["custom_kanban_profile"], "Dokki")
 
 
 class TestUnpaidOnlineCollectionChange(unittest.TestCase):

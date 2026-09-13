@@ -10,6 +10,13 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
+def _raise_frappe(message, exc=None, title=None):
+	"""Stand-in for ``frappe.throw`` on a mocked module: raise the requested class."""
+	if exc and isinstance(exc, type) and issubclass(exc, Exception):
+		raise exc(message)
+	raise Exception(message)
+
+
 class TestEnsureEscalationAccess(unittest.TestCase):
 	"""Role gate: admin / line-manager tier only, mirroring the confirm action
 	on the same InstaPay Reconciliation screen."""
@@ -136,6 +143,44 @@ class TestListUnconfirmedOnlinePaymentEscalations(unittest.TestCase):
 		self.assertEqual(result.get("orders"), [])
 		_, kwargs = mock_frappe.get_all.call_args
 		self.assertEqual(kwargs["filters"]["custom_kanban_profile"], "Dokki")
+
+	def test_explicit_pos_profile_of_another_branch_is_refused(self):
+		"""Naming a branch the caller is not assigned to used to be trusted as given."""
+		from jarz_pos.api.escalations import list_unconfirmed_online_payment_escalations
+		from jarz_pos.utils.access_control import BranchAccessError
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
+		mock_frappe.throw.side_effect = _raise_frappe
+		threshold = MagicMock(return_value=4)
+
+		with patch("jarz_pos.api.escalations.frappe", mock_frappe), \
+				patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", threshold), \
+				patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+			with self.assertRaises(BranchAccessError) as exc:
+				list_unconfirmed_online_payment_escalations(pos_profile="Dokki")
+
+		self.assertIn("branch you are not assigned to", str(exc.exception))
+		# Refused before anything is read: no query, not even the settings lookup.
+		mock_frappe.get_all.assert_not_called()
+		threshold.assert_not_called()
+
+	def test_branchless_caller_gets_empty_list_without_query(self):
+		"""Empty assigned profiles means "no branch", not "every branch"."""
+		from jarz_pos.api.escalations import list_unconfirmed_online_payment_escalations
+
+		mock_frappe = MagicMock()
+		mock_frappe.get_roles.return_value = ["JARZ Manager"]
+		mock_frappe.throw.side_effect = _raise_frappe
+
+		with patch("jarz_pos.api.escalations.frappe", mock_frappe), \
+				patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", return_value=4), \
+				patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=[]):
+			result = list_unconfirmed_online_payment_escalations()
+
+		self.assertEqual(result, {"success": True, "threshold_hours": 4, "orders": []})
+		mock_frappe.get_all.assert_not_called()
+		mock_frappe.throw.assert_not_called()
 
 
 class TestSharedThresholdHelper(unittest.TestCase):
