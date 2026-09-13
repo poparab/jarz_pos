@@ -681,8 +681,10 @@ def normalize_delivery_window(
     # A slot that is running right now is in the list too, but its start alone
     # cannot say whether staff chose it or the cart's auto-default simply aged
     # into it (the app's own stale-slot refresh can fail, and a device clock can
-    # run behind). Only an explicit pick keeps it; anything else falls through
-    # and is snapped to the next slot that has not started.
+    # run behind). ``_keeps_running_slot`` decides: an operator pick, a client
+    # too old to say, or a pre-selection still within the grace keeps it. A
+    # pre-selection past the grace falls through and is snapped to the next
+    # slot that has not started - unless there is none (see below).
     running_match: tuple[datetime, datetime | None] | None = None
     for slot_start, slot_end, is_current in parsed:
         if slot_start.replace(second=0, microsecond=0) != start.replace(second=0, microsecond=0):
@@ -699,8 +701,9 @@ def normalize_delivery_window(
             return start, end, "kept"
         return start, None, "kept"
 
-    # Snap to the next slot that has not started - never to the running one,
-    # which is only ever an explicit choice.
+    # Snap to the next slot that has not started - never onto the running one
+    # from some other passed start; a start already IN the running slot was
+    # decided above and only reaches here past its grace.
     upcoming = [(s, e) for s, e, is_current in parsed if not is_current]
     if not upcoming and running_match:
         # Nothing later to move it to. The running slot is still a real window,
