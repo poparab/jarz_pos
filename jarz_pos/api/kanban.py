@@ -605,7 +605,11 @@ def _get_collection_change_map(invoice_names: List[str]) -> Dict[str, str]:
             "Courier Transaction",
             filters={
                 "reference_invoice": ["in", invoice_names],
-                "payment_mode": ["not in", [None, ""]],
+                # "is set", not "not in (None, '')": Frappe compiles that to
+                # IFNULL(payment_mode,'') NOT IN (NULL,''), which is never true, so
+                # this whole signal returned nothing on production and every
+                # post-dispatch switch to InstaPay/Wallet badged "Cash".
+                "payment_mode": ["is", "set"],
                 "notes": ["like", "%Payment collection changed on%"],
             },
             fields=["reference_invoice", "payment_mode", "modified"],
