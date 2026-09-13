@@ -99,6 +99,39 @@ def _get_cashlike_accounts(company: str) -> List[Dict[str, Any]]:
             r["category"] = "mobile"
             accounts.append(r)
             seen.add(r["name"])
+
+    # Payment-gateway settlement accounts, by name. Kashier's ledger is a plain
+    # "Current Asset" leaf (not Cash/Bank typed, no Mobile/Wallet in its name),
+    # so no rule above picks it up and managers could not move its balance.
+    # Matched by account name only: the Woo-owned `Company.custom_kashier_account`
+    # field is deliberately not read (domain isolation). Restricted to enabled
+    # Asset leaves so an expense such as "Kashier Fees" never becomes a transfer
+    # endpoint.
+    gateway_rows = frappe.get_all(
+        "Account",
+        filters={"company": company, "is_group": 0, "disabled": 0, "root_type": "Asset"},
+        or_filters=[
+            ["Account", "account_name", "like", "%Kashier%"],
+            ["Account", "name", "like", "%Kashier%"],
+        ],
+        fields=["name", "account_name", "account_type", "company", "is_group", "disabled"],
+        order_by="account_name asc",
+    )
+    for r in gateway_rows:
+        # LIKE is collation-dependent; enforce the case-insensitive match and the
+        # leaf/enabled filters here too so the rule never depends on the backend.
+        haystack = f"{r.get('account_name') or ''} {r.get('name') or ''}".lower()
+        if "kashier" not in haystack or cint(r.get("is_group")) or cint(r.get("disabled")):
+            continue
+        if r["name"] not in seen:
+            accounts.append({
+                "name": r["name"],
+                "account_name": r.get("account_name"),
+                "account_type": r.get("account_type"),
+                "company": r.get("company"),
+                "category": "gateway",
+            })
+            seen.add(r["name"])
     return accounts
 
 
@@ -156,6 +189,7 @@ def list_accounts(company: Optional[str] = None, as_of: Optional[str] = None) ->
 
     Includes:
       - Cash, Bank, Mobile Wallet accounts (by type and name heuristic)
+      - Payment-gateway accounts named "Kashier" (category "gateway")
       - Accounts named exactly like POS Profiles
       - Accounts named exactly like Sales Partners
     """
@@ -193,8 +227,9 @@ def list_accounts(company: Optional[str] = None, as_of: Optional[str] = None) ->
             "cash": 0,
             "bank": 1,
             "mobile": 2,
-            "pos_profile": 3,
-            "sales_partner": 4,
+            "gateway": 3,
+            "pos_profile": 4,
+            "sales_partner": 5,
         }.get(cat, 9)
         return (cat_priority, (x.get("label") or x.get("account") or ""))
     out.sort(key=_sort_key)
