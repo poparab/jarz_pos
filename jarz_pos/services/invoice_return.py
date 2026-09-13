@@ -64,6 +64,7 @@ from jarz_pos.services.delivery_handling import (
     _tag_journal_entry,
     update_submitted_sales_invoice_fields,
 )
+from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 # ── Journal Entry dedup types ────────────────────────────────────────────────
@@ -331,6 +332,35 @@ def _money_state(inv: Any) -> str:
         return MONEY_COURIER_SETTLED
 
     return MONEY_PREPAID
+
+
+def _employee_credit_return_blocked(inv: Any, money_state: str) -> bool:
+    """True when a customer-credit return would corrupt an employee's balance.
+
+    A PAID Employee order (cash at the counter, or settled later) posts no AR
+    knock-off on return — the money is already in the branch — so a
+    ``customer_credit`` return leaves the credit note sitting at a NEGATIVE
+    outstanding on the staff Customer. The two readers of staff debt disagree
+    about that row:
+
+    * ``api/manager.get_employee_ledger`` sums ``outstanding_amount != 0``, so it
+      shows the employee as owed money back;
+    * ``api/monthly_expenses._load_employee_orders`` deducts only
+      ``outstanding_amount > 0``, so salary never pays it back.
+
+    The employee would be told they are in credit and never receive it. Refusing
+    that one combination is the narrowest fix: the operator refunds from the till
+    instead (``refund_now``), which zeroes the credit note. An UNPAID (credit)
+    Employee order is unaffected — its knock-off JE already brings both
+    outstandings to zero whichever refund mode is chosen.
+
+    A zero-value order has nothing to strand, so it is not blocked.
+    """
+    if str(inv.get("custom_order_purpose") or "").strip() != EMPLOYEE_ORDER_PURPOSE:
+        return False
+    if flt(inv.get("grand_total")) <= _TOL:
+        return False
+    return money_state in {MONEY_PREPAID, MONEY_COURIER_SETTLED}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1284,6 +1314,17 @@ def run_invoice_return(
         branch = get_invoice_branch(inv)
         transactions = _unsettled_courier_transactions(invoice_id)
         courier = next((t for t in transactions if flt(t.get("amount")) > _TOL), None)
+
+        if refund_mode == REFUND_CUSTOMER_CREDIT and _employee_credit_return_blocked(inv, money_state):
+            return {
+                "success": False,
+                "error": _(
+                    "This employee order was already paid, so its return cannot be kept "
+                    "as credit — staff credit is never paid back through salary. Choose "
+                    "Refund Now to hand the money back from the branch till."
+                ),
+                "return_block_code": "employee_credit_not_supported",
+            }
 
         if refund_mode == REFUND_NOW:
             if money_state not in {MONEY_PREPAID, MONEY_COURIER_SETTLED}:

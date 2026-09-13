@@ -10,7 +10,7 @@ import json
 import traceback
 from datetime import timedelta
 from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
-from jarz_pos.constants import ROLES
+from jarz_pos.constants import PAYMENT_MODES, ROLES
 from jarz_pos.services import delivery_promotions as _delivery_promotions
 from jarz_pos.services import promo_codes as _promo_codes
 from jarz_pos.services import commercial_policy as _commercial_policy
@@ -50,9 +50,12 @@ from jarz_pos.utils.account_utils import (
     # and `jarz_pos.page.custom_pos.custom_pos` re-exports the real one separately.
     get_item_price,
     get_company_receivable_account,
+    get_pos_cash_account,
     ensure_partner_receivable_subaccount,
     resolve_online_partner_paid_to,
 )
+from jarz_pos.utils.access_control import ensure_open_shift
+from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
 
 # Territory / branch exception logging lives in its own service so a logging
 # failure can never reach invoice creation.  Imported defensively (same pattern as
@@ -1469,6 +1472,268 @@ def _apply_credit_terms(invoice_doc, customer_doc, logger, amended_from: str | N
     print(f"   🧾 Credit terms frozen: {days} day(s), due {invoice_doc.due_date}")
 
 
+# ---------------------------------------------------------------------------
+# Employee orders: on the employee's account (credit) or paid at the counter (cash)
+#
+# An Employee order is a staff member buying jars at their own branch. Until now
+# it had exactly one money shape: the invoice stays an UNPAID receivable on the
+# staff Customer and is deducted from salary (``api/manager.get_employee_ledger``
+# counts it, ``api/monthly_expenses._load_employee_orders`` deducts it). That is
+# still the default and is still byte-identical.
+#
+# The second shape is "the employee paid cash at the counter". That money is in
+# the branch drawer the moment the jars are handed over, so it has to be booked
+# into THAT branch's till in the same request — otherwise the shift closes short
+# by exactly the amount the employee paid, and the salary board still deducts an
+# order that was already settled.
+#
+# Why a separate request key and NOT ``payment_method``:
+#   * builds shipped 2026-08-29..2026-09-13 send ``payment_method=Cash`` from a
+#     dialog on CREDIT Employee orders, and production already holds unpaid
+#     Employee invoices stamped Cash. Keying the settlement on that value would
+#     turn every one of those clients' credit orders into a till receipt nobody
+#     handed over.
+#   * ``payment_method=Credit`` is the B2B on-account path (``_apply_credit_terms``,
+#     the credit ledger and its limits), which staff orders must never enter.
+# So ``custom_payment_method`` is only ever a CONSEQUENCE of the choice (cash
+# stamps "Cash" so the board and receipt agree), never its source.
+# ---------------------------------------------------------------------------
+
+#: Default: the order stays an unpaid receivable deducted from salary.
+EMPLOYEE_PAYMENT_CREDIT = "credit"
+#: The employee pays at the counter; the invoice is settled into the branch till.
+EMPLOYEE_PAYMENT_CASH = "cash"
+EMPLOYEE_PAYMENT_CHOICES = (EMPLOYEE_PAYMENT_CREDIT, EMPLOYEE_PAYMENT_CASH)
+
+#: Audit marker for a counter-paid Employee order. Deliberately NOT in
+#: ``_REMARKS_MIRRORED_TAGS``: nothing reads it out of ``remarks``, so it lives in
+#: ``custom_pos_audit_markers`` only (no new Sales Invoice column — that table is
+#: at the MariaDB row-size limit).
+EMPLOYEE_PAYMENT_MARKER = "[EMPLOYEE PAYMENT]"
+
+#: Currency tolerance for "nothing left to pay", same half-piastre as the credit gate.
+_EMPLOYEE_CASH_TOLERANCE = 0.005
+
+
+def _is_employee_purpose(policy_decision) -> bool:
+    """True only when the RESOLVED order purpose is exactly the Employee purpose.
+
+    ``isinstance`` rather than truthiness so a mocked decision can never pass for
+    an Employee order by stringifying into something that happens to compare.
+    """
+    purpose = getattr(policy_decision, "order_purpose", None)
+    return isinstance(purpose, str) and purpose.strip() == EMPLOYEE_ORDER_PURPOSE
+
+
+def _parse_employee_payment(employee_payment) -> str:
+    """Fold the request value to ``"credit"`` / ``"cash"``, refusing anything else.
+
+    Missing or blank means credit, because credit is what every client that
+    predates this key has always got. An unknown value is REFUSED rather than
+    defaulted: silently treating a typo as credit would leave cash the employee
+    really paid out of the till count.
+    """
+    if employee_payment is None:
+        return EMPLOYEE_PAYMENT_CREDIT
+    value = str(employee_payment).strip().lower()
+    if not value:
+        return EMPLOYEE_PAYMENT_CREDIT
+    if value not in EMPLOYEE_PAYMENT_CHOICES:
+        frappe.throw(
+            f"Invalid employee_payment: {employee_payment}. "
+            f"Must be one of: {', '.join(EMPLOYEE_PAYMENT_CHOICES)}"
+        )
+    return value
+
+
+def _normalize_employee_payment(
+    employee_payment, policy_decision, payment_method, payment_type=None
+) -> tuple[str, str | None]:
+    """Validate the employee payment choice and return ``(choice, payment_method)``.
+
+    Cash is refused, loudly, in every shape where it cannot mean "an employee
+    paid this branch's till for their own order":
+
+    * the resolved purpose is not Employee — a retail customer's cash is settled
+      by the normal dispatch/pay flows, never pre-booked at creation;
+    * ``payment_method`` names another method (Instapay, Credit, …) — the two
+      would contradict each other about where the money is;
+    * ``payment_type`` is ``online`` — that path settles the invoice into a sales
+      partner's receivable, and a "cash" order whose payment went to a partner is
+      two stories about one invoice.
+
+    For cash the returned ``payment_method`` is forced to ``Cash`` so
+    ``custom_payment_method`` agrees with the ledger the money lands in. Credit
+    hands ``payment_method`` back untouched.
+    """
+    choice = _parse_employee_payment(employee_payment)
+    if choice != EMPLOYEE_PAYMENT_CASH:
+        return choice, payment_method
+
+    if not _is_employee_purpose(policy_decision):
+        frappe.throw(
+            "employee_payment=cash is only allowed on Employee orders "
+            f"(order purpose is '{getattr(policy_decision, 'order_purpose', None) or 'Standard'}')."
+        )
+    method = str(payment_method or "").strip()
+    if method and method != PAYMENT_MODES.CASH:
+        frappe.throw(
+            "employee_payment=cash cannot be combined with payment_method "
+            f"'{payment_method}'. Send payment_method Cash or leave it empty."
+        )
+    if str(payment_type or "").strip().lower() == "online":
+        frappe.throw(
+            "employee_payment=cash cannot be combined with payment_type 'online'."
+        )
+    return choice, PAYMENT_MODES.CASH
+
+
+def _ensure_employee_cash_can_be_taken(pos_profile_name: str, company: str) -> str:
+    """Refuse a counter-paid Employee order BEFORE anything is created.
+
+    Runs before insert so a branch that cannot receive the money leaves no
+    invoice behind:
+
+    * ``ensure_open_shift`` — the same "is this branch open?" gate every other
+      cash movement uses (``api/invoices.pay_invoice``); it raises
+      ``ShiftRequiredError`` so the client can route to Start Shift.
+    * ``get_pos_cash_account`` — the till the Payment Entry will pay into. It
+      throws when the branch has no Cash In Hand ledger, and resolving it here
+      is what turns that into a refusal instead of a submitted invoice with no
+      payment.
+
+    Returns the till account.
+    """
+    ensure_open_shift(pos_profile_name, action_label="taking an employee's cash payment")
+    return get_pos_cash_account(pos_profile_name, company)
+
+
+def _find_submitted_receive_payment_entry(invoice_name: str) -> str | None:
+    """The submitted Receive Payment Entry already allocated to this invoice.
+
+    Same lookup ``api/invoices.pay_invoice`` does for idempotency — kept here
+    rather than imported because a service must not import an api module.
+    """
+    ref_parents = frappe.get_all(
+        "Payment Entry Reference",
+        filters={"reference_doctype": "Sales Invoice", "reference_name": invoice_name},
+        pluck="parent",
+    ) or []
+    if not ref_parents:
+        return None
+    rows = frappe.get_all(
+        "Payment Entry",
+        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+        fields=["name"],
+        order_by="creation asc",
+        limit=1,
+    ) or []
+    return rows[0].get("name") if rows else None
+
+
+def _register_employee_counter_cash_payment(invoice_doc, branch: str, logger) -> str | None:
+    """Settle a counter-paid Employee order into the branch till.
+
+    Called after submit and BEFORE ``fulfil_at_branch``: money in before the
+    goods are handed over, the same order pickups follow. Deliberately NOT
+    wrapped in a swallowing ``try`` by the caller — if the money cannot be
+    booked, the whole request must roll back rather than leave a "cash" order
+    sitting on the employee's salary as debt while the drawer holds the cash.
+
+    Returns the Payment Entry name, or ``None`` for a zero-total order.
+
+    GL (a 150 EGP order at branch "Nasr City")::
+
+        Sales Invoice   DR Debtors (party: staff Customer)  150
+                        CR Sales                             150
+        Payment Entry   DR Nasr City - J (Cash In Hand)     150
+                        CR Debtors (party: staff Customer)  150
+
+    **Posting date = the invoice's posting date.** A POS invoice is always
+    posted "now" (``set_invoice_fields``), so today in practice; tying the
+    receipt to the invoice keeps the pair on one day even across midnight. The
+    shift count does not read posting_date at all — ``api/shift`` buckets till
+    GL rows by ``creation`` — so the receipt counts in the shift that is open
+    right now, which is the shift whose drawer took the cash.
+    """
+    invoice_name = invoice_doc.name
+    company = invoice_doc.company
+
+    # Idempotent, exactly like pay_invoice: a retried request, or a manager who
+    # already took the payment, must not book the same cash twice.
+    existing = _find_submitted_receive_payment_entry(invoice_name)
+    if existing:
+        print(f"   ♻️ Employee cash payment already recorded: {existing}")
+        return existing
+
+    # The DB, not the in-memory document: submit and its hooks may have moved it.
+    try:
+        outstanding = float(
+            frappe.db.get_value("Sales Invoice", invoice_name, "outstanding_amount") or 0
+        )
+    except (TypeError, ValueError):
+        outstanding = 0.0
+    if outstanding <= _EMPLOYEE_CASH_TOLERANCE:
+        print("   ℹ️ Employee cash order has nothing outstanding – no Payment Entry")
+        return None
+
+    till = get_pos_cash_account(branch, company)
+    receivable = getattr(invoice_doc, "debit_to", None) or get_company_receivable_account(company)
+    posting_date = getattr(invoice_doc, "posting_date", None) or frappe.utils.today()
+
+    try:
+        pe = frappe.new_doc("Payment Entry")
+        pe.payment_type = "Receive"
+        pe.company = company
+        pe.posting_date = posting_date
+        pe.mode_of_payment = PAYMENT_MODES.CASH
+        pe.party_type = "Customer"
+        pe.party = invoice_doc.customer
+        pe.paid_from = receivable
+        pe.party_account = receivable
+        pe.paid_to = till
+        pe.paid_amount = outstanding
+        pe.received_amount = outstanding
+        pe.reference_no = f"EMP-CASH-{invoice_name}"
+        pe.reference_date = posting_date
+        # Branch attribution, same guarded write as the partner cash helper in
+        # api/kanban: the field is custom and may not exist on every site.
+        try:
+            if frappe.get_meta("Payment Entry").get_field("custom_kanban_profile"):
+                pe.custom_kanban_profile = branch
+        except Exception:
+            pass
+        pe.append("references", {
+            "reference_doctype": "Sales Invoice",
+            "reference_name": invoice_name,
+            "due_date": getattr(invoice_doc, "due_date", None),
+            "total_amount": float(getattr(invoice_doc, "grand_total", 0) or 0),
+            "outstanding_amount": outstanding,
+            "allocated_amount": outstanding,
+        })
+        pe.flags.ignore_permissions = True
+        try:
+            pe.set_missing_values()
+        except AttributeError:
+            if not getattr(pe, "party_account", None):
+                pe.party_account = receivable
+        pe.insert(ignore_permissions=True)
+        pe.submit()
+    except Exception as pe_err:
+        detail = _exception_detail(pe_err)
+        logger.warning(  # pre-throw: see _exception_detail note on log levels
+            f"Employee cash payment failed for {invoice_name} into {till}: {detail}"
+        )
+        frappe.throw(
+            f"Could not record the employee's cash payment for {invoice_name} "
+            f"into {till}: {detail}"
+        )
+
+    print(f"   💵 Employee cash payment recorded: {pe.name} → {till} ({outstanding})")
+    logger.info(f"Employee cash Payment Entry {pe.name} for {invoice_name} into {till}")
+    return pe.name
+
+
 @frappe.whitelist()
 def create_pos_invoice(
     cart_json,
@@ -1492,6 +1757,7 @@ def create_pos_invoice(
     policy_reason: str | None = None,
     promo_codes=None,
     channel: str = "flutter",
+    employee_payment: str | None = None,
 ):
     """
     Create POS Sales Invoice using Frappe best practices with comprehensive logging
@@ -1502,9 +1768,16 @@ def create_pos_invoice(
     - Document validation before save/submit
     - Handle delivery time slot for scheduled deliveries
     - Proper field setting in correct order
-    
+
     Args:
         payment_method: Payment method - Cash, Instapay, or Mobile Wallet
+        employee_payment: Employee orders only. ``"credit"`` (default; the order
+            stays an unpaid receivable deducted from salary) or ``"cash"`` (the
+            employee pays at the counter and the invoice is settled into the
+            branch till before the goods are handed over). Validated HERE, not
+            only in ``api/invoices``, because this function is whitelisted too.
+            See the "Employee orders" block above for why this is not keyed on
+            ``payment_method``.
     """
 
     # Frappe best practice: Create logger for this module
@@ -1610,6 +1883,15 @@ def create_pos_invoice(
 
         # Block B2B-Sales-Rep-only accounts from placing Standard (B2C) retail orders.
         _ensure_can_place_standard_order(policy_decision.order_purpose)
+
+        # STEP 3.6: Employee order payment choice (credit | cash). Needs the RESOLVED
+        # purpose, so it cannot run earlier; it writes nothing, so a refusal here
+        # leaves no trace. Cash forces payment_method to "Cash" so STEP 6.3 stamps it.
+        employee_payment, payment_method = _normalize_employee_payment(
+            employee_payment, policy_decision, payment_method, payment_type=payment_type
+        )
+        is_employee_order = _is_employee_purpose(policy_decision)
+        is_employee_cash = employee_payment == EMPLOYEE_PAYMENT_CASH
 
         # STEP 4: Item and Bundle Processing
         print("\n4️⃣ ITEM AND BUNDLE PROCESSING:")
@@ -1846,6 +2128,12 @@ def create_pos_invoice(
         elif policy_decision.reason:
             # Reason supplied without a matched policy (e.g. Standard) — keep for audit.
             invoice_doc.custom_policy_reason = policy_decision.reason
+        if is_employee_cash:
+            # Same marker style as [ORDER PURPOSE]; the settlement itself is the
+            # Payment Entry posted after submit, this only says why it exists.
+            _append_audit_marker(
+                invoice_doc, f"{EMPLOYEE_PAYMENT_MARKER} {PAYMENT_MODES.CASH}"
+            )
 
         # Ensure custom_kanban_profile mirrors POS profile at creation time (defensive in addition to hook)
         try:
@@ -2147,6 +2435,19 @@ def create_pos_invoice(
                 invoice_doc, customer_doc, logger, amended_from=amended_from
             )
 
+        # STEP 8.3: Counter-paid Employee order gate. Before insert for the same
+        # reason as the credit gate: a branch with no open shift or no till must
+        # refuse the order outright, not leave a submitted invoice whose cash has
+        # nowhere to land. (STEP 3.6 already guaranteed payment_method is Cash, so
+        # the credit gate above can never have run for this order.)
+        if is_employee_cash:
+            print("\n8️⃣.3️⃣ EMPLOYEE ORDER PAID AT THE COUNTER:")
+            _employee_cash_till = _ensure_employee_cash_can_be_taken(
+                pos_profile.name,
+                getattr(invoice_doc, "company", None) or pos_profile.company,
+            )
+            print(f"   🏧 Till resolved: {_employee_cash_till}")
+
         # STEP 8.1: Keep POS Sales Invoices accounting-only for all payment flows.
         # Business Rule: Stock movement must happen via Delivery Note on the delivery flow,
         # so Sales Invoice creation must never reduce stock directly.
@@ -2199,6 +2500,22 @@ def create_pos_invoice(
             except Exception:
                 pass
 
+        # STEP 11.4: Counter-paid Employee order — book the cash into the till.
+        #
+        # After submit (a Payment Entry needs a submitted invoice to allocate to)
+        # and BEFORE STEP 11.5 hands the goods over: money in first, like a pickup.
+        # NOT wrapped in a try — unlike the fulfilment below, a failure here must
+        # roll the whole request back. A "cash" order left unpaid would be
+        # deducted from the employee's salary for money already in the drawer.
+        employee_payment_entry = None
+        if is_employee_cash:
+            print("\n💵 EMPLOYEE CASH: settling into the branch till")
+            employee_payment_entry = _register_employee_counter_cash_payment(
+                invoice_doc,
+                getattr(invoice_doc, "custom_kanban_profile", None) or pos_profile.name,
+                logger,
+            )
+
         # STEP 11.5: Deliver-at-Branch auto-fulfilment.
         #
         # An "Employee" order is collected at the counter as it is rung in: there
@@ -2232,11 +2549,25 @@ def create_pos_invoice(
 
         # STEP 12: Prepare Response
         print("\n🎯 PREPARING RESPONSE:")
+        if is_employee_order:
+            # The in-memory document predates the Payment Entry and the branch
+            # fulfilment, so its outstanding/status are stale for exactly the
+            # orders whose client needs to show them. Standard orders skip this
+            # and keep a byte-identical response.
+            invoice_doc.reload()
         result = _prepare_response(invoice_doc, delivery_datetime, logger)
         try:
             result["pickup"] = bool(pickup)
         except Exception:
             pass
+
+        # Employee orders only (keys are added, never changed): which money shape
+        # the order took and the state it left the ledger in.
+        if is_employee_order:
+            result["employee_payment"] = employee_payment
+            result["payment_entry"] = employee_payment_entry
+            result["outstanding_amount"] = getattr(invoice_doc, "outstanding_amount", None)
+            result["status"] = getattr(invoice_doc, "status", None)
 
         # Surface the auto-fulfilment outcome to the POS. `_prepare_response` has
         # no warnings convention of its own, so the key is created on demand and

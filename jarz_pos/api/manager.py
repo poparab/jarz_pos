@@ -916,6 +916,7 @@ def _build_invoice_amendment_request_id(
     custom_delivery_income: Union[float, str, None] = None,
     price_list: Optional[str] = None,
     provided_idempotency_key: Optional[str] = None,
+    employee_payment: Optional[str] = None,
 ) -> str:
     """Build a stable idempotency key for amendment retries of the same payload.
 
@@ -960,6 +961,12 @@ def _build_invoice_amendment_request_id(
     normalized_price_list = _normalize_price_list_name(price_list)
     if normalized_price_list:
         payload["price_list"] = normalized_price_list
+    # Same only-when-supplied rule: switching an Employee amendment from credit to
+    # cash is a different request, and every amendment that never mentions the key
+    # keeps the request id it had before the key existed.
+    normalized_employee_payment = str(employee_payment or "").strip().lower()
+    if normalized_employee_payment:
+        payload["employee_payment"] = normalized_employee_payment
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()
@@ -1152,6 +1159,91 @@ def _find_existing_amendment_invoice(source_invoice_id: str) -> Optional[str]:
     except Exception:
         rows = []
     return rows[0] if rows else None
+
+
+#: Mirrors ``services/invoice_creation.EMPLOYEE_PAYMENT_*``. Not imported: that
+#: import is already optional in this module (see ``_create_amendment_invoice``),
+#: and the amendment must still be able to decide what to ask for without it.
+_EMPLOYEE_PAYMENT_CASH = "cash"
+_EMPLOYEE_ORDER_PURPOSE = "Employee"
+#: Reference prefix ``_register_employee_counter_cash_payment`` stamps on its PE.
+_EMPLOYEE_CASH_REFERENCE_PREFIX = "EMP-CASH-"
+
+
+def _source_paid_into_a_till(source_invoice: Any) -> bool:
+    """Did the staff Customer pay this invoice into a branch till?
+
+    True when a SUBMITTED Receive Payment Entry from the invoice's own customer is
+    allocated to it and it either carries the employee-cash reference or pays into
+    a Cash In Hand ledger. The second arm covers an Employee order settled at the
+    counter later through ``api/invoices.pay_invoice`` — economically the same
+    fact: the employee's cash is in the drawer.
+
+    Deliberately NOT ``custom_payment_method``: builds shipped 2026-08-29..09-13
+    stamp ``Cash`` on credit Employee orders, and production holds unpaid ones
+    that say Cash. Reading the label would turn those salary debts into till
+    receipts on their first amendment. Money-in-a-ledger is the only evidence.
+    """
+    invoice_name = str(getattr(source_invoice, "name", None) or source_invoice.get("name") or "").strip()
+    customer = str(source_invoice.get("customer") or "").strip()
+    if not invoice_name or not customer:
+        return False
+    names = _find_submitted_payment_entries(invoice_name)
+    if not names:
+        return False
+    rows = frappe.get_all(
+        "Payment Entry",
+        filters={
+            "name": ["in", names],
+            "docstatus": 1,
+            "payment_type": "Receive",
+            "party_type": "Customer",
+            "party": customer,
+        },
+        fields=["name", "paid_to", "reference_no"],
+        limit_page_length=20,
+    ) or []
+    for row in rows:
+        if str(row.get("reference_no") or "").startswith(_EMPLOYEE_CASH_REFERENCE_PREFIX):
+            return True
+        paid_to = str(row.get("paid_to") or "").strip()
+        if not paid_to:
+            continue
+        account = frappe.db.get_value(
+            "Account", paid_to, ["account_type", "parent_account"], as_dict=True
+        ) or {}
+        if str(account.get("account_type") or "").strip() == "Cash":
+            return True
+        if ACCOUNTS.CASH_IN_HAND.lower() in str(account.get("parent_account") or "").lower():
+            return True
+    return False
+
+
+def _resolve_amendment_employee_payment(source_invoice: Any, requested: Optional[str]) -> Optional[str]:
+    """The ``employee_payment`` to recreate an amended order with.
+
+    * An explicit request wins, passed through raw so ``create_pos_invoice``
+      applies its one validation (an invalid value is refused there, not here).
+    * Otherwise an Employee order whose employee already paid into a till is
+      recreated as ``cash`` — the job cancels that Payment Entry before
+      recreating, so without this the replacement would silently turn money the
+      employee handed over into salary debt.
+    * Everything else returns ``None``: credit, exactly as before.
+
+    MUST be called before the job cancels the source's Payment Entries; after
+    that the evidence is gone.
+    """
+    explicit = str(requested or "").strip()
+    if explicit:
+        return explicit
+    if str(source_invoice.get("custom_order_purpose") or "").strip() != _EMPLOYEE_ORDER_PURPOSE:
+        return None
+    if _source_paid_into_a_till(source_invoice):
+        return _EMPLOYEE_PAYMENT_CASH
+    # No till receipt: credit, as before. A failure to READ the evidence is not
+    # swallowed into this branch on purpose — guessing credit would cancel a real
+    # till receipt and leave the drawer short; the job refuses instead.
+    return None
 
 
 def _add_invoice_audit_comment(invoice_name: str, comment: str) -> None:
@@ -1354,6 +1446,7 @@ def _run_invoice_amendment_job(
     expected_source_item_count: Optional[int] = None,
     custom_delivery_income: Union[float, str, None] = None,
     price_list: Optional[str] = None,
+    employee_payment: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
     if _create_amendment_invoice is None:
@@ -1430,6 +1523,36 @@ def _run_invoice_amendment_job(
     effective_order_purpose = source_invoice.get("custom_order_purpose") or None
     effective_commercial_policy = source_invoice.get("custom_commercial_policy") or None
     effective_policy_reason = source_invoice.get("custom_policy_reason") or None
+    # Employee orders: credit (salary debt) or cash (paid into the till). Resolved
+    # HERE, before the lock and long before the Payment Entries are cancelled below —
+    # the source's till receipt is the only evidence of "cash", and it is gone once
+    # the cancel loop has run.
+    try:
+        effective_employee_payment = _resolve_amendment_employee_payment(
+            source_invoice, employee_payment
+        )
+    except Exception as employee_payment_error:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Amendment employee-payment derivation failed for {invoice_id}",
+        )
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": _(
+                "Could not tell whether this employee order was paid at the counter, "
+                "so it was not amended: {0}"
+            ).format(str(employee_payment_error)),
+            "amendment_block_code": "employee_payment_unresolved",
+        }
+    if (
+        str(effective_employee_payment or "").strip().lower() == _EMPLOYEE_PAYMENT_CASH
+        and payment_method is None
+    ):
+        # A cash Employee order is stamped Cash by creation. When the client did not
+        # name a method, do not replay a stale source label (a credit-era "Credit",
+        # say) that creation would then refuse as contradicting the cash choice.
+        effective_payment_method = "Cash"
     initiated_by = (initiated_by or frappe.session.user or "Unknown User").strip()
 
     # Territory → POS profile safety check (before any DB writes)
@@ -1714,6 +1837,7 @@ def _run_invoice_amendment_job(
                 order_purpose=effective_order_purpose,
                 commercial_policy=effective_commercial_policy,
                 policy_reason=effective_policy_reason,
+                employee_payment=effective_employee_payment,
             )
 
         replacement_invoice_name = (
@@ -1862,8 +1986,15 @@ def submit_invoice_amendment(
     custom_delivery_income: Union[float, str, None] = None,
     reuse_source_cart: Union[bool, int, str, None] = None,
     price_list: Optional[str] = None,
+    employee_payment: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload.
+
+    ``employee_payment`` (Employee orders only): ``"credit"`` or ``"cash"``, same
+    contract as ``create_pos_invoice``. Omit it and an Employee order whose employee
+    already paid into a till is recreated as cash, anything else as credit — see
+    :func:`_resolve_amendment_employee_payment`. Declared here for the same reason as
+    ``price_list``: Frappe drops undeclared whitelisted kwargs silently.
 
     Pass ``reuse_source_cart`` (with no ``cart_json``) for amendments that change
     only invoice-level data — delivery income, address, slot. The cart is then
@@ -1926,6 +2057,7 @@ def submit_invoice_amendment(
         custom_delivery_income=custom_delivery_income,
         price_list=price_list,
         provided_idempotency_key=idempotency_key,
+        employee_payment=employee_payment,
     )
     if existing_replacement:
         return _build_invoice_amendment_response(
@@ -1974,6 +2106,7 @@ def submit_invoice_amendment(
         expected_source_item_count=int(expected_source_item_count) if expected_source_item_count is not None else None,
         custom_delivery_income=custom_delivery_income,
         price_list=price_list,
+        employee_payment=employee_payment,
     )
 
 

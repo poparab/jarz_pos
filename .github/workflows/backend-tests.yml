@@ -125,6 +125,9 @@ jobs:
             test_branch_fulfilment
             test_employee_advances
             test_employee_ledger
+            # Employee orders paid at the counter (cash) vs on the employee's
+            # account (credit): validation, till Payment Entry, call order.
+            test_employee_cash_orders
             # Staff customers: one Employee-group Customer per active employee,
             # the POS staff picker endpoints, and the deterministic ledger join.
             test_employee_customers

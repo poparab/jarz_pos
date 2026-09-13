@@ -95,6 +95,10 @@ def create_pos_invoice():
     # New: promo codes (JSON list or CSV) + channel for the promo engine
     promo_codes = frappe.form_dict.get('promo_codes')
     channel = frappe.form_dict.get('channel') or 'flutter'
+    # New: Employee orders only — "credit" (default, deducted from salary) or
+    # "cash" (paid at the counter, settled into the branch till). Forwarded raw;
+    # the service validates it, because the service is whitelisted on its own.
+    employee_payment = frappe.form_dict.get('employee_payment')
 
     if zero_shipping_override:
         suppress_shipping_income = True
@@ -220,8 +224,9 @@ RAW PARAMETERS:
             policy_reason=policy_reason,
             promo_codes=promo_codes,
             channel=channel,
+            employee_payment=employee_payment,
         )
-        
+
         # Log successful response
         print(f"\n✅ API CALL SUCCESSFUL!")
         print(f"📤 RESPONSE:")

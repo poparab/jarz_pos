@@ -1392,3 +1392,247 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertEqual(result["summary"]["open_count"], 0)
 		self.assertEqual(result["summary"]["closed_count"], 1)
 
+
+class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
+	"""An amended Employee order keeps the money shape it was taken with.
+
+	The job cancels the source's Payment Entries before recreating it, so a counter-paid
+	(cash) Employee order would otherwise come back as salary debt while its cash stays
+	in the drawer. The evidence must be read BEFORE that cancel, and it must be money in
+	a ledger — never ``custom_payment_method``, which shipped clients stamp ``Cash`` on
+	credit Employee orders.
+	"""
+
+	@staticmethod
+	def _source(**overrides):
+		data = dict(
+			name="INV-EMP-AMD-001",
+			docstatus=1,
+			is_return=0,
+			customer="STAFF-Mona",
+			pos_profile="Nasr City",
+			custom_kanban_profile="Nasr City",
+			custom_sales_invoice_state="Recieved",
+			custom_payment_method="Cash",
+			custom_order_purpose="Employee",
+			custom_commercial_policy="Employee Order",
+			woo_order_id=None,
+		)
+		data.update(overrides)
+		source = _FakeInvoice(**data)
+		source.flags = SimpleNamespace(ignore_permissions=False, ignore_woo_outbound=False)
+		source.cancel = MagicMock()
+		return source
+
+	@staticmethod
+	def _frappe(pe_rows=None, account=None, trace=None):
+		mf = MagicMock()
+		mf.session.user = "manager@example.com"
+		mf.local.site = "frontend"
+		mf.logger.return_value = MagicMock()
+		mf.parse_json.return_value = [{"item_code": "JAR-M", "qty": 1, "rate": 150}]
+		mf.db.sql.return_value = [[1]]
+		mf.get_meta.return_value.get_field.return_value = None
+
+		def _get_all(doctype, *args, **kwargs):
+			if trace is not None:
+				trace.append(f"get_all:{doctype}")
+			return list(pe_rows or [])
+
+		mf.get_all.side_effect = _get_all
+		mf.db.get_value.side_effect = lambda *args, **kwargs: account
+		return mf
+
+	# -- the resolver -----------------------------------------------------------
+
+	def test_an_explicit_request_wins_without_reading_the_ledger(self):
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		with patch("jarz_pos.api.manager._find_submitted_payment_entries") as find_pes:
+			self.assertEqual(_resolve_amendment_employee_payment(self._source(), "cash"), "cash")
+			self.assertEqual(_resolve_amendment_employee_payment(self._source(), "credit"), "credit")
+		find_pes.assert_not_called()
+
+	def test_a_till_receipt_on_an_employee_order_derives_cash(self):
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": None}],
+			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
+		)
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+			self.assertEqual(_resolve_amendment_employee_payment(self._source(), None), "cash")
+
+		filters = mf.get_all.call_args.kwargs["filters"]
+		self.assertEqual(filters["payment_type"], "Receive")
+		self.assertEqual(filters["party_type"], "Customer")
+		self.assertEqual(filters["party"], "STAFF-Mona")
+		self.assertEqual(filters["docstatus"], 1)
+
+	def test_the_employee_cash_reference_derives_cash(self):
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Unknown - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
+			account={},
+		)
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+			self.assertEqual(_resolve_amendment_employee_payment(self._source(), None), "cash")
+
+	def test_a_cash_label_without_a_payment_is_still_credit(self):
+		"""The shipped-dialog case: stamped Cash, never paid."""
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		mf = self._frappe(pe_rows=[])
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=[]):
+			self.assertIsNone(
+				_resolve_amendment_employee_payment(self._source(custom_payment_method="Cash"), None)
+			)
+
+	def test_a_bank_receipt_is_not_counter_cash(self):
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Bank Account - J", "reference_no": "IPY-123"}],
+			account={"account_type": "Bank", "parent_account": "Bank Accounts - J"},
+		)
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+			self.assertIsNone(_resolve_amendment_employee_payment(self._source(), None))
+
+	def test_a_non_employee_order_never_derives_cash(self):
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		with patch("jarz_pos.api.manager._find_submitted_payment_entries") as find_pes:
+			self.assertIsNone(
+				_resolve_amendment_employee_payment(self._source(custom_order_purpose="B2B Supply"), None)
+			)
+		find_pes.assert_not_called()
+
+	# -- the job ----------------------------------------------------------------
+
+	def _run_job(self, source, mf, *, find_pes=None, trace=None, **job_kwargs):
+		from jarz_pos.api.manager import _run_invoice_amendment_job
+
+		payment_entry = MagicMock()
+		payment_entry.name = "PE-1"
+		payment_entry.get.side_effect = lambda fieldname, default=None: 1 if fieldname == "docstatus" else default
+		payment_entry.flags = SimpleNamespace(ignore_permissions=False)
+		payment_entry.cancel.side_effect = lambda: trace.append("cancel_pe") if trace is not None else None
+
+		mf.get_doc.side_effect = lambda doctype, name: {
+			("Sales Invoice", source.name): source,
+			("Payment Entry", "PE-1"): payment_entry,
+		}[(doctype, name)]
+		creation = MagicMock(return_value={"invoice_name": "INV-EMP-AMD-001-1"})
+
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}), \
+			 patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None), \
+			 patch("jarz_pos.api.manager.resolve_order_territory", return_value=None), \
+			 patch("jarz_pos.api.manager._resolve_amendment_delivery_income", return_value=None), \
+			 patch("jarz_pos.api.manager._resolve_amendment_price_list", return_value=None), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", find_pes or MagicMock(return_value=["PE-1"])), \
+			 patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()), \
+			 patch("jarz_pos.api.manager._create_amendment_invoice", creation), \
+			 patch("jarz_pos.api.manager._mark_source_invoice_as_amended"), \
+			 patch("jarz_pos.api.manager._add_invoice_audit_comment"), \
+			 patch("jarz_pos.api.manager._carry_over_invoice_notes"), \
+			 patch("jarz_pos.api.manager._build_invoice_amendment_response", return_value={"success": True}):
+			result = _run_invoice_amendment_job(
+				invoice_id=source.name,
+				request_id="amd-emp-1",
+				cart_json='[{"item_code":"JAR-M","qty":1,"rate":150}]',
+				**job_kwargs,
+			)
+		return result, creation, source
+
+	def test_job_recreates_a_till_paid_employee_order_as_cash(self):
+		trace = []
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
+			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
+			trace=trace,
+		)
+		result, creation, source = self._run_job(self._source(), mf, trace=trace)
+
+		self.assertTrue(result.get("success"), result)
+		self.assertEqual(creation.call_args.kwargs["employee_payment"], "cash")
+		# 10th positional argument of create_pos_invoice is payment_method.
+		self.assertEqual(creation.call_args.args[9], "Cash")
+		# The evidence was read BEFORE the Payment Entry was cancelled.
+		self.assertIn("cancel_pe", trace)
+		self.assertLess(trace.index("get_all:Payment Entry"), trace.index("cancel_pe"))
+		source.cancel.assert_called_once()
+
+	def test_job_keeps_a_credit_employee_order_on_credit(self):
+		mf = self._frappe(pe_rows=[])
+		result, creation, _ = self._run_job(
+			self._source(), mf, find_pes=MagicMock(return_value=[])
+		)
+
+		self.assertTrue(result.get("success"), result)
+		self.assertIsNone(creation.call_args.kwargs["employee_payment"])
+		# The source label is replayed untouched, exactly as before.
+		self.assertEqual(creation.call_args.args[9], "Cash")
+
+	def test_job_forwards_an_explicit_choice(self):
+		mf = self._frappe(pe_rows=[])
+		result, creation, _ = self._run_job(
+			self._source(custom_payment_method="Credit"),
+			mf,
+			find_pes=MagicMock(return_value=[]),
+			employee_payment="cash",
+		)
+
+		self.assertTrue(result.get("success"), result)
+		self.assertEqual(creation.call_args.kwargs["employee_payment"], "cash")
+		# A stale source label must not contradict the cash choice.
+		self.assertEqual(creation.call_args.args[9], "Cash")
+
+	def test_job_refuses_when_the_evidence_cannot_be_read(self):
+		mf = self._frappe()
+		result, creation, source = self._run_job(
+			self._source(),
+			mf,
+			find_pes=MagicMock(side_effect=RuntimeError("db gone")),
+		)
+
+		self.assertFalse(result.get("success"))
+		self.assertEqual(result.get("amendment_block_code"), "employee_payment_unresolved")
+		creation.assert_not_called()
+		source.cancel.assert_not_called()
+
+	def test_submit_forwards_employee_payment_and_changes_the_job_id(self):
+		from jarz_pos.api.manager import submit_invoice_amendment
+
+		def _submit(**kwargs):
+			source = self._source()
+			mf = self._frappe()
+			mf.get_doc.side_effect = None
+			mf.get_doc.return_value = source
+			mf.enqueue.return_value = {"success": True}
+			mf.utils.flt.side_effect = lambda value=0, precision=None: float(value or 0)
+			mf.parse_json.side_effect = lambda value: value
+			with patch("jarz_pos.api.manager.frappe", mf), \
+				 patch("jarz_pos.api.manager._ensure_profile_scoped_invoice_access"), \
+				 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+				 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+				submit_invoice_amendment(
+					invoice_id=source.name,
+					cart_json='[{"item_code":"JAR-M","qty":1,"rate":150}]',
+					**kwargs,
+				)
+			return mf.enqueue.call_args.kwargs
+
+		without = _submit()
+		with_cash = _submit(employee_payment="cash")
+
+		self.assertIsNone(without["employee_payment"])
+		self.assertEqual(with_cash["employee_payment"], "cash")
+		self.assertNotEqual(without["job_id"], with_cash["job_id"])
+

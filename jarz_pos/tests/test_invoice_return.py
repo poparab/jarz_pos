@@ -360,5 +360,85 @@ class TestSubmitValidation(unittest.TestCase):
         self.assertFalse(result["success"])
 
 
+class TestEmployeeOrderReturns(unittest.TestCase):
+    """A PAID Employee order refunds from the till; it cannot be kept as credit.
+
+    A customer-credit return on a prepaid order leaves the credit note at a
+    negative outstanding on the staff Customer. ``get_employee_ledger`` counts
+    ``!= 0`` (the employee is shown as owed money) while monthly deductions only
+    take ``> 0`` (salary never pays it back). Refund Now zeroes the note.
+    """
+
+    def test_guard_truth_table(self):
+        employee_paid = _invoice(custom_order_purpose="Employee", outstanding_amount=0.0)
+        self.assertTrue(ir._employee_credit_return_blocked(employee_paid, ir.MONEY_PREPAID))
+
+        # An unpaid (credit) Employee order posts the AR knock-off either way.
+        employee_unpaid = _invoice(custom_order_purpose="Employee", outstanding_amount=500.0)
+        self.assertFalse(ir._employee_credit_return_blocked(employee_unpaid, ir.MONEY_UNPAID))
+
+        # Every other purpose keeps its customer-credit option.
+        for purpose in (None, "Standard", "B2B Supply"):
+            self.assertFalse(
+                ir._employee_credit_return_blocked(
+                    _invoice(custom_order_purpose=purpose), ir.MONEY_PREPAID
+                ),
+                repr(purpose),
+            )
+
+        # A zero-value order strands nothing.
+        free = _invoice(custom_order_purpose="Employee", grand_total=0.0)
+        self.assertFalse(ir._employee_credit_return_blocked(free, ir.MONEY_PREPAID))
+
+    def _run(self, refund_mode):
+        inv = _invoice(
+            custom_order_purpose="Employee", outstanding_amount=0.0, grand_total=150.0
+        )
+        row = MagicMock()
+        row.name = "row-1"
+        row.qty = 1
+        row.item_code = "JAR-M"
+        inv.items = [row]
+
+        with patch.object(ir, "returns_enabled", return_value=True), \
+             patch.object(ir, "frappe") as mock_frappe, \
+             patch.object(ir, "ensure_profile_scoped_invoice_access"), \
+             patch.object(ir, "get_invoice_return_eligibility", return_value={"can_return": True}), \
+             patch.object(ir, "_returned_qty_by_row", return_value={}), \
+             patch.object(ir, "_money_state", return_value=ir.MONEY_PREPAID), \
+             patch.object(ir, "get_invoice_branch", return_value="Nasr City"), \
+             patch.object(ir, "_unsettled_courier_transactions", return_value=[]), \
+             patch.object(ir, "ensure_open_shift_for_invoice") as shift, \
+             patch.object(ir, "_original_delivery_note", return_value="DN-1"), \
+             patch.object(ir, "_build_return_delivery_note", side_effect=RuntimeError("stop here")):
+            mock_frappe.get_all.return_value = []
+            mock_frappe.get_doc.return_value = inv
+            mock_frappe.db.sql.return_value = [[1]]
+            result = ir.run_invoice_return(
+                invoice_id=inv.name,
+                lines=[{"si_detail": "row-1", "qty": 1}],
+                reason="Customer changed mind",
+                refund_mode=refund_mode,
+            )
+        return result, mock_frappe, shift
+
+    def test_customer_credit_is_refused_before_anything_is_posted(self):
+        result, mock_frappe, shift = self._run(ir.REFUND_CUSTOMER_CREDIT)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["return_block_code"], "employee_credit_not_supported")
+        self.assertIn("Refund Now", result["error"])
+        mock_frappe.db.savepoint.assert_not_called()
+        shift.assert_not_called()
+
+    def test_refund_now_passes_the_guard_and_needs_a_shift(self):
+        result, mock_frappe, shift = self._run(ir.REFUND_NOW)
+
+        self.assertNotEqual(result.get("return_block_code"), "employee_credit_not_supported")
+        shift.assert_called_once()
+        # It went on to build the return (stopped by the test's own side effect).
+        mock_frappe.db.savepoint.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

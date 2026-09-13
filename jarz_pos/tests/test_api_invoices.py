@@ -121,6 +121,54 @@ class TestInvoiceAPI(unittest.TestCase):
 			self.assertIn(key, forwarded)
 			self.assertEqual(forwarded[key], expected, f"{key} was not forwarded intact")
 
+	def _forwarded_employee_payment(self, form_dict):
+		"""Run the public wrapper and return the kwargs it handed the service."""
+		from jarz_pos.api.invoices import create_pos_invoice
+
+		with patch("jarz_pos.utils.invoice_utils.resolve_order_territory", return_value=None), \
+			 patch("jarz_pos.utils.invoice_utils.assert_pos_profile_matches_territory"), \
+			 patch("jarz_pos.api.invoices._guard_branch_sale"), \
+			 patch("jarz_pos.api.invoices._create_invoice") as mock_create_invoice, \
+			 patch("jarz_pos.api.invoices.frappe") as mock_frappe:
+			mock_frappe.session.user = "cashier@example.com"
+			mock_frappe.local.site = "frontend"
+			mock_frappe.local.request.method = "POST"
+			mock_frappe.form_dict = form_dict
+			mock_create_invoice.return_value = {"success": True, "invoice_name": "INV-EMP-0001"}
+
+			create_pos_invoice()
+
+		mock_create_invoice.assert_called_once()
+		self.assertEqual(mock_create_invoice.call_args.args, ())
+		return mock_create_invoice.call_args.kwargs
+
+	def test_create_pos_invoice_forwards_employee_payment(self):
+		"""The service is whitelisted and validates; the wrapper must forward the raw value."""
+		forwarded = self._forwarded_employee_payment({
+			"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
+			"customer_name": "STAFF-Mona",
+			"pos_profile_name": "Nasr City",
+			"order_purpose": "Employee",
+			"employee_payment": "CASH",
+		})
+		self.assertIn("employee_payment", forwarded)
+		self.assertEqual(forwarded["employee_payment"], "CASH")
+		self.assertEqual(forwarded["order_purpose"], "Employee")
+
+	def test_create_pos_invoice_employee_payment_defaults_to_none(self):
+		"""An older client that never sends the key must reach the service as credit (None)."""
+		forwarded = self._forwarded_employee_payment({
+			"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
+			"customer_name": "STAFF-Mona",
+			"pos_profile_name": "Nasr City",
+			"order_purpose": "Employee",
+			"payment_method": "Cash",
+		})
+		self.assertIn("employee_payment", forwarded)
+		self.assertIsNone(forwarded["employee_payment"])
+		# payment_method=Cash is forwarded as a label only — it never implies cash.
+		self.assertEqual(forwarded["payment_method"], "Cash")
+
 	def test_api_modules_present(self):
 		"""Test that invoice API modules can be imported."""
 		import importlib
