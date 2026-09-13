@@ -351,6 +351,10 @@ jobs:
             # removed unit held. Without it 5 "Box of 12" at 120 became 5 units
             # at 120 — right total, a twelfth of the stock, 12x the valuation.
             test_purchase_history_lines
+            # The other half of that: a line whose unit has no conversion row on
+            # the Item is refused by name. The old fallback booked it 1:1 — the
+            # same twelfth-of-the-stock, 12x-valuation error, with no warning.
+            test_purchase_uom_conversion
             # The POS stock-update suppression hook. Its field read used to
             # throw on a class-level descriptor and get swallowed, silently
             # disabling the guard that stops stock being booked twice.

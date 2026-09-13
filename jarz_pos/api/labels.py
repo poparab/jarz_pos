@@ -894,6 +894,13 @@ def bill_print_order(
     sheets = _int(doc.qty_sheets) or 1
     from jarz_pos.api.purchase import create_purchase_invoice
 
+    # No "uom": the line is billed in the printing item's own stock unit, where
+    # one sheet is one unit. This used to hard-code "Nos", which only matched
+    # because label_setup creates the item with stock_uom "Nos" — but the item
+    # is configurable in Jarz POS Settings and a pre-existing item keeps its own
+    # unit. create_purchase_invoice now refuses a unit with no conversion row
+    # instead of booking it 1:1, so the hard-coded name would block the printer's
+    # bill for any printing item whose stock unit is not "Nos".
     result = create_purchase_invoice(
         supplier=supplier_name,
         is_paid=1 if _bool(is_paid) else 0,
@@ -901,7 +908,6 @@ def bill_print_order(
         items=[{
             "item_code": printing_item,
             "qty": sheets,
-            "uom": "Nos",
             "rate": round(cost / sheets, 4),
         }],
         bill_no=_clean(bill_no),

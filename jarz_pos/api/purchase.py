@@ -668,12 +668,8 @@ def create_purchase_invoice(
         if qty <= 0:
             frappe.throw(_("Quantity must be > 0 for {0}").format(item_code))
         rate = row.get("rate")
-        # Determine conversion_factor for selected UOM
-        conv = 1
         stock_uom = frappe.db.get_value("Item", item_code, "stock_uom")
-        if uom and uom != stock_uom:
-            cf = frappe.db.get_value("UOM Conversion Detail", {"parent": item_code, "uom": uom}, "conversion_factor")
-            conv = float(cf or 1)
+        conv = _line_conversion_factor(item_code, uom, stock_uom)
         # Default price if not supplied
         if rate is None:
             rate_info = get_item_price(item_code, uom)
@@ -806,6 +802,40 @@ def create_purchase_invoice(
         "outstanding_amount": pi.outstanding_amount,
         "deduplicated": False,
     }
+
+
+def _line_conversion_factor(item_code: str, uom: Optional[str], stock_uom: Optional[str]) -> float:
+    """How many stock units one ``uom`` of *item_code* holds, or refuse the line.
+
+    The stock UOM (or no UOM, which means the stock UOM) is 1 by definition.
+    Any other unit must have a ``UOM Conversion Detail`` row on the Item.
+
+    This used to fall back to 1 when that row was missing, which books the
+    line silently wrong rather than failing: 5 x "Box of 12" at 120 became 5
+    stock units at 120 each — the right invoice total, a twelfth of the stock,
+    and 12x the valuation rate on every unit. The mobile reorder reaches this
+    whenever it replays an old invoice whose big unit has since been removed
+    from the Item and its own item lookup fails, so the only safe answer is to
+    stop and name the unit, not to guess a factor nobody stated.
+    """
+    if not uom or uom == stock_uom:
+        return 1
+    cf = frappe.db.get_value(
+        "UOM Conversion Detail",
+        {"parent": item_code, "parenttype": "Item", "uom": uom},
+        "conversion_factor"
+    )
+    try:
+        factor = float(cf or 0)
+    except (TypeError, ValueError):
+        factor = 0
+    if factor <= 0:
+        frappe.throw(
+            _("{0} has no conversion from {1} to {2}. Pick another unit or add the conversion on the Item.").format(
+                item_code, uom, stock_uom or _("its stock unit")
+            )
+        )
+    return factor
 
 
 def _validate_item_tax_template(template: str, company: str, item_code: str) -> None:
