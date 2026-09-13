@@ -1013,5 +1013,43 @@ class TestCommercialPolicyPayload(unittest.TestCase):
         self.assertNotIn("fulfilment_behavior", mock.get_all.call_args.kwargs["fields"])
 
 
+class TestCustomerEmployeeFieldIgnoresUserPermissions(unittest.TestCase):
+    """``Customer.custom_employee`` must never act as an access scope.
+
+    Staff hold ``Employee = <self>`` User Permissions on every doctype. Without
+    ``ignore_user_permissions`` Frappe stamped each new walk-in customer with the
+    creating cashier's employee and refused it to every other cashier, which is
+    how create_pos_invoice ended up rejecting orders on production in Sep 2026.
+    """
+
+    def _spec(self):
+        from jarz_pos.setup import employee_link_setup as els
+
+        return next(s for s in els.CUSTOMER_FIELDS if s["fieldname"] == el.CUSTOMER_EMPLOYEE_FIELD)
+
+    def test_spec_ignores_user_permissions(self):
+        self.assertEqual(self._spec().get("ignore_user_permissions"), 1)
+
+    def test_existing_field_is_brought_in_line_on_migrate(self):
+        # The field already exists on staging and production, so the flag only
+        # lands if the seeder hands the full spec to create_custom_fields (which
+        # updates existing rows) rather than skipping fields that exist.
+        from jarz_pos.setup import employee_link_setup as els
+
+        log = {"created": [], "existing": [], "skipped": [], "warnings": []}
+        mock = MagicMock()
+        mock.db.exists.return_value = True
+        create = MagicMock()
+        with patch.object(els, "frappe", mock), patch(
+            "frappe.custom.doctype.custom_field.custom_field.create_custom_fields", create
+        ):
+            els._ensure_fields("Customer", els.CUSTOMER_FIELDS, log)
+
+        passed = create.call_args.args[0]["Customer"][0]
+        self.assertEqual(passed["fieldname"], el.CUSTOMER_EMPLOYEE_FIELD)
+        self.assertEqual(passed["ignore_user_permissions"], 1)
+        self.assertEqual(log["existing"], [f"Customer.{el.CUSTOMER_EMPLOYEE_FIELD}"])
+
+
 if __name__ == "__main__":
     unittest.main()

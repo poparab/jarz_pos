@@ -103,6 +103,17 @@ CUSTOMER_FIELDS: List[Dict[str, Any]] = [
         # create_custom_fields updates the existing field and updatedb adds the
         # index on the next migrate.
         "search_index": 1,
+        # Load-bearing. POS staff carry a User Permission ``Employee = <their own
+        # employee>`` with Apply To All Doctypes, and without this flag Frappe
+        # applies it to this Link twice over: a single permitted value becomes the
+        # user default, so every walk-in customer a cashier created was silently
+        # stamped with THAT cashier's employee (create_new.get_user_default_value);
+        # and every other cashier then failed has_permission on the customer, so
+        # create_pos_invoice refused the order ("No permission for Customer X").
+        # Production 2026-09-07..10: four refused bursts, one order lost, 46
+        # retail customers stamped. The link is a salary join, never an access
+        # scope. create_custom_fields updates the existing field on migrate.
+        "ignore_user_permissions": 1,
         "module": "jarz pos",
         "description": (
             "Staff member this customer account belongs to. Read by "
