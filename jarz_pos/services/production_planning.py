@@ -459,6 +459,56 @@ def _resolve_required_material_rows():
     return _get_required_material_rows
 
 
+def _resolve_backdated_stock_helpers():
+    """Deferred, for the same reason as ``_resolve_required_material_rows``."""
+    from jarz_pos.api.manufacturing import _get_stock_qty_at, _resolve_backdated_posting
+
+    return _resolve_backdated_posting, _get_stock_qty_at
+
+
+def _resolve_backdated_shortage_stamper():
+    from jarz_pos.api.manufacturing import _stamp_backdated_shortage
+
+    return _stamp_backdated_shortage
+
+
+def _stock_at_backdated_postings(
+    lines: Sequence[Dict[str, Any]], sets: Sequence[Dict[str, Any]]
+) -> Dict[Tuple[str, str], Tuple[float, Any]]:
+    """``{(item, warehouse): (balance, posting moment)}`` for backdated lines.
+
+    A basket dated in the past is posted — and validated by ERPNext — against
+    the ledger at that moment, so the Bin is the wrong snapshot for it.  Where
+    lines consuming one pair are dated differently, the lowest balance wins:
+    that is the line that fails.  Pairs no backdated line touches are absent and
+    keep the Bin figure; so does any pair whose ledger could not be read.
+    """
+    resolve_posting, qty_at = _resolve_backdated_stock_helpers()
+    found: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+    # A jar and a lid sit on every recipe: one ledger read per pair and moment.
+    read: Dict[Tuple[str, str, Any], Optional[float]] = {}
+    for entry in sets:
+        index = entry.get("line_index")
+        if not isinstance(index, int) or index >= len(lines):
+            continue
+        as_of = resolve_posting(lines[index].get("scheduled_at"))
+        if as_of is None:
+            continue
+        for c in entry.get("components") or []:
+            warehouse = c.get("source_warehouse")
+            if not warehouse:
+                continue
+            key = (c["item_code"], warehouse)
+            if (c["item_code"], warehouse, as_of) not in read:
+                read[(c["item_code"], warehouse, as_of)] = qty_at(c["item_code"], warehouse, as_of)
+            qty = read[(c["item_code"], warehouse, as_of)]
+            if qty is None:
+                continue
+            if key not in found or qty < found[key][0]:
+                found[key] = (qty, as_of)
+    return found
+
+
 def _resolve_default_company() -> str:
     try:
         return frappe.db.get_single_value("Global Defaults", "default_company") or ""
@@ -935,13 +985,27 @@ def build_basket_rollup(lines: Sequence[Dict[str, Any]], company: str) -> Dict[s
         if c.get("source_warehouse")
     ]
     stock = _resolve_bin_stock_map(pairs)
+    at_posting = _stock_at_backdated_postings(lines, sets)
     for entry in sets:
         entry["components"] = [
-            dict(c, available_qty=stock.get((c["item_code"], c.get("source_warehouse")), 0.0))
+            dict(
+                c,
+                available_qty=(
+                    at_posting[(c["item_code"], c.get("source_warehouse"))][0]
+                    if (c["item_code"], c.get("source_warehouse")) in at_posting
+                    else stock.get((c["item_code"], c.get("source_warehouse")), 0.0)
+                ),
+            )
             for c in entry["components"]
         ]
 
     rollup = aggregate_basket_materials(sets)
+    if at_posting:
+        stamp = _resolve_backdated_shortage_stamper()
+        for row in rollup.get("shortages") or []:
+            key = (row.get("item_code"), row.get("source_warehouse"))
+            if key in at_posting:
+                stamp(row, at_posting[key][1], stock.get(key, 0.0))
     # Only the shortage rows: a component the basket can cover needs no
     # redirection, and the pick list stays the pick list.  The rows are the same
     # objects the ``components`` list holds, so a shortage carries the hint in

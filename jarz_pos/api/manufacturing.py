@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import math
+import re
 from datetime import date as _date_cls, datetime as _datetime_cls
 from typing import Any, Dict, List, Optional
 
@@ -837,6 +839,150 @@ def _get_live_stock_qty(item_code: str, warehouse: str) -> float:
         return 0.0
 
 
+def _resolve_backdated_posting(scheduled_at: Any):
+    """The batch's posting moment when it lies in the past, else ``None``.
+
+    A backdated Stock Entry is validated by ERPNext against the balance **at its
+    own posting datetime**, not against the Bin.  Measuring a backdated batch
+    against today's stock is how a batch dated 2026-09-01 18:00 passed the
+    pre-check on 461 labels and then failed inside ``submit()`` because only 11
+    had been counted by then — the other 450 were received on 2026-09-03.
+    A posting at or after now reads the Bin exactly as before.
+    """
+    if not scheduled_at:
+        return None
+    try:
+        posting_dt = get_datetime(scheduled_at)
+        now_dt = get_datetime(_resolve_now_datetime())
+    except Exception:
+        return None
+    if not isinstance(posting_dt, _datetime_cls) or not isinstance(now_dt, _datetime_cls):
+        return None
+    return posting_dt if posting_dt < now_dt else None
+
+
+def _format_posting_moment(value: Any) -> str:
+    try:
+        return get_datetime(value).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(value or "")
+
+
+def _get_stock_qty_at(item_code: str, warehouse: str, posting_dt: Any) -> Optional[float]:
+    """Balance of ``item_code`` in ``warehouse`` as of ``posting_dt``.
+
+    ``None`` when the ledger cannot be read, so the caller keeps the live figure
+    rather than inventing a zero that would block every backdated batch.
+    """
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT qty_after_transaction
+            FROM `tabStock Ledger Entry`
+            WHERE item_code = %s AND warehouse = %s AND is_cancelled = 0
+              AND posting_datetime <= %s
+            ORDER BY posting_datetime DESC, creation DESC
+            LIMIT 1
+            """,
+            (item_code, warehouse, posting_dt),
+        )
+    except Exception:
+        return None
+    if not isinstance(rows, (list, tuple)):
+        return None
+    if not rows:
+        return 0.0
+    try:
+        return float(rows[0][0] or 0)
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+
+
+def _find_stock_sufficient_from(
+    item_code: str, warehouse: str, posting_dt: Any, required_qty: float
+) -> Optional[Dict[str, str]]:
+    """The first ledger entry after ``posting_dt`` that brings the balance up to
+    ``required_qty`` — the moment this batch could first have been posted."""
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT posting_datetime, voucher_type, voucher_no
+            FROM `tabStock Ledger Entry`
+            WHERE item_code = %s AND warehouse = %s AND is_cancelled = 0
+              AND posting_datetime > %s AND qty_after_transaction >= %s
+            ORDER BY posting_datetime ASC, creation ASC
+            LIMIT 1
+            """,
+            (item_code, warehouse, posting_dt, required_qty - QTY_TOLERANCE),
+            as_dict=True,
+        )
+    except Exception:
+        return None
+    if not isinstance(rows, (list, tuple)) or not rows or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+    return {
+        "posting_datetime": _format_posting_moment(row.get("posting_datetime")),
+        "voucher_type": str(row.get("voucher_type") or ""),
+        "voucher_no": str(row.get("voucher_no") or ""),
+    }
+
+
+def _stamp_backdated_shortage(issue: Dict[str, Any], as_of: Any, available_now: Any) -> None:
+    """Explain a shortage that exists only because the batch is backdated.
+
+    Stamped only when the stock that is there **now** would cover the batch:
+    then the date, not the store, is the reason, and the operator needs to be
+    told when the stock actually arrived.  A shortage that is real today is
+    reported exactly as it always was.
+    """
+    try:
+        now_qty = float(available_now or 0)
+        required = float(issue.get("required_qty") or 0)
+    except (TypeError, ValueError):
+        return
+    if now_qty + QTY_TOLERANCE < required:
+        return
+    issue["as_of"] = _format_posting_moment(as_of)
+    issue["available_now"] = now_qty
+    warehouse = issue.get("source_warehouse")
+    if warehouse:
+        found = _find_stock_sufficient_from(issue["item_code"], warehouse, as_of, required)
+        if found:
+            issue["sufficient_from"] = found
+
+
+def _format_backdated_shortage(issue: Dict[str, Any]) -> str:
+    """The "this is the stock at the batch's date, not today's" tail, or ""."""
+    as_of = issue.get("as_of")
+    if not as_of:
+        return ""
+    text = _("; that is the stock on {0}, the date of this batch ({1} {2} is there now)").format(
+        as_of,
+        _format_qty(issue.get("available_now")),
+        issue.get("uom") or DEFAULT_UOM,
+    )
+    found = issue.get("sufficient_from") or {}
+    if found.get("posting_datetime"):
+        text += _(". Enough stock from {0} ({1} {2}): date the batch after that").format(
+            found["posting_datetime"],
+            found.get("voucher_type") or "",
+            found.get("voucher_no") or "",
+        )
+    return text
+
+
+def _plain_error_text(error: Any) -> str:
+    """An exception as plain text for an API ``error`` field.
+
+    ERPNext formats stock errors as HTML (``<strong>``, desk ``<a href>`` links)
+    for Desk's dialog.  A per-line ``error`` is read by the app as text, so the
+    markup reached the operator verbatim.
+    """
+    text = re.sub(r"<[^>]+>", "", str(error or ""))
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
 def _coerce_material_selections(value: Any) -> Dict[str, str]:
     """Normalize ``{BOM item: actual stock item}`` from an HTTP argument."""
     if value in (None, ""):
@@ -1134,8 +1280,14 @@ def _get_required_material_rows(
     return _apply_material_selections(rows, material_selections, company)
 
 
-def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Dict[str, Any]]:
+def _get_material_precheck_issues(
+    line: Dict[str, Any], company: str, posting_dt: Any = None
+) -> List[Dict[str, Any]]:
     """Per-line "will this batch's material transfer succeed" check.
+
+    ``posting_dt`` (default: the line's ``scheduled_at``) is when the transfer
+    will be posted.  In the past, availability is the ledger balance at that
+    moment — the figure ERPNext itself validates a backdated entry against.
 
     ``fetch_exploded=0``: this check exists to predict the Stock Entry the
     Work Order is about to post, and that entry moves the one-level bill.
@@ -1148,6 +1300,9 @@ def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Di
     the fix is a stock transfer, and the message now says so.
     """
     issues: List[Dict[str, Any]] = []
+    as_of = _resolve_backdated_posting(
+        posting_dt if posting_dt is not None else line.get("scheduled_at")
+    )
     required_rows = _get_required_material_rows(
         line["bom_name"],
         company,
@@ -1185,19 +1340,25 @@ def _get_material_precheck_issues(line: Dict[str, Any], company: str) -> List[Di
 
         required_qty = float(row.get("required_qty") or 0)
         available_qty = float(row.get("available_qty") or 0)
+        available_now = available_qty
+        if as_of is not None:
+            at_posting = _get_stock_qty_at(row["item_code"], source_warehouse, as_of)
+            if at_posting is not None:
+                available_qty = at_posting
         if available_qty + 1e-9 < required_qty:
-            issues.append(
-                {
-                    "type": "insufficient_stock",
-                    "item_code": row["item_code"],
-                    "item_name": row["item_name"],
-                    "uom": row.get("uom") or DEFAULT_UOM,
-                    "required_qty": required_qty,
-                    "available_qty": available_qty,
-                    "missing_qty": required_qty - available_qty,
-                    "source_warehouse": source_warehouse,
-                }
-            )
+            issue = {
+                "type": "insufficient_stock",
+                "item_code": row["item_code"],
+                "item_name": row["item_name"],
+                "uom": row.get("uom") or DEFAULT_UOM,
+                "required_qty": required_qty,
+                "available_qty": available_qty,
+                "missing_qty": required_qty - available_qty,
+                "source_warehouse": source_warehouse,
+            }
+            if as_of is not None:
+                _stamp_backdated_shortage(issue, as_of, available_now)
+            issues.append(issue)
 
     # One batched lookup for every short item on the line, after the loop —
     # never inside it.
@@ -1260,8 +1421,10 @@ def _format_stock_elsewhere(issue: Dict[str, Any]) -> str:
     )
 
 
-def _assert_material_availability(line: Dict[str, Any], company: str) -> None:
-    issues = _get_material_precheck_issues(line, company)
+def _assert_material_availability(
+    line: Dict[str, Any], company: str, posting_dt: Any = None
+) -> None:
+    issues = _get_material_precheck_issues(line, company, posting_dt)
     if not issues:
         return
 
@@ -1287,6 +1450,7 @@ def _assert_material_availability(line: Dict[str, Any], company: str) -> None:
                     f"{float(issue.get('required_qty') or 0):.3f}",
                     f"{float(issue.get('available_qty') or 0):.3f}",
                 )
+                + _format_backdated_shortage(issue)
                 # Appended, not substituted: the operator still needs the
                 # numbers, and now also needs to know a transfer — not a
                 # purchase — is what unblocks them.
@@ -1346,6 +1510,7 @@ def _format_basket_shortage_message(shortages: List[Dict[str, Any]]) -> str:
                 f"{float(row.get('required_qty') or 0):.3f}",
                 f"{float(row.get('available_qty') or 0):.3f}",
             )
+            + _format_backdated_shortage(row)
             # The roll-up stamps the same two fields onto its shortage rows, so
             # the basket message can point at the other store exactly the way the
             # per-line one does.  Two shortage messages that answer "where is it"
@@ -2293,7 +2458,7 @@ def _submit_work_orders_impl(
             company = _get_bom_company(ln["bom_name"]) or _get_default_company()
             if not company:
                 frappe.throw(_("Company is not configured on BOM and no Default Company set"))
-            _assert_material_availability(ln, company)
+            _assert_material_availability(ln, company, scheduled_dt)
             # Before anything exists for this line, so a refusal rolls back to
             # this line's savepoint like every other per-line failure rather
             # than leaving a Work Order behind with no stock against it.
@@ -2384,7 +2549,7 @@ def _submit_work_orders_impl(
             except Exception:
                 # Swallow logging issues to not mask original error in response
                 pass
-            results.append({"ok": False, "error": str(e), "line": ln})
+            results.append({"ok": False, "error": _plain_error_text(e), "line": ln})
 
     return {"results": results}
 
@@ -2712,7 +2877,7 @@ def _start_production_batch_impl(
 
     scheduled_dt = _resolve_scheduled_datetime(scheduled_at)
     _assert_posting_date_allowed(scheduled_dt)
-    _assert_material_availability(line, company)
+    _assert_material_availability(line, company, scheduled_dt)
     # Priced once and reused for the response — a second BOM explosion here
     # would double the cost of every start.
     priced = _assert_batch_value_within_threshold(line, company)
@@ -2867,7 +3032,7 @@ def start_production_batches(lines: Any, strict_basket: Any = 1) -> Dict[str, An
             except Exception:
                 # Swallow logging issues to not mask original error in response
                 pass
-            results.append({"ok": False, "error": str(e), "line": ln})
+            results.append({"ok": False, "error": _plain_error_text(e), "line": ln})
 
     return {"results": results}
 
