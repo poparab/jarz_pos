@@ -1168,16 +1168,31 @@ _EMPLOYEE_PAYMENT_CASH = "cash"
 _EMPLOYEE_ORDER_PURPOSE = "Employee"
 #: Reference prefix ``_register_employee_counter_cash_payment`` stamps on its PE.
 _EMPLOYEE_CASH_REFERENCE_PREFIX = "EMP-CASH-"
+#: Half a piastre — the same tolerance creation uses for "nothing outstanding".
+_EMPLOYEE_CASH_TOLERANCE = 0.005
 
 
-def _source_paid_into_a_till(source_invoice: Any) -> bool:
-    """Did the staff Customer pay this invoice into a branch till?
+class EmployeePaymentUnresolvedError(Exception):
+    """The source's till receipts neither fully pay it nor are absent.
 
-    True when a SUBMITTED Receive Payment Entry from the invoice's own customer is
-    allocated to it and it either carries the employee-cash reference or pays into
-    a Cash In Hand ledger. The second arm covers an Employee order settled at the
-    counter later through ``api/invoices.pay_invoice`` — economically the same
-    fact: the employee's cash is in the drawer.
+    Raised instead of guessing: ``cash`` would book the WHOLE order into the till
+    again, ``credit`` would cancel real money the employee handed over. The job
+    turns it into the ``employee_payment_unresolved`` block with this message.
+    """
+
+
+def _source_till_receipts(source_invoice: Any) -> tuple:
+    """``(has_till_receipt, amount_allocated_to_this_invoice)`` for the source.
+
+    A till receipt is a SUBMITTED Receive Payment Entry from the invoice's own
+    customer that either carries the employee-cash reference or pays into a Cash
+    In Hand ledger. The second arm covers an Employee order settled at the counter
+    later through ``api/invoices.pay_invoice`` — economically the same fact: the
+    employee's cash is in the drawer.
+
+    The amount is the ``allocated_amount`` on THIS invoice's reference rows, not
+    the Payment Entry's ``paid_amount``: a receipt that also paid other invoices
+    must not count its whole value toward this one.
 
     Deliberately NOT ``custom_payment_method``: builds shipped 2026-08-29..09-13
     stamp ``Cash`` on credit Employee orders, and production holds unpaid ones
@@ -1187,10 +1202,10 @@ def _source_paid_into_a_till(source_invoice: Any) -> bool:
     invoice_name = str(getattr(source_invoice, "name", None) or source_invoice.get("name") or "").strip()
     customer = str(source_invoice.get("customer") or "").strip()
     if not invoice_name or not customer:
-        return False
+        return False, 0.0
     names = _find_submitted_payment_entries(invoice_name)
     if not names:
-        return False
+        return False, 0.0
     rows = frappe.get_all(
         "Payment Entry",
         filters={
@@ -1203,9 +1218,11 @@ def _source_paid_into_a_till(source_invoice: Any) -> bool:
         fields=["name", "paid_to", "reference_no"],
         limit_page_length=20,
     ) or []
+    till_entries: List[str] = []
     for row in rows:
         if str(row.get("reference_no") or "").startswith(_EMPLOYEE_CASH_REFERENCE_PREFIX):
-            return True
+            till_entries.append(row.get("name"))
+            continue
         paid_to = str(row.get("paid_to") or "").strip()
         if not paid_to:
             continue
@@ -1213,10 +1230,87 @@ def _source_paid_into_a_till(source_invoice: Any) -> bool:
             "Account", paid_to, ["account_type", "parent_account"], as_dict=True
         ) or {}
         if str(account.get("account_type") or "").strip() == "Cash":
-            return True
-        if ACCOUNTS.CASH_IN_HAND.lower() in str(account.get("parent_account") or "").lower():
-            return True
-    return False
+            till_entries.append(row.get("name"))
+        elif ACCOUNTS.CASH_IN_HAND.lower() in str(account.get("parent_account") or "").lower():
+            till_entries.append(row.get("name"))
+    till_entries = [name for name in till_entries if name]
+    if not till_entries:
+        return False, 0.0
+    allocations = frappe.get_all(
+        "Payment Entry Reference",
+        filters={
+            "parent": ["in", till_entries],
+            "parenttype": "Payment Entry",
+            "reference_doctype": "Sales Invoice",
+            "reference_name": invoice_name,
+        },
+        fields=["parent", "allocated_amount"],
+        limit_page_length=100,
+    ) or []
+    amount = sum(float(row.get("allocated_amount") or 0) for row in allocations)
+    return True, amount
+
+
+def _source_paid_into_a_till(source_invoice: Any) -> bool:
+    """Was this invoice paid IN FULL into a branch till by its staff Customer?
+
+    * no till receipt at all -> ``False`` (credit, as before);
+    * till receipts that together cover the source total (``grand_total``, or
+      ``rounded_total`` when the invoice is rounded — that is what its outstanding
+      was) within half a piastre -> ``True`` (cash);
+    * anything in between -> :class:`EmployeePaymentUnresolvedError`.
+
+    WHY the middle case refuses: a 300 EGP credit Employee order with 100 later
+    taken at the counter through ``pay_invoice`` used to come back as ``cash`` and
+    book all 300 into the till on the replacement — 200 EGP of salary debt
+    silently turned into drawer money that was never handed over. Calling it
+    credit instead would cancel the 100 the employee DID pay. Neither guess is
+    safe, so the manager settles or reverses the partial payment first.
+    """
+    has_till_receipt, amount = _source_till_receipts(source_invoice)
+    if not has_till_receipt:
+        return False
+
+    totals = [float(source_invoice.get("grand_total") or 0)]
+    rounded_total = float(source_invoice.get("rounded_total") or 0)
+    if rounded_total > 0:
+        totals.append(rounded_total)
+    if amount > _EMPLOYEE_CASH_TOLERANCE and any(
+        amount >= total - _EMPLOYEE_CASH_TOLERANCE for total in totals
+    ):
+        return True
+
+    raise EmployeePaymentUnresolvedError(
+        _(
+            "This employee order was only partly paid into a till ({0} of {1}), so it "
+            "is neither paid at the counter nor on the employee's account. Collect "
+            "the rest at the counter or reverse the partial payment, then amend it."
+        ).format(f"{amount:.2f}", f"{totals[0]:.2f}")
+    )
+
+
+def _resolve_employee_amendment_payment_method(
+    source_invoice: Any, employee_payment: Optional[str]
+) -> Optional[str]:
+    """The ``payment_method`` an amended EMPLOYEE order is recreated with.
+
+    Never the client's: the Flutter amendment loader clears the order purpose, so
+    the POS shows its payment-method dialog and sends ``Instapay`` / ``Credit`` /
+    ... for an Employee amendment. Replaying that would either be refused by
+    creation (cash contradicted) or, for ``Credit``, drag a salary debt through
+    the B2B credit-terms gate (``_apply_credit_terms``) it was never meant for.
+
+    * cash -> ``Cash``, which is what creation stamps on a counter-paid order;
+    * credit -> the source's stamped ``Cash`` label (builds shipped 2026-08-29..
+      09-13 wrote it on credit Employee orders; replaying it is byte-identical to
+      before), otherwise ``None`` — never ``Credit`` or any other method.
+    """
+    if str(employee_payment or "").strip().lower() == _EMPLOYEE_PAYMENT_CASH:
+        return "Cash"
+    stamped = str(source_invoice.get("custom_payment_method") or "").strip()
+    if stamped.lower() == "cash":
+        return "Cash"
+    return None
 
 
 def _resolve_amendment_employee_payment(source_invoice: Any, requested: Optional[str]) -> Optional[str]:
@@ -1224,10 +1318,12 @@ def _resolve_amendment_employee_payment(source_invoice: Any, requested: Optional
 
     * An explicit request wins, passed through raw so ``create_pos_invoice``
       applies its one validation (an invalid value is refused there, not here).
-    * Otherwise an Employee order whose employee already paid into a till is
-      recreated as ``cash`` — the job cancels that Payment Entry before
+    * Otherwise an Employee order whose employee already paid IN FULL into a till
+      is recreated as ``cash`` — the job cancels that Payment Entry before
       recreating, so without this the replacement would silently turn money the
       employee handed over into salary debt.
+    * A partial till payment raises :class:`EmployeePaymentUnresolvedError`
+      (see :func:`_source_paid_into_a_till`).
     * Everything else returns ``None``: credit, exactly as before.
 
     MUST be called before the job cancels the source's Payment Entries; after
@@ -1531,6 +1627,14 @@ def _run_invoice_amendment_job(
         effective_employee_payment = _resolve_amendment_employee_payment(
             source_invoice, employee_payment
         )
+    except EmployeePaymentUnresolvedError as unresolved:
+        # A business refusal, not a failure: the message already says what to do.
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": str(unresolved),
+            "amendment_block_code": "employee_payment_unresolved",
+        }
     except Exception as employee_payment_error:
         frappe.log_error(
             frappe.get_traceback(),
@@ -1545,7 +1649,33 @@ def _run_invoice_amendment_job(
             ).format(str(employee_payment_error)),
             "amendment_block_code": "employee_payment_unresolved",
         }
-    if (
+    if str(source_invoice.get("custom_order_purpose") or "").strip() == _EMPLOYEE_ORDER_PURPOSE:
+        # An Employee source never takes the client's method: the amendment loader
+        # clears the purpose, so the POS asks for one and sends Instapay / Credit.
+        # See _resolve_employee_amendment_payment_method.
+        effective_payment_method = _resolve_employee_amendment_payment_method(
+            source_invoice, effective_employee_payment
+        )
+        client_payment_method = str(payment_method or "").strip()
+        if client_payment_method and client_payment_method.lower() != str(
+            effective_payment_method or ""
+        ).lower():
+            try:
+                import logging
+
+                # Explicit level: servers default every logger to ERROR, which would
+                # drop this warning (same reason as _resolve_amendment_price_list).
+                logger.setLevel(logging.WARNING)
+                logger.warning(
+                    "amendment_employee_payment_method: ignored client payment_method "
+                    "%r on Employee order %s; recreating with %r.",
+                    client_payment_method,
+                    invoice_id,
+                    effective_payment_method,
+                )
+            except Exception:
+                pass
+    elif (
         str(effective_employee_payment or "").strip().lower() == _EMPLOYEE_PAYMENT_CASH
         and payment_method is None
     ):

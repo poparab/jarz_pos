@@ -1417,6 +1417,7 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			custom_order_purpose="Employee",
 			custom_commercial_policy="Employee Order",
 			woo_order_id=None,
+			grand_total=150.0,
 		)
 		data.update(overrides)
 		source = _FakeInvoice(**data)
@@ -1425,7 +1426,11 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 		return source
 
 	@staticmethod
-	def _frappe(pe_rows=None, account=None, trace=None):
+	def _frappe(pe_rows=None, account=None, trace=None, allocations=None):
+		"""``allocations`` are the Payment Entry Reference rows on the source.
+
+		Omitted, every PE row is taken to allocate the full 150 to the source.
+		"""
 		mf = MagicMock()
 		mf.session.user = "manager@example.com"
 		mf.local.site = "frontend"
@@ -1437,6 +1442,13 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 		def _get_all(doctype, *args, **kwargs):
 			if trace is not None:
 				trace.append(f"get_all:{doctype}")
+			if doctype == "Payment Entry Reference":
+				if allocations is not None:
+					return list(allocations)
+				return [
+					{"parent": row.get("name"), "allocated_amount": 150.0}
+					for row in (pe_rows or [])
+				]
 			return list(pe_rows or [])
 
 		mf.get_all.side_effect = _get_all
@@ -1464,7 +1476,8 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
 			self.assertEqual(_resolve_amendment_employee_payment(self._source(), None), "cash")
 
-		filters = mf.get_all.call_args.kwargs["filters"]
+		pe_calls = [c for c in mf.get_all.call_args_list if c.args[0] == "Payment Entry"]
+		filters = pe_calls[0].kwargs["filters"]
 		self.assertEqual(filters["payment_type"], "Receive")
 		self.assertEqual(filters["party_type"], "Customer")
 		self.assertEqual(filters["party"], "STAFF-Mona")
@@ -1511,6 +1524,117 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 				_resolve_amendment_employee_payment(self._source(custom_order_purpose="B2B Supply"), None)
 			)
 		find_pes.assert_not_called()
+
+	# -- partial till receipts ----------------------------------------------------
+
+	_TILL_ACCOUNT = {"account_type": "Cash", "parent_account": "Cash In Hand - J"}
+
+	def test_a_partial_till_receipt_is_refused_not_guessed(self):
+		"""300 EGP credit order, 100 later taken at the counter: neither cash nor credit."""
+		from jarz_pos.api.manager import (
+			EmployeePaymentUnresolvedError,
+			_resolve_amendment_employee_payment,
+		)
+
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "ACC-PAY-1"}],
+			account=self._TILL_ACCOUNT,
+			allocations=[{"parent": "PE-1", "allocated_amount": 100.0}],
+		)
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+			with self.assertRaises(EmployeePaymentUnresolvedError) as ctx:
+				_resolve_amendment_employee_payment(self._source(grand_total=300.0), None)
+
+		self.assertIn("100.00", str(ctx.exception))
+		self.assertIn("300.00", str(ctx.exception))
+
+	def test_several_till_receipts_that_cover_the_total_derive_cash(self):
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		mf = self._frappe(
+			pe_rows=[
+				{"name": "PE-1", "paid_to": "Unknown - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"},
+				{"name": "PE-2", "paid_to": "Nasr City - J", "reference_no": "ACC-PAY-2"},
+			],
+			account=self._TILL_ACCOUNT,
+			allocations=[
+				{"parent": "PE-1", "allocated_amount": 100.0},
+				{"parent": "PE-2", "allocated_amount": 200.0},
+			],
+		)
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1", "PE-2"]):
+			self.assertEqual(
+				_resolve_amendment_employee_payment(self._source(grand_total=300.0), None), "cash"
+			)
+
+	def test_coverage_tolerance_is_half_a_piastre(self):
+		from jarz_pos.api.manager import (
+			EmployeePaymentUnresolvedError,
+			_resolve_amendment_employee_payment,
+		)
+
+		def _resolve(allocated):
+			mf = self._frappe(
+				pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": None}],
+				account=self._TILL_ACCOUNT,
+				allocations=[{"parent": "PE-1", "allocated_amount": allocated}],
+			)
+			with patch("jarz_pos.api.manager.frappe", mf), \
+				 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+				return _resolve_amendment_employee_payment(self._source(grand_total=300.0), None)
+
+		self.assertEqual(_resolve(299.996), "cash")
+		with self.assertRaises(EmployeePaymentUnresolvedError):
+			_resolve(299.99)
+
+	def test_a_rounded_invoice_paid_to_its_rounded_total_derives_cash(self):
+		from jarz_pos.api.manager import _resolve_amendment_employee_payment
+
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": None}],
+			account=self._TILL_ACCOUNT,
+			allocations=[{"parent": "PE-1", "allocated_amount": 300.0}],
+		)
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+			self.assertEqual(
+				_resolve_amendment_employee_payment(
+					self._source(grand_total=300.25, rounded_total=300.0), None
+				),
+				"cash",
+			)
+
+	def test_only_till_receipts_count_toward_coverage(self):
+		"""A bank receipt for the rest does not make the till side whole."""
+		from jarz_pos.api.manager import (
+			EmployeePaymentUnresolvedError,
+			_resolve_amendment_employee_payment,
+		)
+
+		accounts = {
+			"Nasr City - J": self._TILL_ACCOUNT,
+			"Bank Account - J": {"account_type": "Bank", "parent_account": "Bank Accounts - J"},
+		}
+		mf = self._frappe(
+			pe_rows=[
+				{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": None},
+				{"name": "PE-2", "paid_to": "Bank Account - J", "reference_no": "IPY-9"},
+			],
+			allocations=[{"parent": "PE-1", "allocated_amount": 100.0}],
+		)
+		mf.db.get_value.side_effect = lambda doctype, name, *a, **k: accounts.get(name)
+		with patch("jarz_pos.api.manager.frappe", mf), \
+			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1", "PE-2"]):
+			with self.assertRaises(EmployeePaymentUnresolvedError):
+				_resolve_amendment_employee_payment(self._source(grand_total=300.0), None)
+
+		ref_calls = [c for c in mf.get_all.call_args_list if c.args[0] == "Payment Entry Reference"]
+		self.assertEqual(len(ref_calls), 1)
+		ref_filters = ref_calls[0].kwargs["filters"]
+		self.assertEqual(ref_filters["parent"], ["in", ["PE-1"]])
+		self.assertEqual(ref_filters["reference_name"], "INV-EMP-AMD-001")
 
 	# -- the job ----------------------------------------------------------------
 
@@ -1606,6 +1730,102 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 		self.assertEqual(result.get("amendment_block_code"), "employee_payment_unresolved")
 		creation.assert_not_called()
 		source.cancel.assert_not_called()
+
+	def test_job_refuses_a_partly_till_paid_employee_order(self):
+		trace = []
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "ACC-PAY-1"}],
+			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
+			allocations=[{"parent": "PE-1", "allocated_amount": 100.0}],
+			trace=trace,
+		)
+		result, creation, source = self._run_job(self._source(grand_total=300.0), mf, trace=trace)
+
+		self.assertFalse(result.get("success"))
+		self.assertEqual(result.get("amendment_block_code"), "employee_payment_unresolved")
+		self.assertIn("partly paid", result.get("error"))
+		creation.assert_not_called()
+		source.cancel.assert_not_called()
+		self.assertNotIn("cancel_pe", trace)
+
+	# -- the client's payment_method on an Employee source ------------------------
+
+	@staticmethod
+	def _ignored_method_warnings(mf):
+		return [
+			c for c in mf.logger.return_value.warning.call_args_list
+			if c.args and "amendment_employee_payment_method" in str(c.args[0])
+		]
+
+	def test_job_ignores_the_client_method_on_a_cash_employee_order(self):
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
+			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
+		)
+		result, creation, _ = self._run_job(self._source(), mf, payment_method="Instapay")
+
+		self.assertTrue(result.get("success"), result)
+		self.assertEqual(creation.call_args.kwargs["employee_payment"], "cash")
+		self.assertEqual(creation.call_args.args[9], "Cash")
+		self.assertEqual(len(self._ignored_method_warnings(mf)), 1)
+
+	def test_job_never_sends_credit_for_a_credit_employee_order(self):
+		"""``Credit`` would drag a salary debt through the B2B credit-terms gate."""
+		mf = self._frappe(pe_rows=[])
+		result, creation, _ = self._run_job(
+			self._source(custom_payment_method="Cash"),
+			mf,
+			find_pes=MagicMock(return_value=[]),
+			payment_method="Credit",
+		)
+
+		self.assertTrue(result.get("success"), result)
+		self.assertIsNone(creation.call_args.kwargs["employee_payment"])
+		# The source's shipped-dialog Cash label, not the client's Credit.
+		self.assertEqual(creation.call_args.args[9], "Cash")
+		self.assertEqual(len(self._ignored_method_warnings(mf)), 1)
+
+	def test_job_drops_a_non_cash_source_label_on_a_credit_employee_order(self):
+		for source_label, client_method in (("Credit", None), ("Instapay", "Instapay"), ("", "Credit")):
+			with self.subTest(source_label=source_label, client_method=client_method):
+				mf = self._frappe(pe_rows=[])
+				result, creation, _ = self._run_job(
+					self._source(custom_payment_method=source_label),
+					mf,
+					find_pes=MagicMock(return_value=[]),
+					payment_method=client_method,
+				)
+
+				self.assertTrue(result.get("success"), result)
+				self.assertIsNone(creation.call_args.kwargs["employee_payment"])
+				self.assertIsNone(creation.call_args.args[9])
+				self.assertEqual(
+					len(self._ignored_method_warnings(mf)), 1 if client_method else 0
+				)
+
+	def test_job_logs_nothing_when_the_client_method_already_agrees(self):
+		mf = self._frappe(
+			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
+			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
+		)
+		result, creation, _ = self._run_job(self._source(), mf, payment_method="Cash")
+
+		self.assertTrue(result.get("success"), result)
+		self.assertEqual(creation.call_args.args[9], "Cash")
+		self.assertEqual(self._ignored_method_warnings(mf), [])
+
+	def test_job_still_takes_the_client_method_for_a_non_employee_order(self):
+		mf = self._frappe(pe_rows=[])
+		result, creation, _ = self._run_job(
+			self._source(custom_order_purpose="", custom_payment_method="Cash"),
+			mf,
+			find_pes=MagicMock(return_value=[]),
+			payment_method="Instapay",
+		)
+
+		self.assertTrue(result.get("success"), result)
+		self.assertEqual(creation.call_args.args[9], "Instapay")
+		self.assertEqual(self._ignored_method_warnings(mf), [])
 
 	def test_submit_forwards_employee_payment_and_changes_the_job_id(self):
 		from jarz_pos.api.manager import submit_invoice_amendment

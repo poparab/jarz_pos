@@ -6,8 +6,10 @@ and ``_resolve_effective_price_list`` resolved ``requested or policy_pl``, so a
 client-sent list silently beat the policy's own. The server now refuses a contradiction:
 
   1. matched policy WITH a price list (Employee, Sample): the request must be that list;
-  2. matched B2B Supply policy WITHOUT one: the request must be what the chain derives
-     with no request (partner -> customer/group tier -> B2B baseline -> POS default);
+  2. matched B2B Supply policy WITHOUT one: the request must be ANY list the server can
+     derive for that context (partner list, customer/group tier, B2B baseline when there
+     is no selling tier; POS/company default only when none of those exist), because the
+     POS cart resolves the tier without the partner;
   3. Standard / any other list-less purpose (Free Shipping Waiver): the request must not
      be a list reserved for some purpose.
 
@@ -242,17 +244,40 @@ class TestRule2B2BSupplyUsesDerivedList(_PurposeCase):
     def test_empty_request_derives_baseline(self):
         self.assertEqual(self._b2b(None, customer=_untiered(), is_manager=False), _B2B)
 
-    def test_sales_partner_list_outranks_customer_tier(self):
-        # Same chain as the resolver: the partner's list sits above the customer tier.
+    def test_sales_partner_list_and_customer_tier_are_both_accepted(self):
+        # The chain picks the partner's list with no request, but the POS cart prices
+        # through resolve_customer_price_list, which ignores the partner and echoes the
+        # customer tier. Refusing that echo refused every B2B order with such a partner.
+        partner = dict(customer=_tiered(), sales_partner="_TEST Partner", partner_pl=_PARTNER_PL)
+        self.assertEqual(self._b2b(_PARTNER_PL, **partner), _PARTNER_PL)
+        self.assertEqual(self._b2b(_TIER, is_manager=False, **partner), _TIER)
+        # Retail is still refused, and the message names every acceptable list.
+        self.assertMismatch(
+            ["must use price list Partner Selling or Cafes", _DEFAULT],
+            requested=_DEFAULT, matched=True, purpose="B2B Supply", **partner,
+        )
+
+    def test_sales_partner_does_not_unlock_the_baseline_over_a_tier(self):
+        self.assertMismatch(
+            ["must use price list Partner Selling or Cafes", _B2B],
+            requested=_B2B, matched=True, purpose="B2B Supply", customer=_tiered(),
+            sales_partner="_TEST Partner", partner_pl=_PARTNER_PL,
+        )
+
+    def test_untiered_customer_with_a_partner_accepts_partner_list_or_baseline(self):
+        partner = dict(customer=_untiered(), sales_partner="_TEST Partner", partner_pl=_PARTNER_PL)
+        self.assertEqual(self._b2b(_PARTNER_PL, **partner), _PARTNER_PL)
+        self.assertEqual(self._b2b(_B2B, is_manager=False, **partner), _B2B)
+        self.assertMismatch(
+            ["must use price list Partner Selling or B2B Selling", _DEFAULT],
+            requested=_DEFAULT, matched=True, purpose="B2B Supply", **partner,
+        )
+
+    def test_effective_list_without_a_request_is_still_the_partner_list(self):
         self.assertEqual(
-            self._b2b(_PARTNER_PL, customer=_tiered(), sales_partner="_TEST Partner",
+            self._b2b(None, customer=_tiered(), sales_partner="_TEST Partner",
                       partner_pl=_PARTNER_PL),
             _PARTNER_PL,
-        )
-        self.assertMismatch(
-            ["must use price list Partner Selling"],
-            requested=_TIER, matched=True, purpose="B2B Supply", customer=_tiered(),
-            sales_partner="_TEST Partner", partner_pl=_PARTNER_PL,
         )
 
     def test_rule2_never_queries_reserved_lists(self):
@@ -260,6 +285,38 @@ class TestRule2B2BSupplyUsesDerivedList(_PurposeCase):
             _B2B, customer=_untiered(),
             reserved_side_effect=AssertionError("reserved map is rule 3 only"),
         )
+
+
+class TestB2BSupplyAcceptablePriceLists(unittest.TestCase):
+    """``_b2b_supply_acceptable_price_lists`` with its resolvers stubbed."""
+
+    def _candidates(self, *, partner=None, tier=None, tier_selling=True, baseline=_B2B,
+                    default=_DEFAULT, company_default="Company Selling"):
+        with patch.object(ic, "_resolve_sales_partner_price_list", return_value=partner), \
+             patch.object(ic, "_resolve_customer_price_list", return_value=tier), \
+             patch.object(ic, "_resolve_b2b_baseline_price_list", return_value=baseline), \
+             patch.object(ic, "_is_selling_price_list", return_value=tier_selling), \
+             patch.object(ic, "_resolve_company_default_price_list", return_value=company_default):
+            return ic._b2b_supply_acceptable_price_lists(
+                default_price_list=default,
+                policy_order_purpose="B2B Supply",
+                customer_doc=object(),
+                sales_partner="_TEST Partner",
+            )
+
+    def test_a_non_selling_tier_unlocks_the_baseline_like_the_client(self):
+        # api/pos.resolve_customer_price_list skips a non-selling tier to the baseline.
+        self.assertEqual(self._candidates(tier=_TIER, tier_selling=False), [_TIER, _B2B])
+        self.assertEqual(self._candidates(tier=_TIER, tier_selling=True), [_TIER])
+
+    def test_defaults_only_when_nothing_b2b_is_derivable(self):
+        self.assertEqual(self._candidates(baseline=None), [_DEFAULT])
+        self.assertEqual(self._candidates(baseline=None, default=None), ["Company Selling"])
+        self.assertEqual(self._candidates(baseline=None, default=None, company_default=None), [])
+        self.assertNotIn(_DEFAULT, self._candidates(partner=_PARTNER_PL, baseline=None))
+
+    def test_duplicates_collapse_case_insensitively(self):
+        self.assertEqual(self._candidates(partner=_TIER, tier="cafes"), [_TIER])
 
 
 # ---------------------------------------------------------------------------
@@ -352,19 +409,30 @@ class TestAbsentRequestIsUnchanged(_PurposeCase):
 class TestAmendmentKeepsSourcePriceList(_PurposeCase):
     _SOURCE = "ACC-SINV-2026-00001"
 
+    @staticmethod
+    def _source_row(**overrides):
+        """A cancelled source for the same customer on the same profile as the new order."""
+        row = {
+            "selling_price_list": _DEFAULT,
+            "docstatus": 2,
+            "custom_order_purpose": _SAMPLE_COURIER,
+            "customer": _untiered().name,
+            "pos_profile": _PROFILE,
+            "custom_kanban_profile": _PROFILE,
+        }
+        row.update(overrides)
+        return row
+
     def _sample_amendment(self, requested=_DEFAULT, *, source=None, live_replacement=False,
-                          amended_from=_SOURCE):
+                          amended_from=_SOURCE, customer=None):
         if source is None:
-            source = {
-                "selling_price_list": _DEFAULT,
-                "docstatus": 2,
-                "custom_order_purpose": _SAMPLE_COURIER,
-            }
+            source = self._source_row()
         return self._resolve(
             requested,
             matched=True,
             purpose=_SAMPLE_COURIER,
             policy_pl=_SAMPLE,
+            customer=customer if customer is not None else _untiered(),
             amended_from=amended_from,
             source_invoice=source,
             live_replacement=live_replacement,
@@ -381,10 +449,7 @@ class TestAmendmentKeepsSourcePriceList(_PurposeCase):
 
     def test_source_must_be_cancelled(self):
         with self.assertRaises(frappe.ValidationError):
-            self._sample_amendment(source={
-                "selling_price_list": _DEFAULT, "docstatus": 1,
-                "custom_order_purpose": _SAMPLE_COURIER,
-            })
+            self._sample_amendment(source=self._source_row(docstatus=1))
 
     def test_a_new_list_on_amendment_is_still_checked(self):
         with self.assertRaises(frappe.ValidationError):
@@ -392,10 +457,38 @@ class TestAmendmentKeepsSourcePriceList(_PurposeCase):
 
     def test_source_purpose_must_match(self):
         with self.assertRaises(frappe.ValidationError):
-            self._sample_amendment(source={
-                "selling_price_list": _DEFAULT, "docstatus": 2,
-                "custom_order_purpose": "Standard",
-            })
+            self._sample_amendment(source=self._source_row(custom_order_purpose="Standard"))
+
+    def test_source_customer_must_match(self):
+        # amended_from is client-supplied: another customer's cancelled order must not
+        # lend its list to this one.
+        with self.assertRaises(frappe.ValidationError):
+            self._sample_amendment(source=self._source_row(customer="_TEST Someone Else"))
+
+    def test_source_customer_is_required(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._sample_amendment(source=self._source_row(customer=None))
+
+    def test_source_pos_profile_must_match(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._sample_amendment(
+                source=self._source_row(pos_profile="Nasr City", custom_kanban_profile="Nasr City")
+            )
+
+    def test_source_kanban_profile_counts_as_its_branch(self):
+        # The amendment job recreates on custom_kanban_profile first, pos_profile second.
+        self.assertEqual(
+            self._sample_amendment(
+                source=self._source_row(pos_profile="Nasr City", custom_kanban_profile=_PROFILE)
+            ),
+            _DEFAULT,
+        )
+        self.assertEqual(
+            self._sample_amendment(
+                source=self._source_row(pos_profile=_PROFILE, custom_kanban_profile=None)
+            ),
+            _DEFAULT,
+        )
 
     def test_only_one_replacement_is_grandfathered(self):
         with self.assertRaises(frappe.ValidationError):
@@ -409,7 +502,9 @@ class TestAmendmentKeepsSourcePriceList(_PurposeCase):
             )
 
     def test_b2b_order_whose_tier_changed_since_stays_amendable(self):
-        source = {"selling_price_list": _B2B, "docstatus": 2, "custom_order_purpose": "B2B Supply"}
+        source = self._source_row(
+            selling_price_list=_B2B, custom_order_purpose="B2B Supply", customer=_tiered().name
+        )
         self.assertEqual(
             self._resolve(
                 _B2B, matched=True, purpose="B2B Supply", customer=_tiered(),
@@ -419,14 +514,17 @@ class TestAmendmentKeepsSourcePriceList(_PurposeCase):
         )
 
     def test_standard_amendment_keeping_a_reserved_list_is_still_manager_gated(self):
-        source = {"selling_price_list": _EMPLOYEE, "docstatus": 2, "custom_order_purpose": ""}
+        source = self._source_row(selling_price_list=_EMPLOYEE, custom_order_purpose="")
         self.assertEqual(
-            self._resolve(_EMPLOYEE, amended_from=self._SOURCE, source_invoice=source),
+            self._resolve(
+                _EMPLOYEE, customer=_untiered(), amended_from=self._SOURCE, source_invoice=source
+            ),
             _EMPLOYEE,
         )
         with self.assertRaises(frappe.ValidationError):
             self._resolve(
-                _EMPLOYEE, amended_from=self._SOURCE, source_invoice=source, is_manager=False
+                _EMPLOYEE, customer=_untiered(), amended_from=self._SOURCE,
+                source_invoice=source, is_manager=False,
             )
 
 

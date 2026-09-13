@@ -54,7 +54,7 @@ from jarz_pos.utils.account_utils import (
     ensure_partner_receivable_subaccount,
     resolve_online_partner_paid_to,
 )
-from jarz_pos.utils.access_control import ensure_open_shift
+from jarz_pos.utils.access_control import ShiftRequiredError, get_open_shift_for_profile
 from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
 
 # Territory / branch exception logging lives in its own service so a logging
@@ -468,11 +468,11 @@ def _derive_policy_price_list(
 ) -> str | None:
     """The list a MATCHED-policy order resolves to when the client requests none.
 
-    Extracted verbatim from ``_resolve_effective_price_list`` so the purpose/price-list
-    consistency check (:func:`_enforce_order_purpose_price_list`) compares a B2B Supply
-    request against exactly the list the chain would pick — one chain, never a copy
+    Extracted verbatim from ``_resolve_effective_price_list`` — one chain, never a copy
     that can drift from it. Evaluation stays lazy: each lookup runs only when every
-    higher-priority source came back empty.
+    higher-priority source came back empty. The purpose/price-list consistency check
+    does NOT hold a request to this single answer; see
+    :func:`_b2b_supply_acceptable_price_lists`.
     """
     return (
         _normalize_price_list_name(policy_price_list)
@@ -486,6 +486,66 @@ def _derive_policy_price_list(
     )
 
 
+def _b2b_supply_acceptable_price_lists(
+    *,
+    default_price_list: str | None,
+    policy_order_purpose: str | None,
+    customer_doc=None,
+    sales_partner: str | None = None,
+) -> list[str]:
+    """Every list a B2B Supply request may legitimately name, in chain order.
+
+    WHY a set and not :func:`_derive_policy_price_list`'s single answer: the POS never
+    runs that chain. The cart prices a B2B customer through
+    ``api/pos.resolve_customer_price_list`` — customer -> customer group (only an
+    enabled SELLING list) -> B2B baseline — which ignores the Sales Partner entirely.
+    Holding the request to the chain's first hit refused exactly what the client
+    legitimately sends: a B2B Supply order with a Sales Partner that carries a price
+    list, where the cart echoes the customer's tier and the chain expects the
+    partner's list. So a request is accepted when it equals ANY of:
+
+      * the Sales Partner's list (what the chain picks with no request);
+      * the customer / customer-group tier;
+      * the B2B baseline — only when there is no tier, or the tier is not a selling
+        list (that is when the client falls through to it). A configured tier still
+        keeps a rep from booking the baseline instead.
+
+    The POS default / company default are candidates ONLY when none of those exist
+    (the chain's last resort). Anything else — a retail list for a tiered or
+    baseline-priced customer — is refused. Resolution of the effective list is
+    unchanged (``requested or _derive_policy_price_list(...)``); this only decides
+    which requests are consistent with the purpose.
+    """
+    candidates: list[str] = []
+
+    def _add(name):
+        name = _normalize_price_list_name(name)
+        if name and not any(_same_price_list(name, existing) for existing in candidates):
+            candidates.append(name)
+
+    _add(_resolve_sales_partner_price_list(sales_partner))
+    tier = _resolve_customer_price_list(customer_doc)
+    _add(tier)
+    if not tier or not _is_selling_price_list(tier):
+        _add(_resolve_b2b_baseline_price_list(policy_order_purpose))
+    if not candidates:
+        _add(_normalize_price_list_name(default_price_list) or _resolve_company_default_price_list())
+    return candidates
+
+
+def _is_selling_price_list(price_list: str | None) -> bool:
+    """Same test ``api/pos.resolve_customer_price_list`` applies to a customer tier."""
+    name = _normalize_price_list_name(price_list)
+    if not name:
+        return False
+    try:
+        return bool(frappe.db.get_value("Price List", name, "selling"))
+    except Exception:
+        # Unreadable -> treat as selling: the tier then stays the only B2B candidate,
+        # which is the stricter answer (the baseline is not unlocked by a DB error).
+        return True
+
+
 def _same_price_list(a: str | None, b: str | None) -> bool:
     """Case-insensitive name equality: MariaDB's collation makes "sample" == "Sample"."""
     left = _normalize_price_list_name(a)
@@ -494,7 +554,9 @@ def _same_price_list(a: str | None, b: str | None) -> bool:
 
 
 def _amendment_keeps_source_price_list(amended_from: str | None, requested: str | None,
-                                       order_purpose: str | None) -> bool:
+                                       order_purpose: str | None, *,
+                                       customer: str | None = None,
+                                       pos_profile: str | None = None) -> bool:
     """True when an amendment is only carrying its cancelled source's OWN price list.
 
     WHY this exemption exists: invoices booked before the purpose/price-list check —
@@ -512,17 +574,37 @@ def _amendment_keeps_source_price_list(amended_from: str | None, requested: str 
       * no live replacement for it exists yet — a cancelled invoice grandfathers ONE
         replacement, not an unlimited supply of mismatched orders;
       * the source had the SAME order purpose;
+      * the source belongs to the SAME customer as the new order;
+      * the source was booked on the SAME POS profile (its ``pos_profile`` or its
+        ``custom_kanban_profile``) as the new order;
       * the requested list IS the source's persisted ``selling_price_list``.
+    The customer and profile checks close the remaining hole in a client-supplied
+    ``amended_from``: without them any cancelled invoice that has no replacement
+    yet — say an old B2B order at a cheap tier — could lend its list to an order
+    for a DIFFERENT customer or branch. The amendment job always recreates the
+    source's own customer on the source's branch unless the manager changed
+    them, and a changed customer/branch is a new pricing context anyway.
     A deliberately NEW list on an amendment still goes through the full check.
     """
     source = str(amended_from or "").strip()
+    new_customer = str(customer or "").strip()
+    new_profile = str(pos_profile or "").strip()
     if not source or not _normalize_price_list_name(requested):
+        return False
+    if not new_customer or not new_profile:
         return False
     try:
         row = frappe.db.get_value(
             "Sales Invoice",
             source,
-            ["selling_price_list", "docstatus", "custom_order_purpose"],
+            [
+                "selling_price_list",
+                "docstatus",
+                "custom_order_purpose",
+                "customer",
+                "pos_profile",
+                "custom_kanban_profile",
+            ],
             as_dict=True,
         )
         if not row or int(row.get("docstatus") or 0) != 2:
@@ -531,6 +613,14 @@ def _amendment_keeps_source_price_list(amended_from: str | None, requested: str 
             return False
         source_purpose = str(row.get("custom_order_purpose") or "").strip() or "Standard"
         if source_purpose != (str(order_purpose or "").strip() or "Standard"):
+            return False
+        if str(row.get("customer") or "").strip() != new_customer:
+            return False
+        source_profiles = {
+            str(row.get(field) or "").strip()
+            for field in ("pos_profile", "custom_kanban_profile")
+        } - {""}
+        if new_profile not in source_profiles:
             return False
         if frappe.db.exists(
             "Sales Invoice", {"amended_from": source, "docstatus": ["!=", 2]}
@@ -562,9 +652,10 @@ def _enforce_order_purpose_price_list(
     B2B Supply invoice booked at Standard Selling. Order Purpose now drives the list:
 
       1. matched policy WITH a price list (Employee, Sample): the request must BE it;
-      2. matched B2B Supply policy without one: the request must be what the chain
-         derives with no request (partner -> customer/group tier -> B2B baseline ->
-         POS default -> company default) — reusing :func:`_derive_policy_price_list`;
+      2. matched B2B Supply policy without one: the request must be ONE of the lists
+         the server can derive for this context — see
+         :func:`_b2b_supply_acceptable_price_lists` for why it is a set and not the
+         single answer of :func:`_derive_policy_price_list`;
       3. Standard, or any other matched policy without a list (Free Shipping Waiver,
          a retail order with shipping waived): the request must not be a list RESERVED
          for some purpose (``commercial_policy.reserved_price_lists``).
@@ -584,14 +675,13 @@ def _enforce_order_purpose_price_list(
 
     from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
 
-    expected: str | None = None
+    expected: list[str] | None = None
     reserved_for: set[str] = set()
     if policy_matched and policy_pl:
-        expected = policy_pl
+        expected = [policy_pl]
     elif policy_matched and purpose == B2B_SUPPLY_PURPOSE:
-        expected = _derive_policy_price_list(
+        expected = _b2b_supply_acceptable_price_lists(
             default_price_list=default_price_list,
-            policy_price_list=None,
             policy_order_purpose=purpose,
             customer_doc=customer_doc,
             sales_partner=sales_partner,
@@ -615,23 +705,33 @@ def _enforce_order_purpose_price_list(
         if not reserved_for:
             return
 
-    if expected is not None and _same_price_list(requested, expected):
+    if expected is not None and any(_same_price_list(requested, name) for name in expected):
         return
 
-    if _amendment_keeps_source_price_list(amended_from, requested, purpose):
+    if _amendment_keeps_source_price_list(
+        amended_from,
+        requested,
+        purpose,
+        customer=getattr(customer_doc, "name", None),
+        pos_profile=getattr(pos_profile, "name", None),
+    ):
         if logger is not None:
             try:
                 logger.warning(
                     f"purpose_price_list: amendment of {amended_from} keeps its source "
                     f"price list {requested} under order purpose {purpose} "
-                    f"(expected {expected or 'a retail list'}); grandfathered."
+                    f"(expected {' or '.join(expected) if expected else 'a retail list'}); "
+                    f"grandfathered."
                 )
             except Exception:
                 pass
         return
 
     if expected is not None:
-        message = f"Order purpose {purpose} must use price list {expected}, not {requested}."
+        message = (
+            f"Order purpose {purpose} must use price list {' or '.join(expected)}, "
+            f"not {requested}."
+        )
     else:
         message = (
             f"Price list {requested} is reserved for order purpose "
@@ -1594,18 +1694,36 @@ def _ensure_employee_cash_can_be_taken(pos_profile_name: str, company: str) -> s
     Runs before insert so a branch that cannot receive the money leaves no
     invoice behind:
 
-    * ``ensure_open_shift`` — the same "is this branch open?" gate every other
-      cash movement uses (``api/invoices.pay_invoice``); it raises
-      ``ShiftRequiredError`` so the client can route to Start Shift.
+    * **an open shift on the branch, for EVERY user.** Deliberately not
+      ``ensure_open_shift``: that gate returns early for users without
+      ``custom_require_pos_shift``, and Employee orders are placed by managers
+      and B2B reps who usually lack the flag. Their cash would land in the till
+      outside any shift window, and the next shift open would book it as Cash
+      Over/Short. So the branch lookup is asked directly, and the refusal is the
+      same ``ShiftRequiredError`` shape so the client still routes to Start
+      Shift. A lookup failure returns no shift, so it refuses too.
     * ``get_pos_cash_account`` — the till the Payment Entry will pay into. It
       throws when the branch has no Cash In Hand ledger, and resolving it here
       is what turns that into a refusal instead of a submitted invoice with no
       payment.
 
-    Returns the till account.
+    ``pos_profile_name`` must be the SAME branch the Payment Entry is later
+    booked against: the caller resolves it once and passes it to both, so the
+    shift that was checked is the shift whose drawer receives the cash.
+
+    Credit Employee orders never reach this gate. Returns the till account.
     """
-    ensure_open_shift(pos_profile_name, action_label="taking an employee's cash payment")
-    return get_pos_cash_account(pos_profile_name, company)
+    branch = str(pos_profile_name or "").strip()
+    if not get_open_shift_for_profile(branch):
+        frappe.throw(
+            frappe._(
+                "No open shift on branch {0}, so taking an employee's cash payment is "
+                "not allowed. Start a shift on this branch first."
+            ).format(branch or "?"),
+            ShiftRequiredError,
+            title=frappe._("Shift Required"),
+        )
+    return get_pos_cash_account(branch, company)
 
 
 def _find_submitted_receive_payment_entry(invoice_name: str) -> str | None:
@@ -2440,10 +2558,16 @@ def create_pos_invoice(
         # refuse the order outright, not leave a submitted invoice whose cash has
         # nowhere to land. (STEP 3.6 already guaranteed payment_method is Cash, so
         # the credit gate above can never have run for this order.)
+        #
+        # ONE branch value for the gate and the Payment Entry (STEP 11.4): the shift
+        # that was checked must be the one whose drawer receives the cash.
+        employee_cash_branch = (
+            getattr(invoice_doc, "custom_kanban_profile", None) or pos_profile.name
+        )
         if is_employee_cash:
             print("\n8️⃣.3️⃣ EMPLOYEE ORDER PAID AT THE COUNTER:")
             _employee_cash_till = _ensure_employee_cash_can_be_taken(
-                pos_profile.name,
+                employee_cash_branch,
                 getattr(invoice_doc, "company", None) or pos_profile.company,
             )
             print(f"   🏧 Till resolved: {_employee_cash_till}")
@@ -2512,7 +2636,7 @@ def create_pos_invoice(
             print("\n💵 EMPLOYEE CASH: settling into the branch till")
             employee_payment_entry = _register_employee_counter_cash_payment(
                 invoice_doc,
-                getattr(invoice_doc, "custom_kanban_profile", None) or pos_profile.name,
+                employee_cash_branch,
                 logger,
             )
 

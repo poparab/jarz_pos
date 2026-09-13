@@ -12,7 +12,8 @@ What is locked down here, and why each one matters:
    type, an unknown value. A silently defaulted typo would leave real cash out of
    the shift count.
 3. **The branch must be able to take the money BEFORE the invoice exists.** No
-   open shift or no till is a refusal with nothing inserted.
+   open shift (for ANY user, flagged or not) or no till is a refusal with nothing
+   inserted, and the gate checks the same branch the Payment Entry pays into.
 4. **Money in before goods out.** The Payment Entry is posted after submit and
    before ``fulfil_at_branch``; if it fails the request fails, and the goods are
    not handed over.
@@ -150,31 +151,87 @@ class EmployeePaymentNormalisationTests(unittest.TestCase):
 # 2. The pre-insert gate
 # ---------------------------------------------------------------------------
 
-class EmployeeCashGateTests(unittest.TestCase):
-    def test_checks_the_shift_and_resolves_the_branch_till(self):
-        with patch.object(ic, "ensure_open_shift") as shift, patch.object(
-            ic, "get_pos_cash_account", return_value=_TILL
-        ) as till:
-            self.assertEqual(ic._ensure_employee_cash_can_be_taken(_BRANCH, _COMPANY), _TILL)
-        shift.assert_called_once()
-        self.assertEqual(shift.call_args.args[0], _BRANCH)
-        till.assert_called_once_with(_BRANCH, _COMPANY)
+def _throwing_with_class(message="throw", exc=None, *args, **kwargs):
+    """A ``frappe.throw`` that raises the exception class it was handed."""
+    if isinstance(exc, type) and issubclass(exc, Exception):
+        raise exc(str(message))
+    raise RuntimeError(str(message))
 
-    def test_no_open_shift_propagates_unchanged(self):
-        """ShiftRequiredError must reach the client as itself (it routes to Start Shift)."""
-        with patch.object(
-            ic, "ensure_open_shift", side_effect=RuntimeError("No open shift")
-        ), patch.object(ic, "get_pos_cash_account") as till:
-            with self.assertRaises(RuntimeError):
-                ic._ensure_employee_cash_can_be_taken(_BRANCH, _COMPANY)
-        till.assert_not_called()
+
+class EmployeeCashGateTests(unittest.TestCase):
+    """The branch must have an open shift for EVERY user, not only flagged ones.
+
+    Employee orders are placed by managers and B2B reps who usually lack
+    ``custom_require_pos_shift``; ``ensure_open_shift`` waves them through, and
+    their cash then lands in the till outside any shift (Cash Over/Short at the
+    next open).
+    """
+
+    def _gate(self, *, open_shift=None, till_side_effect=None, branch=_BRANCH):
+        with patch.object(ic, "frappe") as mock_frappe, patch.object(
+            ic, "get_open_shift_for_profile", return_value=open_shift
+        ) as lookup, patch.object(
+            ic, "get_pos_cash_account", return_value=_TILL, side_effect=till_side_effect
+        ) as till, patch(
+            "jarz_pos.utils.access_control.user_requires_pos_shift", return_value=False
+        ):
+            mock_frappe.throw.side_effect = _throwing_with_class
+            mock_frappe._.side_effect = lambda text: text
+            try:
+                result = ic._ensure_employee_cash_can_be_taken(branch, _COMPANY)
+                error = None
+            except Exception as exc:  # noqa: BLE001 - asserted by the caller
+                result = None
+                error = exc
+        return SimpleNamespace(result=result, error=error, lookup=lookup, till=till)
+
+    def test_checks_the_branch_shift_and_resolves_the_branch_till(self):
+        run = self._gate(open_shift={"name": "POS-OPE-0001"})
+
+        self.assertIsNone(run.error)
+        self.assertEqual(run.result, _TILL)
+        run.lookup.assert_called_once_with(_BRANCH)
+        run.till.assert_called_once_with(_BRANCH, _COMPANY)
+
+    def test_no_open_shift_refuses_with_shift_required_error(self):
+        """ShiftRequiredError is what routes the client to Start Shift."""
+        from jarz_pos.utils.access_control import ShiftRequiredError
+
+        run = self._gate(open_shift=None)
+
+        self.assertIsInstance(run.error, ShiftRequiredError)
+        self.assertIn(_BRANCH, str(run.error))
+        run.till.assert_not_called()
+
+    def test_a_user_without_the_require_shift_flag_is_still_refused(self):
+        """The whole fix: ``_gate`` pins user_requires_pos_shift() to False.
+
+        ``ensure_open_shift`` returns early for exactly that user, so a gate built
+        on it would let this call through and the assertion below would fail.
+        """
+        from jarz_pos.utils.access_control import ShiftRequiredError
+
+        run = self._gate(open_shift=None)
+
+        self.assertIsInstance(run.error, ShiftRequiredError)
+        run.lookup.assert_called_once_with(_BRANCH)
+
+    def test_a_blank_branch_is_refused(self):
+        from jarz_pos.utils.access_control import ShiftRequiredError
+
+        run = self._gate(open_shift=None, branch="")
+
+        self.assertIsInstance(run.error, ShiftRequiredError)
+        run.till.assert_not_called()
 
     def test_a_branch_without_a_till_is_refused(self):
-        with patch.object(ic, "ensure_open_shift"), patch.object(
-            ic, "get_pos_cash_account", side_effect=RuntimeError("No Cash In Hand account")
-        ):
-            with self.assertRaises(RuntimeError):
-                ic._ensure_employee_cash_can_be_taken(_BRANCH, _COMPANY)
+        run = self._gate(
+            open_shift={"name": "POS-OPE-0001"},
+            till_side_effect=RuntimeError("No Cash In Hand account"),
+        )
+
+        self.assertIsInstance(run.error, RuntimeError)
+        self.assertIn("Cash In Hand", str(run.error))
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +406,7 @@ class EmployeeOrderCreationFlowTests(unittest.TestCase):
         after_reload=None,
         gate_side_effect=None,
         register_side_effect=None,
+        invoice_pos_profile=None,
     ):
         inv = _EmployeeInvoice(after_reload=after_reload)
         order = []
@@ -362,7 +420,7 @@ class EmployeeOrderCreationFlowTests(unittest.TestCase):
             invoice_doc.customer = customer_doc.name
             invoice_doc.customer_name = customer_doc.customer_name
             invoice_doc.company = pos_profile.company
-            invoice_doc.pos_profile = pos_profile.name
+            invoice_doc.pos_profile = invoice_pos_profile or pos_profile.name
             invoice_doc.posting_date = "2026-09-13"
 
         def _record(label, side_effect=None, value=None):
@@ -500,6 +558,22 @@ class EmployeeOrderCreationFlowTests(unittest.TestCase):
         self.assertIs(args[0], run.inv)
         self.assertEqual(args[1], _BRANCH)
         run.mocks["gate"].assert_called_once_with(_BRANCH, _COMPANY)
+
+    def test_the_shift_gate_and_the_payment_entry_use_one_branch(self):
+        """The shift that was checked must be the one whose drawer takes the cash.
+
+        The gate used ``pos_profile.name`` while the Payment Entry used
+        ``custom_kanban_profile or pos_profile.name``; here the two differ, so a
+        split resolution would check one branch and pay into another.
+        """
+        run = self._run(employee_payment="cash", invoice_pos_profile="Nasr City Kanban")
+
+        self.assertIsNone(run.error)
+        self.assertEqual(run.inv.custom_kanban_profile, "Nasr City Kanban")
+        gate_branch = run.mocks["gate"].call_args.args[0]
+        register_branch = run.mocks["register"].call_args.args[1]
+        self.assertEqual(gate_branch, "Nasr City Kanban")
+        self.assertEqual(gate_branch, register_branch)
 
     def test_cash_response_carries_the_payment_and_fresh_state(self):
         run = self._run(
