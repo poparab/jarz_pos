@@ -326,6 +326,20 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		self.assertEqual(self._current(slots), ["00:00-01:00"])
 		self.assertEqual(slots[0]["business_date"], self._make_date().isoformat())
 
+	def test_day_labels_follow_the_site_clock_not_the_container(self):
+		"""At 00:20 site time the running after-midnight slot is Today, not Tomorrow."""
+		from unittest import mock
+		from jarz_pos.api import delivery_slots
+
+		now = self._at(0, 20, days=1)
+		with mock.patch.object(delivery_slots.frappe.utils, "now_datetime", return_value=now):
+			slots = self._today_slots(now)
+			upcoming = self._today_slots(now, target=now.date())
+
+		self.assertEqual(slots[0]["day_label"], "Today")
+		self.assertTrue(slots[0]["label"].startswith("Today, "))
+		self.assertEqual(upcoming[0]["day_label"], "Today")
+
 	def test_an_ended_day_offers_nothing(self):
 		self.assertEqual(self._today_slots(self._at(1, 0, days=1)), [])
 

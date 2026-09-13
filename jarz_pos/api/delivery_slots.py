@@ -536,8 +536,13 @@ def _build_slot(
 def _get_day_label(target_date: datetime.date) -> str:
     """
     Get human-readable day label (Today, Tomorrow, Monday, etc.)
+
+    "Today" is the site's today, the same clock slot filtering uses. The
+    container clock need not share the site timezone; if it runs behind (UTC vs
+    Cairo), ``datetime.now()`` still says yesterday just after midnight and
+    labels the running after-midnight slot "Tomorrow".
     """
-    today = datetime.now().date()
+    today = frappe.utils.now_datetime().date()
     
     if target_date == today:
         return "Today"
