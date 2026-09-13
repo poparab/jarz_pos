@@ -588,11 +588,32 @@ def _parse_slot_datetime(raw: Any) -> datetime | None:
             return None
 
 
+#: How long after a slot starts a pre-selected (non-explicit) start in it is
+#: still kept. The POS decides "not started yet" on the device clock and the
+#: server decides moments later on its own; without this, an order sent at
+#: 21:59:58 and handled at 22:00:01 - or from a device a minute or two behind -
+#: jumped a whole slot to 23:30.
+RUNNING_SLOT_GRACE_MINUTES = 5
+
+
+def _keeps_running_slot(explicit: bool | None, slot_start: datetime, now: datetime) -> bool:
+    """Whether a start in the slot running right now is kept rather than snapped.
+
+    ``explicit`` is the POS's ``delivery_slot_explicit``: ``True`` for an
+    operator pick, ``False`` for a slot the app pre-selected, ``None`` when the
+    client is too old to send it. An unpatched app must keep booking the running
+    slot staff tap, so a missing flag keeps the behaviour it had.
+    """
+    if explicit is None or explicit:
+        return True
+    return now - slot_start <= timedelta(minutes=RUNNING_SLOT_GRACE_MINUTES)
+
+
 def normalize_delivery_window(
     pos_profile_name: str | None,
     start: datetime | None,
     end: datetime | None = None,
-    explicit: bool = False,
+    explicit: bool | None = None,
 ) -> tuple[datetime | None, datetime | None, str]:
     """Snap a requested delivery window onto the profile's real slot grid.
 
@@ -607,10 +628,14 @@ def normalize_delivery_window(
     Returns ``(start, end, note)``:
 
     - ``"matched"``  — the start IS a real slot; that slot's own end is used,
-      which also repairs a missing or contradictory end. The slot running right
-      now only matches when ``explicit`` is set: the operator picked it on
-      purpose (the POS sends ``delivery_slot_explicit=1``), or an amendment is
-      keeping the window its order already had.
+      which also repairs a missing or contradictory end. For the slot running
+      right now ``explicit`` decides (see ``_keeps_running_slot``): ``True`` -
+      the operator picked it, or an amendment keeps its order's own window -
+      matches; ``False`` - the POS pre-selected it - matches only within
+      ``RUNNING_SLOT_GRACE_MINUTES`` of its start, and is otherwise snapped;
+      ``None`` - a client too old to send the flag - matches, as it always did.
+      A running slot that would be snapped still matches when no later slot
+      is left to snap to.
     - ``"snapped"``  — the start had passed; the next available slot is used.
     - ``"kept"``     — a future, off-grid start (manual entry) is left alone.
     - ``"unresolved"`` — no profile, no timetable or no slots left; the caller
@@ -648,6 +673,8 @@ def normalize_delivery_window(
             )
         )
 
+    now = frappe.utils.now_datetime()
+
     # Exact slot the caller asked for. Minute resolution: the POS sends whole
     # minutes and a stored Time keeps seconds, so a second-level compare would
     # miss a slot the operator really did pick.
@@ -656,14 +683,15 @@ def normalize_delivery_window(
     # into it (the app's own stale-slot refresh can fail, and a device clock can
     # run behind). Only an explicit pick keeps it; anything else falls through
     # and is snapped to the next slot that has not started.
+    running_match: tuple[datetime, datetime | None] | None = None
     for slot_start, slot_end, is_current in parsed:
         if slot_start.replace(second=0, microsecond=0) != start.replace(second=0, microsecond=0):
             continue
-        if is_current and not explicit:
+        if is_current and not _keeps_running_slot(explicit, slot_start, now):
+            running_match = (slot_start, slot_end or end)
             break
         return slot_start, slot_end or end, "matched"
 
-    now = frappe.utils.now_datetime()
     if start > now:
         # Future but off-grid: an amendment carrying an older grid, or a manual
         # datetime. Respect it; only repair an end that cannot be true.
@@ -674,6 +702,10 @@ def normalize_delivery_window(
     # Snap to the next slot that has not started - never to the running one,
     # which is only ever an explicit choice.
     upcoming = [(s, e) for s, e, is_current in parsed if not is_current]
+    if not upcoming and running_match:
+        # Nothing later to move it to. The running slot is still a real window,
+        # which beats the "now + 5 minutes" the caller would otherwise invent.
+        return running_match[0], running_match[1], "matched"
     if not upcoming:
         logger.error(
             "Delivery slot %s for %r has passed and the profile offers no further "

@@ -552,7 +552,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		self.assertEqual(slot["time"], "00:00:00")
 		self.assertEqual(slot["business_date"], "2030-01-06")
 
-	def _normalize(self, start, end=None, slots=None, now=None, explicit=False):
+	def _normalize(self, start, end=None, slots=None, now=None, explicit=None):
 		"""Run normalize_delivery_window against a fixed grid and clock."""
 		from unittest import mock
 		from jarz_pos.api import delivery_slots
@@ -602,34 +602,72 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		{"datetime": "2030-01-06T22:30:00", "end_datetime": "2030-01-07T00:00:00"},
 	]
 
+	def _running(self, hh, mm, explicit, slots=None):
+		"""Submit the 21:00 start of the running slot at ``hh:mm``."""
+		return self._normalize(
+			datetime.datetime(2030, 1, 6, 21, 0), datetime.datetime(2030, 1, 6, 22, 30),
+			slots=self.RUNNING_GRID if slots is None else slots,
+			now=datetime.datetime(2030, 1, 6, hh, mm), explicit=explicit,
+		)
+
 	def test_an_aged_default_on_the_running_slot_snaps_to_the_next_one(self):
 		"""Cart opened 20:50 with the 21:00 default, submitted 21:20.
 
 		The app's stale-slot refresh failed (or the device clock ran behind), so
-		the start still says 21:00. Without the explicit flag that is not a
-		choice anyone made: book the next slot, 22:30, not the running one.
+		the start still says 21:00. The POS says it pre-selected the slot: book
+		the next slot, 22:30, not the running one.
 		"""
-		start, end, note = self._normalize(
-			datetime.datetime(2030, 1, 6, 21, 0), datetime.datetime(2030, 1, 6, 22, 30),
-			slots=self.RUNNING_GRID, now=datetime.datetime(2030, 1, 6, 21, 20),
-		)
+		start, end, note = self._running(21, 20, explicit=False)
 
 		self.assertEqual(note, "snapped")
 		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 30))
 		self.assertEqual(end, datetime.datetime(2030, 1, 7, 0, 0))
 
 	def test_an_explicit_pick_of_the_running_slot_is_kept(self):
-		start, end, note = self._normalize(
-			datetime.datetime(2030, 1, 6, 21, 0), datetime.datetime(2030, 1, 6, 22, 30),
-			slots=self.RUNNING_GRID, now=datetime.datetime(2030, 1, 6, 21, 20), explicit=True,
-		)
+		start, end, note = self._running(21, 20, explicit=True)
+
+		self.assertEqual(note, "matched")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 21, 0))
+		self.assertEqual(end, datetime.datetime(2030, 1, 6, 22, 30))
+
+	def test_a_client_that_sends_no_flag_keeps_the_running_slot(self):
+		"""An app without the patch cannot say it was a pick; it keeps what it had."""
+		start, end, note = self._running(21, 20, explicit=None)
+
+		self.assertEqual(note, "matched")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 21, 0))
+		self.assertEqual(end, datetime.datetime(2030, 1, 6, 22, 30))
+
+	def test_a_default_that_just_started_is_kept_within_the_grace(self):
+		"""Sent at 20:59:58 on the device, handled at 21:00:01 on the server.
+
+		The app saw an upcoming slot and sent no pick; the server sees it running.
+		Within the grace period that is the boundary, not a stale cart.
+		"""
+		from jarz_pos.api import delivery_slots
+
+		self.assertEqual(delivery_slots.RUNNING_SLOT_GRACE_MINUTES, 5)
+		for hh, mm in ((21, 0), (21, 4), (21, 5)):
+			start, _end, note = self._running(hh, mm, explicit=False)
+
+			self.assertEqual(note, "matched", (hh, mm))
+			self.assertEqual(start, datetime.datetime(2030, 1, 6, 21, 0), (hh, mm))
+
+		start, _end, note = self._running(21, 6, explicit=False)
+		self.assertEqual(note, "snapped")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 30))
+
+	def test_with_nothing_later_the_running_slot_is_kept_not_invented(self):
+		"""No slot left to snap to: the running slot beats "now + 5 minutes"."""
+		only_running = self.RUNNING_GRID[:1]
+		start, end, note = self._running(21, 20, explicit=False, slots=only_running)
 
 		self.assertEqual(note, "matched")
 		self.assertEqual(start, datetime.datetime(2030, 1, 6, 21, 0))
 		self.assertEqual(end, datetime.datetime(2030, 1, 6, 22, 30))
 
 	def test_the_flag_is_irrelevant_for_a_slot_that_has_not_started(self):
-		for explicit in (False, True):
+		for explicit in (None, False, True):
 			start, _end, note = self._normalize(
 				datetime.datetime(2030, 1, 6, 22, 30), slots=self.RUNNING_GRID,
 				now=datetime.datetime(2030, 1, 6, 21, 20), explicit=explicit,
@@ -643,7 +681,8 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		from jarz_pos.services import invoice_creation
 
 		cases = [
-			(None, False), ("", False), ("0", False), (0, False), (False, False), ("false", False),
+			(None, None), ("", None), ("  ", None),
+			("0", False), (0, False), (False, False), ("false", False),
 			("1", True), (1, True), (True, True), ("true", True), (" Yes ", True),
 		]
 		for raw, expected in cases:
@@ -657,7 +696,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		from jarz_pos.api import delivery_slots
 
 		start = datetime.datetime(2030, 1, 6, 21, 0)
-		for raw, expected in ((None, False), ("1", True)):
+		for raw, expected in ((None, None), ("1", True), ("0", False)):
 			form = {} if raw is None else {"delivery_slot_explicit": raw}
 			with mock.patch.object(invoice_creation.frappe, "form_dict", form, create=True), \
 				mock.patch.object(
@@ -681,25 +720,73 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		self.assertFalse(manager._is_source_delivery_start(None, source))
 		self.assertFalse(manager._is_source_delivery_start("2030-01-06 21:00:00", frappe._dict()))
 
+		decide = manager._amendment_delivery_slot_explicit
+		# Its own start is explicit whatever the client sent.
+		for flag in (None, "", "0", 0, "1"):
+			self.assertIs(decide(flag, "2030-01-06 21:00:00", source), True, flag)
+		# A different start carries the client's flag, including "not sent".
+		self.assertIsNone(decide(None, "2030-01-06 22:30:00", source))
+		self.assertIsNone(decide("", "2030-01-06 22:30:00", source))
+		self.assertIs(decide("0", "2030-01-06 22:30:00", source), False)
+		self.assertIs(decide(0, "2030-01-06 22:30:00", source), False)
+		self.assertIs(decide("1", "2030-01-06 22:30:00", source), True)
+
+	def test_the_amendment_form_context_writes_the_flag_it_is_given(self):
+		"""The job's argument decides, not whatever the request happened to carry."""
+		import frappe
+		from jarz_pos.api import manager
+
 		previous = getattr(frappe, "form_dict", None)
 		try:
-			frappe.form_dict = frappe._dict()
-			with manager._temporary_invoice_creation_form_context(
-				required_delivery_datetime="2030-01-06 21:00:00", delivery_slot_explicit=True,
-			):
-				self.assertEqual(frappe.form_dict.get("delivery_slot_explicit"), 1)
-			with manager._temporary_invoice_creation_form_context(
-				required_delivery_datetime="2030-01-06 22:30:00",
-			):
-				self.assertIsNone(frappe.form_dict.get("delivery_slot_explicit"))
-			# A flag the client sent with the request is carried through.
-			frappe.form_dict = frappe._dict(delivery_slot_explicit="1")
-			with manager._temporary_invoice_creation_form_context(
-				required_delivery_datetime="2030-01-06 22:30:00",
-			):
-				self.assertEqual(frappe.form_dict.get("delivery_slot_explicit"), "1")
+			for request_flag in (None, "1", "0"):
+				frappe.form_dict = frappe._dict(
+					{} if request_flag is None else {"delivery_slot_explicit": request_flag}
+				)
+				for given, expected in ((True, 1), (False, 0), (None, None)):
+					with manager._temporary_invoice_creation_form_context(
+						required_delivery_datetime="2030-01-06 22:30:00",
+						delivery_slot_explicit=given,
+					):
+						self.assertEqual(
+							frappe.form_dict.get("delivery_slot_explicit"), expected,
+							(request_flag, given),
+						)
+				self.assertEqual(
+					frappe.form_dict.get("delivery_slot_explicit"), request_flag, "restored"
+				)
 		finally:
 			frappe.form_dict = previous
+
+	def test_submit_invoice_amendment_passes_the_flag_to_the_job(self):
+		"""Declared on the endpoint, so it survives the job leaving the request."""
+		from types import SimpleNamespace
+		from unittest.mock import MagicMock, patch
+		from jarz_pos.api import manager
+
+		source = SimpleNamespace(
+			name="INV-SLOT-001", docstatus=1, pos_profile="Dokki", custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="Ready", sales_partner=None, custom_payment_method="Cash",
+			custom_delivery_date="2030-01-06", custom_delivery_time_from="21:00:00",
+			custom_delivery_duration=5400,
+		)
+		source.get = lambda key, default=None: getattr(source, key, default)
+
+		for flag in ("1", "0", None):
+			mock_frappe = MagicMock()
+			mock_frappe.session.user = "manager@example.com"
+			mock_frappe.get_doc.return_value = source
+			mock_frappe.enqueue.return_value = {"success": True}
+			with patch("jarz_pos.api.manager.frappe", mock_frappe), \
+				patch("jarz_pos.api.manager._ensure_profile_scoped_invoice_access"), \
+				patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
+				patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+				manager.submit_invoice_amendment(
+					invoice_id="INV-SLOT-001", cart_json="[]", delivery_slot_explicit=flag,
+				)
+
+			self.assertEqual(
+				mock_frappe.enqueue.call_args.kwargs["delivery_slot_explicit"], flag, flag
+			)
 
 	def test_a_passed_off_grid_start_never_snaps_onto_the_running_slot(self):
 		grid = [

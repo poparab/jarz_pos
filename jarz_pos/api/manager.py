@@ -877,6 +877,28 @@ def _derive_delivery_end_datetime(inv: Any) -> Optional[str]:
         return None
 
 
+def _optional_flag(value: Any) -> Optional[bool]:
+    """A request flag that may be absent: ``None``/blank → ``None``, else truthy."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return _is_truthy_flag(value)
+
+
+def _amendment_delivery_slot_explicit(
+    requested_flag: Any, effective_start: Optional[str], source_invoice: Any
+) -> Optional[bool]:
+    """``delivery_slot_explicit`` for the replacement invoice.
+
+    Keeping the order's own start is always explicit; otherwise the client's
+    flag is passed on as sent, including "not sent" for an older app.
+    """
+    if _is_source_delivery_start(effective_start, source_invoice):
+        return True
+    return _optional_flag(requested_flag)
+
+
 def _is_source_delivery_start(requested: Optional[str], source_invoice: Any) -> bool:
     """Whether an amendment keeps the delivery start its order already has.
 
@@ -902,13 +924,14 @@ def _temporary_invoice_creation_form_context(
     *,
     required_delivery_datetime: Optional[str] = None,
     delivery_end_datetime: Optional[str] = None,
-    delivery_slot_explicit: bool = False,
+    delivery_slot_explicit: Optional[bool] = None,
 ) -> Any:
     """Temporarily seed form_dict so invoice creation keeps the chosen slot duration.
 
-    ``delivery_slot_explicit`` marks the window as deliberate, so a slot that is
-    running right now is kept rather than snapped to the next one. Without it a
-    flag the client sent with the request still carries through.
+    ``delivery_slot_explicit`` is written as given - ``True`` → 1, ``False`` → 0,
+    ``None`` → removed - rather than inherited from the request, so the job's own
+    argument decides whether a slot running right now is kept (see
+    ``normalize_delivery_window``) even when the job does not run in-request.
     """
     previous_form_dict = getattr(frappe, "form_dict", None)
     next_form_dict = frappe._dict(dict(previous_form_dict or {}))
@@ -916,8 +939,10 @@ def _temporary_invoice_creation_form_context(
         next_form_dict["required_delivery_datetime"] = required_delivery_datetime
     if delivery_end_datetime:
         next_form_dict["delivery_end_datetime"] = delivery_end_datetime
-    if delivery_slot_explicit:
-        next_form_dict["delivery_slot_explicit"] = 1
+    if delivery_slot_explicit is None:
+        next_form_dict.pop("delivery_slot_explicit", None)
+    else:
+        next_form_dict["delivery_slot_explicit"] = 1 if delivery_slot_explicit else 0
     frappe.form_dict = next_form_dict
     try:
         yield
@@ -1571,6 +1596,7 @@ def _run_invoice_amendment_job(
     custom_delivery_income: Union[float, str, None] = None,
     price_list: Optional[str] = None,
     employee_payment: Optional[str] = None,
+    delivery_slot_explicit: Union[bool, int, str, None] = None,
 ) -> Dict[str, Any]:
     """Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
     if _create_amendment_invoice is None:
@@ -1971,8 +1997,8 @@ def _run_invoice_amendment_job(
         with _temporary_invoice_creation_form_context(
             required_delivery_datetime=effective_required_delivery_datetime,
             delivery_end_datetime=effective_delivery_end_datetime,
-            delivery_slot_explicit=_is_source_delivery_start(
-                effective_required_delivery_datetime, source_invoice
+            delivery_slot_explicit=_amendment_delivery_slot_explicit(
+                delivery_slot_explicit, effective_required_delivery_datetime, source_invoice
             ),
         ):
             creation_result = _create_amendment_invoice(
@@ -2148,8 +2174,14 @@ def submit_invoice_amendment(
     reuse_source_cart: Union[bool, int, str, None] = None,
     price_list: Optional[str] = None,
     employee_payment: Optional[str] = None,
+    delivery_slot_explicit: Union[bool, int, str, None] = None,
 ) -> Dict[str, Any]:
     """Supersede a submitted invoice and recreate it from the edited POS cart payload.
+
+    ``delivery_slot_explicit``: ``1`` when the operator picked the delivery slot,
+    ``0`` when the POS pre-selected it, omitted by older apps. Declared and passed
+    to the job as an argument, so it reaches invoice creation even if the job
+    stops running in-request; keeping the order's own start is explicit anyway.
 
     ``employee_payment`` (Employee orders only): ``"credit"`` or ``"cash"``, same
     contract as ``create_pos_invoice``. Omit it and an Employee order whose employee
@@ -2268,6 +2300,7 @@ def submit_invoice_amendment(
         custom_delivery_income=custom_delivery_income,
         price_list=price_list,
         employee_payment=employee_payment,
+        delivery_slot_explicit=delivery_slot_explicit,
     )
 
 

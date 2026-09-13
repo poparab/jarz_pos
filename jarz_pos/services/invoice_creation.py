@@ -1097,17 +1097,26 @@ def _requested_delivery_end():
         return None
 
 
-def _requested_delivery_slot_explicit() -> bool:
-    """Whether the operator deliberately picked the slot, rather than the POS
-    pre-selecting it. Only then may a slot that is already running be booked;
-    see ``normalize_delivery_window``. Absent (older clients) means no."""
+def _requested_delivery_slot_explicit() -> bool | None:
+    """Whether the operator deliberately picked the slot (``True``), the POS
+    pre-selected it (``False``), or the client did not say (``None``).
+
+    Only a pre-selected start in a slot that is already running is snapped;
+    see ``normalize_delivery_window``. An app too old to send the flag keeps
+    the behaviour it had, so absent or blank must stay ``None``, not ``False``.
+    """
     try:
         raw = getattr(frappe, "form_dict", {}).get("delivery_slot_explicit")
     except Exception:
-        return False
+        return None
+    if raw is None:
+        return None
     if isinstance(raw, bool):
         return raw
-    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    return text in {"1", "true", "yes", "on"}
 
 
 def _normalize_delivery_window(pos_profile_name, delivery_datetime, logger):
