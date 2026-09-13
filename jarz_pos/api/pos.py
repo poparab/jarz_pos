@@ -312,6 +312,21 @@ def get_pos_price_lists(profile: str):
         order_by="name asc",
     )
 
+    # Additive: which order purposes OWN each list, so the cart can lock the picker to
+    # the purpose's list and keep reserved lists out of retail orders. One query for the
+    # whole map (not one per row), from the same helper the invoice gate enforces with,
+    # so what the picker offers and what checkout accepts cannot disagree.
+    from jarz_pos.services.commercial_policy import reserved_price_lists
+
+    reserved_lookup: dict[str, set[str]] = {}
+    for reserved_name, purposes in (
+        reserved_price_lists(profile, default_price_list=default_price_list) or {}
+    ).items():
+        reserved_lookup.setdefault(reserved_name.casefold(), set()).update(purposes)
+
+    def _reserved_for(price_list_name: str) -> list[str]:
+        return sorted(reserved_lookup.get(price_list_name.casefold(), set()))
+
     has_zero_shipping_flag = False
     has_display_label = False
     try:
@@ -338,6 +353,7 @@ def get_pos_price_lists(profile: str):
             "is_default": name == default_price_list,
             "zero_shipping_default": False,
             "display_label": name,
+            "reserved_for_purposes": [] if name == default_price_list else _reserved_for(name),
         }
         if has_zero_shipping_flag:
             payload["zero_shipping_default"] = bool(
@@ -361,6 +377,8 @@ def get_pos_price_lists(profile: str):
                 "is_default": True,
                 "zero_shipping_default": False,
                 "display_label": default_price_list,
+                # The profile default is what retail prices from: never reserved.
+                "reserved_for_purposes": [],
             },
         )
 

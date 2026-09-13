@@ -455,6 +455,189 @@ def _auto_derivable_price_lists(
     return {candidate for candidate in candidates if candidate}
 
 
+def _derive_policy_price_list(
+    *,
+    default_price_list: str | None,
+    policy_price_list: str | None,
+    policy_order_purpose: str | None,
+    customer_doc=None,
+    sales_partner: str | None = None,
+) -> str | None:
+    """The list a MATCHED-policy order resolves to when the client requests none.
+
+    Extracted verbatim from ``_resolve_effective_price_list`` so the purpose/price-list
+    consistency check (:func:`_enforce_order_purpose_price_list`) compares a B2B Supply
+    request against exactly the list the chain would pick — one chain, never a copy
+    that can drift from it. Evaluation stays lazy: each lookup runs only when every
+    higher-priority source came back empty.
+    """
+    return (
+        _normalize_price_list_name(policy_price_list)
+        or _resolve_sales_partner_price_list(sales_partner)
+        or _resolve_customer_price_list(customer_doc)
+        # Un-tiered B2B customer: the agreed base list, never retail. Sits below the
+        # customer/group lookup so a configured tier still wins.
+        or _resolve_b2b_baseline_price_list(policy_order_purpose)
+        or _normalize_price_list_name(default_price_list)
+        or _resolve_company_default_price_list()
+    )
+
+
+def _same_price_list(a: str | None, b: str | None) -> bool:
+    """Case-insensitive name equality: MariaDB's collation makes "sample" == "Sample"."""
+    left = _normalize_price_list_name(a)
+    right = _normalize_price_list_name(b)
+    return bool(left) and bool(right) and left.casefold() == right.casefold()
+
+
+def _amendment_keeps_source_price_list(amended_from: str | None, requested: str | None,
+                                       order_purpose: str | None) -> bool:
+    """True when an amendment is only carrying its cancelled source's OWN price list.
+
+    WHY this exemption exists: invoices booked before the purpose/price-list check —
+    Sample - Courier orders at Standard Selling, a B2B Supply order at Standard Selling,
+    or a B2B order whose customer tier has changed since — must stay amendable.
+    ``api/manager._resolve_amendment_price_list`` re-sends the source's header (or the
+    profile default that equals it) and the job copies ``custom_order_purpose``
+    verbatim, so without this every such amendment would be refused after the source
+    had ALREADY been cancelled inside the same job, stranding the order.
+
+    Deliberately narrow, because ``create_pos_invoice`` is whitelisted and
+    ``amended_from`` is client-supplied. All must hold:
+      * the source exists and is CANCELLED (the amendment job cancels it before it
+        creates the replacement);
+      * no live replacement for it exists yet — a cancelled invoice grandfathers ONE
+        replacement, not an unlimited supply of mismatched orders;
+      * the source had the SAME order purpose;
+      * the requested list IS the source's persisted ``selling_price_list``.
+    A deliberately NEW list on an amendment still goes through the full check.
+    """
+    source = str(amended_from or "").strip()
+    if not source or not _normalize_price_list_name(requested):
+        return False
+    try:
+        row = frappe.db.get_value(
+            "Sales Invoice",
+            source,
+            ["selling_price_list", "docstatus", "custom_order_purpose"],
+            as_dict=True,
+        )
+        if not row or int(row.get("docstatus") or 0) != 2:
+            return False
+        if not _same_price_list(requested, row.get("selling_price_list")):
+            return False
+        source_purpose = str(row.get("custom_order_purpose") or "").strip() or "Standard"
+        if source_purpose != (str(order_purpose or "").strip() or "Standard"):
+            return False
+        if frappe.db.exists(
+            "Sales Invoice", {"amended_from": source, "docstatus": ["!=", 2]}
+        ):
+            return False
+    except Exception:
+        # Unverifiable -> no exemption: the caller throws the ordinary mismatch message.
+        return False
+    return True
+
+
+def _enforce_order_purpose_price_list(
+    pos_profile,
+    *,
+    requested: str | None,
+    default_price_list: str | None,
+    policy_matched: bool,
+    policy_price_list: str | None,
+    policy_order_purpose: str | None,
+    customer_doc=None,
+    sales_partner: str | None = None,
+    amended_from: str | None = None,
+    logger=None,
+) -> None:
+    """Refuse a requested price list that contradicts the order purpose.
+
+    WHY: the chain resolves ``requested or policy_pl ...``, so a list sent by the client
+    silently beat the policy's own. Production carried Sample - Courier invoices and a
+    B2B Supply invoice booked at Standard Selling. Order Purpose now drives the list:
+
+      1. matched policy WITH a price list (Employee, Sample): the request must BE it;
+      2. matched B2B Supply policy without one: the request must be what the chain
+         derives with no request (partner -> customer/group tier -> B2B baseline ->
+         POS default -> company default) — reusing :func:`_derive_policy_price_list`;
+      3. Standard, or any other matched policy without a list (Free Shipping Waiver,
+         a retail order with shipping waived): the request must not be a list RESERVED
+         for some purpose (``commercial_policy.reserved_price_lists``).
+
+    Runs BEFORE the manager gate so a manager — who would otherwise pass the gate and
+    succeed silently — is told about the mismatch instead. An absent request keeps
+    today's behaviour: the chain resolves it, and a derived list is consistent by
+    construction. ``_auto_derivable_price_lists`` stays intact: a rep echoing the
+    server-derived tier back is rule 1/2's valid combination, so it passes here and
+    is exempt from the gate exactly as before.
+    """
+    if not requested:
+        return
+
+    purpose = str(policy_order_purpose or "").strip() or "Standard"
+    policy_pl = _normalize_price_list_name(policy_price_list)
+
+    from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+
+    expected: str | None = None
+    reserved_for: set[str] = set()
+    if policy_matched and policy_pl:
+        expected = policy_pl
+    elif policy_matched and purpose == B2B_SUPPLY_PURPOSE:
+        expected = _derive_policy_price_list(
+            default_price_list=default_price_list,
+            policy_price_list=None,
+            policy_order_purpose=purpose,
+            customer_doc=customer_doc,
+            sales_partner=sales_partner,
+        )
+        if not expected:
+            # Nothing derivable at all (no tier, no baseline, no default anywhere):
+            # there is no list to hold the request to, so the chain's answer stands.
+            return
+    else:
+        # The POS Profile default is never reserved, so the everyday retail order skips
+        # the policy query entirely.
+        if _same_price_list(requested, default_price_list):
+            return
+        reserved = _commercial_policy.reserved_price_lists(
+            getattr(pos_profile, "name", None),
+            default_price_list=default_price_list,
+        )
+        for name, purposes in (reserved or {}).items():
+            if _same_price_list(name, requested):
+                reserved_for.update(purposes)
+        if not reserved_for:
+            return
+
+    if expected is not None and _same_price_list(requested, expected):
+        return
+
+    if _amendment_keeps_source_price_list(amended_from, requested, purpose):
+        if logger is not None:
+            try:
+                logger.warning(
+                    f"purpose_price_list: amendment of {amended_from} keeps its source "
+                    f"price list {requested} under order purpose {purpose} "
+                    f"(expected {expected or 'a retail list'}); grandfathered."
+                )
+            except Exception:
+                pass
+        return
+
+    if expected is not None:
+        message = f"Order purpose {purpose} must use price list {expected}, not {requested}."
+    else:
+        message = (
+            f"Price list {requested} is reserved for order purpose "
+            f"{', '.join(sorted(reserved_for))}; order purpose {purpose} must use a "
+            f"retail price list."
+        )
+    frappe.throw(message)
+
+
 def _resolve_effective_price_list(
     pos_profile,
     cart_items,
@@ -468,11 +651,27 @@ def _resolve_effective_price_list(
     policy_order_purpose: str | None = None,
     customer_doc=None,
     sales_partner: str | None = None,
+    amended_from: str | None = None,
 ) -> str | None:
     default_price_list = _normalize_price_list_name(
         getattr(pos_profile, "selling_price_list", None)
     )
     requested = _normalize_price_list_name(requested_price_list)
+
+    # Order Purpose drives the Price List. Checked before the manager gate so a manager
+    # gets the mismatch message instead of silently booking the wrong list.
+    _enforce_order_purpose_price_list(
+        pos_profile,
+        requested=requested,
+        default_price_list=default_price_list,
+        policy_matched=policy_matched,
+        policy_price_list=policy_price_list,
+        policy_order_purpose=policy_order_purpose,
+        customer_doc=customer_doc,
+        sales_partner=sales_partner,
+        amended_from=amended_from,
+        logger=logger,
+    )
 
     # Manager gating: only an explicit MANUAL override (or line pricing / suppress hints)
     # requires manager access. A requested price list bypasses the gate ONLY when the
@@ -510,16 +709,12 @@ def _resolve_effective_price_list(
     if policy_matched:
         # Non-Standard (B2B/Employee/Sample/...) resolution chain, highest priority first.
         # Only reached for an explicitly chosen, permission-gated order purpose.
-        effective_price_list = (
-            requested
-            or policy_pl
-            or _resolve_sales_partner_price_list(sales_partner)
-            or _resolve_customer_price_list(customer_doc)
-            # Un-tiered B2B customer: the agreed base list, never retail. Sits below the
-            # customer/group lookup so a configured tier still wins.
-            or _resolve_b2b_baseline_price_list(policy_order_purpose)
-            or default_price_list
-            or _resolve_company_default_price_list()
+        effective_price_list = requested or _derive_policy_price_list(
+            default_price_list=default_price_list,
+            policy_price_list=policy_pl,
+            policy_order_purpose=policy_order_purpose,
+            customer_doc=customer_doc,
+            sales_partner=sales_partner,
         )
     else:
         # Standard order: BYTE-IDENTICAL to prior behavior — POS Profile default only.
@@ -1430,6 +1625,10 @@ def create_pos_invoice(
             policy_order_purpose=policy_decision.order_purpose,
             customer_doc=customer_doc,
             sales_partner=sales_partner,
+            # Only consulted when the requested list contradicts the purpose: lets an
+            # amendment keep its cancelled source's own list (see
+            # _amendment_keeps_source_price_list).
+            amended_from=amended_from,
         )
         # Fail fast with an actionable message if a policy order's price list is missing
         # prices (the common "B2B Selling not populated yet" data gap). Customer-scoped

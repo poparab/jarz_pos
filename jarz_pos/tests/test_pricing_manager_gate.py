@@ -64,13 +64,21 @@ class _GateTestCase(unittest.TestCase):
     def _resolve(self, *, is_manager, requested=None, cart=None, customer=None,
                  sales_partner=None, policy_matched=False, policy_price_list=None,
                  suppress_shipping_income=None, suppress_legacy_delivery_charges=None):
-        """Run _resolve_effective_price_list with roles + Price List existence stubbed."""
+        """Run _resolve_effective_price_list with roles + Price List existence stubbed.
+
+        The reserved-list map is pinned EMPTY: these tests isolate the manager gate, and
+        ``_TIER_PL`` happens to be named "B2B Selling" (the B2B baseline, which the real
+        map reserves). The Order Purpose / Price List consistency rules are covered in
+        ``test_order_purpose_price_list``.
+        """
         with patch.object(
             ic, "_has_manager_pricing_access", return_value=is_manager
         ), patch.object(
             ic.frappe.db, "exists", return_value=True
         ), patch.object(
             ic.frappe.db, "get_value", side_effect=self._get_value
+        ), patch.object(
+            ic._commercial_policy, "reserved_price_lists", return_value={}
         ):
             return ic._resolve_effective_price_list(
                 self.pos,
@@ -144,7 +152,9 @@ class TestPriceListManagerGate(_GateTestCase):
 
         with patch.object(ic, "_has_manager_pricing_access", return_value=False), patch.object(
             ic.frappe.db, "exists", return_value=True
-        ), patch.object(ic.frappe.db, "get_value", side_effect=_gv):
+        ), patch.object(ic.frappe.db, "get_value", side_effect=_gv), patch.object(
+            ic._commercial_policy, "reserved_price_lists", return_value={}
+        ):
             eff = ic._resolve_effective_price_list(
                 self.pos, [],
                 requested_price_list=_TIER_PL,

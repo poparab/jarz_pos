@@ -533,6 +533,11 @@ class TestSellingPriceListPersistedAfterSubmit(unittest.TestCase):
                   return_value={"success": True}),
             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as promo,
             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"),
+            # A Standard order carrying "B2B Selling" is exactly what the Order Purpose
+            # gate now refuses. What is under test here is the post-submit re-stamp, not
+            # purpose/list consistency (see test_order_purpose_price_list), so the gate
+            # stands aside.
+            patch("jarz_pos.services.invoice_creation._enforce_order_purpose_price_list"),
             patch("jarz_pos.services.invoice_creation.frappe") as mf,
         ):
             from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision

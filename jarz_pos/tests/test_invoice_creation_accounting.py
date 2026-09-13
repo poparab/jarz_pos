@@ -968,6 +968,7 @@ class TestManagerPricingSupport(unittest.TestCase):
              patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
              patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
              patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"), \
+             patch("jarz_pos.services.invoice_creation._commercial_policy.reserved_price_lists", return_value={}), \
              patch("jarz_pos.services.invoice_creation.frappe") as mf:
             from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 

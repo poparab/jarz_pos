@@ -130,6 +130,83 @@ def resolve_commercial_policy(
     return decision
 
 
+#: Sentinel for :func:`reserved_price_lists`: "caller did not say what the POS Profile
+#: default is" (look it up), as distinct from "the profile has no default" (``None``).
+_UNSET = object()
+
+
+def reserved_price_lists(
+    pos_profile_name: str | None,
+    default_price_list=_UNSET,
+) -> dict[str, set[str]]:
+    """Map every price list OWNED by an order purpose to the purposes that own it.
+
+    WHY: the POS let a manager pick the Order Purpose and the Price List
+    independently, and ``invoice_creation._resolve_effective_price_list`` resolved
+    ``requested or policy_pl``, so a client-sent list silently beat the policy's own.
+    Production booked Sample - Courier invoices at Standard Selling and a B2B Supply
+    invoice at Standard Selling. This map is the single definition of "which lists
+    belong to a purpose", shared by the cart (``api/pos.get_pos_price_lists`` marks the
+    options) and the server gate (``invoice_creation`` refuses a Standard / retail order
+    that borrows one), so the two can never disagree.
+
+    A list is reserved when it is:
+      * the ``price_list`` of an ENABLED non-Standard ``Jarz Commercial Policy`` whose
+        ``pos_profile`` scope is empty or equals ``pos_profile_name`` — the same scope
+        rule ``_load_policy`` applies, so a Nasr City-only policy does not lock a list
+        on Dokki; or
+      * the B2B baseline list (``setup/b2b_pricing.PRICE_LIST``) -> B2B Supply. The
+        "B2B Supply" policy deliberately carries no price list (the tier comes from the
+        customer), so without this entry the one list B2B orders fall back to would
+        look free to every retail order.
+
+    The POS Profile default is NEVER reserved, even if a policy points at it: it is
+    what every retail order prices from, and reserving it would make Standard checkout
+    impossible on that profile.
+
+    One query for the whole map, never one per price list. Names are returned as
+    stored; callers compare case-insensitively (MariaDB's collation treats
+    "sample" and "Sample" as the same list).
+    """
+    from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE, PRICE_LIST as B2B_PRICE_LIST
+
+    profile = (pos_profile_name or "").strip()
+    if default_price_list is _UNSET:
+        default_price_list = (
+            frappe.db.get_value("POS Profile", profile, "selling_price_list") if profile else None
+        )
+    default_key = (default_price_list or "").strip().casefold()
+
+    reserved: dict[str, set[str]] = {}
+
+    def _reserve(price_list, purpose) -> None:
+        name = (price_list or "").strip()
+        owner = (purpose or "").strip()
+        if not name or not owner or owner == "Standard":
+            return
+        if default_key and name.casefold() == default_key:
+            return
+        reserved.setdefault(name, set()).add(owner)
+
+    # Staged-rollout tolerance, same as resolve_commercial_policy: a site that has not
+    # migrated the DocType has no policy-owned lists, only the B2B baseline.
+    if frappe.db.exists("DocType", "Jarz Commercial Policy"):
+        rows = frappe.get_all(
+            "Jarz Commercial Policy",
+            filters={"enabled": 1},
+            fields=["price_list", "order_purpose", "pos_profile"],
+            limit_page_length=0,
+        )
+        for row in rows or []:
+            scope = (row.get("pos_profile") or "").strip()
+            if scope and scope != profile:
+                continue
+            _reserve(row.get("price_list"), row.get("order_purpose"))
+
+    _reserve(B2B_PRICE_LIST, B2B_SUPPLY_PURPOSE)
+    return reserved
+
+
 def _load_policy(policy_name: str, purpose: str, pos_profile):
     """Load a policy by explicit name, else the best enabled match for the purpose."""
     if policy_name:
