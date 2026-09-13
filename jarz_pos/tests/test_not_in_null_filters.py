@@ -153,6 +153,14 @@ class TestExistingCourierPartyAgainstRealSql(unittest.TestCase):
             dh._existing_courier_party(TEST_INVOICE), ("Employee", "EMP-NOTINNULL-A")
         )
 
+    def test_settle_single_refuses_to_derive_a_courier_from_a_settled_row(self):
+        """Nothing open means nothing left to settle: deriving from history re-pays freight."""
+        self._insert_ct("CT-NOTINNULL-DONE", "Employee", "EMP-NOTINNULL-A", "Settled",
+                        "2026-09-01 10:00:00")
+        with self.assertRaises(frappe.ValidationError) as ctx:
+            dh.settle_single_invoice_paid(TEST_INVOICE, "Any POS Profile", "", "")
+        self.assertIn("unable to derive", str(ctx.exception))
+
     def test_a_row_without_a_party_is_not_a_courier(self):
         self._insert_ct("CT-NOTINNULL-BLANK", "", "", "Unsettled", "2026-09-01 10:00:00")
         self.assertEqual(dh._existing_courier_party(TEST_INVOICE), (None, None))

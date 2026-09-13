@@ -3836,9 +3836,12 @@ def settle_single_invoice_paid(invoice_name: str, pos_profile: str, party_type: 
         frappe.throw("pos_profile required to resolve cash account")
 
     if not (party_type and party):
+        # OPEN rows only. With no open row there is nothing left to settle, so a
+        # courier taken from a Settled row could only be paid again: a cash_now
+        # dispatch's freight (already paid from the till, tagged OFD rather than
+        # COURIER_SHIPPING_SETTLEMENT, so the duplicate-JE check misses it), or a
+        # partner order's rider paid the partner's fee personally.
         existing_type, existing_party = _existing_courier_party(invoice_name, open_only=True)
-        if not existing_party:
-            existing_type, existing_party = _existing_courier_party(invoice_name)
         if existing_party:
             party_type, party = existing_type, existing_party
         else:
