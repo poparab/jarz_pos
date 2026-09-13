@@ -130,6 +130,9 @@ jobs:
             test_employee_customers
             test_employee_pricing
             test_pricing_manager_gate
+            # Order purpose drives the price list: a purpose that owns a list
+            # must use it, retail purposes may not borrow a reserved one.
+            test_order_purpose_price_list
             test_settlement_accounting
             test_settlement_strategies
             test_settle_courier_for_invoice_scope
