@@ -558,6 +558,9 @@ jobs:
             # customer whose order arrived months ago.
             test_woo_backlog_watch
             test_woo_backlog_api
+            # Delivery slots: no preparation buffer, the running slot offered
+            # but never the default, and the snap onto the real slot grid.
+            test_api_delivery_slots
           )
           rc=0
           for m in "${MODULES[@]}"; do

@@ -258,42 +258,113 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 		self.assertEqual(slots, [])
 
-	def test_anchored_slot_survives_today_filtering(self):
-		"""Late in the day the anchored tail is still offered on its own."""
+	def _today_slots(self, now, target=None):
+		"""The Woo grid A day, filtered against ``now`` the way the POS sees it."""
 		from jarz_pos.api.delivery_slots import _generate_day_slots
 
-		target = self._make_date()
-		slots = _generate_day_slots(
+		target = target or self._make_date()
+		return _generate_day_slots(
 			target_date=target,
 			opening_time=datetime.time(13, 0),
 			closing_time=datetime.time(1, 0),
 			same_day="Next Day",
 			slot_duration_minutes=90,
-			current_datetime=datetime.datetime.combine(target, datetime.time(23, 0)),
+			current_datetime=now,
 			last_slot_duration_minutes=60,
 			anchor_last_slot_to_closing=True,
 		)
+
+	def _at(self, hh, mm, days=0):
+		return datetime.datetime.combine(
+			self._make_date() + datetime.timedelta(days=days), datetime.time(hh, mm)
+		)
+
+	def _current(self, slots):
+		return [self._hhmm([s])[0] for s in slots if s["is_current"]]
+
+	def test_anchored_slot_survives_today_filtering(self):
+		"""Late in the day the anchored tail is still offered after the running slot."""
+		slots = self._today_slots(self._at(23, 0))
+
+		self.assertEqual(self._hhmm(slots), ["22:00-23:30", "00:00-01:00"])
+		self.assertEqual(self._current(slots), ["22:00-23:30"])
+
+	def test_no_preparation_buffer_2159_still_gets_the_2200_slot(self):
+		"""Order 17343: at 21:41 (and even 21:59) the next slot is 22:00, not 00:00."""
+		for now in (self._at(21, 41), self._at(21, 59)):
+			slots = self._today_slots(now)
+			upcoming = [s for s in slots if not s["is_current"]]
+
+			self.assertEqual(self._hhmm(upcoming)[0], "22:00-23:30", now)
+			self.assertEqual(self._current(slots), ["20:30-22:00"], now)
+
+	def test_a_slot_starting_exactly_now_is_upcoming_not_current(self):
+		slots = self._today_slots(self._at(22, 0))
+
+		self.assertEqual(self._hhmm(slots)[0], "22:00-23:30")
+		self.assertEqual(self._current(slots), [])
+
+	def test_the_running_slot_is_offered_until_it_ends(self):
+		"""At 22:10 the 22:00 slot is still bookable, flagged as current."""
+		slots = self._today_slots(self._at(22, 10))
+
+		self.assertEqual(self._hhmm(slots), ["22:00-23:30", "00:00-01:00"])
+		self.assertEqual(self._current(slots), ["22:00-23:30"])
+
+	def test_the_unbookable_gap_has_no_current_slot(self):
+		"""At 23:45 nothing is running; 00:00 is simply the next slot."""
+		slots = self._today_slots(self._at(23, 45))
 
 		self.assertEqual(self._hhmm(slots), ["00:00-01:00"])
+		self.assertEqual(self._current(slots), [])
 
-	def test_anchored_slot_respects_preparation_buffer(self):
-		"""The anchored slot obeys the same 30-minute buffer as every other slot."""
-		from jarz_pos.api.delivery_slots import _generate_day_slots
+	def test_yesterdays_after_midnight_slot_is_current_past_midnight(self):
+		"""At 00:20 the 00:00-01:00 tail of yesterday's day is the running slot."""
+		slots = self._today_slots(self._at(0, 20, days=1))
+
+		self.assertEqual(self._hhmm(slots), ["00:00-01:00"])
+		self.assertEqual(self._current(slots), ["00:00-01:00"])
+		self.assertEqual(slots[0]["business_date"], self._make_date().isoformat())
+
+	def test_an_ended_day_offers_nothing(self):
+		self.assertEqual(self._today_slots(self._at(1, 0, days=1)), [])
+
+	def test_available_slots_default_skips_the_running_slot(self):
+		"""The running slot sorts first but the default is the next one."""
+		from types import SimpleNamespace
+		from unittest import mock
+		from jarz_pos.api import delivery_slots
 
 		target = self._make_date()
-		slots = _generate_day_slots(
-			target_date=target,
-			opening_time=datetime.time(13, 0),
-			closing_time=datetime.time(1, 0),
-			same_day="Next Day",
-			slot_duration_minutes=90,
-			# 23:45 leaves only 15 minutes before a 00:00 start.
-			current_datetime=datetime.datetime.combine(target, datetime.time(23, 45)),
-			last_slot_duration_minutes=60,
-			anchor_last_slot_to_closing=True,
+		config = SimpleNamespace(
+			name="TT", slot_hours=1, slot_minutes=30, has_custom_last_slot=1,
+			last_slot_hours=1, last_slot_minutes=0, anchor_last_slot_to_closing=1,
 		)
+		timings = [
+			SimpleNamespace(
+				day=day, opening_time=datetime.timedelta(hours=13),
+				closing_time=datetime.timedelta(hours=1), same_day="Next Day",
+				get=lambda key, default=None, _d=day: "Next Day" if key == "same_day" else default,
+			)
+			for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+		]
 
-		self.assertEqual(slots, [])
+		with mock.patch("jarz_pos.utils.validation_utils.assert_pos_profile_enabled"), \
+			mock.patch.object(delivery_slots.frappe, "get_value", return_value=config), \
+			mock.patch.object(delivery_slots.frappe, "get_all", return_value=timings), \
+			mock.patch.object(
+				delivery_slots.frappe.utils, "now_datetime",
+				return_value=datetime.datetime.combine(target, datetime.time(22, 10)),
+			):
+			slots = delivery_slots.get_available_delivery_slots("Test POS Profile")
+			next_slot = delivery_slots.get_next_available_slot("Test POS Profile")
+
+		self.assertTrue(slots[0]["is_current"])
+		self.assertFalse(slots[0]["is_default"])
+		self.assertEqual(self._hhmm(slots[:2]), ["22:00-23:30", "00:00-01:00"])
+		self.assertTrue(slots[1]["is_default"])
+		self.assertEqual(sum(1 for s in slots if s["is_default"]), 1)
+		self.assertEqual(self._hhmm([next_slot]), ["00:00-01:00"])
 
 	def test_preview_endpoint_reproduces_the_woo_week(self):
 		"""The Desk preview must render the same aligned week the POS serves."""
@@ -382,6 +453,31 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		self.assertEqual(note, "snapped")
 		self.assertEqual(start, datetime.datetime(2030, 1, 7, 0, 0))
 		self.assertEqual(end, datetime.datetime(2030, 1, 7, 1, 0))
+
+	def test_a_deliberately_picked_running_slot_is_kept(self):
+		"""Staff chose the slot in progress; it must not be snapped to the next one."""
+		grid = [
+			{"datetime": "2030-01-06T22:00:00", "end_datetime": "2030-01-06T23:30:00", "is_current": True},
+			{"datetime": "2030-01-07T00:00:00", "end_datetime": "2030-01-07T01:00:00"},
+		]
+		start, end, note = self._normalize(datetime.datetime(2030, 1, 6, 22, 0), slots=grid)
+
+		self.assertEqual(note, "matched")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 0))
+		self.assertEqual(end, datetime.datetime(2030, 1, 6, 23, 30))
+
+	def test_a_passed_off_grid_start_never_snaps_onto_the_running_slot(self):
+		grid = [
+			{"datetime": "2030-01-06T20:30:00", "end_datetime": "2030-01-06T22:00:00", "is_current": True},
+			{"datetime": "2030-01-06T22:00:00", "end_datetime": "2030-01-06T23:30:00"},
+		]
+		start, _end, note = self._normalize(
+			datetime.datetime(2030, 1, 6, 19, 0), slots=grid,
+			now=datetime.datetime(2030, 1, 6, 21, 41),
+		)
+
+		self.assertEqual(note, "snapped")
+		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 0))
 
 	def test_a_real_slot_keeps_its_own_end_when_none_was_sent(self):
 		"""A missing end must not fall back to the timetable's default length."""

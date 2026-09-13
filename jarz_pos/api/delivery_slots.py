@@ -231,7 +231,11 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
             'Sunday': ['Sunday', 'Sun', 'sunday', 'SUNDAY']
         }
 
-        for day_offset in range(5):  # Next 5 days
+        # Yesterday is included for its after-midnight tail: at 00:20 the
+        # 00:00-01:00 slot of yesterday's 13:00-01:00 day is still running and
+        # must be offered as the current slot. Everything else of yesterday has
+        # ended and is filtered out against the clock.
+        for day_offset in range(-1, 5):  # yesterday's tail + next 5 days
             target_date = current_datetime.date() + timedelta(days=day_offset)
             day_name = target_date.strftime('%A')  # Monday, Tuesday, etc.
 
@@ -284,7 +288,8 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
                 closing_time,
                 same_day,
                 slot_duration_minutes,
-                current_datetime if day_offset == 0 else None,  # Only check current time for today
+                # Only yesterday and today can hold slots that have started.
+                current_datetime if day_offset <= 0 else None,
                 last_slot_duration_minutes,
                 anchor_last_slot_to_closing,
             )
@@ -295,15 +300,18 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
         # Sort slots by datetime
         slots.sort(key=lambda x: x['datetime'])
 
-        # Mark the next available slot as default
-        if slots:
-            slots[0]['is_default'] = True
+        # The default is the next slot that has not started yet. A slot already
+        # running is offered (``is_current``) so staff can still book it, but it
+        # is never pre-selected.
+        default_slot = next((s for s in slots if not s.get("is_current")), None)
+        if default_slot:
+            default_slot['is_default'] = True
 
         logger.debug(
             "Generated %s total delivery slot(s) for %r; default=%s",
             len(slots),
             pos_profile_name,
-            slots[0]['label'] if slots else None,
+            default_slot['label'] if default_slot else None,
         )
 
         return slots
@@ -333,7 +341,9 @@ def _generate_day_slots(
         closing_time: Store closing time (can be time or timedelta)
         same_day: "Same Day" or "Next Day" - indicates if closing time is same day or next day
         slot_duration_minutes: Duration of each regular slot in minutes
-        current_datetime: Current datetime (only provided for today)
+        current_datetime: Current datetime (only for today and yesterday). Slots that
+            have ended are dropped; a slot that has started but not ended is kept
+            with ``is_current=True``. There is no preparation buffer.
         last_slot_duration_minutes: If set, the final slot of the day uses this shorter duration
             instead of the regular one, allowing an extra slot to fill remaining time before closing.
         anchor_last_slot_to_closing: Pin the final slot to *end* exactly at closing time
@@ -348,6 +358,7 @@ def _generate_day_slots(
         List of time slots for the day
     """
     slots = []
+    windows: List[tuple[datetime, datetime]] = []
     logger = _get_logger()
 
     # Convert timedelta to time if needed (Frappe Time fields return timedelta)
@@ -406,38 +417,12 @@ def _generate_day_slots(
 
     regular_limit = anchored_start or end_time
 
-    # If this is today, ensure we only show future slots
-    min_slot_time = None
-    skip_regular_slots = False
-    if current_datetime:
-        # Add buffer of 30 minutes for preparation
-        min_slot_time = current_datetime + timedelta(minutes=30)
-        logger.debug("Minimum slot time (current + 30min buffer): %s", min_slot_time)
-
-        if current_slot_time < min_slot_time:
-            # Round up to next slot boundary
-            minutes_since_opening = (min_slot_time - current_slot_time).total_seconds() / 60
-            slots_to_skip = int(minutes_since_opening / slot_duration_minutes) + 1
-            current_slot_time += timedelta(minutes=slot_duration_minutes * slots_to_skip)
-            logger.debug(
-                "Adjusted start time for today: %s (skipped %s slots)",
-                current_slot_time,
-                slots_to_skip,
-            )
-
-            # No regular slots left today. An anchored last slot may still be
-            # valid, so fall through to it instead of returning early.
-            if current_slot_time >= regular_limit:
-                logger.debug("No regular slots left today after time adjustment")
-                skip_regular_slots = True
-
     slot_count = 0
     max_iterations = 50  # Safety limit to prevent infinite loops
     iteration_count = 0
 
     while (
-        not skip_regular_slots
-        and current_slot_time < regular_limit
+        current_slot_time < regular_limit
         and iteration_count < max_iterations
     ):
         iteration_count += 1
@@ -474,9 +459,9 @@ def _generate_day_slots(
             else:
                 break
 
-        slots.append(_build_slot(target_date, current_slot_time, slot_end_time))
+        windows.append((current_slot_time, slot_end_time))
         slot_count += 1
-        logger.debug("Generated slot %s: %s", slot_count, slots[-1]["time_label"])
+        logger.debug("Generated slot %s: %s - %s", slot_count, current_slot_time, slot_end_time)
 
         # If we appended a custom last slot, the loop must end now
         if slot_end_time != current_slot_time + timedelta(minutes=slot_duration_minutes):
@@ -496,23 +481,26 @@ def _generate_day_slots(
             slot_duration_minutes,
         )
 
-    # Append the anchored last slot, unless today's buffer already ruled it out.
     if anchored_start:
-        if min_slot_time and anchored_start < min_slot_time:
-            logger.debug(
-                "Anchored last slot %s is inside today's preparation buffer; skipping",
-                anchored_start,
-            )
-        else:
-            slots.append(_build_slot(target_date, anchored_start, end_time))
-            logger.debug("Generated anchored last slot: %s", slots[-1]["time_label"])
+        windows.append((anchored_start, end_time))
+        logger.debug("Generated anchored last slot: %s - %s", anchored_start, end_time)
 
+    # Against the clock (today, and yesterday's after-midnight tail): a slot is
+    # offered until it ENDS. There is no preparation buffer - at 21:59 the
+    # 22:00 slot is still the next one. A slot that has already started is
+    # flagged ``is_current``; the caller offers it but never makes it the default.
+    for start, end in windows:
+        if current_datetime and end <= current_datetime:
+            logger.debug("Slot %s - %s has ended; skipping", start, end)
+            continue
+        is_current = bool(current_datetime and start < current_datetime)
+        slots.append(_build_slot(target_date, start, end, is_current=is_current))
     logger.debug("Total slots generated for %s: %s", target_date, len(slots))
     return slots
 
 
 def _build_slot(
-    target_date: datetime.date, start: datetime, end: datetime
+    target_date: datetime.date, start: datetime, end: datetime, is_current: bool = False
 ) -> Dict[str, Any]:
     """Shape one slot the way the POS and the preview both expect.
 
@@ -522,9 +510,14 @@ def _build_slot(
     The kanban reschedule dialog posts ``date`` + ``time`` straight to the
     backend, so a business-day ``date`` there rescheduled the order a full day
     early. ``business_date`` keeps the day the slot is sold under, which is what
-    ``day_label`` is derived from.
+    ``day_label`` is derived from - except for a slot that is running right now,
+    which is labelled by its real start so yesterday's after-midnight tail reads
+    "Today" rather than yesterday's weekday.
+
+    ``is_current`` marks a slot that has already started but not ended. It is
+    offered so staff can still book it; it is never the default.
     """
-    day_label = _get_day_label(target_date)
+    day_label = _get_day_label(start.date() if is_current else target_date)
     time_label = f"{start.strftime('%I:%M %p')} - {end.strftime('%I:%M %p')}"
     return {
         "date": start.date().isoformat(),
@@ -536,6 +529,7 @@ def _build_slot(
         "day_label": day_label,
         "time_label": time_label,
         "is_default": False,
+        "is_current": is_current,
     }
 
 
@@ -609,17 +603,25 @@ def normalize_delivery_window(
         )
         return start, end, "unresolved"
 
-    parsed: List[tuple[datetime, datetime | None]] = []
+    parsed: List[tuple[datetime, datetime | None, bool]] = []
     for slot in slots:
         slot_start = _parse_slot_datetime(slot.get("datetime"))
         if slot_start is None:
             continue
-        parsed.append((slot_start, _parse_slot_datetime(slot.get("end_datetime"))))
+        parsed.append(
+            (
+                slot_start,
+                _parse_slot_datetime(slot.get("end_datetime")),
+                bool(slot.get("is_current")),
+            )
+        )
 
     # Exact slot the caller asked for. Minute resolution: the POS sends whole
     # minutes and a stored Time keeps seconds, so a second-level compare would
     # miss a slot the operator really did pick.
-    for slot_start, slot_end in parsed:
+    # A slot that is running right now is in the list too, so a staff member who
+    # deliberately picked the current slot lands here rather than being snapped.
+    for slot_start, slot_end, _is_current in parsed:
         if slot_start.replace(second=0, microsecond=0) == start.replace(second=0, microsecond=0):
             return slot_start, slot_end or end, "matched"
 
@@ -631,7 +633,10 @@ def normalize_delivery_window(
             return start, end, "kept"
         return start, None, "kept"
 
-    if not parsed:
+    # Snap to the next slot that has not started - never to the running one,
+    # which is only ever an explicit choice.
+    upcoming = [(s, e) for s, e, is_current in parsed if not is_current]
+    if not upcoming:
         logger.error(
             "Delivery slot %s for %r has passed and the profile offers no further "
             "slots; leaving the window untouched.",
@@ -640,7 +645,7 @@ def normalize_delivery_window(
         )
         return start, end, "unresolved"
 
-    next_start, next_end = parsed[0]
+    next_start, next_end = upcoming[0]
     logger.error(
         "Delivery slot %s for %r had already passed when the order was placed "
         "(now %s); snapped to the next available slot %s - %s.",
@@ -665,12 +670,9 @@ def get_next_available_slot(pos_profile_name: str) -> Dict[str, Any] | None:
         Dict: Next available slot or None
     """
     slots = get_available_delivery_slots(pos_profile_name)
-    
-    if slots:
-        # Return the first slot (which is the next available)
-        return slots[0]
-    
-    return None
+
+    # The default slot, not slots[0]: a slot already running sorts first.
+    return next((s for s in slots if s.get("is_default")), None)
 
 
 # ──────────────────────────────────────────────────────────────────────────

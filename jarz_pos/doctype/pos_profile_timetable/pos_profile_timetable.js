@@ -117,8 +117,8 @@ function build_preview_html(data) {
 			<tbody>${rows}</tbody>
 		</table>
 		<div class="text-muted" style="margin-top:6px; font-size:11px">
-			Preview of the full day. The POS hides slots already in the past and
-			applies a 30-minute preparation buffer for today.
+			Preview of the full day. The POS offers each slot until it ends: the
+			next slot is the default, and the slot running now can still be picked.
 		</div>`;
 }
 

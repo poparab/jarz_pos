@@ -216,11 +216,14 @@ def validate_delivery_datetime(required_delivery_datetime, logger):
                 # already passed. The caller snaps it onto the profile's real
                 # slot grid instead - see
                 # jarz_pos.api.delivery_slots.normalize_delivery_window.
+                # Not an error by itself: staff may deliberately book the slot
+                # that is running right now. A start that is on no slot at all
+                # is reported at ERROR by the normaliser when it snaps.
                 stale_msg = (
-                    "Delivery datetime is in the past; leaving it for slot "
+                    "Delivery datetime has already started; leaving it for slot "
                     f"normalisation. Provided: {delivery_datetime}, now: {current_datetime}"
                 )
-                logger.error(stale_msg)
+                logger.info(stale_msg)
                 print(f"   ⚠️ {stale_msg}")
             else:
                 print(f"   ✅ Delivery datetime validated: {delivery_datetime}")
