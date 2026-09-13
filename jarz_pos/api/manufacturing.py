@@ -5,7 +5,7 @@ import html
 import json
 import math
 import re
-from datetime import date as _date_cls, datetime as _datetime_cls
+from datetime import date as _date_cls, datetime as _datetime_cls, timedelta as _timedelta_cls
 from typing import Any, Dict, List, Optional
 
 import frappe
@@ -30,6 +30,8 @@ RUNNING_WORK_ORDER_STATUSES = ("Not Started", "In Process")
 # Float slack shared with the material precheck so the two agree at the
 # boundary instead of disagreeing by a float hair.
 QTY_TOLERANCE = 1e-9
+# A posting within this much of the server clock is "now", not backdated.
+BACKDATED_POSTING_SLACK = _timedelta_cls(minutes=1)
 # The floor board shows what is open now, not a history; a cap keeps a
 # misconfigured client from asking for the whole Work Order table.
 MAX_RUNNING_WORK_ORDERS = 200
@@ -848,6 +850,10 @@ def _resolve_backdated_posting(scheduled_at: Any):
     pre-check on 461 labels and then failed inside ``submit()`` because only 11
     had been counted by then — the other 450 were received on 2026-09-03.
     A posting at or after now reads the Bin exactly as before.
+
+    "Now" has a minute of slack: an undated line is resolved to the server
+    clock by ``_resolve_scheduled_datetime`` a moment before this reads the
+    clock again, and that moment must not turn it into a backdated batch.
     """
     if not scheduled_at:
         return None
@@ -858,7 +864,7 @@ def _resolve_backdated_posting(scheduled_at: Any):
         return None
     if not isinstance(posting_dt, _datetime_cls) or not isinstance(now_dt, _datetime_cls):
         return None
-    return posting_dt if posting_dt < now_dt else None
+    return posting_dt if posting_dt < now_dt - BACKDATED_POSTING_SLACK else None
 
 
 def _format_posting_moment(value: Any) -> str:
@@ -868,8 +874,53 @@ def _format_posting_moment(value: Any) -> str:
         return str(value or "")
 
 
+def _read_later_ledger(item_code: str, warehouse: str, posting_dt: Any) -> Optional[List[Dict[str, Any]]]:
+    """Ledger rows for the pair after ``posting_dt``, oldest first; ``None`` if unreadable."""
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT posting_datetime, voucher_type, voucher_no, qty_after_transaction
+            FROM `tabStock Ledger Entry`
+            WHERE item_code = %s AND warehouse = %s AND is_cancelled = 0
+              AND posting_datetime > %s
+            ORDER BY posting_datetime ASC, creation ASC
+            LIMIT 5000
+            """,
+            (item_code, warehouse, posting_dt),
+            as_dict=True,
+        )
+    except Exception:
+        return None
+    if not isinstance(rows, (list, tuple)) or any(not isinstance(r, dict) for r in rows):
+        return None
+    return list(rows)
+
+
+def _segment_minimums(rows: List[Dict[str, Any]]) -> List[float]:
+    """For each row, the lowest balance from it until the next Stock Reconciliation.
+
+    A deduction posted before row ``i`` is carried through every later balance
+    until a Stock Reconciliation, which resets the quantity and absorbs it — so
+    that stretch is exactly what a backdated entry must not push below zero.
+    """
+    minimums = [0.0] * len(rows)
+    running = float("inf")
+    for index in range(len(rows) - 1, -1, -1):
+        next_is_count = index + 1 < len(rows) and rows[index + 1].get("voucher_type") == "Stock Reconciliation"
+        if next_is_count:
+            running = float("inf")
+        running = min(running, float(rows[index].get("qty_after_transaction") or 0))
+        minimums[index] = running
+    return minimums
+
+
 def _get_stock_qty_at(item_code: str, warehouse: str, posting_dt: Any) -> Optional[float]:
-    """Balance of ``item_code`` in ``warehouse`` as of ``posting_dt``.
+    """What a batch posted at ``posting_dt`` can take from the pair.
+
+    The balance at that moment, capped by the lowest balance after it up to the
+    next Stock Reconciliation: ERPNext refuses a backdated entry that would
+    drive a LATER balance negative, not only its own.  100 on Sep 1 with 90
+    consumed on Sep 2 leaves 10 for a Sep 1 batch, not 100.
 
     ``None`` when the ledger cannot be read, so the caller keeps the live figure
     rather than inventing a zero that would block every backdated batch.
@@ -890,42 +941,42 @@ def _get_stock_qty_at(item_code: str, warehouse: str, posting_dt: Any) -> Option
         return None
     if not isinstance(rows, (list, tuple)):
         return None
-    if not rows:
-        return 0.0
     try:
-        return float(rows[0][0] or 0)
+        balance = float(rows[0][0] or 0) if rows else 0.0
     except (TypeError, ValueError, IndexError, KeyError):
         return None
+
+    later = _read_later_ledger(item_code, warehouse, posting_dt)
+    if later is None:
+        return None
+    if later and later[0].get("voucher_type") != "Stock Reconciliation":
+        balance = min(balance, _segment_minimums(later)[0])
+    return balance
 
 
 def _find_stock_sufficient_from(
     item_code: str, warehouse: str, posting_dt: Any, required_qty: float
 ) -> Optional[Dict[str, str]]:
-    """The first ledger entry after ``posting_dt`` that brings the balance up to
-    ``required_qty`` — the moment this batch could first have been posted."""
-    try:
-        rows = frappe.db.sql(
-            """
-            SELECT posting_datetime, voucher_type, voucher_no
-            FROM `tabStock Ledger Entry`
-            WHERE item_code = %s AND warehouse = %s AND is_cancelled = 0
-              AND posting_datetime > %s AND qty_after_transaction >= %s
-            ORDER BY posting_datetime ASC, creation ASC
-            LIMIT 1
-            """,
-            (item_code, warehouse, posting_dt, required_qty - QTY_TOLERANCE),
-            as_dict=True,
-        )
-    except Exception:
+    """The first ledger entry after ``posting_dt`` from which ``required_qty`` could
+    be taken without any later balance (up to the next count) going negative —
+    the earliest moment this batch could have been posted."""
+    later = _read_later_ledger(item_code, warehouse, posting_dt)
+    if not later:
         return None
-    if not isinstance(rows, (list, tuple)) or not rows or not isinstance(rows[0], dict):
-        return None
-    row = rows[0]
-    return {
-        "posting_datetime": _format_posting_moment(row.get("posting_datetime")),
-        "voucher_type": str(row.get("voucher_type") or ""),
-        "voucher_no": str(row.get("voucher_no") or ""),
-    }
+    minimums = _segment_minimums(later)
+    for index, row in enumerate(later):
+        # Posting just after row ``index``: the rows after it, up to a count, must hold.
+        if index + 1 < len(later) and later[index + 1].get("voucher_type") != "Stock Reconciliation":
+            floor = min(float(row.get("qty_after_transaction") or 0), minimums[index + 1])
+        else:
+            floor = float(row.get("qty_after_transaction") or 0)
+        if floor + QTY_TOLERANCE >= required_qty:
+            return {
+                "posting_datetime": _format_posting_moment(row.get("posting_datetime")),
+                "voucher_type": str(row.get("voucher_type") or ""),
+                "voucher_no": str(row.get("voucher_no") or ""),
+            }
+    return None
 
 
 def _stamp_backdated_shortage(issue: Dict[str, Any], as_of: Any, available_now: Any) -> None:

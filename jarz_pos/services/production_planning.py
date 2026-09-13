@@ -479,12 +479,19 @@ def _stock_at_backdated_postings(
 
     A basket dated in the past is posted — and validated by ERPNext — against
     the ledger at that moment, so the Bin is the wrong snapshot for it.  Where
-    lines consuming one pair are dated differently, the lowest balance wins:
-    that is the line that fails.  Pairs no backdated line touches are absent and
-    keep the Bin figure; so does any pair whose ledger could not be read.
+    backdated lines consuming one pair are dated differently, the lowest
+    figure wins: that is the line that fails.
+
+    Only pairs **every** consuming line is backdated for.  A basket mixing a
+    past line with a current one cannot be judged against one number — 11
+    labels on Sep 1 and 461 today let a Sep 1 line take 11 and a current line
+    take 400, while "411 against 11" would refuse both.  Such a pair keeps the
+    Bin figure here; each line's own dated pre-check still runs before it posts.
+    Pairs whose ledger could not be read keep the Bin figure too.
     """
     resolve_posting, qty_at = _resolve_backdated_stock_helpers()
     found: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+    current: Set[Tuple[str, str]] = set()
     # A jar and a lid sit on every recipe: one ledger read per pair and moment.
     read: Dict[Tuple[str, str, Any], Optional[float]] = {}
     for entry in sets:
@@ -493,6 +500,11 @@ def _stock_at_backdated_postings(
             continue
         as_of = resolve_posting(lines[index].get("scheduled_at"))
         if as_of is None:
+            current.update(
+                (c["item_code"], c.get("source_warehouse"))
+                for c in entry.get("components") or []
+                if c.get("source_warehouse")
+            )
             continue
         for c in entry.get("components") or []:
             warehouse = c.get("source_warehouse")
@@ -506,6 +518,8 @@ def _stock_at_backdated_postings(
                 continue
             if key not in found or qty < found[key][0]:
                 found[key] = (qty, as_of)
+    for key in current:
+        found.pop(key, None)
     return found
 
 

@@ -37,17 +37,27 @@ BOM_ITEMS = {
 }
 
 
-def _ledger_sql(balance_at_posting, sufficient_from=None):
-    """``frappe.db.sql`` answering the two ledger reads the pre-check makes."""
+def _ledger_sql(balance_at_posting, later_rows=()):
+    """``frappe.db.sql`` answering the two ledger reads the pre-check makes:
+    the balance at the posting moment, and every row after it."""
 
     def sql(query, values=None, as_dict=False):
-        if "qty_after_transaction >=" in query:
-            return [sufficient_from] if sufficient_from else []
+        if "posting_datetime >" in query:
+            return [dict(r) for r in later_rows]
         if "qty_after_transaction" in query:
             return [(balance_at_posting,)]
         return []
 
     return MagicMock(side_effect=sql)
+
+
+def _row(voucher_type, qty, when="2026-09-03 02:15:00", voucher_no="V-1"):
+    return {
+        "posting_datetime": datetime.fromisoformat(when),
+        "voucher_type": voucher_type,
+        "voucher_no": voucher_no,
+        "qty_after_transaction": qty,
+    }
 
 
 class TestResolveBackdatedPosting(unittest.TestCase):
@@ -62,6 +72,8 @@ class TestResolveBackdatedPosting(unittest.TestCase):
 
     def test_now_the_future_and_blank_are_not(self):
         self.assertIsNone(self._call(NOW))
+        # The undated line resolved to the clock a moment before this re-read it.
+        self.assertIsNone(self._call("2026-09-13 10:19:30"))
         self.assertIsNone(self._call("2026-09-14 09:00:00"))
         self.assertIsNone(self._call(None))
         self.assertIsNone(self._call(""))
@@ -88,14 +100,7 @@ class TestPrecheckReadsTheLedgerAtThePostingMoment(unittest.TestCase):
             return manufacturing._get_material_precheck_issues(line, "Jarz Co")
 
     def test_stock_that_arrived_after_the_batch_date_does_not_count(self):
-        sql = _ledger_sql(
-            11.0,
-            {
-                "posting_datetime": datetime(2026, 9, 3, 2, 15),
-                "voucher_type": "Purchase Invoice",
-                "voucher_no": "ACC-PINV-1",
-            },
-        )
+        sql = _ledger_sql(11.0, [_row("Purchase Invoice", 461.0, voucher_no="ACC-PINV-1")])
         line = {"item_code": "CHOC-L", "bom_name": "BOM-CHOC-L", "item_qty": 32, "scheduled_at": PAST}
 
         issues = self._issues(line, sql)
@@ -139,6 +144,49 @@ class TestPrecheckReadsTheLedgerAtThePostingMoment(unittest.TestCase):
         issues = self._issues(line, MagicMock(side_effect=Exception("db gone")))
 
         self.assertEqual([], issues)
+
+
+class TestLaterLedgerCapsWhatABackdatedBatchCanTake(unittest.TestCase):
+    """ERPNext refuses a backdated entry that drives any LATER balance negative,
+    up to the next Stock Reconciliation."""
+
+    def _qty_at(self, balance, later):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.db.sql = _ledger_sql(balance, later)
+            return manufacturing._get_stock_qty_at("LABEL", "Raw Material - J", PAST)
+
+    def _sufficient_from(self, later, required):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.db.sql = _ledger_sql(0.0, later)
+            return manufacturing._find_stock_sufficient_from("LABEL", "Raw Material - J", PAST, required)
+
+    def test_a_later_consumption_caps_the_balance(self):
+        self.assertAlmostEqual(10.0, self._qty_at(100.0, [_row("Stock Entry", 10.0)]))
+
+    def test_a_later_count_absorbs_the_deduction(self):
+        self.assertAlmostEqual(100.0, self._qty_at(100.0, [_row("Stock Reconciliation", 5.0)]))
+
+    def test_only_the_stretch_before_the_next_count_matters(self):
+        later = [_row("Stock Entry", 40.0), _row("Stock Reconciliation", 5.0), _row("Stock Entry", 1.0)]
+        self.assertAlmostEqual(40.0, self._qty_at(100.0, later))
+
+    def test_no_later_rows_is_just_the_balance(self):
+        self.assertAlmostEqual(7.0, self._qty_at(7.0, []))
+
+    def test_enough_from_skips_a_receipt_that_a_later_issue_undoes(self):
+        later = [
+            _row("Purchase Receipt", 100.0, voucher_no="PR-1"),
+            _row("Stock Entry", 10.0, voucher_no="SE-1"),
+            _row("Purchase Receipt", 60.0, voucher_no="PR-2"),
+        ]
+        self.assertEqual("PR-2", self._sufficient_from(later, 50.0)["voucher_no"])
+
+    def test_enough_from_is_none_when_it_never_is(self):
+        self.assertIsNone(self._sufficient_from([_row("Stock Entry", 10.0)], 50.0))
 
 
 class TestBackdatedShortageMessage(unittest.TestCase):
@@ -257,6 +305,40 @@ class TestBasketRollupReadsTheLedgerForBackdatedLines(unittest.TestCase):
 
         self.assertEqual([], rollup["shortages"])
         qty_at.assert_not_called()
+
+    def test_a_basket_mixing_past_and_current_lines_keeps_the_bin_for_shared_stock(self):
+        from jarz_pos.services import production_planning as planning
+
+        components = [
+            {
+                "item_code": "LABEL",
+                "item_name": "Label",
+                "stock_uom": "Nos",
+                "required_qty": 200.0,
+                "source_warehouse": "Raw Material - J",
+            }
+        ]
+        with patch(
+            "jarz_pos.services.production_planning._resolve_required_material_rows",
+            return_value=MagicMock(return_value=components),
+        ), patch(
+            "jarz_pos.services.production_planning._resolve_bom_company", return_value="Jarz Co"
+        ), patch(
+            "jarz_pos.services.production_planning._resolve_bin_stock_map",
+            return_value={("LABEL", "Raw Material - J"): 461.0},
+        ), patch(
+            "jarz_pos.services.production_planning._resolve_backdated_stock_helpers",
+            return_value=(lambda value: datetime(2026, 9, 1, 18) if value else None, MagicMock(return_value=11.0)),
+        ):
+            rollup = planning.build_basket_rollup(
+                [
+                    {"item_code": "A", "bom_name": "BOM-A", "item_qty": 1, "scheduled_at": PAST},
+                    {"item_code": "B", "bom_name": "BOM-B", "item_qty": 1},
+                ],
+                "Jarz Co",
+            )
+
+        self.assertEqual([], rollup["shortages"])
 
 
 class TestPlainErrorText(unittest.TestCase):
