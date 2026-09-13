@@ -284,8 +284,12 @@ def acknowledge_request(name: str) -> Dict[str, Any]:
     _ensure_review_access()
     if not name:
         frappe.throw(_("Request name is required"))
+    if not _has_ack_fields():
+        frappe.throw(_("Accepting requests is not available until the site is migrated."))
 
-    doc = frappe.get_doc("Material Request", name)
+    # Row lock: two buyers tapping Accept together must not both pass the
+    # "already accepted?" check and overwrite each other.
+    doc = frappe.get_doc("Material Request", name, for_update=True)
     if doc.docstatus != 1 or doc.material_request_type != "Purchase":
         frappe.throw(_("Only an open item request can be accepted."))
     if doc.get("custom_jarz_acknowledged_at"):
@@ -346,7 +350,7 @@ def list_requests(
     rows = frappe.get_all(
         "Material Request",
         filters=filters,
-        fields=_REQUEST_FIELDS,
+        fields=_request_fields(),
         order_by="transaction_date desc, creation desc",
         limit_page_length=limit,
         limit_start=start,
@@ -397,6 +401,9 @@ def get_request_counts() -> Dict[str, Any]:
         filters["custom_jarz_pos_profile"] = ["in", visible]
 
     open_count = frappe.db.count("Material Request", filters=filters)
+    if not _has_ack_fields():
+        # Not migrated yet: nothing can have been accepted.
+        return {"open": int(open_count or 0), "unacknowledged": int(open_count or 0)}
     unacknowledged = frappe.db.count(
         "Material Request",
         filters={**filters, "custom_jarz_acknowledged_at": ["is", "not set"]},
@@ -529,9 +536,30 @@ _REQUEST_FIELDS = [
     "name", "transaction_date", "schedule_date", "status", "docstatus",
     "per_ordered", "per_received", "company", "owner", "creation", "modified",
     "custom_jarz_pos_profile", "custom_jarz_requested_by_label", "custom_jarz_note",
+]
+
+_ACK_FIELDS = [
     "custom_jarz_acknowledged_by", "custom_jarz_acknowledged_by_label",
     "custom_jarz_acknowledged_at",
 ]
+
+
+def _has_ack_fields() -> bool:
+    """Whether the acceptance Custom Fields exist on this site yet.
+
+    Fixtures sync at the very end of ``bench migrate``, and the CI logic gate
+    runs without migrating. Selecting an absent column is a hard SQL error, so
+    without this check the whole request list — not just acceptance — died in
+    that window.
+    """
+    try:
+        return bool(frappe.db.has_column("Material Request", "custom_jarz_acknowledged_at"))
+    except Exception:
+        return False
+
+
+def _request_fields() -> List[str]:
+    return _REQUEST_FIELDS + _ACK_FIELDS if _has_ack_fields() else list(_REQUEST_FIELDS)
 
 _REQUEST_ITEM_FIELDS = [
     "name", "parent", "item_code", "item_name", "qty", "uom", "stock_uom",
