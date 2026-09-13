@@ -991,6 +991,9 @@ def get_purchase_invoices(
     )
 
     # One query for every line on the page instead of one query per invoice.
+    # `conversion_factor` is the line's own, stamped at purchase time: reorder
+    # needs it to restate a line in the stock UOM once its UOM has been removed
+    # from the Item, and the Item can no longer tell it what a "Box" held.
     names = [inv["name"] for inv in invoices]
     lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
     if names:
@@ -999,7 +1002,7 @@ def get_purchase_invoices(
             filters={"parent": ["in", names]},
             fields=[
                 "parent", "item_code", "item_name", "qty", "uom", "rate", "amount",
-                "warehouse", "item_tax_template",
+                "warehouse", "item_tax_template", "conversion_factor",
             ],
             order_by="parent asc, idx asc",
             limit_page_length=0,

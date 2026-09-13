@@ -346,6 +346,11 @@ jobs:
             # account. This pins that the endpoint states the payment fields
             # outright instead of inheriting a form customisation.
             test_purchase_payment_defaults
+            # Reorder restates a line whose UOM was removed from the Item in the
+            # stock UOM; only the old line's own conversion_factor says what the
+            # removed unit held. Without it 5 "Box of 12" at 120 became 5 units
+            # at 120 — right total, a twelfth of the stock, 12x the valuation.
+            test_purchase_history_lines
             # The POS stock-update suppression hook. Its field read used to
             # throw on a class-level descriptor and get swallowed, silently
             # disabling the guard that stops stock being booked twice.
