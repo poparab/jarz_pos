@@ -277,6 +277,36 @@ class TestActualPaymentMethodMap(unittest.TestCase):
         )
         self.assertEqual(result.get("SI-SETTLED-1"), "Instapay")
 
+    def test_settled_row_keeps_its_dispatch_label_but_the_invoice_says_cash(self):
+        """A Settled row is never rewritten, so its payment_mode can be "Deferred".
+
+        change_payment_collection_method still appends the note and sets the
+        invoice's declared method; the card must follow the invoice, not the row.
+        """
+        result = self._resolve(
+            [_paid("SI-DEFERRED-1", custom_payment_method="Cash")],
+            payment_entries={"SI-DEFERRED-1": f"Nasr City - {COMPANY_ABBR}"},
+            collection_changes={"SI-DEFERRED-1": "Deferred"},
+        )
+        self.assertEqual(result.get("SI-DEFERRED-1"), "Cash")
+
+    def test_a_later_conversion_the_row_never_saw_wins(self):
+        """Production ACC-SINV-2026-16099: row says Instapay, invoice was converted to Cash."""
+        result = self._resolve(
+            [_paid("SI-CONVERTED-1", custom_payment_method="Cash")],
+            payment_entries={"SI-CONVERTED-1": f"Courier Outstanding - {COMPANY_ABBR}"},
+            collection_changes={"SI-CONVERTED-1": "Instapay"},
+        )
+        self.assertEqual(result.get("SI-CONVERTED-1"), "Cash")
+
+    def test_change_row_still_answers_when_nothing_is_declared(self):
+        result = self._resolve(
+            [_paid("SI-NODECL-1", custom_payment_method=None)],
+            payment_entries={"SI-NODECL-1": f"Courier Outstanding - {COMPANY_ABBR}"},
+            collection_changes={"SI-NODECL-1": "Mobile Wallet"},
+        )
+        self.assertEqual(result.get("SI-NODECL-1"), "Mobile Wallet")
+
     def test_unreadable_ledger_with_nothing_declared_is_omitted(self):
         """Never invent a method. An absent key makes the card show its status."""
         result = self._resolve(

@@ -700,9 +700,10 @@ def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]
     for the fallback below to work -- ``custom_payment_method`` and ``sales_partner``.
 
     Sources, in priority order:
-      1. An unsettled Courier Transaction whose notes record a collection-method
+      1. A Courier Transaction (settled or not) whose notes record a collection-method
          change. This is the newest evidence and the only trace of a post-dispatch
-         COD -> online switch, so it outranks the Payment Entry.
+         COD -> online switch, so it outranks the Payment Entry. The method is the
+         invoice's declared one when set, which every change path keeps current.
       2. The submitted Payment Entry ``paid_to`` ledger, classified by
          :func:`_classify_collection_account` -- which returns nothing rather than
          guessing when the ledger is not a customer collection.
@@ -725,10 +726,20 @@ def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]
     if not invoice_names:
         return method_map
 
-    # 1. Post-dispatch collection change (newest evidence wins).
+    # 1. Post-dispatch collection change (newest evidence wins). The change marks the
+    #    Payment Entry as stale, but the method itself is read from the invoice when
+    #    it has one: every change path rewrites ``custom_payment_method``, while a
+    #    Settled Courier Transaction keeps its old ``payment_mode`` (a dispatch-time
+    #    "Deferred", or the method before a later switch). Production had two May
+    #    orders whose row still says Instapay while the invoice was converted to Cash.
+    declared_by_name = {
+        str(row.get("name") or "").strip(): sanitize_printable_text(row.get("custom_payment_method"))
+        for row in rows
+    }
     for name, method in _get_collection_change_map(invoice_names).items():
-        if method:
-            method_map[name] = method
+        current = declared_by_name.get(name) or method
+        if current:
+            method_map[name] = current
 
     # 2. The ledger the money actually landed in.
     for name, method in _get_payment_entry_method_map(rows).items():
