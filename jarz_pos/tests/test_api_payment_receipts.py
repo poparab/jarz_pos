@@ -471,6 +471,163 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		self.assertIn("Changed payment receipts cannot be edited", str(exc.exception))
 
 
+def _receipt_row(**overrides):
+	"""A POS Payment Receipt row as ``frappe.get_all`` hands it back."""
+	row = {
+		"name": "PPR-0001",
+		"sales_invoice": "ACC-SINV-0001",
+		"payment_method": "InstaPay",
+		"amount": 120.0,
+		"pos_profile": "Dokki",
+		"status": "Unconfirmed",
+		"receipt_image": "/files/receipt.png",
+		"receipt_image_url": "/files/receipt.png",
+		"uploaded_by": "staff@example.com",
+		"upload_date": "2026-09-13 12:00:00",
+		"confirmed_by": None,
+		"confirmed_date": None,
+		"rejected_by": None,
+		"rejected_date": None,
+		"rejection_reason": None,
+		"creation": "2026-09-13 12:00:00",
+		"modified": "2026-09-13 12:00:00",
+	}
+	row.update(overrides)
+	return row
+
+
+class TestGetPaymentReceipt(unittest.TestCase):
+	"""The bounded single-receipt read the transfer-proof sheet re-reads with.
+
+	Its only alternative was ``list_payment_receipts(pos_profile)``: every
+	non-Changed receipt of the branch, unlimited, with a Sales Invoice loaded for
+	each -- to look at one row.
+	"""
+
+	def _frappe(self, rows):
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.get_all.return_value = rows
+		mock_frappe.get_doc.return_value = _FakeInvoiceDoc(woo_order_id="18053")
+		return mock_frappe
+
+	def test_returns_the_row_in_the_list_shape(self):
+		from jarz_pos.api.payment_receipts import (
+			RECEIPT_ROW_FIELDS,
+			get_payment_receipt,
+			list_payment_receipts,
+		)
+
+		single_frappe = self._frappe([_receipt_row()])
+		with patch("jarz_pos.api.payment_receipts.frappe", single_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+			result = get_payment_receipt("PPR-0001")
+
+		self.assertTrue(result["success"])
+		receipt = result["receipt"]
+		self.assertEqual(receipt["name"], "PPR-0001")
+		self.assertEqual(receipt["customer_name"], "Jarz Test Customer")
+		self.assertEqual(receipt["invoice_id"], "ACC-SINV-0001")
+		self.assertTrue(receipt["can_confirm"])
+		for field in (
+			"name", "sales_invoice", "payment_method", "amount", "pos_profile",
+			"status", "receipt_image", "receipt_image_url", "uploaded_by",
+			"upload_date", "confirmed_by", "confirmed_date", "rejected_by",
+			"rejected_date", "rejection_reason", "customer_name", "invoice_id",
+			"woo_order_id", "can_confirm",
+		):
+			self.assertIn(field, receipt)
+
+		# Bounded: one row by name, never the branch's whole receipt set.
+		call = single_frappe.get_all.call_args
+		self.assertEqual(call.args[0], "POS Payment Receipt")
+		self.assertEqual(call.kwargs["filters"], {"name": "PPR-0001"})
+		self.assertEqual(call.kwargs["limit_page_length"], 1)
+		self.assertEqual(call.kwargs["fields"], list(RECEIPT_ROW_FIELDS))
+		single_frappe.get_doc.assert_called_once_with("Sales Invoice", "ACC-SINV-0001")
+
+		# The sheet feeds this row to the model the list populates, so the two
+		# shapes must not drift: same source row, same keys.
+		list_frappe = self._frappe([_receipt_row()])
+		with patch("jarz_pos.api.payment_receipts.frappe", list_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+			listed = list_payment_receipts()
+
+		self.assertEqual(set(listed[0].keys()), set(receipt.keys()))
+		self.assertEqual(
+			list_frappe.get_all.call_args.kwargs["fields"], call.kwargs["fields"]
+		)
+
+	def test_returns_a_changed_receipt_with_its_status(self):
+		from jarz_pos.api.payment_receipts import get_payment_receipt
+
+		mock_frappe = self._frappe([_receipt_row(status="Changed")])
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+			result = get_payment_receipt("PPR-0001")
+
+		# Asked for by name, so it is returned; the status tells the sheet.
+		self.assertEqual(result["receipt"]["status"], "Changed")
+		self.assertNotIn("status", mock_frappe.get_all.call_args.kwargs["filters"])
+
+	def test_unrestricted_user_reads_any_branch(self):
+		from jarz_pos.api.payment_receipts import get_payment_receipt
+
+		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=[]):
+			result = get_payment_receipt("PPR-0001")
+
+		# An empty allowed list applies no branch filter in the list either.
+		self.assertEqual(result["receipt"]["pos_profile"], "Nasr city")
+
+	def test_refuses_a_receipt_of_another_branch(self):
+		from jarz_pos.api.payment_receipts import get_payment_receipt
+
+		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+			with self.assertRaises(FrappePermissionError) as exc:
+				get_payment_receipt("PPR-0001")
+
+		self.assertIn("branch you are not assigned to", str(exc.exception))
+		# Refused before the invoice is loaded: nothing of the order leaks.
+		mock_frappe.get_doc.assert_not_called()
+
+	def test_refuses_a_missing_receipt(self):
+		from jarz_pos.api.payment_receipts import get_payment_receipt
+
+		mock_frappe = self._frappe([])
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
+				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+			with self.assertRaises(FrappeValidationError) as exc:
+				get_payment_receipt("PPR-MISSING")
+
+		self.assertIn("was not found", str(exc.exception))
+		try:
+			from frappe.exceptions import DoesNotExistError
+		except ImportError:
+			DoesNotExistError = None
+		if DoesNotExistError is not None:
+			self.assertIsInstance(exc.exception, DoesNotExistError)
+		mock_frappe.get_doc.assert_not_called()
+
+	def test_refuses_a_blank_name(self):
+		from jarz_pos.api.payment_receipts import get_payment_receipt
+
+		mock_frappe = self._frappe([])
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			with self.assertRaises(FrappeValidationError):
+				get_payment_receipt("   ")
+
+		mock_frappe.get_all.assert_not_called()
+
+
 class TestConfirmOnlinePaymentGate(unittest.TestCase):
 	"""confirm_online_payment: manager permission gate + screenshot validation."""
 

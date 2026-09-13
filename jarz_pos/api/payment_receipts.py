@@ -468,6 +468,121 @@ def _ensure_payment_receipt_confirm_access(pos_profile: str | None = None) -> No
     )
 
 
+#: The POS Payment Receipt columns every receipt read returns. Shared by
+#: :func:`list_payment_receipts` and :func:`get_payment_receipt` so the single
+#: read cannot drift from the list the app already parses.
+RECEIPT_ROW_FIELDS = (
+    'name',
+    'sales_invoice',
+    'payment_method',
+    'amount',
+    'pos_profile',
+    'status',
+    'receipt_image',
+    'receipt_image_url',
+    'uploaded_by',
+    'upload_date',
+    'confirmed_by',
+    'confirmed_date',
+    'rejected_by',
+    'rejected_date',
+    'rejection_reason',
+    'creation',
+    'modified',
+)
+
+
+def _decorate_receipt_row(receipt: dict) -> dict:
+    """Add the invoice-derived fields and ``can_confirm`` to a receipt row, in place.
+
+    One builder for both read endpoints: the transfer-proof sheet re-reads a
+    single receipt through :func:`get_payment_receipt` and hands it to the same
+    client model the list feeds, so a key added here reaches both or neither.
+    """
+    try:
+        invoice = frappe.get_doc('Sales Invoice', receipt['sales_invoice'])
+        receipt['customer_name'] = invoice.customer_name
+        receipt['invoice_id'] = invoice.name
+        receipt['woo_order_id'] = normalize_woo_order_id(invoice.get('woo_order_id'))
+    except Exception:
+        receipt['customer_name'] = 'Unknown'
+        receipt['invoice_id'] = receipt['sales_invoice']
+        receipt['woo_order_id'] = None
+
+    receipt['can_confirm'] = _has_payment_receipt_confirm_access(
+        receipt.get('pos_profile')
+    )
+    return receipt
+
+
+def _does_not_exist_error() -> type:
+    """``frappe.DoesNotExistError``, resolved lazily.
+
+    The site-less test harness stubs ``frappe.exceptions`` with only the two
+    classes this module imports at the top, so a module-level import of a third
+    would break every test in it. ``DoesNotExistError`` subclasses
+    ``ValidationError``, which makes that the faithful fallback.
+    """
+    try:
+        from frappe.exceptions import DoesNotExistError
+    except ImportError:
+        return FrappeValidationError
+    return DoesNotExistError
+
+
+@frappe.whitelist()
+def get_payment_receipt(receipt_name: str):
+    """One payment receipt, in exactly the shape a ``list_payment_receipts`` row has.
+
+    The InstaPay transfer-proof sheet re-reads the receipt it is about to
+    confirm. Its only way to do that was ``list_payment_receipts(pos_profile)``,
+    which returns every non-Changed receipt of the branch with no limit and
+    loads a Sales Invoice for each one — to look at a single row.
+
+    Scoping mirrors the list exactly: a user with assigned POS Profiles sees
+    only receipts filed against one of them, and an empty allowed list is
+    unrestricted, as the list treats it. Like the list it reads with
+    ``frappe.get_all``, which does NOT apply DocPerm read rules — the branch
+    check above is the only gate, the same one the list relies on.
+
+    Unlike the list, ``Changed`` receipts are returned: the caller asked for this
+    row by name, and its ``status`` is what tells the sheet it was superseded.
+
+    Args:
+        receipt_name: POS Payment Receipt name.
+
+    Returns:
+        dict: ``{"success": True, "receipt": row}``.
+    """
+    name = str(receipt_name or '').strip()
+    if not name:
+        frappe.throw(_("Payment receipt name is required."), FrappeValidationError)
+
+    rows = frappe.get_all(
+        'POS Payment Receipt',
+        filters={'name': name},
+        fields=list(RECEIPT_ROW_FIELDS),
+        limit_page_length=1,
+    )
+    if not rows:
+        frappe.throw(
+            _("Payment receipt {0} was not found.").format(name),
+            _does_not_exist_error(),
+        )
+    receipt = rows[0]
+
+    from jarz_pos.api.manager import _current_user_allowed_profiles
+
+    accessible_profiles = _current_user_allowed_profiles()
+    if accessible_profiles and receipt.get('pos_profile') not in accessible_profiles:
+        frappe.throw(
+            _("This payment receipt belongs to a branch you are not assigned to."),
+            FrappePermissionError,
+        )
+
+    return {'success': True, 'receipt': _decorate_receipt_row(receipt)}
+
+
 @frappe.whitelist()
 def list_payment_receipts(pos_profile: str = None, status: str = None):
     """List payment receipts filtered by POS profile and status.
@@ -501,44 +616,14 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
         receipts = frappe.get_all(
             'POS Payment Receipt',
             filters=filters,
-            fields=[
-                'name',
-                'sales_invoice',
-                'payment_method',
-                'amount',
-                'pos_profile',
-                'status',
-                'receipt_image',
-                'receipt_image_url',
-                'uploaded_by',
-                'upload_date',
-                'confirmed_by',
-                'confirmed_date',
-                'rejected_by',
-                'rejected_date',
-                'rejection_reason',
-                'creation',
-                'modified'
-            ],
+            fields=list(RECEIPT_ROW_FIELDS),
             order_by='creation desc'
         )
-        
+
         # Get invoice details for each receipt
         for receipt in receipts:
-            try:
-                invoice = frappe.get_doc('Sales Invoice', receipt['sales_invoice'])
-                receipt['customer_name'] = invoice.customer_name
-                receipt['invoice_id'] = invoice.name
-                receipt['woo_order_id'] = normalize_woo_order_id(invoice.get('woo_order_id'))
-            except Exception:
-                receipt['customer_name'] = 'Unknown'
-                receipt['invoice_id'] = receipt['sales_invoice']
-                receipt['woo_order_id'] = None
+            _decorate_receipt_row(receipt)
 
-            receipt['can_confirm'] = _has_payment_receipt_confirm_access(
-                receipt.get('pos_profile')
-            )
-        
         frappe.logger().info(f"Retrieved {len(receipts)} payment receipts")
         
         return receipts
