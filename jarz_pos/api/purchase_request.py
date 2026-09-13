@@ -34,7 +34,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, flt, getdate, nowdate
+from frappe.utils import add_days, flt, getdate, now_datetime, nowdate
 from typing import Any, Dict, List, Optional, Sequence
 
 from jarz_pos.constants import ROLES
@@ -228,7 +228,7 @@ def create_request(
 
     _notify_reviewers(doc)
 
-    return {"success": True, "request": _serialize_request(doc.as_dict())}
+    return {"success": True, "request": _serialize_request_with_lines(doc)}
 
 
 @frappe.whitelist()
@@ -246,13 +246,13 @@ def stop_request(name: str, reason: Optional[str] = None) -> Dict[str, Any]:
     if doc.docstatus != 1:
         frappe.throw(_("Only an open request can be stopped."))
     if doc.status == "Stopped":
-        return {"success": True, "request": _serialize_request(doc.as_dict())}
+        return {"success": True, "request": _serialize_request_with_lines(doc)}
 
     doc.update_status("Stopped")
     if reason:
         doc.add_comment("Comment", _("Stopped: {0}").format(reason))
     doc.reload()
-    return {"success": True, "request": _serialize_request(doc.as_dict())}
+    return {"success": True, "request": _serialize_request_with_lines(doc)}
 
 
 @frappe.whitelist()
@@ -267,7 +267,41 @@ def reopen_request(name: str) -> Dict[str, Any]:
         frappe.throw(_("Only a stopped request can be reopened."))
     doc.update_status("Submitted")
     doc.reload()
-    return {"success": True, "request": _serialize_request(doc.as_dict())}
+    return {"success": True, "request": _serialize_request_with_lines(doc)}
+
+
+@frappe.whitelist()
+def acknowledge_request(name: str) -> Dict[str, Any]:
+    """Accept a request: tell the requester a buyer has seen it and is on it.
+
+    Without this a request sat at ``Pending`` from the moment it was raised
+    until goods arrived, so the person who filed it could not tell "nobody has
+    looked" from "being bought". Acceptance is a stamp, not a status change —
+    ERPNext's status map stays the single source of fulfilment state, and an
+    unaccepted request can still be bought, which also marks nothing here.
+    Idempotent: accepting twice keeps the first buyer and time.
+    """
+    _ensure_review_access()
+    if not name:
+        frappe.throw(_("Request name is required"))
+
+    doc = frappe.get_doc("Material Request", name)
+    if doc.docstatus != 1 or doc.material_request_type != "Purchase":
+        frappe.throw(_("Only an open item request can be accepted."))
+    if doc.get("custom_jarz_acknowledged_at"):
+        return {"success": True, "request": _serialize_request_with_lines(doc)}
+    if doc.status not in OPEN_STATUSES:
+        frappe.throw(_("Only an open item request can be accepted."))
+
+    user = frappe.session.user
+    doc.db_set({
+        "custom_jarz_acknowledged_by": user,
+        "custom_jarz_acknowledged_by_label": _user_label(user),
+        "custom_jarz_acknowledged_at": now_datetime(),
+    })
+    doc.add_comment("Comment", _("Accepted by {0}").format(_user_label(user)))
+    doc.reload()
+    return {"success": True, "request": _serialize_request_with_lines(doc)}
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +372,36 @@ def list_requests(
         requests.append(payload)
 
     return {"requests": requests, "total": total, "can_review": _can_review()}
+
+
+@frappe.whitelist()
+def get_request_counts() -> Dict[str, Any]:
+    """Open requests the caller can see, for the side-menu indicator.
+
+    Two counts only, no rows: the drawer asks every time it opens, so this must
+    stay as cheap as two ``COUNT(*)``. Scoped exactly like :func:`list_requests`
+    with ``status="open"``, so the badge never promises a request the list will
+    not show.
+    """
+    _ensure_request_access()
+
+    filters: Dict[str, Any] = {
+        "material_request_type": "Purchase",
+        "docstatus": 1,
+        "status": ["in", list(OPEN_STATUSES)],
+    }
+    visible = _visible_profiles()
+    if visible is not None:
+        if not visible:
+            return {"open": 0, "unacknowledged": 0}
+        filters["custom_jarz_pos_profile"] = ["in", visible]
+
+    open_count = frappe.db.count("Material Request", filters=filters)
+    unacknowledged = frappe.db.count(
+        "Material Request",
+        filters={**filters, "custom_jarz_acknowledged_at": ["is", "not set"]},
+    )
+    return {"open": int(open_count or 0), "unacknowledged": int(unacknowledged or 0)}
 
 
 @frappe.whitelist()
@@ -465,6 +529,8 @@ _REQUEST_FIELDS = [
     "name", "transaction_date", "schedule_date", "status", "docstatus",
     "per_ordered", "per_received", "company", "owner", "creation", "modified",
     "custom_jarz_pos_profile", "custom_jarz_requested_by_label", "custom_jarz_note",
+    "custom_jarz_acknowledged_by", "custom_jarz_acknowledged_by_label",
+    "custom_jarz_acknowledged_at",
 ]
 
 _REQUEST_ITEM_FIELDS = [
@@ -491,7 +557,23 @@ def _serialize_request(doc: Dict[str, Any]) -> Dict[str, Any]:
         "creation": doc.get("creation"),
         "modified": doc.get("modified"),
         "is_mine": doc.get("owner") == frappe.session.user,
+        "acknowledged_by": doc.get("custom_jarz_acknowledged_by_label")
+        or doc.get("custom_jarz_acknowledged_by"),
+        "acknowledged_by_user": doc.get("custom_jarz_acknowledged_by"),
+        "acknowledged_at": doc.get("custom_jarz_acknowledged_at"),
     }
+
+
+def _serialize_request_with_lines(doc: Any) -> Dict[str, Any]:
+    """A single request as the list returns it, lines included.
+
+    The write endpoints used to return the header alone. The app swaps the
+    returned request into its list in place, so a card that had just been
+    stopped or reopened lost every line and fell back to showing its name.
+    """
+    payload = _serialize_request(doc.as_dict())
+    payload["items"] = [_serialize_line(row.as_dict()) for row in doc.get("items") or []]
+    return payload
 
 
 def _serialize_line(row: Dict[str, Any]) -> Dict[str, Any]:
