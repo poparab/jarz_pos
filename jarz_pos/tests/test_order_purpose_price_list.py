@@ -10,8 +10,11 @@ client-sent list silently beat the policy's own. The server now refuses a contra
      derive for that context (partner list, customer/group tier, B2B baseline when there
      is no selling tier; POS/company default only when none of those exist), because the
      POS cart resolves the tier without the partner;
-  3. Standard / any other list-less purpose (Free Shipping Waiver): the request must not
-     be a list reserved for some purpose.
+  3. Standard / any other list-less purpose (Free Shipping Waiver): the request must be
+     the POS Profile's default list. The cart's Price List dropdown is being removed, and
+     "Selling Bundle of 3/4" (on no production invoice, three item prices each) used to
+     slip through because rule 3 only refused RESERVED lists. A profile with no default
+     keeps that reserved-only check.
 
 Plus the amendment exemption (a replacement may keep its cancelled source's own list),
 ``commercial_policy.reserved_price_lists`` and the additive ``reserved_for_purposes``
@@ -320,21 +323,47 @@ class TestB2BSupplyAcceptablePriceLists(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Rule 3: retail purposes cannot borrow a reserved list
+# Rule 3: retail purposes use the branch (POS Profile) default list only
 # ---------------------------------------------------------------------------
 
 class TestRule3RetailCannotUseReservedList(_PurposeCase):
-    def test_standard_manager_may_use_free_retail_list(self):
-        self.assertEqual(self._resolve(_BUNDLE3), _BUNDLE3)
+    _STANDARD_BUNDLE_MESSAGE = (
+        "Order purpose Standard uses the branch price list Standard Selling, "
+        "not Selling Bundle of 3."
+    )
 
-    def test_standard_free_list_is_still_manager_gated(self):
-        with self.assertRaises(frappe.ValidationError):
-            self._resolve(_BUNDLE3, is_manager=False)
+    def test_standard_manager_cannot_use_free_non_default_list(self):
+        # The dropdown is gone: a free (unreserved) list is no longer a manager option.
+        message = self.assertMismatch([], requested=_BUNDLE3, is_manager=True)
+        self.assertEqual(message, self._STANDARD_BUNDLE_MESSAGE)
+
+    def test_standard_free_list_is_refused_before_the_manager_gate(self):
+        # A cashier gets the purpose message, not "manager pricing access required".
+        message = self.assertMismatch(
+            [], requested=_BUNDLE3, is_manager=False,
+            gate_side_effect=AssertionError("manager gate reached before the purpose check"),
+        )
+        self.assertEqual(message, self._STANDARD_BUNDLE_MESSAGE)
+
+    def test_standard_default_and_empty_request_pass_for_a_cashier(self):
+        self.assertEqual(self._resolve(_DEFAULT, is_manager=False), _DEFAULT)
+        for requested in (None, "", "   "):
+            with self.subTest(requested=requested):
+                self.assertEqual(self._resolve(requested, is_manager=False), _DEFAULT)
+
+    def test_standard_case_variant_of_default_is_accepted(self):
+        # MariaDB treats "standard selling" and "Standard Selling" as the same list.
+        self.assertEqual(self._resolve("standard selling"), "standard selling")
 
     def test_standard_rejects_employee_list_even_for_manager(self):
-        self.assertMismatch(
+        message = self.assertMismatch(
             ["Price list Employee is reserved for order purpose Employee", "Standard"],
             requested=_EMPLOYEE,
+        )
+        self.assertEqual(
+            message,
+            "Price list Employee is reserved for order purpose Employee; order purpose "
+            "Standard uses the branch price list Standard Selling.",
         )
 
     def test_standard_rejects_sample_list_naming_every_owner(self):
@@ -358,25 +387,95 @@ class TestRule3RetailCannotUseReservedList(_PurposeCase):
         )
 
     def test_reserved_lookup_is_scoped_to_this_profile(self):
-        self._resolve(_BUNDLE3)
+        # Still consulted on the refusal path: it picks the more informative wording.
+        with self.assertRaises(frappe.ValidationError):
+            self._resolve(_BUNDLE3)
         self.reserved_mock.assert_called_once_with(_PROFILE, default_price_list=_DEFAULT)
 
     def test_free_shipping_waiver_rejects_sample_list(self):
         self.assertMismatch(
-            ["reserved for order purpose", "Free Shipping Waiver must use a retail price list"],
+            [
+                "reserved for order purpose",
+                "order purpose Free Shipping Waiver uses the branch price list Standard Selling",
+            ],
             requested=_SAMPLE, matched=True, purpose="Free Shipping Waiver",
         )
 
-    def test_free_shipping_waiver_accepts_free_retail_list(self):
-        self.assertEqual(
-            self._resolve(_BUNDLE3, matched=True, purpose="Free Shipping Waiver"), _BUNDLE3
+    def test_free_shipping_waiver_rejects_free_non_default_list_even_for_manager(self):
+        message = self.assertMismatch(
+            [], requested=_BUNDLE3, matched=True, purpose="Free Shipping Waiver",
+            is_manager=True,
         )
+        self.assertEqual(
+            message,
+            "Order purpose Free Shipping Waiver uses the branch price list Standard Selling, "
+            "not Selling Bundle of 3.",
+        )
+
+    def test_free_shipping_waiver_default_and_empty_request_pass(self):
+        for requested in (_DEFAULT, None, ""):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    self._resolve(
+                        requested, matched=True, purpose="Free Shipping Waiver",
+                        customer=_untiered(), is_manager=False,
+                    ),
+                    _DEFAULT,
+                )
+
+    def test_free_shipping_waiver_without_a_request_never_resolves_the_customer_tier(self):
+        # A B2B-group customer (prod: "ilo specialty coffee" -> B2B Selling) placing a
+        # Free Shipping Waiver order with no list sent must price at the branch default,
+        # not fall through the policy chain to its group tier.
+        b2b_group_customer = _ns(name="_TEST B2B", default_price_list=_B2B, customer_group=None)
+        for requested in (None, ""):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    self._resolve(
+                        requested, matched=True, purpose="Free Shipping Waiver",
+                        customer=b2b_group_customer, is_manager=False,
+                    ),
+                    _DEFAULT,
+                )
 
     def test_free_shipping_waiver_cannot_borrow_b2b_baseline(self):
         self.assertMismatch(
             ["reserved for order purpose B2B Supply"],
             requested=_B2B, matched=True, purpose="Free Shipping Waiver",
         )
+
+
+class TestRule3ProfileWithoutDefaultKeepsReservedOnlyCheck(_PurposeCase):
+    """No branch default -> nothing to hold the request to; only reserved lists refused."""
+
+    def setUp(self):
+        super().setUp()
+        self.pos = _ns(name=_PROFILE, selling_price_list=None, company=None)
+
+    def test_manager_may_still_use_free_list(self):
+        self.assertEqual(self._resolve(_BUNDLE3, reserved={_EMPLOYEE: {"Employee"}}), _BUNDLE3)
+        self.assertEqual(
+            self._resolve(
+                _BUNDLE3, matched=True, purpose="Free Shipping Waiver",
+                reserved={_EMPLOYEE: {"Employee"}},
+            ),
+            _BUNDLE3,
+        )
+
+    def test_free_list_is_still_manager_gated(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._resolve(_BUNDLE3, is_manager=False, reserved={_EMPLOYEE: {"Employee"}})
+
+    def test_reserved_list_keeps_the_retail_wording(self):
+        message = self.assertMismatch(
+            [], requested=_EMPLOYEE, reserved={_EMPLOYEE: {"Employee"}},
+        )
+        self.assertEqual(
+            message,
+            "Price list Employee is reserved for order purpose Employee; order purpose "
+            "Standard must use a retail price list.",
+        )
+        self.reserved_mock.assert_called_once_with(_PROFILE, default_price_list=None)
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +610,48 @@ class TestAmendmentKeepsSourcePriceList(_PurposeCase):
                 amended_from=self._SOURCE, source_invoice=source,
             ),
             _B2B,
+        )
+
+    def test_standard_amendment_keeping_a_free_non_default_list_stays_amendable(self):
+        # A retail invoice booked at "Selling Bundle of 3" before rule 3 tightened must
+        # still be amendable once cancelled — and it stays manager-only.
+        source = self._source_row(selling_price_list=_BUNDLE3, custom_order_purpose="")
+        self.assertEqual(
+            self._resolve(
+                _BUNDLE3, customer=_untiered(), amended_from=self._SOURCE, source_invoice=source
+            ),
+            _BUNDLE3,
+        )
+        warning = self.logger.warning.call_args.args[0]
+        self.assertIn("expected Standard Selling", warning)
+        with self.assertRaises(frappe.ValidationError):
+            self._resolve(
+                _BUNDLE3, customer=_untiered(), amended_from=self._SOURCE,
+                source_invoice=source, is_manager=False,
+            )
+
+    def test_standard_amendment_moving_to_a_new_free_list_is_refused(self):
+        source = self._source_row(selling_price_list=_DEFAULT, custom_order_purpose="")
+        message = self.assertMismatch(
+            [], requested=_BUNDLE3, customer=_untiered(), amended_from=self._SOURCE,
+            source_invoice=source,
+        )
+        self.assertEqual(
+            message,
+            "Order purpose Standard uses the branch price list Standard Selling, "
+            "not Selling Bundle of 3.",
+        )
+
+    def test_free_shipping_waiver_amendment_keeps_its_source_list(self):
+        source = self._source_row(
+            selling_price_list=_BUNDLE3, custom_order_purpose="Free Shipping Waiver"
+        )
+        self.assertEqual(
+            self._resolve(
+                _BUNDLE3, matched=True, purpose="Free Shipping Waiver", customer=_untiered(),
+                amended_from=self._SOURCE, source_invoice=source,
+            ),
+            _BUNDLE3,
         )
 
     def test_standard_amendment_keeping_a_reserved_list_is_still_manager_gated(self):

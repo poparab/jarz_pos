@@ -12,9 +12,10 @@ so a cashier / B2B Sales Rep could not create a B2B invoice AT ALL.
 The gate now trips only when the requested list is NOT auto-derivable for this exact
 order context. That set mirrors ``_resolve_effective_price_list``'s own chain: the POS
 Profile default always, plus the policy / sales-partner / customer lists ONLY on a
-matched-policy order. A Standard (retail) order therefore still requires manager access
-for anything other than the profile default — including the customer's own B2B tier list,
-which would otherwise be unapproved B2B pricing on a retail sale.
+matched-policy order. A Standard (retail) order used to require manager access for
+anything other than the profile default; since the cart's Price List dropdown was removed,
+the Order Purpose check refuses such a list outright (for a manager too) before the gate
+runs, so the Standard-order tests below pin that refusal instead.
 
 Everything else that required manager access before still does: ``suppress_shipping_income``,
 ``suppress_legacy_delivery_charges`` and any line-level ``custom_rate_override`` /
@@ -63,8 +64,13 @@ class _GateTestCase(unittest.TestCase):
 
     def _resolve(self, *, is_manager, requested=None, cart=None, customer=None,
                  sales_partner=None, policy_matched=False, policy_price_list=None,
-                 suppress_shipping_income=None, suppress_legacy_delivery_charges=None):
+                 suppress_shipping_income=None, suppress_legacy_delivery_charges=None,
+                 policy_order_purpose=None):
         """Run _resolve_effective_price_list with roles + Price List existence stubbed.
+
+        A matched policy with no list of its own stands for B2B Supply unless a test names
+        another purpose: since the cart's Price List dropdown was removed, B2B Supply is
+        the only list-less purpose allowed to price from a customer/partner tier.
 
         The reserved-list map is pinned EMPTY: these tests isolate the manager gate, and
         ``_TIER_PL`` happens to be named "B2B Selling" (the B2B baseline, which the real
@@ -89,6 +95,11 @@ class _GateTestCase(unittest.TestCase):
                 logger=self.logger,
                 policy_matched=policy_matched,
                 policy_price_list=policy_price_list,
+                policy_order_purpose=(
+                    policy_order_purpose
+                    if policy_order_purpose is not None
+                    else ("B2B Supply" if policy_matched and not policy_price_list else None)
+                ),
                 customer_doc=self.customer if customer is None else customer,
                 sales_partner=sales_partner,
             )
@@ -163,6 +174,7 @@ class TestPriceListManagerGate(_GateTestCase):
                 logger=self.logger,
                 policy_matched=True,
                 policy_price_list=None,
+                policy_order_purpose="B2B Supply",
                 customer_doc=cust,
                 sales_partner=None,
             )
@@ -192,8 +204,12 @@ class TestPriceListManagerGate(_GateTestCase):
             self._resolve(is_manager=False, requested=_ARBITRARY_PL, policy_matched=True)
 
     def test_cashier_blocked_on_arbitrary_price_list_standard_order(self):
-        with self.assertRaises(frappe.ValidationError):
+        # Since the cart's Price List dropdown was removed, the Order Purpose check
+        # (rule 3 of _enforce_order_purpose_price_list) refuses any non-default list on
+        # a Standard order BEFORE this gate runs, so the refusal is the purpose message.
+        with self.assertRaises(frappe.ValidationError) as cm:
             self._resolve(is_manager=False, requested=_ARBITRARY_PL, policy_matched=False)
+        self.assertIn("uses the branch price list Standard Selling", str(cm.exception))
 
     def test_cashier_blocked_on_other_customers_tier_list(self):
         # The echo bypass is scoped to THIS order's customer: a cashier cannot borrow a
@@ -212,25 +228,39 @@ class TestPriceListManagerGate(_GateTestCase):
         # gate exists to stop. Same customer + same list as
         # test_cashier_may_use_customer_tier_price_list, which passes ONLY because that
         # order is policy_matched. These two tests are a pair: keep them in sync.
-        with self.assertRaises(frappe.ValidationError):
+        # The refusal now comes from the Order Purpose check (a Standard order uses the
+        # branch default only), which runs before the gate — see
+        # test_manager_refused_customer_tier_list_for_standard_order.
+        with self.assertRaises(frappe.ValidationError) as cm:
             self._resolve(is_manager=False, requested=_TIER_PL, policy_matched=False)
+        self.assertIn("uses the branch price list Standard Selling", str(cm.exception))
 
     def test_cashier_blocked_on_sales_partner_list_for_standard_order(self):
         # Same rule for the sales-partner candidate: unreachable on a Standard order.
-        with self.assertRaises(frappe.ValidationError):
+        with self.assertRaises(frappe.ValidationError) as cm:
             self._resolve(is_manager=False, requested=_PARTNER_PL,
                           sales_partner="_TEST Partner", policy_matched=False)
+        self.assertIn("uses the branch price list Standard Selling", str(cm.exception))
 
-    # (e) manager + any -> ALLOWED.
-    def test_manager_may_use_arbitrary_price_list(self):
-        eff = self._resolve(is_manager=True, requested=_ARBITRARY_PL, policy_matched=True)
-        self.assertEqual(eff, _ARBITRARY_PL)
+    # (e) manager + an arbitrary list on a matched purpose -> REFUSED. This used to be a
+    # manager override; Order Purpose now decides the list for a manager too.
+    def test_manager_refused_arbitrary_price_list_on_b2b_supply(self):
+        with self.assertRaises(frappe.ValidationError) as cm:
+            self._resolve(is_manager=True, requested=_ARBITRARY_PL, policy_matched=True)
+        self.assertIn("Order purpose B2B Supply must use price list", str(cm.exception))
 
-    def test_manager_may_use_customer_tier_list_for_standard_order(self):
-        # The Standard-order restriction is a MANAGER gate, not a prohibition: a manager
-        # may still deliberately price a retail order off the customer's tier list.
-        eff = self._resolve(is_manager=True, requested=_TIER_PL, policy_matched=False)
-        self.assertEqual(eff, _TIER_PL)
+    def test_manager_refused_customer_tier_list_for_standard_order(self):
+        # This USED to be a manager-gated override. The cart's Price List dropdown was
+        # removed and Order Purpose alone now decides the list: a Standard order prices
+        # from the POS Profile default, for a manager too. Pricing a customer off their
+        # tier is what the B2B Supply purpose is for.
+        with self.assertRaises(frappe.ValidationError) as cm:
+            self._resolve(is_manager=True, requested=_TIER_PL, policy_matched=False)
+        self.assertEqual(
+            str(cm.exception),
+            "Order purpose Standard uses the branch price list Standard Selling, "
+            "not B2B Selling.",
+        )
 
 
 class TestOtherManagerTriggersUnchanged(_GateTestCase):

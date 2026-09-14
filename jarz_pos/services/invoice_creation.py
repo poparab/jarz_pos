@@ -657,8 +657,26 @@ def _enforce_order_purpose_price_list(
          :func:`_b2b_supply_acceptable_price_lists` for why it is a set and not the
          single answer of :func:`_derive_policy_price_list`;
       3. Standard, or any other matched policy without a list (Free Shipping Waiver,
-         a retail order with shipping waived): the request must not be a list RESERVED
-         for some purpose (``commercial_policy.reserved_price_lists``).
+         a retail order with shipping waived): the request must BE the POS Profile's
+         default ``selling_price_list`` (case-insensitive).
+
+    WHY rule 3 is the branch default and not merely "not reserved": the cart's Price
+    List dropdown is being removed, so Order Purpose alone decides the list. Rule 3
+    used to refuse only lists RESERVED for some purpose
+    (``commercial_policy.reserved_price_lists``), which still let a Standard order book
+    "Selling Bundle of 3" / "Selling Bundle of 4" — lists that appear on none of the
+    11,362 production invoices and carry three item prices each, so a manager picking
+    one priced a retail order off a near-empty list. Every retail invoice ever booked
+    is at the branch default, so holding the request to it refuses nothing real.
+    When the request IS a reserved list the message still names its owners (it tells
+    the operator which purpose to pick instead). A profile with NO default has nothing
+    to hold the request to, so it keeps the reserved-only check.
+
+    An amendment carrying its cancelled source's own list stays exempt under every rule
+    (:func:`_amendment_keeps_source_price_list`), so an invoice booked before this check
+    at a now-refused list is still amendable. With rule 3 in place the manager gate can
+    no longer be reached by a price list on a Standard order; it is left intact for the
+    matched-policy paths and the line-pricing / shipping-suppression triggers.
 
     Runs BEFORE the manager gate so a manager — who would otherwise pass the gate and
     succeed silently — is told about the mismatch instead. An absent request keeps
@@ -691,10 +709,12 @@ def _enforce_order_purpose_price_list(
             # there is no list to hold the request to, so the chain's answer stands.
             return
     else:
-        # The POS Profile default is never reserved, so the everyday retail order skips
-        # the policy query entirely.
+        # The POS Profile default is the only retail list, so the everyday retail order
+        # skips the policy query entirely.
         if _same_price_list(requested, default_price_list):
             return
+        # Queried only on the refusal path: it decides the wording when a default
+        # exists, and whether to refuse at all when it does not.
         reserved = _commercial_policy.reserved_price_lists(
             getattr(pos_profile, "name", None),
             default_price_list=default_price_list,
@@ -702,7 +722,8 @@ def _enforce_order_purpose_price_list(
         for name, purposes in (reserved or {}).items():
             if _same_price_list(name, requested):
                 reserved_for.update(purposes)
-        if not reserved_for:
+        if not reserved_for and not default_price_list:
+            # No branch default to hold the request to: only a reserved list is refused.
             return
 
     if expected is not None and any(_same_price_list(requested, name) for name in expected):
@@ -717,11 +738,16 @@ def _enforce_order_purpose_price_list(
     ):
         if logger is not None:
             try:
+                if expected:
+                    wanted = " or ".join(expected)
+                elif default_price_list:
+                    wanted = default_price_list
+                else:
+                    wanted = "a retail list"
                 logger.warning(
                     f"purpose_price_list: amendment of {amended_from} keeps its source "
                     f"price list {requested} under order purpose {purpose} "
-                    f"(expected {' or '.join(expected) if expected else 'a retail list'}); "
-                    f"grandfathered."
+                    f"(expected {wanted}); grandfathered."
                 )
             except Exception:
                 pass
@@ -732,11 +758,22 @@ def _enforce_order_purpose_price_list(
             f"Order purpose {purpose} must use price list {' or '.join(expected)}, "
             f"not {requested}."
         )
-    else:
+    elif reserved_for and default_price_list:
+        message = (
+            f"Price list {requested} is reserved for order purpose "
+            f"{', '.join(sorted(reserved_for))}; order purpose {purpose} uses the branch "
+            f"price list {default_price_list}."
+        )
+    elif reserved_for:
         message = (
             f"Price list {requested} is reserved for order purpose "
             f"{', '.join(sorted(reserved_for))}; order purpose {purpose} must use a "
             f"retail price list."
+        )
+    else:
+        message = (
+            f"Order purpose {purpose} uses the branch price list {default_price_list}, "
+            f"not {requested}."
         )
     frappe.throw(message)
 
@@ -782,7 +819,10 @@ def _resolve_effective_price_list(
     # _auto_derivable_price_lists) — which, for policy / sales-partner / customer lists,
     # means matched-policy orders only. Those are already gated by the commercial-policy
     # resolver, so they do NOT re-trip this check. A Standard order derives nothing but
-    # the POS Profile default, so any other list there stays manager-only.
+    # the POS Profile default, and since the Price List dropdown was removed any other
+    # list there is refused outright by the purpose check above (rule 3) before this
+    # gate is reached. The gate still sees one only on a profile with no default, or on
+    # an amendment that keeps its cancelled source's own list — both stay manager-only.
     # Computed lazily: when the request matches the POS Profile default (the overwhelming
     # majority of orders) the gate cannot trip on the price list, so we skip the call
     # entirely. A Standard order costs no queries either way — the set builder short-
@@ -809,7 +849,19 @@ def _resolve_effective_price_list(
         _ensure_manager_pricing_access()
 
     policy_pl = _normalize_price_list_name(policy_price_list)
-    if policy_matched:
+    from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+
+    retail_purpose = policy_matched and not policy_pl and (
+        str(policy_order_purpose or "").strip() != B2B_SUPPLY_PURPOSE
+    )
+    if retail_purpose and default_price_list:
+        # A list-less retail purpose (Free Shipping Waiver) prices like Standard: the POS
+        # Profile default, never the customer's group tier. Rule 3 already refuses any other
+        # REQUESTED list; without this, a client that sends no list would fall through the
+        # policy chain to e.g. "B2B Selling" for a B2B-group customer — a list the same
+        # request would have been refused for.
+        effective_price_list = requested or default_price_list
+    elif policy_matched:
         # Non-Standard (B2B/Employee/Sample/...) resolution chain, highest priority first.
         # Only reached for an explicitly chosen, permission-gated order purpose.
         effective_price_list = requested or _derive_policy_price_list(

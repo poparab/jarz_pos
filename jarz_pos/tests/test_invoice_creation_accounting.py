@@ -952,6 +952,11 @@ class TestManagerPricingSupport(unittest.TestCase):
             }
         ]
 
+        # A Standard order on "B2B A" is refused by the Order Purpose check since the
+        # Price List dropdown was removed (and frappe is mocked here, so that refusal
+        # would be a silent no-op). What is under test is the audit-marker stamping, not
+        # purpose/list consistency (see test_order_purpose_price_list), so the check
+        # stands aside instead of the reserved-list map it used to consult.
         with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1", "custom_rate_override": 110.0, "discount_percentage": 10.0}]), \
              patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
              patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
@@ -968,7 +973,7 @@ class TestManagerPricingSupport(unittest.TestCase):
              patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
              patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
              patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"), \
-             patch("jarz_pos.services.invoice_creation._commercial_policy.reserved_price_lists", return_value={}), \
+             patch("jarz_pos.services.invoice_creation._enforce_order_purpose_price_list"), \
              patch("jarz_pos.services.invoice_creation.frappe") as mf:
             from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 
