@@ -97,6 +97,23 @@ def _is_online_intent(inv) -> bool:
     return normalized in _ONLINE_INTENT_TOKENS
 
 
+def _live_transfer_receipt(inv) -> dict | None:
+    """A transfer screenshot already on file for *inv*, or ``None``.
+
+    Kept out of :func:`_is_online_intent` on purpose: that predicate is
+    deliberately DB-free so it stays safe under the site-less unit-test mocks,
+    and this one has to read the receipt table. Fails closed to ``None`` -- a
+    lookup that cannot answer must not hold a courier at the door -- which is
+    the pre-existing behaviour for every order without a receipt.
+    """
+    try:
+        from jarz_pos.api.payment_receipts import get_live_transfer_receipt
+
+        return get_live_transfer_receipt(getattr(inv, "name", None))
+    except Exception:
+        return None
+
+
 def _is_credit_intent(inv) -> bool:
     """True when this order was taken ON ACCOUNT (nothing paid at the door).
 
@@ -572,7 +589,19 @@ def dispatch_settlement(inv_name: str, *, mode: str, pos_profile: Optional[str] 
             partner_fee=partner_fee,
         )
 
-    if status == "unpaid" and _is_online_intent(inv):
+    # A transfer screenshot on the order is online intent too, whatever the
+    # invoice's declared method still says. Woo sends ``cod`` for every order
+    # placed without an online gateway, so an order the customer paid by
+    # InstaPay arrives here declared Cash; the screenshot the floor uploaded is
+    # then the only record of how it is really being collected.
+    #
+    # Dispatching that as cash is not a cosmetic mislabel. ``mark_courier_outstanding``
+    # moves the whole receivable onto the rider and records him as holding money he
+    # was never given, so settling him debits the branch till with cash nobody
+    # handed over -- production orders 17417, 17450 and 17453 each landed that way.
+    # Routing it here instead leaves the receivable honestly on Debtors until a
+    # manager confirms the transfer, which is what this path exists for.
+    if status == "unpaid" and (_is_online_intent(inv) or _live_transfer_receipt(inv)):
         return handle_unpaid_online_deliver_unconfirmed(
             inv,
             pos_profile=pos_profile,

@@ -167,6 +167,9 @@ def _build_stub_payment_receipts():
         return_value=_pending_receipt("PPR-PENDING", created=True)
     )
     module.receipt_method_label = MagicMock(return_value="InstaPay")
+    # Imported by delivery_handling at module scope: the dispatch and
+    # confirmation paths both ask whether a transfer screenshot is on file.
+    module.get_live_transfer_receipt = MagicMock(return_value=None)
     module.retire_pending_payment_receipts = MagicMock(return_value=[])
     module._ensure_payment_receipt_confirm_access = MagicMock(return_value=None)
     module._has_payment_receipt_confirm_access = MagicMock(return_value=True)
@@ -1168,3 +1171,397 @@ class TestReconcilePaymentConfirmation(unittest.TestCase):
         self.assertIsNone(module.reconcile_payment_confirmation("INV-DONE"))
         module.update_submitted_sales_invoice_fields.assert_not_called()
         module.retire_pending_payment_receipts.assert_not_called()
+
+
+class TestReceiptCollectionClassifier(unittest.TestCase):
+    """Where an order's money sits, read off the ledger rather than a flag.
+
+    This is what decides whether confirming a transfer screenshot posts a
+    Payment Entry, moves the money off the courier, or refuses. Getting a shape
+    wrong here is a money defect in both directions: a second Payment Entry
+    against an order whose receivable already moved, or a receipt stamped while
+    the courier is still recorded as holding the cash.
+    """
+
+    def _classify(self, row, *, cts=None, real_pe=None):
+        module, stub_frappe = _import_delivery_handling()
+        stub_frappe.db.get_value = MagicMock(return_value=row)
+        stub_frappe.get_all = MagicMock(return_value=list(cts or []))
+        module._get_real_customer_payment_entry = MagicMock(return_value=real_pe)
+        return module.classify_receipt_collection("INV-001")
+
+    def _row(self, **over):
+        row = {
+            "name": "INV-001",
+            "company": "Test Company",
+            "docstatus": 1,
+            "outstanding_amount": 480.0,
+            "grand_total": 480.0,
+            "custom_payment_method": "Cash",
+            "custom_payment_confirmation_status": "",
+            "custom_kanban_profile": "Dokki",
+            "pos_profile": "Dokki",
+        }
+        row.update(over)
+        return row
+
+    def test_an_awaiting_order_is_awaiting(self):
+        plan = self._classify(self._row(custom_payment_confirmation_status="Awaiting Payment"))
+        self.assertEqual(plan["shape"], "awaiting")
+
+    def test_an_unpaid_order_that_was_never_stamped_is_unpaid(self):
+        plan = self._classify(self._row())
+        self.assertEqual(plan["shape"], "unpaid")
+        self.assertEqual(plan["outstanding"], 480.0)
+
+    def test_money_parked_on_an_unsettled_courier_row_is_courier_cash(self):
+        """Orders 17450 and 17453: dispatched as cash, rider not settled yet."""
+        plan = self._classify(
+            self._row(outstanding_amount=0.0),
+            cts=[{"name": "CT-1", "status": "Unsettled", "amount": 480.0, "payment_mode": "Deferred"}],
+        )
+        self.assertEqual(plan["shape"], "courier_cash")
+        self.assertEqual(plan["courier_transaction"], "CT-1")
+        self.assertEqual(plan["amount"], 480.0)
+
+    def test_money_already_settled_as_cash_is_settled_cash(self):
+        """Order 17417: the branch till counted it, so only a correction moves it."""
+        plan = self._classify(
+            self._row(outstanding_amount=0.0),
+            cts=[{"name": "CT-2", "status": "Settled", "amount": 1020.0, "payment_mode": "Deferred"}],
+        )
+        self.assertEqual(plan["shape"], "settled_cash")
+
+    def test_a_row_already_switched_online_needs_nothing(self):
+        """A collection change (or a hand correction stamped the same way) ran."""
+        plan = self._classify(
+            self._row(outstanding_amount=0.0),
+            cts=[{"name": "CT-3", "status": "Unsettled", "amount": 480.0, "payment_mode": "Instapay"}],
+        )
+        self.assertEqual(plan["shape"], "none")
+        self.assertTrue(plan["already_paid"])
+
+    def test_a_real_customer_payment_needs_nothing(self):
+        plan = self._classify(self._row(), real_pe={"name": "ACC-PAY-1"})
+        self.assertEqual(plan["shape"], "none")
+
+    def test_an_order_converted_to_cash_needs_nothing(self):
+        plan = self._classify(self._row(custom_payment_confirmation_status="Converted to Cash"))
+        self.assertEqual(plan["shape"], "none")
+
+    def test_a_draft_or_missing_invoice_needs_nothing(self):
+        self.assertEqual(self._classify(self._row(docstatus=0))["shape"], "none")
+        self.assertEqual(self._classify(None)["shape"], "none")
+
+    def test_an_on_account_order_is_left_to_the_credit_ledger(self):
+        """Collecting a credit order here would hide the rest of the debt.
+
+        ``record_credit_payment`` allocates FIFO across everything the customer
+        owes, and the credit ledger finds those debts partly BY the Credit
+        payment method -- which booking here would overwrite.
+        """
+        plan = self._classify(self._row(custom_payment_method="Credit"))
+        self.assertEqual(plan["shape"], "none")
+        self.assertTrue(plan["credit_order"])
+
+    def test_a_relabelled_credit_order_is_still_a_credit_order(self):
+        """The payment method is mutable; the terms stamp is not.
+
+        A manager tapping "Change collection method -> Instapay" on a credit
+        order rewrites the method without moving a pound, so matching only the
+        method would let the next screenshot book the whole balance against
+        this one invoice.
+        """
+        plan = self._classify(
+            self._row(custom_payment_method="Instapay", custom_credit_terms_days=30)
+        )
+        self.assertEqual(plan["shape"], "none")
+        self.assertTrue(plan["credit_order"])
+
+    def test_a_freight_only_row_is_not_customer_cash(self):
+        """The unpaid-online dispatch writes amount 0: the rider carries nothing."""
+        plan = self._classify(
+            self._row(outstanding_amount=0.0),
+            cts=[{"name": "CT-4", "status": "Unsettled", "amount": 0.0, "payment_mode": "Deferred"}],
+        )
+        self.assertEqual(plan["shape"], "none")
+
+
+class TestPaymentMethodAlignment(unittest.TestCase):
+    """A screenshot on file is what says the order is being paid by transfer.
+
+    Every reader downstream keys off the INVOICE's method, so dispatching an
+    order as awaiting-payment while leaving it declared Cash would create an
+    order nobody could ever confirm.
+    """
+
+    def _module(self, invoice, receipt=None):
+        module, _ = _import_delivery_handling(invoice)
+        module.get_live_transfer_receipt = MagicMock(return_value=receipt)
+        module.update_submitted_sales_invoice_fields = MagicMock()
+        return module
+
+    def test_a_cash_declared_order_adopts_the_receipt_method(self):
+        invoice = _FakeInvoice(custom_payment_method="Cash")
+        module = self._module(invoice, {"name": "PPR-1", "payment_method": "InstaPay"})
+
+        self.assertEqual(module._align_payment_method_with_transfer_receipt(invoice), "Instapay")
+        module.update_submitted_sales_invoice_fields.assert_called_once_with(
+            invoice, {"custom_payment_method": "Instapay"}
+        )
+
+    def test_a_wallet_receipt_maps_to_the_invoice_spelling(self):
+        invoice = _FakeInvoice(custom_payment_method="Cash")
+        module = self._module(invoice, {"name": "PPR-2", "payment_method": "Wallet"})
+
+        self.assertEqual(
+            module._align_payment_method_with_transfer_receipt(invoice), "Mobile Wallet"
+        )
+
+    def test_an_order_already_online_is_left_alone(self):
+        invoice = _FakeInvoice(custom_payment_method="Instapay")
+        module = self._module(invoice, {"name": "PPR-3", "payment_method": "InstaPay"})
+
+        self.assertEqual(module._align_payment_method_with_transfer_receipt(invoice), "Instapay")
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+
+    def test_no_receipt_changes_nothing(self):
+        invoice = _FakeInvoice(custom_payment_method="Cash")
+        module = self._module(invoice, None)
+
+        self.assertIsNone(module._align_payment_method_with_transfer_receipt(invoice))
+        module.update_submitted_sales_invoice_fields.assert_not_called()
+
+
+class TestConfirmOnlinePaymentFromTheReceipt(unittest.TestCase):
+    """Confirming collects for an order that was never stamped Awaiting Payment.
+
+    Woo declares every non-gateway order ``cod``, so an order the customer paid
+    by transfer is still declared Cash when a manager confirms the screenshot.
+    Refusing there -- which is what this function did -- is what left the money
+    recorded as the courier's cash.
+    """
+
+    def _module(self, invoice, *, outstanding=480.0, receipt_method="InstaPay"):
+        module, stub_frappe = _import_delivery_handling(invoice)
+
+        def _get_value(doctype, name, field=None, **kwargs):
+            if doctype == "POS Payment Receipt":
+                return receipt_method
+            if doctype == "Sales Invoice" and field == "outstanding_amount":
+                return outstanding
+            return None
+
+        stub_frappe.db.get_value = MagicMock(side_effect=_get_value)
+        module._ensure_payment_receipt_confirm_access = MagicMock()
+        module._get_real_customer_payment_entry = MagicMock(return_value=None)
+        module.ensure_uploaded_payment_receipt = MagicMock(
+            return_value={"name": "PPR-1", "status": "Unconfirmed"}
+        )
+        module._confirm_receipt_record = MagicMock()
+        module._get_receivable_account = MagicMock(return_value="Debtors - TC")
+        module._get_online_collection_account = MagicMock(return_value="Bank Account - TC")
+        module._create_payment_entry = MagicMock(
+            return_value=SimpleNamespace(name="ACC-PAY-NEW")
+        )
+        module.update_submitted_sales_invoice_fields = MagicMock()
+        module._publish_branch_event = MagicMock()
+        return module, stub_frappe
+
+    def test_books_a_cash_declared_order_into_the_receipt_ledger(self):
+        invoice = _FakeInvoice(
+            custom_payment_method="Cash",
+            custom_payment_confirmation_status="",
+            outstanding_amount=480.0,
+            grand_total=480.0,
+        )
+        module, _ = self._module(invoice)
+
+        result = module.confirm_online_payment("INV-CHANGE-001", "Dokki", receipt_name="PPR-1")
+
+        self.assertEqual(result["payment_entry"], "ACC-PAY-NEW")
+        self.assertEqual(result["method"], "Instapay")
+        # The ledger comes from the RECEIPT, not from the stale declaration.
+        self.assertEqual(module._get_online_collection_account.call_args[0][0], "Instapay")
+        self.assertEqual(
+            module.ensure_uploaded_payment_receipt.call_args.kwargs["payment_method"], "InstaPay"
+        )
+        # ... and the invoice is corrected, or every screen keeps saying Cash.
+        fields = module.update_submitted_sales_invoice_fields.call_args[0][1]
+        self.assertEqual(fields["custom_payment_method"], "Instapay")
+        self.assertEqual(fields["custom_payment_confirmation_status"], "Payment Confirmed")
+
+    def test_an_awaiting_order_still_uses_its_own_declared_method(self):
+        invoice = _FakeInvoice(
+            custom_payment_method="Mobile Wallet",
+            custom_payment_confirmation_status="Awaiting Payment",
+            outstanding_amount=480.0,
+            grand_total=480.0,
+        )
+        module, _ = self._module(invoice, receipt_method="Wallet")
+
+        result = module.confirm_online_payment("INV-CHANGE-001", "Dokki", receipt_name="PPR-1")
+
+        self.assertEqual(result["method"], "Mobile Wallet")
+        fields = module.update_submitted_sales_invoice_fields.call_args[0][1]
+        self.assertNotIn("custom_payment_method", fields)
+
+    def test_refuses_a_non_awaiting_order_with_no_receipt(self):
+        invoice = _FakeInvoice(
+            custom_payment_method="Cash", custom_payment_confirmation_status=""
+        )
+        module, _ = self._module(invoice)
+
+        with self.assertRaises(Exception) as exc:
+            module.confirm_online_payment("INV-CHANGE-001", "Dokki")
+
+        self.assertIn("needs the customer's receipt", str(exc.exception))
+        module._create_payment_entry.assert_not_called()
+
+    def test_refuses_to_double_book_money_sitting_with_the_courier(self):
+        """Zero outstanding here means the receivable MOVED, not that it was paid."""
+        invoice = _FakeInvoice(
+            custom_payment_method="Cash",
+            custom_payment_confirmation_status="",
+            outstanding_amount=0.0,
+        )
+        module, _ = self._module(invoice, outstanding=0.0)
+        module.classify_receipt_collection = MagicMock(
+            return_value={"shape": "courier_cash", "invoice": "INV-CHANGE-001"}
+        )
+
+        with self.assertRaises(Exception) as exc:
+            module.confirm_online_payment("INV-CHANGE-001", "Dokki", receipt_name="PPR-1")
+
+        self.assertIn("cash with the courier", str(exc.exception))
+        module._create_payment_entry.assert_not_called()
+
+    def test_refuses_an_on_account_order(self):
+        invoice = _FakeInvoice(
+            custom_payment_method="Credit", custom_payment_confirmation_status=""
+        )
+        module, _ = self._module(invoice)
+
+        with self.assertRaises(Exception) as exc:
+            module.confirm_online_payment("INV-CHANGE-001", "Dokki", receipt_name="PPR-1")
+
+        self.assertIn("on-account order", str(exc.exception))
+        module._create_payment_entry.assert_not_called()
+
+    def test_refuses_an_order_converted_to_cash(self):
+        invoice = _FakeInvoice(
+            custom_payment_method="Cash",
+            custom_payment_confirmation_status="Converted to Cash",
+        )
+        module, _ = self._module(invoice)
+
+        with self.assertRaises(Exception) as exc:
+            module.confirm_online_payment("INV-CHANGE-001", "Dokki", receipt_name="PPR-1")
+
+        self.assertIn("converted to cash", str(exc.exception))
+        module._create_payment_entry.assert_not_called()
+
+
+class TestDispatchKeepsTransferOrdersOffTheCourier(unittest.TestCase):
+    """The legacy OFD entry point is the one the kanban card actually calls.
+
+    ``dispatch_settlement`` has routed online orders away from the cash path
+    since 2026-07-20, but this function never learned the rule: it only looked
+    correct because the CLIENT sends a different endpoint for orders it believes
+    are InstaPay. An order paid by transfer but declared Cash (every Woo order
+    is) therefore arrived here and had its receivable moved onto the rider.
+    """
+
+    def _module(self, invoice, receipt=None):
+        module, stub_frappe = _import_delivery_handling(invoice)
+        module.get_live_transfer_receipt = MagicMock(return_value=receipt)
+        module.handle_unpaid_online_deliver_unconfirmed = MagicMock(
+            return_value={"success": True, "mode": "unpaid_online_deliver_unconfirmed"}
+        )
+        module.mark_courier_outstanding = MagicMock(return_value={"success": True, "mode": "cash"})
+        module.handle_credit_deliver_on_account = MagicMock(return_value={"success": True})
+        module.resolve_assignment_pos_profile = MagicMock(return_value="Dokki")
+        module.resolve_courier_delivery_partner = MagicMock(return_value=None)
+        module.assert_courier_matches_pos_profile = MagicMock(return_value={"delivery_partner": None})
+        module._guard_courier_money_action_by_name = MagicMock()
+        stub_frappe.db.get_value = MagicMock(return_value=480.0)
+        return module, stub_frappe
+
+    def _dispatch(self, module):
+        return module.handle_out_for_delivery_transition(
+            "INV-CHANGE-001", "courier", "later", "Dokki",
+            party_type="Employee", party="HR-EMP-1",
+        )
+
+    def test_a_cash_declared_order_with_a_receipt_is_rerouted(self):
+        invoice = _FakeInvoice(custom_payment_method="Cash", outstanding_amount=480.0)
+        module, _ = self._module(invoice, {"name": "PPR-1", "payment_method": "InstaPay"})
+
+        result = self._dispatch(module)
+
+        module.handle_unpaid_online_deliver_unconfirmed.assert_called_once()
+        module.mark_courier_outstanding.assert_not_called()
+        self.assertEqual(result["mode"], "unpaid_online_deliver_unconfirmed")
+
+    def test_a_declared_instapay_order_is_rerouted_too(self):
+        """The two entry points must agree, whichever endpoint the client used."""
+        invoice = _FakeInvoice(custom_payment_method="Instapay", outstanding_amount=480.0)
+        module, _ = self._module(invoice, None)
+
+        self._dispatch(module)
+
+        module.handle_unpaid_online_deliver_unconfirmed.assert_called_once()
+        module.mark_courier_outstanding.assert_not_called()
+
+    def test_a_plain_cash_order_still_goes_to_the_courier(self):
+        invoice = _FakeInvoice(custom_payment_method="Cash", outstanding_amount=480.0)
+        module, _ = self._module(invoice, None)
+
+        self._dispatch(module)
+
+        module.mark_courier_outstanding.assert_called_once()
+        module.handle_unpaid_online_deliver_unconfirmed.assert_not_called()
+
+    def test_a_gateway_order_is_not_stamped_awaiting_a_transfer(self):
+        """Card/gateway orders are prepaid: stamping one arms the hourly alarm."""
+        invoice = _FakeInvoice(custom_payment_method="Kashier Card", outstanding_amount=480.0)
+        module, _ = self._module(invoice, None)
+
+        self._dispatch(module)
+
+        module.mark_courier_outstanding.assert_called_once()
+        module.handle_unpaid_online_deliver_unconfirmed.assert_not_called()
+
+
+class TestMarkCourierOutstandingBackstop(unittest.TestCase):
+    """The one function where a customer's debt becomes the rider's cash."""
+
+    def _module(self, receipt):
+        invoice = _FakeInvoice(custom_payment_method="Cash", custom_is_pickup=0, custom_no_courier=0)
+        module, stub_frappe = _import_delivery_handling(invoice)
+        module.get_live_transfer_receipt = MagicMock(return_value=receipt)
+        return module, stub_frappe
+
+    def test_refuses_an_order_that_carries_a_transfer_receipt(self):
+        module, _ = self._module({"name": "PPR-1", "payment_method": "InstaPay"})
+
+        with self.assertRaises(Exception) as exc:
+            module._mark_courier_outstanding_locked(
+                "INV-CHANGE-001", None, "Employee", "HR-EMP-1"
+            )
+
+        self.assertIn("transfer receipt", str(exc.exception))
+
+    def test_the_deliberate_cash_conversion_is_allowed_through(self):
+        """``convert_online_order_to_cod`` means it: the rider collects cash."""
+        module, _ = self._module({"name": "PPR-1", "payment_method": "InstaPay"})
+
+        with self.assertRaises(Exception) as exc:
+            module._mark_courier_outstanding_locked(
+                "INV-CHANGE-001", None, "Employee", "HR-EMP-1",
+                allow_transfer_receipt=True,
+            )
+
+        # It gets past the backstop and fails later on the stubbed ledger --
+        # what matters is that the refusal above is not the reason.
+        self.assertNotIn("transfer receipt", str(exc.exception))

@@ -14,6 +14,7 @@ from erpnext.stock.stock_ledger import is_negative_stock_allowed
 from frappe import _
 from jarz_pos.api.payment_receipts import (
     ensure_pending_payment_receipt,
+    get_live_transfer_receipt,
     receipt_method_label,
     ensure_uploaded_payment_receipt,
     mark_payment_receipts_changed_for_invoice,
@@ -43,7 +44,12 @@ from jarz_pos.utils.courier_visibility import (
     resolve_courier_delivery_partner,
     user_has_global_profile_access,
 )
-from jarz_pos.utils.credit_utils import CREDIT_INTENT_TOKENS, is_credit_intent_doc
+from jarz_pos.utils.credit_utils import (
+    CREDIT_INTENT_TOKENS,
+    CREDIT_TERMS_FIELD,
+    has_credit_terms_field,
+    is_credit_intent_doc,
+)
 from jarz_pos.utils.invoice_utils import get_woo_order_ids, normalize_woo_order_id
 
 # ---------------------------------------------------------------------------
@@ -1155,7 +1161,7 @@ def _existing_courier_party(invoice_name: str, *, open_only: bool = False) -> tu
 
 
 @frappe.whitelist()
-def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None, delivery_trip: str | None = None, shipping_override: float | None = None):
+def mark_courier_outstanding(invoice_name: str, courier: str | None = None, party_type: str | None = None, party: str | None = None, delivery_trip: str | None = None, shipping_override: float | None = None, *, allow_transfer_receipt: bool = False):
     """Allocate outstanding to Courier Outstanding and create Courier Transaction atomically (relying on Frappe's request transaction).
 
     Args:
@@ -1193,7 +1199,8 @@ def mark_courier_outstanding(invoice_name: str, courier: str | None = None, part
 
     try:
         return _mark_courier_outstanding_locked(
-            invoice_name, courier, party_type, party, delivery_trip, shipping_override
+            invoice_name, courier, party_type, party, delivery_trip, shipping_override,
+            allow_transfer_receipt=allow_transfer_receipt,
         )
     finally:
         try:
@@ -1209,6 +1216,8 @@ def _mark_courier_outstanding_locked(
     party: str | None = None,
     delivery_trip: str | None = None,
     shipping_override: float | None = None,
+    *,
+    allow_transfer_receipt: bool = False,
 ):
     """Body of :func:`mark_courier_outstanding`, run under the per-invoice lock."""
     inv = frappe.get_doc("Sales Invoice", invoice_name)
@@ -1227,7 +1236,33 @@ def _mark_courier_outstanding_locked(
         frappe.throw("Cannot assign courier to pickup orders. Pickup orders do not require courier delivery.")
     if bool(getattr(inv, "custom_no_courier", 0)):
         frappe.throw("Cannot assign courier: this order's purpose does not require courier delivery.")
-    
+
+    # BACKSTOP. This function is where the customer's receivable becomes money
+    # the RIDER owes, and both dispatch entry points now route an order carrying
+    # a transfer screenshot away from it. This refusal is for everything else --
+    # a future caller, the trips path, a direct call to the whitelisted
+    # endpoint -- because the failure it prevents is invisible: the rider is
+    # charged with money he was never given, and the branch till is credited
+    # with it when he settles (orders 17417, 17450, 17453).
+    #
+    # Refusing rather than rerouting: by the time a caller reaches here it has
+    # already decided this is a cash collection, and quietly doing something
+    # else would surprise it. ``convert_online_order_to_cod`` is the one caller
+    # that means it — the customer really is paying the rider in cash — and it
+    # says so with ``allow_transfer_receipt``.
+    if not allow_transfer_receipt:
+        _receipt = get_live_transfer_receipt(invoice_name)
+        if _receipt:
+            frappe.throw(
+                _(
+                    "This order has a {0} transfer receipt on file, so the customer "
+                    "is not paying the courier in cash. Confirm the receipt to record "
+                    "the payment, or reject it first if the customer is paying cash."
+                ).format(str(_receipt.get("payment_method") or "transfer")),
+                title=_("Transfer receipt on this order"),
+            )
+
+
     derived_existing_party = False
 
     # Derive party if omitted
@@ -1503,6 +1538,27 @@ def _invoice_is_online_intent(inv) -> bool:
         # Unknown / empty / unmapped method → not an online-intent order we handle here
         return False
     return _is_online_collection_method(normalized)
+
+
+def _invoice_declares_transfer_intent(inv) -> bool:
+    """True when the invoice's declared method is one that OWES a bank transfer.
+
+    Narrower than :func:`_invoice_is_online_intent` on purpose, and deliberately
+    the same set as ``settlement_strategies._is_online_intent``: InstaPay and
+    Mobile Wallet only. A gateway/card order is prepaid, so routing one to the
+    unpaid-online handler would stamp it ``Awaiting Payment`` and arm the hourly
+    escalation over a transfer nobody is waiting for.
+
+    The rule is spelled in both modules because they cannot import each other
+    (``settlement_strategies`` imports this one). Keep the two in step.
+    """
+    try:
+        raw = inv.get("custom_payment_method") if hasattr(inv, "get") else getattr(inv, "custom_payment_method", None)
+    except Exception:
+        raw = getattr(inv, "custom_payment_method", None)
+    if not _is_recognised_collection_method(raw):
+        return False
+    return _normalize_collection_method(raw) in (ACCOUNTS.INSTAPAY, ACCOUNTS.MOBILE_WALLET)
 
 
 #: Normalized tokens that mean "taken on account". No longer duplicated: the one
@@ -1868,6 +1924,14 @@ def handle_unpaid_online_deliver_unconfirmed(
             _("Assign a courier before sending {0} out for delivery.").format(inv.name),
             title=_("Courier required"),
         )
+
+    # An order routed here because a transfer screenshot is on file still
+    # carries Woo's declared "Cash". Align it FIRST -- before the state flip and
+    # the awaiting stamp below, both of which this order would otherwise carry
+    # while still declared Cash, a combination nothing can confirm afterwards.
+    # Running it first also means a failure to write leaves the dispatch
+    # untouched rather than half-done.
+    _align_payment_method_with_transfer_receipt(inv)
 
     # Operational state → Out for Delivery
     update_submitted_sales_invoice_state(inv, "Out for Delivery")
@@ -2303,8 +2367,58 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
             "already_confirmed": True,
         }
 
-    if current_status != "Awaiting Payment":
-        frappe.throw("Invoice is not awaiting online payment confirmation.")
+    if current_status == "Converted to Cash":
+        frappe.throw(
+            "This order's collection was converted to cash; it is no longer "
+            "waiting for a transfer."
+        )
+
+    # Two ways in, and they disagree about which document declares the method.
+    #
+    # An order DISPATCHED as unpaid-online was stamped Awaiting Payment and its
+    # method is already an online one — that is the original flow, unchanged.
+    #
+    # An order that was never stamped gets here because a manager confirmed the
+    # transfer screenshot on it. Those orders are usually still declared Cash:
+    # Woo sends ``cod`` for anything placed without an online gateway, so the
+    # declaration describes how the order arrived, not how it was paid. The
+    # RECEIPT is what says how the customer paid — uploading one is only
+    # reachable from the InstaPay / Wallet actions — so it names the ledger, and
+    # the invoice is corrected to match. Refusing here instead (which is what
+    # this function did) is what left production orders carrying a confirmed
+    # screenshot while their money stayed recorded as the courier's cash.
+    proof_method = None
+    if receipt_name:
+        try:
+            proof_method = frappe.db.get_value(
+                "POS Payment Receipt", str(receipt_name).strip(), "payment_method"
+            )
+        except Exception:
+            proof_method = None
+
+    if current_status == "Awaiting Payment":
+        intended_label = method_label
+    else:
+        if not proof_method:
+            frappe.throw(
+                "This order is not awaiting an online payment. Confirming a "
+                "transfer for it needs the customer's receipt."
+            )
+        # Credit orders are collected by ``api/credit.record_credit_payment``,
+        # which allocates across the customer's whole balance. Booking one here
+        # would also relabel the order away from Credit, which is half of how
+        # the credit ledger identifies the debt.
+        if is_credit_intent_doc(inv):
+            frappe.throw(
+                "This is an on-account order. Record the transfer against the "
+                "customer's credit balance instead of confirming it here."
+            )
+        intended_label = proof_method
+
+    # Resolve the online collection ledger from the intended method
+    normalized_method = _normalize_collection_method(intended_label)
+    if not _is_online_collection_method(normalized_method):
+        frappe.throw("Invoice payment method is not an online method.")
 
     # Must still be unpaid
     try:
@@ -2312,12 +2426,20 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     except Exception:
         outstanding = float(inv.outstanding_amount or 0)
     if outstanding <= 0.0001:
+        # Zero outstanding with no real customer payment (checked above) means
+        # the receivable moved without being collected — the COD dispatch parks
+        # it on Courier Outstanding against the rider. That money is moved by
+        # ``change_payment_collection_method``, not by a second Payment Entry,
+        # so say which one this is rather than the flatly wrong "already paid".
+        if classify_receipt_collection(inv.name).get("shape") in (
+            RECEIPT_COLLECTION_COURIER_CASH,
+            RECEIPT_COLLECTION_SETTLED_CASH,
+        ):
+            frappe.throw(
+                "This order's money is recorded as cash with the courier; "
+                "change its collection method instead of booking a second payment."
+            )
         frappe.throw("Invoice is already fully paid.")
-
-    # Resolve the online collection ledger from the intended method
-    normalized_method = _normalize_collection_method(method_label)
-    if not _is_online_collection_method(normalized_method):
-        frappe.throw("Invoice payment method is not an online method.")
 
     order_amount = float(inv.grand_total or 0) or outstanding
 
@@ -2325,7 +2447,7 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     validated_receipt = ensure_uploaded_payment_receipt(
         receipt_name,
         sales_invoice=inv.name,
-        payment_method=method_label,
+        payment_method=intended_label,
         amount=order_amount,
     )
     # Stamp the row directly rather than through the whitelisted
@@ -2342,15 +2464,21 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     paid_to = _get_online_collection_account(normalized_method, company)
     pe = _create_payment_entry(inv, paid_from, paid_to, outstanding)
 
-    update_submitted_sales_invoice_fields(
-        inv,
-        {
-            "custom_payment_confirmation_status": "Payment Confirmed",
-            "custom_payment_confirmation_reference": (reference_no or "").strip() or None,
-            "custom_payment_confirmed_by": frappe.session.user,
-            "custom_payment_confirmed_date": frappe.utils.now_datetime(),
-        },
-    )
+    confirmed_fields = {
+        "custom_payment_confirmation_status": "Payment Confirmed",
+        "custom_payment_confirmation_reference": (reference_no or "").strip() or None,
+        "custom_payment_confirmed_by": frappe.session.user,
+        "custom_payment_confirmed_date": frappe.utils.now_datetime(),
+    }
+    # The money landed in the online ledger, so the order's declared method has
+    # to say so. Left at "Cash" the kanban badge, the courier settlement screen
+    # and every report would keep describing a bank transfer as cash.
+    if (
+        not _is_recognised_collection_method(method_label)
+        or _normalize_collection_method(method_label) != normalized_method
+    ):
+        confirmed_fields["custom_payment_method"] = normalized_method
+    update_submitted_sales_invoice_fields(inv, confirmed_fields)
 
     payload = {
         "success": True,
@@ -2358,7 +2486,7 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
         "payment_entry": pe.name,
         "payment_confirmation_status": "Payment Confirmed",
         "amount": order_amount,
-        "method": method_label,
+        "method": normalized_method,
     }
     _publish_branch_event(WS_EVENTS.INVOICE_STATE_CHANGE, payload, invoice=inv)
     return payload
@@ -2550,7 +2678,12 @@ def convert_online_order_to_cod(invoice_name: str, pos_profile: str, party_type:
     if inv.docstatus != 1:
         frappe.throw("Invoice must be submitted")
 
-    res = mark_courier_outstanding(invoice_name, None, party_type, party) or {}
+    # The customer has chosen to pay the rider in cash, so the transfer
+    # receipt on this order is no longer proof of anything -- it is retired
+    # a few lines below. This is the one caller allowed past the backstop.
+    res = mark_courier_outstanding(
+        invoice_name, None, party_type, party, allow_transfer_receipt=True
+    ) or {}
 
     # The customer is paying the courier in cash, so no transfer screenshot is
     # owed any more. Retiring the receipt is what stops the pending row this
@@ -3752,6 +3885,37 @@ def handle_out_for_delivery_transition(invoice_name: str, courier: str, mode: st
                 "handle_credit_deliver_on_account (receivable stays on Debtors)"
             )
             return handle_credit_deliver_on_account(
+                inv,
+                pos_profile=resolved_pos_profile or pos_profile,
+                party_type=party_type,
+                party=party,
+            )
+
+        # ONLINE INTENT comes next, for the same reason credit does: the branch
+        # below is unconditional and would otherwise swallow it.
+        #
+        # ``dispatch_settlement`` has routed online-intent orders away from the
+        # cash path since 2026-07-20, but THIS entry point is the one the kanban
+        # card actually calls, and it never learned the rule. It only looked
+        # right because the client sends a DIFFERENT endpoint
+        # (``deliver_online_unconfirmed``) for orders whose declared method is
+        # InstaPay -- so the decision lived in the app, and any order the app
+        # thinks is cash arrives here. An order the customer paid by transfer
+        # arrives declared Cash whenever it came from Woo (``cod`` is what Woo
+        # sends for everything placed without an online gateway), and the only
+        # record of the real method is the screenshot the floor uploaded.
+        #
+        # Sent to ``mark_courier_outstanding`` it becomes money the RIDER owes:
+        # settling him then debits the branch till with cash nobody handed over.
+        # Production orders 17417, 17450 and 17453 each landed exactly there.
+        if outstanding > 0.0001 and (
+            _invoice_declares_transfer_intent(inv) or get_live_transfer_receipt(inv.name)
+        ):
+            frappe.logger().info(
+                f"OFD transition for ONLINE invoice {invoice_name} - routing to "
+                "handle_unpaid_online_deliver_unconfirmed (receivable stays on Debtors)"
+            )
+            return handle_unpaid_online_deliver_unconfirmed(
                 inv,
                 pos_profile=resolved_pos_profile or pos_profile,
                 party_type=party_type,
@@ -5060,6 +5224,191 @@ def _is_cash_collection_method(method: str) -> bool:
 
 def _is_online_collection_method(method: str) -> bool:
     return not _is_cash_collection_method(method)
+
+
+def _align_payment_method_with_transfer_receipt(inv) -> str | None:
+    """Make an order's declared payment method agree with the screenshot on file.
+
+    Returns the online method now declared on the invoice, or ``None`` when
+    there is nothing to align (no receipt, or a method that is already online).
+
+    Why this write is safe -- and necessary. A Woo order placed without an
+    online gateway arrives declared ``Cash`` even when the customer transfers
+    instead, and the floor records the truth by uploading the screenshot. Every
+    reader downstream keys off the INVOICE's method, not off the receipt:
+    ``confirm_online_payment`` refuses an invoice whose method is not online,
+    ``ensure_pending_payment_receipt`` files nothing for a Cash order, and the
+    kanban badge shows Cash. So dispatching as awaiting-payment while leaving
+    the method at Cash would create an order nobody could ever confirm -- the
+    exact dead end this change exists to remove.
+
+    Credit orders are excluded: they are never waiting on a transfer, and
+    ``dispatch_settlement`` routes them away before this runs.
+    """
+    try:
+        declared = str(inv.get("custom_payment_method") or "").strip()
+    except Exception:
+        declared = str(getattr(inv, "custom_payment_method", "") or "").strip()
+
+    if _is_recognised_collection_method(declared) and _is_online_collection_method(
+        _normalize_collection_method(declared)
+    ):
+        return declared
+    if is_credit_intent_doc(inv):
+        return None
+
+    receipt = get_live_transfer_receipt(getattr(inv, "name", None))
+    if not receipt:
+        return None
+    method = receipt.get("payment_method")
+    if not _is_recognised_collection_method(method):
+        return None
+    normalized = _normalize_collection_method(method)
+    if not _is_online_collection_method(normalized):
+        return None
+
+    update_submitted_sales_invoice_fields(inv, {"custom_payment_method": normalized})
+    return normalized
+
+
+#: What confirming a payment receipt still has to do about the money.
+RECEIPT_COLLECTION_NONE = "none"
+RECEIPT_COLLECTION_AWAITING = "awaiting"
+RECEIPT_COLLECTION_UNPAID = "unpaid"
+RECEIPT_COLLECTION_COURIER_CASH = "courier_cash"
+RECEIPT_COLLECTION_SETTLED_CASH = "settled_cash"
+
+
+def classify_receipt_collection(invoice_name: str | None) -> dict:
+    """Where an order's money sits, from the point of view of confirming its receipt.
+
+    Confirming a transfer screenshot used to be a pure stamp, then (2026-09-09)
+    a stamp that also collected for orders flagged ``Awaiting Payment``. Both
+    readings are too narrow: the owner's rule is that a receipt exists only
+    because somebody chose to pay by transfer, so a CONFIRMED receipt means the
+    money is in the bank and the books have to say so however the order was
+    dispatched. This classifier is the one place that decides which of those
+    shapes an order is in.
+
+    Shapes:
+
+    * ``none`` -- a plain stamp is the whole job. The money is already in a real
+      ledger, the order was deliberately converted to cash, or there is nothing
+      outstanding anywhere.
+    * ``awaiting`` -- dispatched as unpaid-online; the receivable is on Debtors
+      and the invoice is stamped Awaiting Payment.
+    * ``unpaid`` -- still owed on Debtors but never stamped awaiting: an order
+      confirmed before it was dispatched, which is the ordinary counter case.
+    * ``courier_cash`` -- dispatched down the COD path, so the receivable moved
+      to Courier Outstanding and the rider is recorded as carrying the cash. He
+      has not settled yet, so it can still be moved to the bank.
+    * ``settled_cash`` -- the same, but the rider already settled and the branch
+      till was debited with cash nobody handed over. Only a manual correction
+      can fix that, so confirming must refuse rather than pretend.
+
+    Reads the LEDGER, never a code path: ``zero outstanding`` is not proof of
+    payment (a return zeroes it, and so does moving it to Courier Outstanding),
+    so the real-payment question goes through
+    :func:`_get_real_customer_payment_entry`.
+    """
+    name = str(invoice_name or "").strip()
+    empty = {"shape": RECEIPT_COLLECTION_NONE, "invoice": name or None}
+    if not name:
+        return empty
+
+    fields = [
+        "name", "company", "docstatus", "outstanding_amount", "grand_total",
+        "custom_payment_method", "custom_payment_confirmation_status",
+        "custom_kanban_profile", "pos_profile",
+    ]
+    # Asked for only where the column exists: a site that has not migrated the
+    # credit feature has no such column, and naming it would make this whole
+    # classifier raise -- which degrades every confirmation to a plain stamp.
+    if has_credit_terms_field("Sales Invoice"):
+        fields.append(CREDIT_TERMS_FIELD)
+    try:
+        row = frappe.db.get_value("Sales Invoice", name, fields, as_dict=True)
+    except Exception:
+        return empty
+    if not row or int(row.get("docstatus") or 0) != 1:
+        return empty
+
+    # A collection deliberately converted to cash is not waiting for a transfer.
+    if str(row.get("custom_payment_confirmation_status") or "").strip() == "Converted to Cash":
+        return dict(empty, invoice=row.get("name"))
+
+    # An order taken ON ACCOUNT is settled by ``api/credit.record_credit_payment``,
+    # which allocates FIFO across everything that customer owes. Collecting it
+    # here would book the money against this one invoice and relabel the order
+    # Instapay -- and that label is half of how the credit ledger finds the debt
+    # (see ``utils/credit_utils``), so the rest of the customer's balance would
+    # go looking for an invoice that no longer reads as credit.
+    #
+    # BOTH signals, for the reason that module's header gives: the payment
+    # method is MUTABLE (a collection-method change rewrites it without moving a
+    # pound), while ``custom_credit_terms_days`` is stamped once at creation and
+    # never touched. Matching only the method loses a credit order the moment
+    # somebody relabels the card.
+    if is_credit_intent_doc(row) or _safe_float(row.get(CREDIT_TERMS_FIELD)) > 0:
+        return dict(empty, invoice=row.get("name"), credit_order=True)
+
+    if _get_real_customer_payment_entry(row.get("name"), row.get("company")):
+        return dict(empty, invoice=row.get("name"), already_paid=True)
+
+    outstanding = _safe_float(row.get("outstanding_amount"))
+    if outstanding > 0.01:
+        awaiting = (
+            str(row.get("custom_payment_confirmation_status") or "").strip() == "Awaiting Payment"
+        )
+        return {
+            "shape": RECEIPT_COLLECTION_AWAITING if awaiting else RECEIPT_COLLECTION_UNPAID,
+            "invoice": row.get("name"),
+            "outstanding": outstanding,
+            "pos_profile": row.get("custom_kanban_profile") or row.get("pos_profile"),
+        }
+
+    # Nothing outstanding and no real payment: the receivable went somewhere
+    # else. The only route that does that without paying anybody is the COD
+    # dispatch, which parks it on Courier Outstanding against the rider.
+    try:
+        cts = frappe.get_all(
+            "Courier Transaction",
+            filters={"reference_invoice": row.get("name")},
+            fields=["name", "status", "amount", "payment_mode"],
+            order_by="creation desc",
+            limit_page_length=50,
+        )
+    except Exception:
+        cts = []
+    carrying = [ct for ct in cts if _safe_float(ct.get("amount")) > 0.01]
+    # A row already switched to an online method carries the customer's money in
+    # that ledger: a collection change (or a hand correction stamped the same
+    # way) has already moved it, and confirming has nothing left to do.
+    if any(
+        _is_recognised_collection_method(ct.get("payment_mode"))
+        and _is_online_collection_method(_normalize_collection_method(ct.get("payment_mode")))
+        for ct in carrying
+    ):
+        return dict(empty, invoice=row.get("name"), already_paid=True)
+
+    unsettled = [ct for ct in carrying if str(ct.get("status") or "").strip() != "Settled"]
+    if unsettled:
+        return {
+            "shape": RECEIPT_COLLECTION_COURIER_CASH,
+            "invoice": row.get("name"),
+            "courier_transaction": unsettled[0].get("name"),
+            "amount": _safe_float(unsettled[0].get("amount")),
+            "pos_profile": row.get("custom_kanban_profile") or row.get("pos_profile"),
+        }
+    if carrying:
+        return {
+            "shape": RECEIPT_COLLECTION_SETTLED_CASH,
+            "invoice": row.get("name"),
+            "courier_transaction": carrying[0].get("name"),
+            "amount": _safe_float(carrying[0].get("amount")),
+            "pos_profile": row.get("custom_kanban_profile") or row.get("pos_profile"),
+        }
+    return dict(empty, invoice=row.get("name"))
 
 
 def _get_collection_change_source_ct(invoice_name: str, party_type: str | None, party: str | None):

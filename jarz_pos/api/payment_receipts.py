@@ -55,6 +55,56 @@ def receipt_method_label(method: str | None) -> str | None:
     return RECEIPT_METHOD_LABELS.get(_normalize_receipt_method(method))
 
 
+def get_live_transfer_receipt(sales_invoice: str | None) -> dict | None:
+    """The transfer screenshot already on file for *sales_invoice*, if any.
+
+    "On file" means a receipt that is still live -- Unconfirmed or Confirmed,
+    never ``Changed`` (retired by a collection change) or ``Rejected`` (a
+    manager looked and did not accept it) -- and that actually carries an image.
+    A receipt with no image is a placeholder filed by the dispatch path asking
+    for proof, not proof itself.
+
+    This is the load-bearing fact behind the cash/online decision, and it is a
+    statement about INTENT, not about money having arrived. The upload flow is
+    only reachable from the InstaPay / Wallet payment actions, so a screenshot
+    on an order is the floor saying "the customer is paying by transfer" --
+    whatever the Woo-declared ``custom_payment_method`` still says. Woo sends
+    ``cod`` for every order placed without an online gateway, including the ones
+    where the customer then transfers instead, so the invoice field is the
+    weaker signal of the two.
+
+    Returns the newest matching row (``name``, ``payment_method``) or ``None``.
+    Never raises: every caller is on a dispatch or confirmation path where an
+    exception would be worse than the answer "no receipt".
+    """
+    invoice_name = str(sales_invoice or "").strip()
+    if not invoice_name:
+        return None
+    try:
+        rows = frappe.get_all(
+            "POS Payment Receipt",
+            filters={
+                "sales_invoice": invoice_name,
+                "status": ["in", [RECEIPT_STATUS_UNCONFIRMED, RECEIPT_STATUS_CONFIRMED]],
+                # The Select only offers these two today, but the callers act on
+                # this answer by rerouting an order to the transfer flow -- and
+                # that flow can only ever confirm a receipt whose method matches
+                # the invoice. A row for any other method would strand the order
+                # Awaiting Payment with no way to confirm it.
+                "payment_method": ["in", list(RECEIPT_METHOD_LABELS.values())],
+            },
+            fields=["name", "payment_method", "amount", "status", "receipt_image", "receipt_image_url"],
+            order_by="creation desc",
+            limit_page_length=20,
+        )
+    except Exception:
+        return None
+    for row in rows:
+        if str(row.get("receipt_image_url") or row.get("receipt_image") or "").strip():
+            return row
+    return None
+
+
 @dataclass(frozen=True)
 class PendingReceipt:
     """What :func:`ensure_pending_payment_receipt` actually did.
@@ -895,44 +945,55 @@ def remove_receipt_image(receipt_name: str):
         frappe.throw(f"Failed to remove receipt image: {str(e)}")
 
 
-def _awaiting_online_payment_invoice(sales_invoice: str | None) -> dict | None:
-    """The invoice behind a receipt, when it is still owed an online transfer.
+#: Shapes returned by ``services.delivery_handling.classify_receipt_collection``.
+#: Spelled here as well so this module's site-less unit tests do not have to
+#: import the service (which pulls in erpnext) just to name a branch.
+_RECEIPT_COLLECTION_NONE = "none"
+_RECEIPT_COLLECTION_COURIER_CASH = "courier_cash"
+_RECEIPT_COLLECTION_SETTLED_CASH = "settled_cash"
 
-    Returns ``None`` -- meaning "a plain stamp is the whole job" -- for every
-    other case: a receipt filed against an order already paid at the counter, a
-    cancelled invoice, or one whose collection was converted to cash.
+
+def _classify_receipt_collection(invoice_name: str | None) -> dict:
+    """Where this invoice's money sits, per ``services.delivery_handling``.
+
+    Wrapped rather than imported at module scope for the same two reasons as
+    :func:`_allowed_pos_profiles`: the service imports this module (so a
+    top-level import here would be circular), and patching this one name is how
+    a site-less test picks the shape it wants to exercise.
     """
-    invoice_name = str(sales_invoice or "").strip()
-    if not invoice_name:
+    from jarz_pos.services.delivery_handling import classify_receipt_collection
+
+    return classify_receipt_collection(invoice_name)
+
+
+def _plan_receipt_collection(receipt) -> dict | None:
+    """What confirming *receipt* still has to do about the money, or ``None``.
+
+    ``None`` means a plain stamp is the whole job: the order is already paid
+    into a real ledger, its collection was converted to cash, or this is not a
+    transfer receipt at all.
+
+    Only InstaPay and Wallet receipts collect, which is the whole of the rule
+    the owner stated: a screenshot is uploaded only because somebody chose to
+    pay by transfer, so a confirmed one means the money is in the bank.
+
+    Degrades to ``None`` on any failure, exactly as the narrower probe it
+    replaced did. Confirming is the last step of a real payment, and failing it
+    because a classifier could not read the ledger would be worse than the
+    stamp-only behaviour this whole change exists to improve on.
+    """
+    if _normalize_receipt_method(getattr(receipt, "payment_method", None)) not in (
+        "instapay",
+        "wallet",
+    ):
         return None
-    # Everything below degrades to "not awaiting" on any surprise. This probe
-    # runs in front of every receipt confirmation, including the ordinary
-    # paid-at-the-counter ones, and a receipt that cannot be confirmed because
-    # the invoice could not be read would be a worse failure than the one this
-    # whole change exists to fix.
     try:
-        row = frappe.db.get_value(
-            "Sales Invoice",
-            invoice_name,
-            [
-                "name",
-                "docstatus",
-                "outstanding_amount",
-                "custom_payment_confirmation_status",
-                "custom_kanban_profile",
-                "pos_profile",
-            ],
-            as_dict=True,
-        )
-        if not row or int(row.get("docstatus") or 0) != 1:
-            return None
-        if str(row.get("custom_payment_confirmation_status") or "").strip() != "Awaiting Payment":
-            return None
-        if float(row.get("outstanding_amount") or 0) <= 0.01:
-            return None
-        return row
+        plan = _classify_receipt_collection(getattr(receipt, "sales_invoice", None))
     except Exception:
         return None
+    if not plan or str(plan.get("shape") or _RECEIPT_COLLECTION_NONE) == _RECEIPT_COLLECTION_NONE:
+        return None
+    return plan
 
 
 def _confirm_receipt_record(receipt) -> None:
@@ -967,12 +1028,27 @@ def confirm_receipt(receipt_name: str):
     invoice stayed fully unpaid. Nobody was told; the order simply read
     "confirmed" on one screen and "awaiting payment" on the other.
 
-    So confirming now finishes the job. If the invoice behind the receipt is
-    still awaiting an online transfer and still owes money, this routes through
-    ``confirm_online_payment``, which validates the screenshot, posts
-    ``DR Bank/Instapay . CR Debtors`` and flips the invoice to Payment
-    Confirmed. Every other receipt -- an order paid at the counter, a cancelled
-    one, one converted to cash -- keeps the plain stamp it always had.
+    So confirming finishes the job. Which job depends on where the money
+    currently sits, which :func:`_plan_receipt_collection` decides:
+
+    * still owed on Debtors (awaiting a transfer, or simply not yet dispatched)
+      -> ``confirm_online_payment`` validates the screenshot, posts
+      ``DR Bank/Instapay . CR Debtors`` and flips the invoice to Payment
+      Confirmed;
+    * already dispatched as cash, rider not settled ->
+      ``change_payment_collection_method`` moves it off Courier Outstanding into
+      the bank, so the courier is no longer recorded as holding it;
+    * already settled as cash -> refused, because the branch till has counted
+      that money and only a manual correction can move it;
+    * anything else -- paid at the counter, cancelled, converted to cash, or a
+      receipt for a method that takes no transfer -- keeps the plain stamp.
+
+    The second case is the 2026-09-15 one (orders 17450 and 17453). A Woo order
+    arrives declared Cash whatever the customer later does, so an order paid by
+    transfer and dispatched before a manager confirmed it had its whole
+    receivable moved onto the rider. Confirming the screenshot then stamped a
+    row and moved nothing, leaving the courier settlement asking him for money
+    the customer had already sent to the bank.
 
     Args:
         receipt_name: POS Payment Receipt name
@@ -990,11 +1066,12 @@ def confirm_receipt(receipt_name: str):
             frappe.throw('Changed payment receipts cannot be confirmed')
 
         # Deliberately BEFORE the already-confirmed short circuit. A receipt that
-        # is Confirmed while its invoice is still unpaid is precisely the stuck
-        # state described above, and returning "already confirmed" there is what
-        # made it permanent -- pressing the button again has to be the way out.
-        awaiting = _awaiting_online_payment_invoice(getattr(receipt, 'sales_invoice', None))
-        if awaiting:
+        # is Confirmed while its invoice's money is still uncollected is
+        # precisely the stuck state described above, and returning "already
+        # confirmed" there is what made it permanent -- pressing the button
+        # again has to be the way out.
+        plan = _plan_receipt_collection(receipt)
+        if plan:
             image_url = str(
                 getattr(receipt, 'receipt_image_url', None)
                 or getattr(receipt, 'receipt_image', None)
@@ -1009,24 +1086,96 @@ def confirm_receipt(receipt_name: str):
                     "this receipt records the payment against the invoice."
                 )
 
-            # The GUARDED endpoint, not the bare service underneath it.
-            # ``api.couriers.confirm_online_payment`` wraps the service in
-            # ``_guard_invoice_action`` — branch scope on the INVOICE plus an
-            # open shift. Calling the service directly would have made this a
-            # second, weaker door to the same Payment Entry: money bookable into
-            # the bank ledger outside any open shift, and a receipt filed
-            # against another branch's order confirmable by whoever filed it.
+            invoice_name = plan.get('invoice')
+            # The receipt's own profile first, then the INVOICE's branch. A
+            # legacy receipt may carry no profile at all -- branch access
+            # deliberately lets those through (see _has_receipt_branch_access) --
+            # and the guarded endpoints below both refuse an empty one.
+            profile = str(
+                getattr(receipt, 'pos_profile', None) or plan.get('pos_profile') or ''
+            ).strip()
+            shape = plan.get('shape')
+
+            # Both branches call the GUARDED endpoints, never the services
+            # underneath them: those wrappers add branch scope on the INVOICE
+            # plus an open shift. Calling a service directly would make this a
+            # second, weaker door to the same money -- bookable outside any
+            # shift, on another branch's order, by whoever filed the receipt.
+            if shape == _RECEIPT_COLLECTION_SETTLED_CASH:
+                # The rider already settled, so the branch till was debited with
+                # cash nobody handed over. Nothing here can undo that safely:
+                # the money has been counted at a shift close. Refuse loudly
+                # rather than stamp the receipt and leave the books wrong.
+                frappe.throw(
+                    "This order was settled with the courier as cash, so the branch "
+                    "till already counted this money. Confirming cannot move it - "
+                    "post a correction from the bank to the branch cash account, "
+                    "then confirm."
+                )
+
+            if shape == _RECEIPT_COLLECTION_COURIER_CASH:
+                # Dispatched down the cash path before anyone confirmed the
+                # transfer: the receivable sits on Courier Outstanding against
+                # the rider. Moving it to the bank is exactly what a collection
+                # method change does, so use that rather than a second Payment
+                # Entry -- which would credit Debtors twice.
+                from jarz_pos.api.couriers import change_payment_collection_method
+
+                result = change_payment_collection_method(
+                    invoice_name,
+                    str(getattr(receipt, 'payment_method', None) or '').strip(),
+                    profile,
+                    receipt_name=receipt.name,
+                    notes='Confirmed transfer receipt {0}'.format(receipt.name),
+                    # DERIVED FROM THE RECEIPT, never left to the service to
+                    # mint. Both replay guards key on this token -- the stored
+                    # one on the Courier Transaction and the Journal Entry title
+                    # dedup -- so a random token disarms both, and two confirms
+                    # racing on one receipt post the bank/Courier-Outstanding
+                    # entry twice. The invoice row lock does not save us: the
+                    # loser re-reads the courier row from its own REPEATABLE
+                    # READ snapshot and still sees the money unmoved.
+                    idempotency_token='RCPT-{0}'.format(receipt.name),
+                ) or {}
+                # The whitelisted wrapper nests the service's answer under
+                # ``data``; the bare service returns it flat.
+                result = result.get('data') or result
+                # The collection change validates the receipt but does not stamp
+                # it; this is still a confirmation, so record who confirmed.
+                _confirm_receipt_record(
+                    frappe.get_doc('POS Payment Receipt', receipt.name)
+                )
+                frappe.db.commit()
+                return {
+                    # "payment recorded" is load-bearing wording, not prose: the
+                    # app's ``confirmRecordsPayment`` reads it (or a
+                    # ``payment_entry``) to tell a confirmation that moved money
+                    # from one that only stamped a row. This branch moves money
+                    # with a Journal Entry rather than a Payment Entry, so
+                    # without it an already-shipped client would report the
+                    # collection as unconfirmed. ``payment_recorded`` is the
+                    # explicit flag for clients from here on.
+                    'success': True,
+                    'payment_recorded': True,
+                    'message': 'Receipt confirmed and payment recorded from the courier',
+                    'invoice': invoice_name,
+                    'journal_entry': result.get('journal_entry'),
+                    'courier_transaction': result.get('courier_transaction'),
+                    'collection_change_mode': result.get('collection_change_mode'),
+                }
+
             from jarz_pos.api.couriers import confirm_online_payment
 
             result = confirm_online_payment(
-                awaiting["name"],
-                str(getattr(receipt, 'pos_profile', None) or '').strip(),
+                invoice_name,
+                profile,
                 receipt_name=receipt.name,
             ) or {}
             return {
                 'success': True,
+                'payment_recorded': True,
                 'message': 'Receipt confirmed and payment recorded',
-                'invoice': awaiting["name"],
+                'invoice': invoice_name,
                 'payment_entry': result.get('payment_entry'),
                 'payment_confirmation_status': result.get('payment_confirmation_status'),
             }

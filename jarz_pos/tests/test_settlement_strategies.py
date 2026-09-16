@@ -221,6 +221,109 @@ class TestSettlementStrategies(unittest.TestCase):
 			self.assertEqual(kwargs.get("party_type"), "Employee")
 			self.assertEqual(kwargs.get("party"), "HR-EMP-00042")
 
+	@patch('jarz_pos.services.settlement_strategies.frappe')
+	def test_a_transfer_receipt_keeps_a_cash_declared_order_off_the_courier(self, mock_frappe):
+		"""Production orders 17417, 17450, 17453.
+
+		Woo declares every order placed without an online gateway ``cod``, so an
+		order the customer pays by InstaPay arrives here as Cash and the only
+		record of the real method is the screenshot the floor uploaded. Sending
+		that down the cash path moves the WHOLE receivable onto the rider, and
+		settling him then debits the branch till with cash nobody handed over.
+		"""
+		from jarz_pos.services.settlement_strategies import dispatch_settlement
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-CASH-WITH-RECEIPT"
+		mock_inv.docstatus = 1
+		mock_inv.outstanding_amount = 480.0
+		mock_inv.company = "Test Company"
+		mock_inv.get = MagicMock(return_value="Cash")
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.db.get_value.return_value = 480.0
+
+		with patch('jarz_pos.services.settlement_strategies.handle_unpaid_online_deliver_unconfirmed') as mock_online, \
+				 patch('jarz_pos.services.settlement_strategies.mark_courier_outstanding') as mock_mco, \
+				 patch('jarz_pos.services.settlement_strategies.handle_unpaid_settle_later') as mock_later, \
+				 patch(
+					 'jarz_pos.services.settlement_strategies._live_transfer_receipt',
+					 return_value={"name": "PPR-1", "payment_method": "InstaPay"},
+				 ):
+			mock_online.return_value = {"success": True, "payment_confirmation_status": "Awaiting Payment"}
+
+			result = dispatch_settlement("INV-CASH-WITH-RECEIPT", mode="later", pos_profile="Dokki")
+
+			mock_online.assert_called_once()
+			mock_mco.assert_not_called()
+			mock_later.assert_not_called()
+			self.assertEqual(result.get("payment_confirmation_status"), "Awaiting Payment")
+
+	@patch('jarz_pos.services.settlement_strategies.frappe')
+	def test_a_cash_order_without_a_receipt_still_takes_the_cash_path(self, mock_frappe):
+		"""The other half of the rule: no screenshot, no change in behaviour.
+
+		Most orders really are cash on delivery, and the rider really does
+		collect for them.
+		"""
+		from jarz_pos.services.settlement_strategies import dispatch_settlement
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-PLAIN-CASH"
+		mock_inv.docstatus = 1
+		mock_inv.outstanding_amount = 480.0
+		mock_inv.company = "Test Company"
+		mock_inv.get = MagicMock(return_value="Cash")
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.db.get_value.return_value = 480.0
+
+		with patch('jarz_pos.services.settlement_strategies.handle_unpaid_online_deliver_unconfirmed') as mock_online, \
+				 patch('jarz_pos.services.settlement_strategies.handle_unpaid_settle_later') as mock_later, \
+				 patch('jarz_pos.services.settlement_strategies._live_transfer_receipt', return_value=None):
+			mock_later.return_value = {"success": True, "mode": "unpaid_settle_later"}
+
+			result = dispatch_settlement("INV-PLAIN-CASH", mode="later", pos_profile="Dokki")
+
+			mock_later.assert_called_once()
+			mock_online.assert_not_called()
+			self.assertEqual(result.get("mode"), "unpaid_settle_later")
+
+	@patch('jarz_pos.services.settlement_strategies.frappe')
+	def test_a_paid_order_with_a_receipt_is_untouched(self, mock_frappe):
+		"""Only UNPAID orders are rerouted. A paid one still settles normally."""
+		from jarz_pos.services.settlement_strategies import dispatch_settlement
+
+		mock_inv = MagicMock()
+		mock_inv.name = "INV-PAID-RECEIPT"
+		mock_inv.docstatus = 1
+		mock_inv.outstanding_amount = 0.0
+		mock_inv.company = "Test Company"
+		mock_inv.get = MagicMock(return_value="Paid")
+
+		mock_frappe.get_doc.return_value = mock_inv
+		mock_frappe.db.get_value.return_value = 0.0
+
+		with patch('jarz_pos.services.settlement_strategies.handle_unpaid_online_deliver_unconfirmed') as mock_online, \
+				 patch('jarz_pos.services.settlement_strategies.handle_out_for_delivery_paid') as mock_paid, \
+				 patch('jarz_pos.services.settlement_strategies._live_transfer_receipt', return_value={"name": "PPR-9"}):
+			mock_paid.return_value = {"success": True, "mode": "paid_settle_now"}
+
+			dispatch_settlement("INV-PAID-RECEIPT", mode="now", pos_profile="Dokki")
+
+			mock_paid.assert_called_once()
+			mock_online.assert_not_called()
+
+	def test_live_transfer_receipt_never_raises(self):
+		"""A lookup that cannot answer must not hold a courier at the door."""
+		from jarz_pos.services.settlement_strategies import _live_transfer_receipt
+
+		with patch(
+			'jarz_pos.api.payment_receipts.get_live_transfer_receipt',
+			side_effect=RuntimeError("no db"),
+		):
+			self.assertIsNone(_live_transfer_receipt(MagicMock(name="INV-X")))
+
 	def test_is_online_intent_detects_online_and_ignores_cash(self):
 		"""_is_online_intent recognises InstaPay/Mobile Wallet but not cash or unknown methods."""
 		from jarz_pos.services.settlement_strategies import _is_online_intent
