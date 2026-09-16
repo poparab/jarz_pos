@@ -228,3 +228,80 @@ class TestInvoiceAPI(unittest.TestCase):
 		except Exception:
 			# Expected to fail with non-existent invoice
 			pass
+
+
+class TestPayInvoiceIdempotency(unittest.TestCase):
+	"""Two taps on Pay must not post two Payment Entries.
+
+	``pay_invoice`` takes ``FOR UPDATE`` on the Sales Invoice row, which
+	serialises the two callers but does NOT refresh either transaction's
+	snapshot: MariaDB runs at REPEATABLE READ and Frappe sets no isolation
+	level. A plain read of the existing payments therefore answers "none" to the
+	second caller even after the first has committed, and it posts a duplicate.
+	"""
+
+	def _frappe(self, mock_frappe, *, existing_rows=None, sql_error=None):
+		invoice = type("Inv", (), {})()
+		invoice.name = "ACC-SINV-0001"
+		invoice.docstatus = 1
+		invoice.company = "Test Company"
+		invoice.customer = "CUST-1"
+		invoice.outstanding_amount = 480.0
+		mock_frappe.get_doc.return_value = invoice
+
+		def _sql(query, *args, **kwargs):
+			if "tabPayment Entry" in query:
+				if sql_error is not None:
+					raise sql_error
+				return list(existing_rows or [])
+			return []
+
+		mock_frappe.db.sql.side_effect = _sql
+		mock_frappe.db.get_value.return_value = 480.0
+		mock_frappe.throw.side_effect = lambda msg, *a, **k: (_ for _ in ()).throw(Exception(msg))
+		return mock_frappe
+
+	@patch("jarz_pos.api.invoices._clear_awaiting_payment_flag")
+	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
+	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_an_existing_payment_is_looked_up_with_a_locking_read(
+		self, mock_frappe, _scope, _shift, _flag
+	):
+		from jarz_pos.api.invoices import pay_invoice
+
+		self._frappe(mock_frappe, existing_rows=[
+			{"name": "ACC-PAY-0001", "posting_date": "2026-09-16", "paid_amount": 480.0},
+		])
+
+		result = pay_invoice("ACC-SINV-0001", "cash", pos_profile="Dokki")
+
+		self.assertEqual(result["payment_entry"], "ACC-PAY-0001")
+		self.assertIn("idempotent", result["note"])
+		# The check that protects the money has to read the latest committed
+		# rows, not this transaction's snapshot.
+		queries = [c[0][0] for c in mock_frappe.db.sql.call_args_list if "tabPayment Entry" in c[0][0]]
+		self.assertTrue(queries, "the existing-payment check never ran")
+		self.assertIn("FOR UPDATE", queries[-1].upper())
+		mock_frappe.new_doc.assert_not_called()
+
+	@patch("jarz_pos.api.invoices._clear_awaiting_payment_flag")
+	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
+	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_a_failed_check_refuses_instead_of_posting_blind(
+		self, mock_frappe, _scope, _shift, _flag
+	):
+		"""The moment this check is most likely to fail -- a lock wait, a
+		deadlock -- is the moment two people are paying the same order, which is
+		the case it exists to stop. It used to log and carry on."""
+		from jarz_pos.api.invoices import pay_invoice
+
+		self._frappe(mock_frappe, sql_error=RuntimeError("lock wait timeout"))
+
+		with self.assertRaises(Exception) as exc:
+			pay_invoice("ACC-SINV-0001", "cash", pos_profile="Dokki")
+
+		self.assertIn("try again", str(exc.exception).lower())
+		mock_frappe.new_doc.assert_not_called()
+

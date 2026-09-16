@@ -1432,23 +1432,41 @@ def _mark_courier_outstanding_locked(
     paid_from_account = _get_receivable_account(company)
     pe_name = None
     try:
-        ref_parents = frappe.get_all(
-            "Payment Entry Reference",
-            filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-            pluck="parent",
-        )
-        if ref_parents:
-            rows = frappe.get_all(
-                "Payment Entry",
-                filters={"name": ["in", ref_parents], "docstatus": 1},
-                fields=["name", "paid_to"],
-            )
-            for r in rows:
-                if (r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING):
-                    pe_name = r["name"]
-                    break
+        # LOCKING. The named dispatch lock above serialises two OFD requests for
+        # this invoice but does not refresh the loser's snapshot, so a plain read
+        # here reports "no Payment Entry yet" after the winner has committed —
+        # and this function then moves the receivable to Courier Outstanding a
+        # second time. That is not hypothetical: two invoices on production
+        # carried duplicate pairs 15 and 5 seconds apart, 770 EGP of courier debt
+        # nobody owed. The named lock was the first half of that fix; this is the
+        # other half.
+        for r in _submitted_payment_entries_for_invoice(inv.name, for_update=True):
+            if (r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING):
+                pe_name = r["name"]
+                break
     except Exception:
-        pe_name = None
+        # Deliberately NOT "assume there is none". The likeliest reason this
+        # read fails is a lock wait against another dispatch of the SAME
+        # invoice, which is precisely when assuming would duplicate the
+        # Payment Entry. Refusing costs a retry at the door; a duplicate costs
+        # a manual reversal nobody notices is needed.
+        # Wrapped: log_error raises on its own when the message trips its length
+        # or encoding limits, and losing the refusal below to a logging failure
+        # would put us back to posting blind.
+        try:
+            frappe.log_error(
+                title=f"OFD duplicate-payment check failed: {inv.name}"[:140],
+                message=frappe.get_traceback(),
+            )
+        except Exception:
+            pass
+        frappe.throw(
+            _(
+                "Could not check whether {0} has already been dispatched. "
+                "Nothing was posted - please try again."
+            ).format(inv.name),
+            title=_("Dispatch check failed"),
+        )
     if not pe_name and outstanding > 0.0001:
         try:
             # Pass courier party info to _create_payment_entry for JE creation
@@ -2354,8 +2372,11 @@ def confirm_online_payment(invoice_name: str, pos_profile: str, reference_no: st
     method_label = str(inv.get("custom_payment_method") or "").strip()
     current_status = str(inv.get("custom_payment_confirmation_status") or "").strip()
 
-    # Idempotency: already confirmed OR a real (non courier-outstanding) customer PE exists
-    existing_pe = _get_real_customer_payment_entry(inv.name, company)
+    # Idempotency: already confirmed OR a real (non courier-outstanding) customer PE
+    # exists. LOCKING, because this function is about to post one: the invoice
+    # row lock above serialises the two callers but not their snapshots, so a
+    # plain read here answers "no payment yet" to the loser of the race.
+    existing_pe = _get_real_customer_payment_entry(inv.name, company, for_update=True)
     if current_status == "Payment Confirmed" or existing_pe:
         return {
             "success": True,
@@ -2795,19 +2816,16 @@ def sales_partner_unpaid_out_for_delivery(invoice_name: str, pos_profile: str, m
     # Create / reuse Payment Entry if still outstanding
     pe_name = None
     if outstanding > 0.0001:
-        # Look for existing PE that already allocated full amount to invoice & paid_to matches cash account
-        ref_parents = frappe.get_all(
-            "Payment Entry Reference",
-            filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-            pluck="parent",
-        )
-        if ref_parents:
-            rows = frappe.get_all(
-                "Payment Entry",
-                filters={"name": ["in", ref_parents], "docstatus": 1, "paid_to": cash_acc, "payment_type": "Receive"},
-                fields=["name", "paid_amount"],
-            )
-            for r in rows:
+        # Look for an existing PE that already allocated the amount to this
+        # invoice against the same cash account. LOCKING, like every other
+        # duplicate-payment guard here: a plain read answers from a snapshot
+        # taken before a concurrent caller committed, and this one decides
+        # whether to take the customer's cash a second time.
+        for r in _submitted_payment_entries_for_invoice(inv.name, for_update=True):
+            if (
+                str(r.get("payment_type") or "").strip() == "Receive"
+                and str(r.get("paid_to") or "").strip() == str(cash_acc or "").strip()
+            ):
                 pe_name = r["name"]
                 break
         if not pe_name:
@@ -4584,7 +4602,15 @@ def change_payment_collection_method(
     # Checked BEFORE the amount below on purpose: an order the customer has really
     # paid also has a zero-amount courier row, and "no customer amount to change" is
     # a baffling way to say "this one is already paid".
-    existing_real_payment = _get_real_customer_payment_entry(inv.name, inv.company)
+    #
+    # LOCKING for the same reason as ``confirm_online_payment``: this function
+    # posts a Journal Entry against the same money, and the two now run from the
+    # same button (confirming a receipt routes to whichever fits), so a
+    # snapshot-read refusal that never fires would move money a payment had
+    # already collected.
+    existing_real_payment = _get_real_customer_payment_entry(
+        inv.name, inv.company, for_update=True
+    )
     if existing_real_payment:
         frappe.throw(
             "This order already has a real customer payment ({0}); payment method change is not allowed.".format(
@@ -5496,22 +5522,69 @@ def _courier_row_can_still_carry_cash(ct: dict | None) -> bool:
     return str(ct.get("status") or "").strip() != "Settled"
 
 
-def _get_real_customer_payment_entry(invoice_name: str, company: str):
-    ref_parents = frappe.get_all(
-        "Payment Entry Reference",
-        filters={"reference_doctype": "Sales Invoice", "reference_name": invoice_name},
-        pluck="parent",
-    )
-    if not ref_parents:
+def _submitted_payment_entries_for_invoice(invoice_name: str, *, for_update: bool = False) -> list[dict]:
+    """Every submitted Payment Entry allocated to *invoice_name*, newest first.
+
+    One reader for every "has this invoice already been paid?" guard in this
+    module, so the locking property cannot hold in one of them and not the next.
+
+    ``for_update`` makes it a LOCKING read, and every caller that is about to
+    POST money must pass it. Serialising the writers is not enough on its own:
+    MariaDB runs at REPEATABLE READ and Frappe never sets an isolation level, so
+    whichever caller waited — on the invoice row lock, or on the named dispatch
+    lock — then answers this question from the snapshot its transaction opened
+    BEFORE the winner committed. It sees no payment and posts a second one.
+    Every such pair balances, so nothing downstream ever flags it: the duplicate
+    is only visible as money the books say was collected twice. A locking read
+    reads the latest committed rows instead.
+    """
+    suffix = " FOR UPDATE" if for_update else ""
+    return frappe.db.sql(
+        """
+        SELECT pe.name, pe.paid_to, pe.payment_type, pe.paid_amount, pe.mode_of_payment
+        FROM `tabPayment Entry` pe
+        INNER JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
+        WHERE per.reference_doctype = 'Sales Invoice'
+          AND per.reference_name = %s
+          AND pe.docstatus = 1
+        ORDER BY pe.creation DESC
+        """
+        + suffix,
+        (invoice_name,),
+        as_dict=True,
+    ) or []
+
+
+def _get_real_customer_payment_entry(invoice_name: str, company: str, *, for_update: bool = False):
+    """The customer Payment Entry that actually collected this invoice, if any.
+
+    Excludes the Courier Outstanding entry, which moves the receivable onto the
+    rider rather than collecting it.
+
+    ``for_update`` makes this a LOCKING read, and every caller that is about to
+    POST money must pass it. Taking ``FOR UPDATE`` on the Sales Invoice row is
+    not enough on its own: MariaDB runs at REPEATABLE READ and Frappe never
+    changes that, so the loser of the race blocks on the invoice lock, wakes up,
+    and then answers this question from the snapshot its transaction opened
+    BEFORE the winner committed. It sees no payment, and posts a second one for
+    the same transfer. Both entries balance, so nothing downstream ever notices;
+    the customer is simply recorded as having paid twice.
+
+    A locking read reads the latest committed rows instead of the snapshot,
+    which is the whole fix. It is deliberately opt-in: the hourly reconciler and
+    the receipt classifier ask this same question while posting nothing, and
+    taking write locks on their behalf would serialise a background sweep
+    against the tills.
+    """
+    rows = [
+        row
+        for row in _submitted_payment_entries_for_invoice(invoice_name, for_update=for_update)
+        if str(row.get("payment_type") or "").strip() == "Receive"
+    ]
+    if not rows:
         return None
 
     courier_outstanding_acc = _get_courier_outstanding_account(company)
-    rows = frappe.get_all(
-        "Payment Entry",
-        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
-        fields=["name", "paid_to", "mode_of_payment"],
-        order_by="creation desc",
-    )
     for row in rows:
         paid_to = str(row.get("paid_to") or "").strip()
         if paid_to and paid_to != courier_outstanding_acc and not paid_to.startswith(ACCOUNTS.COURIER_OUTSTANDING):

@@ -1436,6 +1436,31 @@ class TestConfirmOnlinePaymentFromTheReceipt(unittest.TestCase):
         self.assertIn("cash with the courier", str(exc.exception))
         module._create_payment_entry.assert_not_called()
 
+    def test_the_duplicate_payment_check_is_a_locking_read(self):
+        """The invoice row lock does not refresh the reader's snapshot.
+
+        MariaDB runs at REPEATABLE READ and Frappe sets no isolation level, so
+        the loser of two concurrent confirmations blocks on the invoice lock,
+        wakes after the winner commits, and a PLAIN read still answers "no
+        payment yet" from its own older snapshot -- posting a second Payment
+        Entry for the same transfer. Both balance, so nothing downstream ever
+        notices. Only a locking read sees the winner's row.
+        """
+        invoice = _FakeInvoice(
+            custom_payment_method="Cash",
+            custom_payment_confirmation_status="",
+            outstanding_amount=480.0,
+            grand_total=480.0,
+        )
+        module, _ = self._module(invoice)
+
+        module.confirm_online_payment("INV-CHANGE-001", "Dokki", receipt_name="PPR-1")
+
+        self.assertTrue(
+            module._get_real_customer_payment_entry.call_args.kwargs.get("for_update"),
+            "confirm_online_payment must ask for the LOCKING duplicate check",
+        )
+
     def test_refuses_an_on_account_order(self):
         invoice = _FakeInvoice(
             custom_payment_method="Credit", custom_payment_confirmation_status=""
@@ -1565,3 +1590,87 @@ class TestMarkCourierOutstandingBackstop(unittest.TestCase):
         # It gets past the backstop and fails later on the stubbed ledger --
         # what matters is that the refusal above is not the reason.
         self.assertNotIn("transfer receipt", str(exc.exception))
+
+
+class TestRealCustomerPaymentLookup(unittest.TestCase):
+    """The one question every money path asks: has this order really been paid?"""
+
+    def _module(self):
+        module, stub_frappe = _import_delivery_handling()
+        module._get_courier_outstanding_account = MagicMock(
+            return_value="Courier Outstanding - TC"
+        )
+        return module, stub_frappe
+
+    def test_it_locks_only_when_asked(self):
+        module, stub_frappe = self._module()
+        stub_frappe.db.sql = MagicMock(return_value=[])
+
+        module._get_real_customer_payment_entry("INV-1", "Test Company")
+        plain = stub_frappe.db.sql.call_args[0][0]
+        self.assertNotIn("FOR UPDATE", plain.upper())
+
+        module._get_real_customer_payment_entry("INV-1", "Test Company", for_update=True)
+        locking = stub_frappe.db.sql.call_args[0][0]
+        self.assertIn("FOR UPDATE", locking.upper())
+
+    def test_the_shared_reader_locks_only_when_asked(self):
+        """One reader backs every duplicate-payment guard in the module.
+
+        The dispatch guard and the sales-partner cash guard reach it through
+        the same keyword; keeping the locking behaviour in one place is what
+        stops it from holding in one guard and quietly not in the next.
+        """
+        module, stub_frappe = self._module()
+        stub_frappe.db.sql = MagicMock(return_value=[])
+
+        module._submitted_payment_entries_for_invoice("INV-1")
+        plain = stub_frappe.db.sql.call_args[0][0]
+        self.assertIn("tabPayment Entry", plain)
+        self.assertNotIn("FOR UPDATE", plain.upper())
+
+        module._submitted_payment_entries_for_invoice("INV-1", for_update=True)
+        locking = stub_frappe.db.sql.call_args[0][0]
+        self.assertIn("FOR UPDATE", locking.upper())
+
+    def test_the_reader_answers_with_an_empty_list_not_none(self):
+        """Every call site iterates the result directly."""
+        module, stub_frappe = self._module()
+        stub_frappe.db.sql = MagicMock(return_value=None)
+
+        self.assertEqual(module._submitted_payment_entries_for_invoice("INV-1"), [])
+
+    def test_courier_outstanding_is_not_a_customer_payment(self):
+        """Moving the receivable onto the rider collects nothing from anybody."""
+        module, stub_frappe = self._module()
+        stub_frappe.db.sql = MagicMock(
+            return_value=[{"name": "ACC-PAY-1", "paid_to": "Courier Outstanding - TC",
+                           "payment_type": "Receive", "mode_of_payment": None}]
+        )
+
+        self.assertIsNone(
+            module._get_real_customer_payment_entry("INV-1", "Test Company")
+        )
+
+    def test_a_refund_is_not_a_customer_payment(self):
+        """Only money coming IN counts. A Pay entry against the invoice is a
+        refund going the other way."""
+        module, stub_frappe = self._module()
+        stub_frappe.db.sql = MagicMock(
+            return_value=[{"name": "ACC-PAY-3", "paid_to": "Bank Account - TC",
+                           "payment_type": "Pay", "mode_of_payment": "Instapay"}]
+        )
+
+        self.assertIsNone(
+            module._get_real_customer_payment_entry("INV-1", "Test Company")
+        )
+
+    def test_a_bank_payment_is_a_customer_payment(self):
+        module, stub_frappe = self._module()
+        stub_frappe.db.sql = MagicMock(
+            return_value=[{"name": "ACC-PAY-2", "paid_to": "Bank Account - TC",
+                           "payment_type": "Receive", "mode_of_payment": "Instapay"}]
+        )
+
+        found = module._get_real_customer_payment_entry("INV-1", "Test Company")
+        self.assertEqual((found or {}).get("name"), "ACC-PAY-2")

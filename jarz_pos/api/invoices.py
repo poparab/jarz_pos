@@ -399,38 +399,65 @@ def pay_invoice(
             outstanding = float(inv.outstanding_amount or 0)
         
         # Check for existing payment entries BEFORE checking outstanding (idempotency check)
-        existing_payment_entries = []
+        #
+        # A LOCKING read, and it must stay one. The `FOR UPDATE` on the invoice
+        # row above serialises two concurrent payments but does NOT refresh
+        # either transaction's snapshot: MariaDB runs at REPEATABLE READ and
+        # Frappe never sets an isolation level, so the second caller blocks on
+        # the invoice lock, wakes after the first commits, and a plain read here
+        # still answers "no payment yet" from the snapshot it opened earlier. It
+        # then posts a second Payment Entry for the same money. Both balance, so
+        # nothing downstream flags it. Reading the rows FOR UPDATE reads the
+        # latest committed ones instead, which is the whole fix.
         try:
-            ref_parents = frappe.get_all(
-                "Payment Entry Reference",
-                filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-                pluck="parent",
+            existing_payment_entries = frappe.db.sql(
+                """
+                SELECT pe.name, pe.posting_date, pe.paid_amount
+                FROM `tabPayment Entry` pe
+                INNER JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
+                WHERE per.reference_doctype = 'Sales Invoice'
+                  AND per.reference_name = %s
+                  AND pe.docstatus = 1
+                  AND pe.payment_type = 'Receive'
+                ORDER BY pe.creation ASC
+                FOR UPDATE
+                """,
+                (inv.name,),
+                as_dict=True,
             )
-            if ref_parents:
-                existing_payment_entries = frappe.get_all(
-                    "Payment Entry",
-                    filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
-                    fields=["name", "posting_date", "paid_amount"],
-                )
-                if existing_payment_entries:
-                    # Return existing payment entry instead of throwing error (idempotency)
-                    pe = existing_payment_entries[0]
-                    _clear_awaiting_payment_flag(inv.name)
-                    return {
-                        "success": True,
-                        "payment_entry": pe.get("name"),
-                        "invoice": inv.name,
-                        "allocated_amount": float(pe.get("paid_amount", 0)),
-                        "note": "Invoice already has a payment entry (idempotent response)",
-                    }
         except Exception as e:
-            frappe.log_error(
-                title="Pay Invoice - Existing Payment Check Error",
-                message=f"Invoice: {invoice_name}\nError: {str(e)}",
+            # Deliberately NOT swallowed any more. This check used to log and
+            # carry on "if the check fails" -- but the moment it is most likely
+            # to fail (a lock wait or deadlock) is exactly the moment two people
+            # are paying the same order, which is the case it exists to stop.
+            # A refusal is retryable; a duplicate payment is not.
+            # Wrapped: log_error raises on its own when a message trips its
+            # length or encoding limits, and losing the refusal below to a
+            # logging failure would put us back to posting blind.
+            try:
+                frappe.log_error(
+                    title="Pay Invoice - Existing Payment Check Error",
+                    message=f"Invoice: {invoice_name}\nError: {str(e)}",
+                )
+            except Exception:
+                pass
+            frappe.throw(
+                "Could not check whether this invoice has already been paid. "
+                "Nothing was posted - please try again."
             )
-            # Continue with payment creation if check fails
-            pass
-        
+
+        if existing_payment_entries:
+            # Return existing payment entry instead of throwing error (idempotency)
+            pe = existing_payment_entries[0]
+            _clear_awaiting_payment_flag(inv.name)
+            return {
+                "success": True,
+                "payment_entry": pe.get("name"),
+                "invoice": inv.name,
+                "allocated_amount": float(pe.get("paid_amount", 0)),
+                "note": "Invoice already has a payment entry (idempotent response)",
+            }
+
         # Now check if there's outstanding amount
         if outstanding <= 0.0001:
             frappe.throw("Invoice already paid (no outstanding amount)")
