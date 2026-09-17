@@ -42,6 +42,44 @@ _SUB_ASSEMBLY_ROOTS = ("Sub Assemblies",)
 _CONSUMABLE_ROOTS = ("Consumable",)
 
 
+def _finished_goods_warehouses() -> List[str]:
+    """The finished-goods store, so the Final Products tables always show it.
+
+    The column set used to be "whatever warehouses happen to hold one of these
+    items", which moves under the report. On production 2026-09-18 that meant
+    the Large table had no ``Finished Goods`` column at all — no Large size was
+    sitting in the store that day — while the Medium table grew a ``Raw
+    Material`` column off a single stray Bin row. A stock report whose columns
+    come and go cannot be read side by side, so the store is pinned here and
+    everything else is added on top.
+
+    Read off the **Company**, not Manufacturing Settings: v16's
+    ``set_company_wise_warehouses`` patch moved the setting, and
+    ``get_single_value`` *raises* on a field the meta no longer has. Production
+    still answers the old address from a stale ``tabSingles`` row left by v15,
+    so the old spelling looks fine there and throws on staging — see
+    ``_get_mfg_defaults`` in ``api/manufacturing.py``, which still asks
+    Manufacturing Settings and only survives on the name-hint fallback.
+    """
+    try:
+        rows = frappe.get_all("Company", fields=["default_fg_warehouse"])
+    except Exception:
+        return []
+
+    names: List[str] = []
+    for row in rows:
+        warehouse = row.get("default_fg_warehouse")
+        if not warehouse or warehouse in names:
+            continue
+        try:
+            if frappe.db.get_value("Warehouse", warehouse, "is_group"):
+                continue
+        except Exception:
+            pass
+        names.append(warehouse)
+    return names
+
+
 def _expand_item_groups(roots: tuple) -> List[str]:
     """Each named group plus every group beneath it in the Item Group tree."""
     names: List[str] = []
@@ -65,6 +103,11 @@ def get_final_products_report() -> Dict[str, Any]:
     """
     Return stock balances for items in the "Medium" and "Large" item groups,
     pivoted by warehouse.
+
+    Both tables carry the *same* warehouse columns — see
+    ``_finished_goods_warehouses`` — and every active size gets a row whether or
+    not it has stock, because "we are out of Carrot cake" is the line a stock
+    count exists to show and the old "skip items with no Bin row" rule hid it.
 
     Response shape:
     {
@@ -103,10 +146,13 @@ def get_final_products_report() -> Dict[str, Any]:
 
     item_codes = [it["item_code"] for it in items]
 
-    # Get actual stock from Bin (only non-zero balances)
+    # Every non-zero balance, negatives included. The filter used to be
+    # ``> 0``, which dropped a branch's oversold bin and so read the total
+    # HIGH: on production Chocolate Hazelnut Medium showed 74 while the ledger
+    # said 70, because Dokki's -4 was simply not fetched.
     bins = frappe.get_all(
         "Bin",
-        filters={"item_code": ["in", item_codes], "actual_qty": [">", 0]},
+        filters={"item_code": ["in", item_codes], "actual_qty": ["!=", 0]},
         fields=["item_code", "warehouse", "actual_qty"],
     )
 
@@ -114,6 +160,13 @@ def get_final_products_report() -> Dict[str, Any]:
     item_wh_map: Dict[str, Dict[str, float]] = {}
     for b in bins:
         item_wh_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
+
+    # One column set for the whole report, so Medium and Large line up and
+    # neither table's columns shift as stock moves.
+    warehouse_set: set = set(_finished_goods_warehouses())
+    for wh_qty in item_wh_map.values():
+        warehouse_set.update(wh_qty.keys())
+    warehouses = sorted(warehouse_set)
 
     # Build separate tables per group, Medium first.
     groups_order = ["Medium", "Large"]
@@ -126,13 +179,9 @@ def get_final_products_report() -> Dict[str, Any]:
         if not group_items:
             continue
 
-        warehouse_set: set = set()
         group_result_items = []
         for it in group_items:
             wh_qty = item_wh_map.get(it["item_code"], {})
-            if not wh_qty:
-                continue
-            warehouse_set.update(wh_qty.keys())
             total = sum(wh_qty.values())
             group_result_items.append({
                 "item_code": it["item_code"],
@@ -143,12 +192,11 @@ def get_final_products_report() -> Dict[str, Any]:
                 "total_qty": total,
             })
 
-        if group_result_items:
-            result_groups.append({
-                "group_name": group_name,
-                "warehouses": sorted(warehouse_set),
-                "items": group_result_items,
-            })
+        result_groups.append({
+            "group_name": group_name,
+            "warehouses": warehouses,
+            "items": group_result_items,
+        })
 
     return {"groups": result_groups}
 
