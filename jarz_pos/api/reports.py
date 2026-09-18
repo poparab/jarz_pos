@@ -57,9 +57,9 @@ def _finished_goods_warehouses() -> List[str]:
     ``set_company_wise_warehouses`` patch moved the setting, and
     ``get_single_value`` *raises* on a field the meta no longer has. Production
     still answers the old address from a stale ``tabSingles`` row left by v15,
-    so the old spelling looks fine there and throws on staging — see
-    ``_get_mfg_defaults`` in ``api/manufacturing.py``, which still asks
-    Manufacturing Settings and only survives on the name-hint fallback.
+    so the old spelling looks fine there and throws on a site without it —
+    ``_get_mfg_defaults`` in ``api/manufacturing.py`` reads the Company the
+    same way.
     """
     try:
         rows = frappe.get_all("Company", fields=["default_fg_warehouse"])

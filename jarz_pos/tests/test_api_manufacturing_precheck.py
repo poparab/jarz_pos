@@ -25,6 +25,61 @@ class TestManufacturingPrecheck(unittest.TestCase):
         self.assertEqual("WIP - J", resolved["wip_warehouse"])
         self.assertEqual("Goods In Transit - J", resolved["fg_warehouse"])
 
+    def test_get_mfg_defaults_reads_the_company_not_the_settings(self):
+        """v16 moved the WIP/FG defaults from Manufacturing Settings onto the
+        Company. The old read only survived on stale v15 ``tabSingles`` rows."""
+        from jarz_pos.api import manufacturing
+
+        warehouse_company = {"Work In Progress - J": "JARZ", "Finished Goods - J": "JARZ"}
+
+        def fake_get_value(doctype, filters=None, fieldname=None, as_dict=False):
+            if doctype == "Company":
+                self.assertEqual("JARZ", filters)
+                self.assertTrue(as_dict)
+                return {
+                    "default_wip_warehouse": "Work In Progress - J",
+                    "default_fg_warehouse": "Finished Goods - J",
+                }
+            if doctype == "Warehouse" and fieldname == "company":
+                return warehouse_company.get(filters)
+            self.fail(f"Unexpected lookup: {doctype}")
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.db.get_value.side_effect = fake_get_value
+            mock_frappe.get_single.side_effect = AssertionError("Manufacturing Settings must not be read")
+
+            defaults = manufacturing._get_mfg_defaults("JARZ")
+
+        self.assertEqual(
+            {"company": "JARZ", "wip_warehouse": "Work In Progress - J", "fg_warehouse": "Finished Goods - J"},
+            defaults,
+        )
+
+    def test_get_mfg_defaults_drops_another_companys_warehouse(self):
+        from jarz_pos.api import manufacturing
+
+        def fake_get_value(doctype, filters=None, fieldname=None, as_dict=False):
+            if doctype == "Company":
+                return {"default_wip_warehouse": "WIP - O", "default_fg_warehouse": None}
+            if doctype == "Warehouse":
+                return "Other Co"
+            return None
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.db.get_value.side_effect = fake_get_value
+            self.assertEqual({"company": "JARZ"}, manufacturing._get_mfg_defaults("JARZ"))
+
+    def test_get_mfg_defaults_degrades_when_the_company_lookup_fails(self):
+        """Missing company or a raising lookup must leave the name-hint fallback to decide."""
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.db.get_value.return_value = None
+            self.assertEqual({"company": "JARZ"}, manufacturing._get_mfg_defaults("JARZ"))
+
+            mock_frappe.db.get_value.side_effect = Exception("boom")
+            self.assertEqual({"company": "JARZ"}, manufacturing._get_mfg_defaults("JARZ"))
+
     def test_get_material_precheck_issues_reports_source_warehouse_shortage(self):
         from jarz_pos.api import manufacturing
 

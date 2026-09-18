@@ -154,23 +154,37 @@ def _get_item_default_warehouse(item_code: str, company: str) -> str | None:
 
 
 def _get_mfg_defaults(company: str) -> Dict[str, str]:
-    # Best-effort defaults for warehouses
+    """Best-effort WIP/FG warehouse defaults for ``company``.
+
+    Read off the **Company**, not Manufacturing Settings: v16's
+    ``set_company_wise_warehouses`` patch moved both fields there. The old
+    ``get_single("Manufacturing Settings")`` read only kept working because
+    ``getattr`` on a Single still returns the stale v15 ``tabSingles`` rows;
+    a site without them got nothing back, and ``get_single_value`` on those
+    fields *raises*. See ``_finished_goods_warehouses`` in ``api/reports.py``.
+    Anything missing falls through to ``_find_company_warehouse`` in
+    ``_resolve_work_order_warehouses``.
+    """
     out: Dict[str, str] = {"company": company}
     try:
-        ms = frappe.get_single("Manufacturing Settings")
-        # Only include warehouses that belong to the given company to avoid cross-company errors
-        if getattr(ms, "default_wip_warehouse", None):
-            wh = ms.default_wip_warehouse
-            wh_comp = frappe.db.get_value("Warehouse", wh, "company")
-            if wh_comp == company:
-                out["wip_warehouse"] = wh
-        if getattr(ms, "default_fg_warehouse", None):
-            wh = ms.default_fg_warehouse
-            wh_comp = frappe.db.get_value("Warehouse", wh, "company")
-            if wh_comp == company:
-                out["fg_warehouse"] = wh
+        row = frappe.db.get_value(
+            "Company",
+            company,
+            ["default_wip_warehouse", "default_fg_warehouse"],
+            as_dict=True,
+        )
     except Exception:
-        pass
+        return out
+    if not row:
+        return out
+
+    # Only include warehouses that belong to the given company to avoid cross-company errors
+    wip = _coerce_str(row.get("default_wip_warehouse"))
+    if _warehouse_belongs_to_company(wip, company):
+        out["wip_warehouse"] = wip
+    fg = _coerce_str(row.get("default_fg_warehouse"))
+    if _warehouse_belongs_to_company(fg, company):
+        out["fg_warehouse"] = fg
     return out
 
 
@@ -2102,7 +2116,7 @@ def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, s
         fg_wh = _find_company_warehouse(company, "Finished Goods", ["FG", "Finished Goods"]) or None
     # Strict requirement: both warehouses must be resolvable for the BOM company
     if not wip_wh or not fg_wh:
-        frappe.throw(_(f"Missing WIP/FG warehouse for company {company}. Configure Manufacturing Settings or create WIP/FG warehouses."))
+        frappe.throw(_(f"Missing WIP/FG warehouse for company {company}. Set the Company's default WIP/FG warehouses or create WIP/FG warehouses."))
 
     wo = frappe.get_doc({
         "doctype": "Work Order",
