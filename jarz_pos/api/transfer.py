@@ -24,18 +24,25 @@ def _ensure_transfer_access() -> None:
         frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
-def _get_singleton_value(doctype: str, field: str) -> Optional[str]:
-    rows = frappe.db.sql(
-        """
-        SELECT value
-        FROM `tabSingles`
-        WHERE doctype = %s AND field = %s
-        LIMIT 1
-        """,
-        (doctype, field),
-        as_dict=True,
-    )
-    return rows[0].get("value") if rows else None
+def _get_default_fg_warehouse(company: Optional[str] = None) -> Optional[str]:
+    """The Finished Goods store: ``company``'s, else the default company's.
+
+    Read off the **Company**, not Manufacturing Settings: v16's
+    ``set_company_wise_warehouses`` patch moved ``default_fg_warehouse`` there.
+    The old raw ``tabSingles`` read only kept working because both servers
+    still carry the stale v15 row; a site without it got ``None`` and the
+    Finished Goods option silently vanished. Same read as ``_get_mfg_defaults``
+    in ``api/manufacturing.py``. Best-effort: ``None`` just omits the option.
+    """
+    try:
+        company = (company or "").strip() or frappe.db.get_single_value(
+            "Global Defaults", "default_company"
+        )
+        if not company:
+            return None
+        return frappe.db.get_value("Company", company, "default_fg_warehouse") or None
+    except Exception:
+        return None
 
 
 def _append_transfer_warehouse_option(
@@ -82,7 +89,7 @@ def list_pos_profiles() -> List[Dict[str, Any]]:
     _append_transfer_warehouse_option(
         out,
         name=_("Finished Goods"),
-        warehouse=_get_singleton_value("Manufacturing Settings", "default_fg_warehouse"),
+        warehouse=_get_default_fg_warehouse(),
     )
     out.sort(key=lambda row: ((row.get("name") or "").lower(), (row.get("warehouse") or "").lower()))
     return out

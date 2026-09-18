@@ -10,26 +10,60 @@ from unittest.mock import patch
 class TestTransferAPI(unittest.TestCase):
 	"""Test class for Transfer API functionality."""
 
-	def test_get_singleton_value_reads_from_singles(self):
-		"""Singleton lookups should remain usable even when the target DocType metadata diverges."""
+	def test_default_fg_warehouse_is_read_off_the_default_company(self):
+		"""v16 moved ``default_fg_warehouse`` from Manufacturing Settings onto the Company."""
 		from jarz_pos.api import transfer
 
 		with patch.object(
-			transfer.frappe.db,
-			"sql",
-			return_value=[{"value": "Finished Goods - J"}],
-		) as sql:
-			result = transfer._get_singleton_value("Manufacturing Settings", "default_fg_warehouse")
+			transfer.frappe.db, "get_single_value", return_value="JARZ"
+		) as single, patch.object(
+			transfer.frappe.db, "get_value", return_value="Finished Goods - J"
+		) as get_value, patch.object(transfer.frappe.db, "sql") as sql:
+			result = transfer._get_default_fg_warehouse()
 
-		sql.assert_called_once()
-		query, params = sql.call_args.args
-		self.assertEqual(
-			" ".join(query.split()),
-			"SELECT value FROM `tabSingles` WHERE doctype = %s AND field = %s LIMIT 1",
-		)
-		self.assertEqual(params, ("Manufacturing Settings", "default_fg_warehouse"))
-		self.assertTrue(sql.call_args.kwargs.get("as_dict"))
 		self.assertEqual(result, "Finished Goods - J")
+		single.assert_called_once_with("Global Defaults", "default_company")
+		get_value.assert_called_once_with("Company", "JARZ", "default_fg_warehouse")
+		# Never the stale v15 ``tabSingles`` row for Manufacturing Settings.
+		sql.assert_not_called()
+
+	def test_default_fg_warehouse_uses_the_company_in_hand(self):
+		from jarz_pos.api import transfer
+
+		with patch.object(transfer.frappe.db, "get_single_value") as single, patch.object(
+			transfer.frappe.db, "get_value", return_value="Finished Goods - O"
+		) as get_value:
+			result = transfer._get_default_fg_warehouse("Other Co")
+
+		self.assertEqual(result, "Finished Goods - O")
+		single.assert_not_called()
+		get_value.assert_called_once_with("Company", "Other Co", "default_fg_warehouse")
+
+	def test_default_fg_warehouse_is_none_without_a_default_company(self):
+		from jarz_pos.api import transfer
+
+		with patch.object(transfer.frappe.db, "get_single_value", return_value=None), patch.object(
+			transfer.frappe.db, "get_value"
+		) as get_value:
+			self.assertIsNone(transfer._get_default_fg_warehouse())
+		get_value.assert_not_called()
+
+	def test_default_fg_warehouse_is_none_when_the_company_has_none(self):
+		from jarz_pos.api import transfer
+
+		with patch.object(transfer.frappe.db, "get_single_value", return_value="JARZ"), patch.object(
+			transfer.frappe.db, "get_value", return_value=""
+		):
+			self.assertIsNone(transfer._get_default_fg_warehouse())
+
+	def test_default_fg_warehouse_read_failure_is_none_not_an_error(self):
+		"""The Finished Goods option is an extra; a failed read must not break the list."""
+		from jarz_pos.api import transfer
+
+		with patch.object(transfer.frappe.db, "get_single_value", return_value="JARZ"), patch.object(
+			transfer.frappe.db, "get_value", side_effect=Exception("db down")
+		):
+			self.assertIsNone(transfer._get_default_fg_warehouse())
 
 	def test_transfer_module_imports(self):
 		"""Test that transfer module can be imported."""
@@ -63,7 +97,7 @@ class TestTransferAPI(unittest.TestCase):
 			 ), \
 			 patch.object(
 				transfer,
-				"_get_singleton_value",
+				"_get_default_fg_warehouse",
 				return_value="Finished Goods - J",
 			 ), \
 			 patch.object(
@@ -89,7 +123,7 @@ class TestTransferAPI(unittest.TestCase):
 			 ), \
 			 patch.object(
 				transfer,
-				"_get_singleton_value",
+				"_get_default_fg_warehouse",
 				return_value="Finished Goods - J",
 			 ), \
 			 patch.object(

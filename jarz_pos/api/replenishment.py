@@ -53,7 +53,7 @@ MIN_COVER_DAYS, MAX_COVER_DAYS = 1, 90
 MIN_SALES_DAYS, MAX_SALES_DAYS = 1, 365
 
 #: Name hints used only to *guess* the factory store when neither the caller
-#: nor Manufacturing Settings names one.
+#: nor the Company's Default Finished Goods Warehouse names one.
 SOURCE_WAREHOUSE_NAME_HINTS = ("finished goods", "finished good")
 
 
@@ -198,19 +198,26 @@ def _resolve_branch_labels() -> Dict[str, str]:
 def _resolve_source_warehouse(
     source_warehouse: Optional[str],
     warehouse_rows: Sequence[Mapping[str, Any]],
+    company: Optional[str] = None,
 ) -> Optional[str]:
-    """The factory store: the caller's choice, then the configured one, then a guess."""
+    """The factory store: the caller's choice, then the configured one, then a guess.
+
+    "Configured" is the **Company's** ``default_fg_warehouse``, not Manufacturing
+    Settings: v16's ``set_company_wise_warehouses`` patch moved the field, and
+    ``get_single_value`` *raises* on a field the meta no longer has, so the old
+    read failed on every call and always fell through to the name guess. Same
+    read as ``_get_mfg_defaults`` in ``api/manufacturing.py``.
+    """
     chosen = (source_warehouse or "").strip()
     if chosen:
         return chosen
 
-    try:
-        configured = frappe.db.get_single_value(
-            "Manufacturing Settings", "default_fg_warehouse"
-        )
-    except Exception:
-        _log_failure("JARZ Replenishment - FG warehouse read failed", _traceback())
-        configured = None
+    configured = None
+    if company:
+        try:
+            configured = frappe.db.get_value("Company", company, "default_fg_warehouse")
+        except Exception:
+            _log_failure("JARZ Replenishment - FG warehouse read failed", _traceback())
     if configured:
         return str(configured)
 
@@ -351,8 +358,8 @@ def get_branch_replenishment(
 
     Args:
         company: optional; defaults to the global default company.
-        source_warehouse: the factory store; defaults to Manufacturing
-            Settings' ``default_fg_warehouse``.
+        source_warehouse: the factory store; defaults to the company's
+            ``default_fg_warehouse``.
         cover_days: days of cover each branch should hold (default 14).
         sales_days: how many completed days of sales set the rate (default 30).
 
@@ -372,7 +379,7 @@ def get_branch_replenishment(
 
     company = _resolve_company(company)
     warehouse_rows = _resolve_warehouse_rows(company)
-    source = _resolve_source_warehouse(source_warehouse, warehouse_rows)
+    source = _resolve_source_warehouse(source_warehouse, warehouse_rows, company)
 
     empty: Dict[str, Any] = {
         "generated_on": _generated_on(),
@@ -390,7 +397,7 @@ def get_branch_replenishment(
     if not source:
         return plan.build_plan(
             **empty,
-            notice="No factory store is configured. Set Manufacturing Settings "
+            notice="No factory store is configured. Set Company "
                    "> Default Finished Goods Warehouse, or pass source_warehouse.",
         )
 

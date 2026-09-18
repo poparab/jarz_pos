@@ -509,6 +509,71 @@ class TestCoerceDays(unittest.TestCase):
         self.assertEqual(90, self._call(3650))
 
 
+class TestResolveSourceWarehouse(unittest.TestCase):
+    """The factory store is the Company's ``default_fg_warehouse``.
+
+    v16's ``set_company_wise_warehouses`` patch moved the field off
+    Manufacturing Settings, and ``get_single_value`` raises on a field the meta
+    no longer has — so the old read failed on every call and the screen always
+    ran on the name guess.
+    """
+
+    ROWS = [
+        {"name": "Nasr city - J"},
+        {"name": "Finished Goods - J"},
+    ]
+
+    def _call(self, source=None, rows=None, company="JARZ", get_value=None):
+        from jarz_pos.api import replenishment as api
+
+        db = mock.Mock()
+        db.get_value = get_value or mock.Mock(return_value="Factory Store - J")
+        db.get_single_value = mock.Mock(
+            side_effect=AssertionError("Manufacturing Settings no longer has the field")
+        )
+        with mock.patch.object(api.frappe, "db", db, create=True),                 mock.patch.object(api, "_log_failure") as log_failure:
+            result = api._resolve_source_warehouse(
+                source, self.ROWS if rows is None else rows, company
+            )
+        return result, db, log_failure
+
+    def test_the_callers_choice_wins_without_a_read(self):
+        result, db, _ = self._call(source="  Dokki - J  ")
+        self.assertEqual("Dokki - J", result)
+        db.get_value.assert_not_called()
+
+    def test_the_company_default_is_read_off_the_company(self):
+        result, db, log_failure = self._call()
+        self.assertEqual("Factory Store - J", result)
+        db.get_value.assert_called_once_with("Company", "JARZ", "default_fg_warehouse")
+        db.get_single_value.assert_not_called()
+        log_failure.assert_not_called()
+
+    def test_a_company_without_one_falls_to_the_name_guess(self):
+        result, _, log_failure = self._call(get_value=mock.Mock(return_value=None))
+        self.assertEqual("Finished Goods - J", result)
+        log_failure.assert_not_called()
+
+    def test_no_company_skips_the_read_and_guesses(self):
+        result, db, _ = self._call(company=None)
+        self.assertEqual("Finished Goods - J", result)
+        db.get_value.assert_not_called()
+
+    def test_a_failed_read_is_logged_and_falls_to_the_name_guess(self):
+        result, _, log_failure = self._call(
+            get_value=mock.Mock(side_effect=Exception("db down"))
+        )
+        self.assertEqual("Finished Goods - J", result)
+        log_failure.assert_called_once()
+        self.assertEqual(
+            "JARZ Replenishment - FG warehouse read failed", log_failure.call_args.args[0]
+        )
+
+    def test_nothing_configured_and_nothing_to_guess_is_none(self):
+        result, _, _ = self._call(rows=[{"name": "Nasr city - J"}], get_value=mock.Mock(return_value=None))
+        self.assertIsNone(result)
+
+
 class TestEndpoint(unittest.TestCase):
     """The API layer, with every database read patched out."""
 
@@ -524,7 +589,7 @@ class TestEndpoint(unittest.TestCase):
                 {"name": "Dokki - J", "warehouse_type": "", "is_group": 0, "disabled": 0},
                 {"name": "Raw Material - J", "warehouse_type": "", "is_group": 0, "disabled": 0},
             ],
-            "_resolve_source_warehouse": lambda source, rows: "Finished Goods - J",
+            "_resolve_source_warehouse": lambda source, rows, company: "Finished Goods - J",
             "_resolve_branch_labels": lambda: {},
             "_resolve_jar_items": lambda: [
                 {"item_code": "CHOC-L", "item_name": "Chocolate Hazelnut Large", "stock_uom": "Nos"},
@@ -568,10 +633,23 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(2, len(payload["branches"]))
 
     def test_no_factory_store_returns_a_well_formed_empty_payload(self):
-        payload = self._call(_resolve_source_warehouse=lambda source, rows: None)
+        payload = self._call(_resolve_source_warehouse=lambda source, rows, company: None)
         self.assertIsNone(payload["source"]["warehouse"])
         self.assertEqual([], payload["branches"])
         self.assertIn("factory store", payload["notice"])
+        # v16 moved the setting; pointing the owner at the old screen is a dead end.
+        self.assertIn("Company", payload["notice"])
+        self.assertNotIn("Manufacturing Settings", payload["notice"])
+
+    def test_the_resolved_company_reaches_the_factory_store_lookup(self):
+        seen = []
+
+        def _source(source, rows, company):
+            seen.append(company)
+            return "Finished Goods - J"
+
+        self._call(_resolve_source_warehouse=_source)
+        self.assertEqual(["Jarz"], seen)
 
     def test_the_permission_gate_is_the_transfer_gate(self):
         from jarz_pos.api import replenishment as api
