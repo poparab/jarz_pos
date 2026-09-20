@@ -36,6 +36,7 @@ def _make_invoice(name="ACC-SINV-TEST-900", grand_total=670.0, outstanding=0.0, 
 def _pe_row(name="ACC-PAY-1", paid_amount=670.0, **extra):
     row = {
         "name": name,
+        "payment_type": "Receive",
         "paid_amount": paid_amount,
         "unallocated_amount": 0.0,
         "clearance_date": None,
@@ -65,8 +66,10 @@ def _alloc_row(parent="ACC-PAY-1", reference_name="ACC-SINV-TEST-900", allocated
 class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
     """The classifier that decides whether a paid order may be amended at all."""
 
-    def _run(self, inv, pe_names, pe_rows, alloc_rows):
+    def _run(self, inv, pe_names, pe_rows, alloc_rows, capture=None):
         def _get_all(doctype, **kwargs):
+            if capture is not None:
+                capture.setdefault(doctype, []).append(kwargs)
             if doctype == "Payment Entry":
                 return pe_rows
             if doctype == "Payment Entry Reference":
@@ -76,6 +79,7 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
         with (
             patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=pe_names),
             patch("jarz_pos.api.manager.frappe.get_all", side_effect=_get_all),
+            patch("jarz_pos.api.manager.frappe.db.get_value", return_value=None),
         ):
             from jarz_pos.api.manager import evaluate_amendment_payment_migration
 
@@ -160,6 +164,68 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
         )
         self.assertFalse(out["can_migrate"])
         self.assertEqual(out["block_code"], "paid_amendment_non_simple_payment")
+
+
+    def test_foreign_allocation_is_not_read_out_of_a_capped_page(self):
+        """The shared-payment refusal proves a NEGATIVE, so its query must be unbounded.
+
+        A gateway payout allocated across 61+ invoices would push its foreign rows
+        outside a capped page; the refusal would pass and cancelling that entry would
+        strip the payment from every other invoice on the payout.
+        """
+        capture = {}
+        rows = [_alloc_row(allocated_amount=10.0) for _ in range(60)]
+        rows.append(_alloc_row(reference_name="ACC-SINV-OTHER", allocated_amount=70.0))
+        out = self._run(_make_invoice(), ["ACC-PAY-1"], [_pe_row()], rows, capture=capture)
+        self.assertFalse(out["can_migrate"], out)
+        self.assertEqual(out["block_code"], "paid_amendment_non_simple_payment")
+        ref_calls = capture.get("Payment Entry Reference") or []
+        self.assertTrue(ref_calls, "the allocation query never ran")
+        self.assertEqual(
+            ref_calls[0].get("limit_page_length"),
+            0,
+            "the allocation query must be unbounded - a capped page cannot prove "
+            "that no foreign allocation exists",
+        )
+
+    def test_a_refund_entry_is_refused_not_restamped_as_a_receipt(self):
+        out = self._run(
+            _make_invoice(), ["ACC-PAY-1"], [_pe_row(payment_type="Pay")], [_alloc_row()]
+        )
+        self.assertFalse(out["can_migrate"])
+        self.assertEqual(out["block_code"], "paid_amendment_non_receipt_payment")
+
+    def test_a_deduction_on_the_entry_is_refused(self):
+        """Paid 700, 30 booked as a gateway fee, 670 allocated, 0 unallocated.
+
+        Passes every other guard. Re-issuing 700 with no deduction row would turn a
+        30 expense into a 30 customer credit.
+        """
+        out = self._run(
+            _make_invoice(), ["ACC-PAY-1"], [_pe_row(paid_amount=700.0)], [_alloc_row()]
+        )
+        self.assertFalse(out["can_migrate"])
+        self.assertEqual(out["block_code"], "paid_amendment_payment_has_deductions")
+
+    def test_a_payment_from_a_closed_shift_is_refused(self):
+        with (
+            patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["ACC-PAY-1"]),
+            patch(
+                "jarz_pos.api.manager.frappe.get_all",
+                side_effect=lambda dt, **kw: [_pe_row()] if dt == "Payment Entry" else [_alloc_row()],
+            ),
+            patch("jarz_pos.api.manager.frappe.db.get_value", return_value="2026-09-19 10:00:00"),
+            patch(
+                "jarz_pos.utils.access_control.find_closed_shift_covering",
+                return_value={"name": "SHIFT-0007"},
+            ),
+        ):
+            from jarz_pos.api.manager import evaluate_amendment_payment_migration
+
+            out = evaluate_amendment_payment_migration(_make_invoice())
+        self.assertFalse(out["can_migrate"], out)
+        self.assertEqual(out["block_code"], "paid_amendment_closed_shift")
+        self.assertIn("SHIFT-0007", out["block_reason"])
 
     def test_partial_payment_is_migrated_not_refused(self):
         """The quietest money loss today: refusing here would preserve the bug."""
@@ -249,6 +315,24 @@ class TestRebookAmendmentPayment(unittest.TestCase):
         self.assertEqual(out["payment_entries"], [])
         self.assertEqual(created, [])
         self.assertAlmostEqual(out["outstanding_before"], 0.0)
+
+    def test_unreadable_replacement_raises_instead_of_reporting_settled(self):
+        """`or {}` + flt(None) would collapse "row not found" into outstanding=0 —
+        the Employee counter-paid success signal — and the caller's only safety net
+        reads that same value, so it could never fire."""
+        with (
+            patch("jarz_pos.api.manager.frappe.db.get_value", return_value=None),
+            patch("jarz_pos.api.manager.frappe.new_doc") as new_doc,
+        ):
+            from jarz_pos.api.manager import _rebook_amendment_payment
+
+            with self.assertRaises(Exception):
+                _rebook_amendment_payment(
+                    replacement_invoice_name="ACC-SINV-TEST-900-1",
+                    source_payment_rows=[_pe_row()],
+                    logger=MagicMock(),
+                )
+        new_doc.assert_not_called()
 
     def test_outstanding_before_is_reported_when_money_was_owed(self):
         out, _created = self._run(670.0, [_pe_row()])

@@ -444,7 +444,7 @@ def _find_submitted_payment_entries(invoice_name: str) -> List[str]:
             "parenttype": "Payment Entry",
         },
         pluck="parent",
-        limit_page_length=20,
+        limit_page_length=0,
     ) or []
     payment_entry_names = sorted({row for row in ref_rows if row})
     if not payment_entry_names:
@@ -454,7 +454,7 @@ def _find_submitted_payment_entries(invoice_name: str) -> List[str]:
         "Payment Entry",
         filters={"name": ["in", payment_entry_names], "docstatus": 1},
         pluck="name",
-        limit_page_length=20,
+        limit_page_length=0,
     ) or []
     return sorted({row for row in submitted if row})
 
@@ -534,8 +534,10 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
     rows = frappe.get_all(
         "Payment Entry",
         filters={"name": ["in", payment_entry_names], "docstatus": 1},
+        limit_page_length=0,
         fields=[
             "name",
+            "payment_type",
             "paid_amount",
             "unallocated_amount",
             "clearance_date",
@@ -549,22 +551,41 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
             "reference_date",
             "posting_date",
         ],
-        limit_page_length=20,
     ) or []
+    # `limit_page_length=0` (unbounded) is load-bearing, not tidiness. This set is
+    # read to prove a NEGATIVE — "no allocation points anywhere but this invoice" —
+    # and a capped page proves nothing: a gateway payout allocated across 61+
+    # invoices would have its foreign rows fall outside the page, the shared-payment
+    # refusal would pass, and cancelling that entry would strip the payment from
+    # every other invoice on the payout. A bounded query cannot answer this question.
     allocations = frappe.get_all(
         "Payment Entry Reference",
         filters={"parent": ["in", payment_entry_names], "parenttype": "Payment Entry"},
         fields=["parent", "reference_doctype", "reference_name", "allocated_amount"],
-        limit_page_length=60,
+        limit_page_length=0,
     ) or []
 
-    allocated_total = 0.0
-    for row in allocations:
-        if (
-            str(row.get("reference_doctype") or "") == "Sales Invoice"
-            and str(row.get("reference_name") or "") == invoice_name
-        ):
-            allocated_total += flt(row.get("allocated_amount"))
+    # Only a row that NAMES a different reference counts as foreign. A row with no
+    # reference recorded says nothing about sharing, and refusing on it would be the
+    # inference-from-an-absent-field that made an amendment impossible whenever
+    # `outstanding_amount` was unpopulated. Money allocated to nothing is caught by
+    # the unallocated check below.
+    def _is_foreign_allocation(row: Dict[str, Any]) -> bool:
+        reference_name = str(row.get("reference_name") or "").strip()
+        reference_doctype = str(row.get("reference_doctype") or "").strip()
+        if reference_name and reference_name != invoice_name:
+            return True
+        return bool(reference_doctype) and reference_doctype != "Sales Invoice"
+
+    # Defined by the SAME predicate, so the two rules cannot disagree about a blank
+    # row: whatever is not foreign is this invoice's. Summing only rows that
+    # explicitly name this invoice would leave a reference-less row counted by
+    # neither, and the deductions check below would then read the gap as a fee.
+    allocated_total = sum(
+        flt(row.get("allocated_amount"))
+        for row in allocations
+        if not _is_foreign_allocation(row)
+    )
 
     paid = dict(
         empty,
@@ -579,19 +600,6 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 
     # A Payment Entry that also settles another invoice cannot be reproduced by
     # cancelling and re-issuing it — the other invoice would lose its payment too.
-    #
-    # Only a row that NAMES a different reference counts. A row with no reference
-    # recorded says nothing about sharing, and refusing on it would be the same
-    # inference-from-an-absent-field that made an amendment impossible whenever
-    # `outstanding_amount` was unpopulated. Money allocated to nothing is already
-    # caught by the unallocated check below.
-    def _is_foreign_allocation(row: Dict[str, Any]) -> bool:
-        reference_name = str(row.get("reference_name") or "").strip()
-        reference_doctype = str(row.get("reference_doctype") or "").strip()
-        if reference_name and reference_name != invoice_name:
-            return True
-        return bool(reference_doctype) and reference_doctype != "Sales Invoice"
-
     if any(_is_foreign_allocation(row) for row in allocations):
         return _refuse(
             "paid_amendment_non_simple_payment",
@@ -617,6 +625,70 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
                 "The payment for this order has an unallocated balance, "
                 "so it cannot be edited from this workflow."
             ),
+        )
+
+    # A refund or an outgoing entry cannot be reproduced by re-issuing a receipt.
+    # `_find_submitted_payment_entries` filters only on the reference and docstatus,
+    # so a "Pay" entry against this invoice reaches here; `_rebook_amendment_payment`
+    # would re-stamp it "Receive". Compare the file's own convention in
+    # `_resolve_amendment_employee_payment`, which filters payment_type and party.
+    if any(
+        str(row.get("payment_type") or "").strip() != "Receive"
+        or str(row.get("party_type") or "Customer").strip() != "Customer"
+        for row in rows
+    ):
+        return _refuse(
+            "paid_amendment_non_receipt_payment",
+            _(
+                "This order has a refund or non-customer payment attached, "
+                "so it cannot be edited from this workflow."
+            ),
+        )
+
+    # Money that left the entry as a DEDUCTION (a gateway fee booked on the Payment
+    # Entry itself) is invisible to the unallocated check: paid 1000, fee 30,
+    # allocated 970, unallocated 0 passes every guard above. Re-issuing 1000 with no
+    # deduction row would turn a 30 expense into a 30 customer credit. The shapes are
+    # equal only when nothing was skimmed off in between.
+    total_paid = sum(flt(row.get("paid_amount")) for row in rows)
+    if abs(total_paid - allocated_total) > _PAYMENT_TOLERANCE:
+        return _refuse(
+            "paid_amendment_payment_has_deductions",
+            _(
+                "The payment on this order carries a fee or deduction, "
+                "so it cannot be edited from this workflow."
+            ),
+        )
+
+    # A Payment Entry booked inside an already-CLOSED shift cannot be cancelled here.
+    # Cancelling it retroactively removes its GL rows from that shift, so the cash
+    # reconciliation and the Cash Over/Short journal posted at close stop matching the
+    # ledger they were computed from — the shift's total silently drops by this order
+    # and its Over/Short entry is wrong. `get_invoice_cancellation_eligibility` already
+    # refuses exactly this ("A paid invoice cancels its Payment Entries, so the shift
+    # rules apply"); the amendment lane performs the identical act and did not.
+    #
+    # Fails OPEN on a lookup error, like the caller that wraps this: an unavailable
+    # shift table must not make every paid order uneditable.
+    try:
+        from jarz_pos.utils.access_control import find_closed_shift_covering
+
+        for row in rows:
+            closed = find_closed_shift_covering(
+                frappe.db.get_value("Payment Entry", row.get("name"), "creation")
+            )
+            if closed:
+                return _refuse(
+                    "paid_amendment_closed_shift",
+                    _(
+                        "The payment for this order was booked in shift {0}, which is "
+                        "already closed. Use the return workflow instead."
+                    ).format(closed.get("name")),
+                )
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"Amendment closed-shift check failed for {invoice_name}",
         )
 
     # Deliberately NOT refused: a payment that covers only part of the invoice.
@@ -647,6 +719,7 @@ def _capture_payment_entry_shape(payment_entry: Any) -> Dict[str, Any]:
 
     return {
         "name": getattr(payment_entry, "name", None),
+        "payment_type": _field("payment_type") or "Receive",
         "paid_amount": flt(_field("paid_amount")),
         "paid_to": _field("paid_to"),
         "paid_from": _field("paid_from"),
@@ -691,6 +764,17 @@ def _rebook_amendment_payment(
         )
         or {}
     )
+    if not replacement:
+        # Split from the "already settled" branch below deliberately. Collapsing a
+        # row that is NOT THERE into outstanding=0 would report the Employee
+        # counter-paid success signal for an invoice that could not be read, and the
+        # caller's only safety net keys off that same value — so it could not fire.
+        frappe.throw(
+            _("Replacement invoice {0} could not be read to carry its payment over.").format(
+                replacement_invoice_name
+            )
+        )
+
     outstanding = flt(replacement.get("outstanding_amount"))
     if outstanding <= _PAYMENT_TOLERANCE:
         # Already settled by invoice creation — an Employee counter-paid order
@@ -716,7 +800,7 @@ def _rebook_amendment_payment(
         allocate = min(paid_amount, remaining) if remaining > _PAYMENT_TOLERANCE else 0.0
 
         pe = frappe.new_doc("Payment Entry")
-        pe.payment_type = "Receive"
+        pe.payment_type = row.get("payment_type") or "Receive"
         pe.company = row.get("company") or replacement.get("company")
         pe.party_type = row.get("party_type") or "Customer"
         pe.party = row.get("party") or replacement.get("customer")
@@ -2296,8 +2380,31 @@ def _run_invoice_amendment_job(
     save_point = f"invoice_amendment_{hashlib.sha1(request_id.encode('utf-8')).hexdigest()[:10]}"
     try:
         frappe.db.savepoint(save_point)
-    except Exception:
-        save_point = ""
+    except Exception as savepoint_error:
+        # Refuse HERE, before a single Payment Entry is cancelled. The old code set
+        # `save_point = ""` and carried on, which disarmed the rollback in the
+        # handler below — and that handler RETURNS a dict rather than re-raising, so
+        # Frappe's teardown commits whatever partial state was reached. The reachable
+        # end state was: gateway payment cancelled, replacement never created,
+        # committed. Everything downstream of here assumes this savepoint exists.
+        frappe.log_error(frappe.get_traceback(), f"Amendment savepoint failed for {invoice_id}")
+        if woo_lock_acquired and woo_lock_key:
+            try:
+                frappe.db.sql("SELECT RELEASE_LOCK(%s)", (woo_lock_key,))
+            except Exception:
+                pass
+        if inv_lock_acquired:
+            try:
+                frappe.db.sql("SELECT RELEASE_LOCK(%s)", (inv_lock_key,))
+            except Exception:
+                pass
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": _("This order could not be edited safely just now. Please try again."),
+            "amendment_block_code": "amendment_savepoint_unavailable",
+            "detail": str(savepoint_error),
+        }
 
     try:
         # WHETHER this payment may be migrated was already settled by the post-lock
