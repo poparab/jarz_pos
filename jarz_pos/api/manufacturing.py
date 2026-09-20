@@ -756,8 +756,33 @@ def _set_work_order_actual_dates(work_order: str, scheduled_dt: Any) -> None:
 
 
 def _find_company_warehouse(company: str, warehouse_type: str | None, name_hints: list[str]) -> str | None:
-    """Pick a reasonable warehouse for the company.
-    Priority: exact warehouse_type match -> name contains any hint -> any leaf warehouse for company.
+    """Pick the company's WIP or FG warehouse, or None.
+
+    Priority: exact warehouse_type match, then a name containing any hint.
+    There is deliberately NO further fallback.
+
+    There used to be one -- "any leaf warehouse for company", i.e.
+    get_value("Warehouse", {"company": company, "is_group": 0}), which is
+    whichever row the database happened to return first. Every caller of this
+    function resolves a Work Order's WIP or FG warehouse, and _ensure_work_order
+    SUBMITS that Work Order, so the arbitrary pick was posted to: a site whose
+    Company defaults were blank and whose warehouses are not named for their
+    purpose would manufacture finished goods into, plausibly, Raw Material - J.
+    Nothing would say so. It surfaces weeks later as bin drift, and by then the
+    stock entries are submitted and the repair is a reconciliation.
+
+    The "both warehouses must be resolvable" guard in _ensure_work_order was
+    supposed to catch exactly this, and could not: it only fires when this
+    returns None, which the catch-all made almost impossible. Returning None is
+    what re-arms it, and a refusal naming the missing setting is strictly better
+    than silently mis-filing stock.
+
+    Dormant when this was written -- both servers had
+    Company.default_fg_warehouse set on 2026-09-20, so the defaults resolve
+    before this function is consulted at all. The name hints also match the real
+    warehouse names here (see services/production_planning, which documents
+    relying on the WIP hint), so removing only the catch-all changes nothing on
+    a correctly configured site.
     """
     try:
         if warehouse_type:
@@ -779,9 +804,9 @@ def _find_company_warehouse(company: str, warehouse_type: str | None, name_hints
             )
             if rows:
                 return rows[0]["name"]
-        # Fallback to any leaf warehouse of the company
-        any_wh = frappe.db.get_value("Warehouse", {"company": company, "is_group": 0}, "name")
-        return any_wh
+        # No catch-all: see the docstring. An unresolvable warehouse must reach
+        # the caller as None so it can refuse, not as a guess.
+        return None
     except Exception:
         return None
 
@@ -2114,9 +2139,25 @@ def _ensure_work_order(line: Dict[str, Any], company: str, defaults: Dict[str, s
         wip_wh = _find_company_warehouse(company, "WIP", ["WIP", "Work In Progress"]) or None
     if not fg_wh:
         fg_wh = _find_company_warehouse(company, "Finished Goods", ["FG", "Finished Goods"]) or None
-    # Strict requirement: both warehouses must be resolvable for the BOM company
-    if not wip_wh or not fg_wh:
-        frappe.throw(_(f"Missing WIP/FG warehouse for company {company}. Set the Company's default WIP/FG warehouses or create WIP/FG warehouses."))
+    # Strict requirement: both warehouses must be resolvable for the BOM company.
+    #
+    # This is now reachable. _find_company_warehouse used to end in "any leaf
+    # warehouse for company", so it practically never returned None and this
+    # guard practically never fired -- the Work Order was submitted against an
+    # arbitrary warehouse instead. Naming WHICH one is missing because the
+    # message is the whole remedy: the fix is a Company default, and an operator
+    # reading "WIP/FG" has to check both.
+    missing = [
+        label
+        for label, value in (("WIP", wip_wh), ("Finished Goods", fg_wh))
+        if not value
+    ]
+    if missing:
+        frappe.throw(
+            _("Cannot create the Work Order: no {0} warehouse could be resolved for company {1}. Set the Company's default WIP / FG warehouses in Desk (Company > Manufacturing), or create a warehouse of that type.").format(
+                " and ".join(missing), company
+            )
+        )
 
     wo = frappe.get_doc({
         "doctype": "Work Order",
