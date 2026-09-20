@@ -207,23 +207,27 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
         self.assertFalse(out["can_migrate"])
         self.assertEqual(out["block_code"], "paid_amendment_payment_has_deductions")
 
-    def _closed_shift_run(self, paid_to, shift_account):
+    def _closed_shift_run(self, paid_to, shifts, tills):
+        """`shifts` are the closed entries covering the instant; `tills` maps
+        pos_profile -> that shift's cash account."""
         with (
             patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["ACC-PAY-1"]),
             patch(
                 "jarz_pos.api.manager.frappe.get_all",
                 side_effect=lambda dt, **kw: (
-                    [_pe_row(paid_to=paid_to)] if dt == "Payment Entry" else [_alloc_row()]
+                    [_pe_row(paid_to=paid_to)]
+                    if dt == "Payment Entry"
+                    else [_alloc_row()]
+                    if dt == "Payment Entry Reference"
+                    else shifts
+                    if dt == "POS Closing Entry"
+                    else []
                 ),
             ),
             patch("jarz_pos.api.manager.frappe.db.get_value", return_value="2026-09-19 10:00:00"),
             patch(
-                "jarz_pos.utils.access_control.find_closed_shift_covering",
-                return_value={"name": "SHIFT-0007", "pos_profile": "Dokki"},
-            ),
-            patch(
                 "jarz_pos.utils.account_utils.get_pos_cash_account",
-                return_value=shift_account,
+                side_effect=lambda profile, company: tills.get(profile),
             ),
         ):
             from jarz_pos.api.manager import evaluate_amendment_payment_migration
@@ -232,20 +236,47 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
 
     def test_a_till_payment_from_a_closed_shift_is_refused(self):
         """Cancelling it would retroactively change that shift's cash total."""
-        out = self._closed_shift_run(paid_to="Dokki - J", shift_account="Dokki - J")
+        out = self._closed_shift_run(
+            paid_to="Nasr city - J",
+            shifts=[{"name": "POS-CLO-15", "pos_profile": "Nasr city", "company": "JARZ"}],
+            tills={"Nasr city": "Nasr city - J"},
+        )
         self.assertFalse(out["can_migrate"], out)
         self.assertEqual(out["block_code"], "paid_amendment_closed_shift")
-        self.assertIn("SHIFT-0007", out["block_reason"])
+        self.assertIn("POS-CLO-15", out["block_reason"])
+
+    def test_the_right_shift_is_found_behind_another_branch_s(self):
+        """The regression that made the guard dead on real data.
+
+        Several branches close tills over the same minutes.
+        `find_closed_shift_covering` returns ONE arbitrary covering entry, so
+        comparing its till skipped the shift that actually held the money —
+        `ACC-PAY-2026-015546` / `POS-CLO-2026-00015` on staging read as amendable.
+        Every covering shift has to be considered, not the first one returned.
+        """
+        out = self._closed_shift_run(
+            paid_to="Nasr city - J",
+            shifts=[
+                {"name": "POS-CLO-99", "pos_profile": "Dokki", "company": "JARZ"},
+                {"name": "POS-CLO-15", "pos_profile": "Nasr city", "company": "JARZ"},
+            ],
+            tills={"Dokki": "Dokki - J", "Nasr city": "Nasr city - J"},
+        )
+        self.assertFalse(out["can_migrate"], out)
+        self.assertEqual(out["block_code"], "paid_amendment_closed_shift")
+        self.assertIn("POS-CLO-15", out["block_reason"])
 
     def test_a_gateway_payment_is_not_blocked_by_someone_elses_closed_shift(self):
-        """The regression this guard caused: refusing on the CLOCK, not the till.
+        """Refusing on the CLOCK made 109 of 120 paid staging invoices uneditable.
 
-        `find_closed_shift_covering` matches any branch's window, but a Kashier
-        receipt appears in no shift's reconciliation. Blocking on the window alone
-        made 109 of 120 paid staging invoices permanently uneditable — the exact
-        orders this topic exists to let an operator edit.
+        A Kashier receipt appears in no shift's reconciliation, so a closed till
+        over the same minutes is irrelevant to it.
         """
-        out = self._closed_shift_run(paid_to="kashier - J", shift_account="Dokki - J")
+        out = self._closed_shift_run(
+            paid_to="kashier - J",
+            shifts=[{"name": "POS-CLO-99", "pos_profile": "Dokki", "company": "JARZ"}],
+            tills={"Dokki": "Dokki - J"},
+        )
         self.assertTrue(out["can_migrate"], out)
         self.assertIsNone(out["block_code"])
 

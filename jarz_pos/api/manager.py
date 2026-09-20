@@ -464,6 +464,50 @@ def _find_submitted_payment_entries(invoice_name: str) -> List[str]:
 _PAYMENT_TOLERANCE = 0.01
 
 
+def _find_closed_shift_holding_till(voucher_creation: Any, paid_to: str, company: str) -> Optional[Dict[str, Any]]:
+    """Return the closed shift whose OWN till is ``paid_to``, or None.
+
+    Deliberately not :func:`find_closed_shift_covering`, which answers a different
+    question. That helper returns ONE arbitrary covering entry (``limit=1``) because
+    for cancellation any covering shift is disqualifying. Here the account decides,
+    so a single arbitrary row is the wrong shape twice over: several branches close
+    tills over the same minutes, and the one returned first is usually not the one
+    that holds this money. Comparing its till made the refusal miss a real till
+    payment inside its own closed shift — verified against
+    ``ACC-PAY-2026-015546`` / ``POS-CLO-2026-00015`` on staging.
+
+    So: enumerate every closed shift covering the instant, and refuse only if one of
+    them reconciles the very account the payment landed in.
+    """
+    if not voucher_creation or not paid_to:
+        return None
+    try:
+        from jarz_pos.utils.account_utils import get_pos_cash_account
+
+        rows = frappe.get_all(
+            "POS Closing Entry",
+            filters={
+                "docstatus": 1,
+                "period_start_date": ["<=", voucher_creation],
+                "period_end_date": [">=", voucher_creation],
+            },
+            fields=["name", "pos_profile", "company"],
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Closed-shift till lookup failed")
+        return None
+
+    for row in rows:
+        try:
+            till = get_pos_cash_account(row.get("pos_profile"), row.get("company") or company)
+        except Exception:
+            continue
+        if till and str(till).strip() == str(paid_to).strip():
+            return row
+    return None
+
+
 def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
     """Describe what has to happen to a source invoice's payment when it is amended.
 
@@ -679,41 +723,29 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
     # Fails OPEN on a lookup error, like the caller that wraps this: an unavailable
     # shift table must not make every paid order uneditable.
     try:
-        from jarz_pos.utils.access_control import find_closed_shift_covering
-        from jarz_pos.utils.account_utils import get_pos_cash_account
-
         company = str(inv.get("company") or "").strip()
         for row in rows:
             paid_to = str(row.get("paid_to") or "").strip()
             if not paid_to:
                 continue
-            closed = find_closed_shift_covering(
-                frappe.db.get_value("Payment Entry", row.get("name"), "creation")
+            closed = _find_closed_shift_holding_till(
+                frappe.db.get_value("Payment Entry", row.get("name"), "creation"),
+                paid_to,
+                company or str(row.get("company") or ""),
             )
-            if not closed:
-                continue
-            try:
-                shift_account = get_pos_cash_account(
-                    closed.get("pos_profile"), company or row.get("company")
+            if closed:
+                return _refuse(
+                    "paid_amendment_closed_shift",
+                    _(
+                        "The payment for this order was booked in shift {0}, which is "
+                        "already closed. Use the return workflow instead."
+                    ).format(closed.get("name")),
                 )
-            except Exception:
-                shift_account = None
-            if shift_account and str(shift_account).strip() != paid_to:
-                # Closed shift, but this money never entered its till.
-                continue
-            return _refuse(
-                "paid_amendment_closed_shift",
-                _(
-                    "The payment for this order was booked in shift {0}, which is "
-                    "already closed. Use the return workflow instead."
-                ).format(closed.get("name")),
-            )
     except Exception:
         frappe.log_error(
             frappe.get_traceback(),
             f"Amendment closed-shift check failed for {invoice_name}",
         )
-
     # Deliberately NOT refused: a payment that covers only part of the invoice.
     # A partial payment is the case that loses money most quietly today — the
     # cancel loop destroys it and nothing re-books it — and re-issuing it is
