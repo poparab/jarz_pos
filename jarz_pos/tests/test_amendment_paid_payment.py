@@ -135,6 +135,32 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
         self.assertFalse(out["can_migrate"])
         self.assertEqual(out["block_code"], "paid_amendment_unallocated_payment")
 
+    def test_allocation_rows_without_a_reference_are_not_foreign(self):
+        """Second inference-from-an-absent-field bug, caught by test_api_manager.
+
+        An allocation row that records no reference says nothing about sharing.
+        Reading `reference_name or ""` as "not this invoice" refused every
+        Employee cash amendment with `paid_amendment_non_simple_payment`.
+        """
+        out = self._run(
+            _make_invoice(),
+            ["ACC-PAY-1"],
+            [_pe_row()],
+            [{"parent": "ACC-PAY-1", "allocated_amount": 670.0}],
+        )
+        self.assertTrue(out["can_migrate"], out)
+        self.assertIsNone(out["block_code"])
+
+    def test_allocation_naming_a_different_invoice_is_still_foreign(self):
+        out = self._run(
+            _make_invoice(),
+            ["ACC-PAY-1"],
+            [_pe_row()],
+            [_alloc_row(), _alloc_row(reference_name="ACC-SINV-OTHER", allocated_amount=1.0)],
+        )
+        self.assertFalse(out["can_migrate"])
+        self.assertEqual(out["block_code"], "paid_amendment_non_simple_payment")
+
     def test_partial_payment_is_migrated_not_refused(self):
         """The quietest money loss today: refusing here would preserve the bug."""
         out = self._run(
@@ -152,13 +178,12 @@ class TestRebookAmendmentPayment(unittest.TestCase):
     """The replacement's Payment Entry is rebuilt from the cancelled one's shape."""
 
     def _run(self, outstanding, source_rows):
-        replacement = SimpleNamespace(
-            name="ACC-SINV-TEST-900-1",
-            outstanding_amount=outstanding,
-            posting_date="2026-09-20",
-            company="JARZ",
-            customer="Heba",
-        )
+        replacement = {
+            "outstanding_amount": outstanding,
+            "posting_date": "2026-09-20",
+            "company": "JARZ",
+            "customer": "Heba",
+        }
         created = []
 
         def _new_doc(doctype):
@@ -170,7 +195,7 @@ class TestRebookAmendmentPayment(unittest.TestCase):
             return pe
 
         with (
-            patch("jarz_pos.api.manager.frappe.get_doc", return_value=replacement),
+            patch("jarz_pos.api.manager.frappe.db.get_value", return_value=replacement),
             patch("jarz_pos.api.manager.frappe.new_doc", side_effect=_new_doc),
         ):
             from jarz_pos.api.manager import _rebook_amendment_payment
@@ -214,9 +239,20 @@ class TestRebookAmendmentPayment(unittest.TestCase):
         self.assertEqual(created[0].paid_amount, 670.0)
 
     def test_already_settled_replacement_books_nothing(self):
+        """Employee counter-paid: invoice creation already booked the till receipt.
+
+        `outstanding_before` is what tells the caller this is success rather than a
+        failed carry-over — throwing on "nothing re-booked" failed every Employee
+        cash amendment.
+        """
         out, created = self._run(0.0, [_pe_row()])
         self.assertEqual(out["payment_entries"], [])
         self.assertEqual(created, [])
+        self.assertAlmostEqual(out["outstanding_before"], 0.0)
+
+    def test_outstanding_before_is_reported_when_money_was_owed(self):
+        out, _created = self._run(670.0, [_pe_row()])
+        self.assertAlmostEqual(out["outstanding_before"], 670.0)
 
     def test_reference_without_woo_prefix_is_preserved(self):
         _, created = self._run(670.0, [_pe_row(reference_no="INSTAPAY-4411")])

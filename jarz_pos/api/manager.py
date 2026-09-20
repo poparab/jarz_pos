@@ -579,11 +579,20 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 
     # A Payment Entry that also settles another invoice cannot be reproduced by
     # cancelling and re-issuing it — the other invoice would lose its payment too.
-    if any(
-        str(row.get("reference_name") or "") != invoice_name
-        or str(row.get("reference_doctype") or "") != "Sales Invoice"
-        for row in allocations
-    ):
+    #
+    # Only a row that NAMES a different reference counts. A row with no reference
+    # recorded says nothing about sharing, and refusing on it would be the same
+    # inference-from-an-absent-field that made an amendment impossible whenever
+    # `outstanding_amount` was unpopulated. Money allocated to nothing is already
+    # caught by the unallocated check below.
+    def _is_foreign_allocation(row: Dict[str, Any]) -> bool:
+        reference_name = str(row.get("reference_name") or "").strip()
+        reference_doctype = str(row.get("reference_doctype") or "").strip()
+        if reference_name and reference_name != invoice_name:
+            return True
+        return bool(reference_doctype) and reference_doctype != "Sales Invoice"
+
+    if any(_is_foreign_allocation(row) for row in allocations):
         return _refuse(
             "paid_amendment_non_simple_payment",
             _(
@@ -618,6 +627,37 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
     return paid
 
 
+def _capture_payment_entry_shape(payment_entry: Any) -> Dict[str, Any]:
+    """Record what a Payment Entry IS, so an equivalent can be re-issued later.
+
+    Taken from the loaded document a line before ``.cancel()`` runs, rather than
+    from a fresh query: the document is in hand, it is authoritative, and the job
+    has already paid for the lookup that produced it.
+    """
+    def _field(name: str) -> Any:
+        getter = getattr(payment_entry, "get", None)
+        if callable(getter):
+            try:
+                value = getter(name)
+                if value is not None:
+                    return value
+            except Exception:
+                pass
+        return getattr(payment_entry, name, None)
+
+    return {
+        "name": getattr(payment_entry, "name", None),
+        "paid_amount": flt(_field("paid_amount")),
+        "paid_to": _field("paid_to"),
+        "paid_from": _field("paid_from"),
+        "mode_of_payment": _field("mode_of_payment"),
+        "party": _field("party"),
+        "party_type": _field("party_type"),
+        "company": _field("company"),
+        "reference_no": _field("reference_no"),
+    }
+
+
 def _rebook_amendment_payment(
     *,
     replacement_invoice_name: str,
@@ -640,10 +680,29 @@ def _rebook_amendment_payment(
       ``unallocated_amount``, i.e. a credit the customer is owed. Money is never
       created or destroyed to make the books look settled.
     """
-    replacement = frappe.get_doc("Sales Invoice", replacement_invoice_name)
-    outstanding = flt(replacement.outstanding_amount)
+    # Four scalar fields, so `db.get_value` rather than `get_doc`: loading the
+    # document would pull every item and tax row to read an outstanding balance.
+    replacement = (
+        frappe.db.get_value(
+            "Sales Invoice",
+            replacement_invoice_name,
+            ["outstanding_amount", "posting_date", "company", "customer"],
+            as_dict=True,
+        )
+        or {}
+    )
+    outstanding = flt(replacement.get("outstanding_amount"))
     if outstanding <= _PAYMENT_TOLERANCE:
-        return {"payment_entries": [], "allocated": 0.0, "unallocated": 0.0}
+        # Already settled by invoice creation — an Employee counter-paid order
+        # books its own till receipt on the is_employee_cash path. Booking nothing
+        # here is the correct outcome, not a failure; `outstanding_before` is
+        # returned so the caller can tell the two apart.
+        return {
+            "payment_entries": [],
+            "allocated": 0.0,
+            "unallocated": 0.0,
+            "outstanding_before": outstanding,
+        }
 
     created: List[str] = []
     allocated_total = 0.0
@@ -658,15 +717,15 @@ def _rebook_amendment_payment(
 
         pe = frappe.new_doc("Payment Entry")
         pe.payment_type = "Receive"
-        pe.company = row.get("company") or replacement.company
+        pe.company = row.get("company") or replacement.get("company")
         pe.party_type = row.get("party_type") or "Customer"
-        pe.party = row.get("party") or replacement.customer
+        pe.party = row.get("party") or replacement.get("customer")
         pe.paid_from = row.get("paid_from")
         pe.paid_to = row.get("paid_to")
         pe.paid_amount = paid_amount
         pe.received_amount = paid_amount
-        pe.posting_date = replacement.posting_date
-        pe.reference_date = replacement.posting_date
+        pe.posting_date = replacement.get("posting_date")
+        pe.reference_date = replacement.get("posting_date")
         if row.get("mode_of_payment"):
             pe.mode_of_payment = row.get("mode_of_payment")
         # Keep the gateway's own reference discoverable: the Woo lane writes
@@ -709,6 +768,7 @@ def _rebook_amendment_payment(
         "payment_entries": created,
         "allocated": allocated_total,
         "unallocated": unallocated_total,
+        "outstanding_before": outstanding,
     }
 
 
@@ -1847,7 +1907,9 @@ def _build_invoice_amendment_response(
         # the customer owing money (``payment_shortfall``) or owed a credit
         # (``payment_credit``). Both are zero on an equal-value swap.
         "rebooked_payment_entries": rebooked_payment.get("payment_entries") or [],
-        "payment_shortfall": flt(replacement_invoice.outstanding_amount),
+        # `.get()`, not attribute access: a Document raises for a field that was
+        # not loaded, and this file reads optional fields through `.get` throughout.
+        "payment_shortfall": flt(replacement_invoice.get("outstanding_amount")),
         "payment_credit": flt(rebooked_payment.get("unallocated")),
         "already_processed": already_processed,
         "invoice": format_invoice_data(replacement_invoice),
@@ -2238,34 +2300,24 @@ def _run_invoice_amendment_job(
         save_point = ""
 
     try:
-        # The settled payment has to be described BEFORE the cancel loop below
-        # destroys the evidence: once the entries are cancelled, their accounts
-        # and amounts are only recoverable from the cancelled documents, and a
-        # replacement booked from a re-derived account is how a gateway
-        # settlement silently becomes a till receipt.
-        payment_migration = evaluate_amendment_payment_migration(source_invoice)
-        if not payment_migration.get("can_migrate"):
-            if save_point:
-                frappe.db.rollback(save_point=save_point)
-            return {
-                "success": False,
-                "request_id": request_id,
-                "error": payment_migration.get("block_reason")
-                or _("This paid order cannot be edited from this workflow."),
-                "amendment_block_code": payment_migration.get("block_code")
-                or "paid_amendment_blocked",
-            }
-        source_payment_rows = list(payment_migration.get("payment_entry_rows") or [])
+        # WHETHER this payment may be migrated was already settled by the post-lock
+        # `fresh_eligibility` check above, which runs
+        # `evaluate_amendment_payment_migration` before anything is cancelled.
+        # What is left is to record each entry's SHAPE so it can be re-issued —
+        # off the document this loop already loads, a line before `.cancel()`
+        # destroys the evidence.
 
         # H1: Per-PE try/except so a single failed cancellation does not leave
         # previously-cancelled PEs orphaned against a still-submitted source invoice.
         payment_entries = _find_submitted_payment_entries(invoice_id)
+        source_payment_rows: List[Dict[str, Any]] = []
         pe_cancel_errors: List[str] = []
         for payment_entry_name in payment_entries:
             try:
                 payment_entry = frappe.get_doc("Payment Entry", payment_entry_name)
                 if int(payment_entry.get("docstatus") or 0) != 1:
                     continue
+                source_payment_rows.append(_capture_payment_entry_shape(payment_entry))
                 payment_entry.flags.ignore_permissions = True
                 payment_entry.cancel()
                 cancelled_payment_entries.append(payment_entry.name)
@@ -2347,23 +2399,45 @@ def _run_invoice_amendment_job(
                 logger=logger,
             )
             rebooked_payment_entries = rebooked_payment.get("payment_entries") or []
-            if not rebooked_payment_entries:
+            # Fail only when money was still owed and nothing covered it. An
+            # Employee counter-paid order arrives here already settled by invoice
+            # creation, so "nothing re-booked" is success — throwing on it failed
+            # every Employee cash amendment.
+            if (
+                flt(rebooked_payment.get("outstanding_before")) > _PAYMENT_TOLERANCE
+                and not rebooked_payment_entries
+            ):
                 frappe.throw(
                     _(
                         "The payment on {0} could not be carried over to {1}, "
                         "so the order was not changed."
                     ).format(invoice_id, replacement_invoice_name)
                 )
-            _add_invoice_audit_comment(
-                replacement_invoice_name,
-                (
-                    f"Payment carried over from {invoice_id}: "
-                    f"{', '.join(rebooked_payment_entries)} "
-                    f"(allocated {flt(rebooked_payment.get('allocated')):.2f}, "
-                    f"unallocated {flt(rebooked_payment.get('unallocated')):.2f}). "
-                    f"Superseded entries: {', '.join(cancelled_payment_entries) or 'none'}."
-                ),
-            )
+            if rebooked_payment_entries:
+                # Cosmetic, so it must never be able to undo the transfer it
+                # describes: this sits inside the savepoint, and an exception
+                # while FORMATTING a comment would roll back a correct,
+                # money-carrying amendment. Names are coerced for the same reason.
+                try:
+                    _add_invoice_audit_comment(
+                        replacement_invoice_name,
+                        (
+                            f"Payment carried over from {invoice_id}: "
+                            f"{', '.join(str(name) for name in rebooked_payment_entries)} "
+                            f"(allocated {flt(rebooked_payment.get('allocated')):.2f}, "
+                            f"unallocated {flt(rebooked_payment.get('unallocated')):.2f}). "
+                            "Superseded entries: "
+                            f"{', '.join(str(name) for name in cancelled_payment_entries) or 'none'}."
+                        ),
+                    )
+                except Exception as comment_error:
+                    logger.warning(
+                        {
+                            "event": "invoice_amendment_payment_comment_failed",
+                            "replacement_invoice": replacement_invoice_name,
+                            "error": str(comment_error),
+                        }
+                    )
 
         _mark_source_invoice_as_amended(
             invoice_id,
