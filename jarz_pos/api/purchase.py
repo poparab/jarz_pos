@@ -224,7 +224,12 @@ def search_items(
         fields=fields,
         limit_page_length=limit,
         limit_start=start,
-        order_by="item_name asc",
+        # name is the tiebreaker, not decoration. This list is paged with
+        # LIMIT/OFFSET, and MariaDB's sort is not stable across calls: two items
+        # sharing an item_name that straddle a page boundary can come back on
+        # both pages, or on neither. item_name alone made the ordering a
+        # coin-flip exactly where paging depends on it being fixed.
+        order_by="item_name asc, name asc",
     )
     if not items:
         return []
