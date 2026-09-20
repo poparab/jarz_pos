@@ -161,8 +161,16 @@ def get_final_products_report() -> Dict[str, Any]:
     for b in bins:
         item_wh_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
 
-    # One column set for the whole report, so Medium and Large line up and
-    # neither table's columns shift as stock moves.
+    # One column set for the whole report. What this guarantees is that the
+    # Company's FG warehouse is ALWAYS a column, and that Medium and Large
+    # always carry identical columns so the two tables line up.
+    #
+    # It does NOT freeze the column list: warehouse_set is the union of the
+    # pinned FG warehouse and every warehouse holding a non-zero bin, so a
+    # stray Bin row elsewhere still grows a column (and since the filter above
+    # counts negatives, an oversold bin now grows one too). The report that
+    # sprouted a "Raw Material" column was cured by repairing the phantom bins,
+    # not by this line.
     warehouse_set: set = set(_finished_goods_warehouses())
     for wh_qty in item_wh_map.values():
         warehouse_set.update(wh_qty.keys())
@@ -250,9 +258,16 @@ def get_materials_report() -> Dict[str, Any]:
 
     item_codes = [it["item_code"] for it in items]
 
+    # Every non-zero balance, negatives included -- the same rule as
+    # get_final_products_report, and for the same reason. > 0 dropped a
+    # branch's oversold bin, so the total read HIGH: a raw material at 70 in
+    # the factory store and -4 at Dokki reported 70, not 66. The two halves of
+    # this screen disagreeing was worse than either rule on its own, because
+    # the same item in the same condition read differently depending on which
+    # tab you opened.
     bins = frappe.get_all(
         "Bin",
-        filters={"item_code": ["in", item_codes], "actual_qty": [">", 0]},
+        filters={"item_code": ["in", item_codes], "actual_qty": ["!=", 0]},
         fields=["item_code", "warehouse", "actual_qty"],
     )
 

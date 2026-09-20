@@ -270,6 +270,53 @@ class TestReportsAPI(unittest.TestCase):
         # Labels split out of Raw Material still count as materials.
         self.assertEqual({"flour", "Lotus label"}, {r["item_name"] for r in result["raw_materials"]})
 
+    def test_get_materials_report_counts_oversold_branches(self):
+        """The two halves of one screen must not disagree.
+
+        get_final_products_report stopped dropping negative bins; this one did
+        not, so the SAME item in the SAME condition read differently depending
+        on which tab you opened -- and the materials total read HIGH by exactly
+        the oversold amount.
+        """
+        from jarz_pos.api import reports
+
+        tree = {"Raw Material": (10, 11)}
+        items = [
+            {"item_code": "RM-1", "item_name": "flour", "item_group": "Raw Material", "stock_uom": "Kg"},
+        ]
+        bins = [
+            {"item_code": "RM-1", "warehouse": "Raw Material - J", "actual_qty": 70},
+            {"item_code": "RM-1", "warehouse": "Dokki - J", "actual_qty": -4},
+        ]
+        captured = {}
+
+        def fake_get_value(doctype, name, fields, as_dict=False):
+            bounds = tree.get(name)
+            return {"lft": bounds[0], "rgt": bounds[1]} if bounds else None
+
+        def fake_get_all(doctype, **kwargs):
+            if doctype == "Item Group":
+                lft = kwargs["filters"]["lft"][1]
+                return [{"name": n} for n, b in tree.items() if b[0] == lft]
+            if doctype == "Item":
+                return items
+            if doctype == "Bin":
+                captured["bin_filters"] = kwargs["filters"]
+                return bins
+            self.fail(f"Unexpected doctype lookup: {doctype}")
+
+        with patch("jarz_pos.api.reports._ensure_materials_report_access"), patch(
+            "jarz_pos.api.reports.frappe.db", SimpleNamespace(get_value=fake_get_value)
+        ), patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all):
+            result = reports.get_materials_report()
+
+        # The same filter the finished-goods report uses.
+        self.assertEqual(["!=", 0], captured["bin_filters"]["actual_qty"])
+
+        row = result["raw_materials"][0]
+        self.assertEqual(66, row["total_qty"])
+        self.assertEqual(-4, row["warehouse_qty"]["Dokki - J"])
+
     def test_get_materials_report_skips_groups_absent_on_this_site(self):
         """Packaging and Labels do not exist until the reshelving runs; the
         report must degrade to the groups that are actually there."""
