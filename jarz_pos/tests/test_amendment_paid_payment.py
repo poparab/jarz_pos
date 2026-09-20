@@ -81,40 +81,34 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
 
             return evaluate_amendment_payment_migration(inv)
 
-    def test_unpaid_order_needs_no_migration(self):
-        """A COD order is the common case and must not even hit the database."""
-        inv = _make_invoice(outstanding=670.0)
-        with patch("jarz_pos.api.manager._find_submitted_payment_entries") as finder:
-            from jarz_pos.api.manager import evaluate_amendment_payment_migration
-
-            out = evaluate_amendment_payment_migration(inv)
-        self.assertFalse(out["is_paid"])
+    def test_order_with_no_payment_entry_has_nothing_to_migrate(self):
+        """A COD order: the amendment cancels no payment, so there is none to carry."""
+        out = self._run(_make_invoice(outstanding=670.0), [], [], [])
+        self.assertFalse(out["has_payment"])
         self.assertTrue(out["can_migrate"])
-        finder.assert_not_called()
+        self.assertEqual(out["payment_entry_rows"], [])
 
-    def test_zero_total_order_needs_no_migration(self):
-        inv = _make_invoice(grand_total=0.0, outstanding=0.0)
-        with patch("jarz_pos.api.manager._find_submitted_payment_entries") as finder:
-            from jarz_pos.api.manager import evaluate_amendment_payment_migration
+    def test_invoice_with_no_outstanding_field_is_not_treated_as_paid(self):
+        """The regression that reddened test_amendment_price_list.
 
-            out = evaluate_amendment_payment_migration(inv)
-        self.assertFalse(out["is_paid"])
-        finder.assert_not_called()
+        `outstanding_amount` reads 0 when an order was paid AND when nothing ever
+        populated the field. Inferring "paid" from it, then REFUSING on that
+        inference, made an ordinary B2B amendment permanently impossible. Only a
+        real Payment Entry may drive this verdict.
+        """
+        inv = _make_invoice()
+        del inv.__dict__["outstanding_amount"]
+        out = self._run(inv, [], [], [])
+        self.assertTrue(out["can_migrate"], out)
+        self.assertIsNone(out["block_code"])
 
     def test_simple_gateway_payment_is_migratable(self):
         out = self._run(_make_invoice(), ["ACC-PAY-1"], [_pe_row()], [_alloc_row()])
-        self.assertTrue(out["is_paid"])
+        self.assertTrue(out["has_payment"])
         self.assertTrue(out["can_migrate"], out)
         self.assertEqual(out["payment_entries"], ["ACC-PAY-1"])
         self.assertAlmostEqual(out["allocated_total"], 670.0)
         self.assertEqual(out["payment_entry_rows"][0]["paid_to"], "kashier - J")
-
-    def test_settled_with_no_payment_entry_is_refused(self):
-        """Paid off by a Journal Entry or a write-off: nothing to re-book."""
-        out = self._run(_make_invoice(), [], [], [])
-        self.assertTrue(out["is_paid"])
-        self.assertFalse(out["can_migrate"])
-        self.assertEqual(out["block_code"], "paid_amendment_payment_artifact_missing")
 
     def test_payment_shared_with_another_invoice_is_refused(self):
         """Re-issuing it would strip the other invoice's payment too."""
@@ -141,12 +135,17 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
         self.assertFalse(out["can_migrate"])
         self.assertEqual(out["block_code"], "paid_amendment_unallocated_payment")
 
-    def test_allocation_short_of_total_is_refused(self):
+    def test_partial_payment_is_migrated_not_refused(self):
+        """The quietest money loss today: refusing here would preserve the bug."""
         out = self._run(
-            _make_invoice(), ["ACC-PAY-1"], [_pe_row(paid_amount=400.0)], [_alloc_row(allocated_amount=400.0)]
+            _make_invoice(outstanding=270.0),
+            ["ACC-PAY-1"],
+            [_pe_row(paid_amount=400.0)],
+            [_alloc_row(allocated_amount=400.0)],
         )
-        self.assertFalse(out["can_migrate"])
-        self.assertEqual(out["block_code"], "paid_amendment_payment_mismatch")
+        self.assertTrue(out["has_payment"])
+        self.assertTrue(out["can_migrate"], out)
+        self.assertAlmostEqual(out["allocated_total"], 400.0)
 
 
 class TestRebookAmendmentPayment(unittest.TestCase):

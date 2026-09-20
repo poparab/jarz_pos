@@ -464,10 +464,6 @@ def _find_submitted_payment_entries(invoice_name: str) -> List[str]:
 _PAYMENT_TOLERANCE = 0.01
 
 
-def _payment_amounts_match(left: Any, right: Any, tolerance: float = _PAYMENT_TOLERANCE) -> bool:
-    return abs(flt(left) - flt(right)) <= tolerance
-
-
 def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
     """Describe what has to happen to a source invoice's payment when it is amended.
 
@@ -490,54 +486,50 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 
     Returns a dict shaped like the other eligibility helpers:
 
-    ``is_paid``
-        The source carries settled money that must be carried across.
+    ``has_payment``
+        Submitted Payment Entries exist and must be carried across.
     ``can_migrate``
         False means the amendment must be refused rather than attempted; the money
         is in a shape this flow cannot reproduce safely.
-    ``payment_entries`` / ``allocated_total``
+    ``payment_entries`` / ``payment_entry_rows`` / ``allocated_total``
         What to re-book, captured while the entries are still live — after the
         cancel loop has run this information is only recoverable from the
         cancelled documents.
 
+    The question asked is strictly "does a submitted Payment Entry exist", NEVER
+    "does the invoice look settled". ``outstanding_amount`` reads 0 both when an
+    order was paid and when nothing populated the field — the same trap as
+    ``custom_delivery_income``, whose NOT NULL DEFAULT 0 makes "never overridden"
+    and "overridden to free" indistinguishable. Refusing an amendment on that
+    inference makes legitimately amendable orders permanently uneditable, which is
+    a worse failure than the one being prevented. An invoice settled by a Journal
+    Entry rather than a Payment Entry is already refused upstream by
+    ``journal_entry_exists``; one settled by nothing at all has no payment to lose,
+    so this returns "nothing to do" and the behaviour is exactly what it was before.
+
     Deliberately mirrors the Woo lane's checks rather than sharing code with it:
-    the two apps never import each other, and duplicating six boolean guards is a
+    the two apps never import each other, and duplicating three boolean guards is a
     smaller cost than a cross-app dependency.
     """
     invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
     empty: Dict[str, Any] = {
-        "is_paid": False,
+        "has_payment": False,
         "can_migrate": True,
         "block_code": None,
         "block_reason": None,
         "payment_entries": [],
+        "payment_entry_rows": [],
         "allocated_total": 0.0,
     }
     if not invoice_name:
         return empty
 
-    grand_total = flt(inv.get("grand_total"))
-    outstanding = flt(inv.get("outstanding_amount"))
-    # Cheap exit for the common case. A COD order is the overwhelming majority of
-    # this system's traffic and must not pay for two extra queries per Kanban card.
-    if grand_total <= _PAYMENT_TOLERANCE or outstanding > _PAYMENT_TOLERANCE:
-        return empty
-
     payment_entry_names = _find_submitted_payment_entries(invoice_name)
     if not payment_entry_names:
-        # Fully settled with no Payment Entry behind it: a Journal Entry, a write-off
-        # or a legacy record. There is nothing to re-book and guessing would invent
-        # money, so the amendment is refused rather than silently un-paying the order.
-        return dict(
-            empty,
-            is_paid=True,
-            can_migrate=False,
-            block_code="paid_amendment_payment_artifact_missing",
-            block_reason=_(
-                "This order is settled but has no Payment Entry to carry over, "
-                "so it cannot be edited from this workflow."
-            ),
-        )
+        # Nothing was settled through a Payment Entry, so the amendment cancels no
+        # payment and there is none to carry across. Two queries, on a single-invoice
+        # detail view rather than per Kanban card.
+        return empty
 
     rows = frappe.get_all(
         "Payment Entry",
@@ -576,7 +568,7 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 
     paid = dict(
         empty,
-        is_paid=True,
+        has_payment=True,
         payment_entries=sorted(payment_entry_names),
         payment_entry_rows=rows,
         allocated_total=allocated_total,
@@ -618,12 +610,11 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
             ),
         )
 
-    if not _payment_amounts_match(allocated_total, grand_total):
-        return _refuse(
-            "paid_amendment_payment_mismatch",
-            _("The payment on this order does not match its total, so it cannot be edited here."),
-        )
-
+    # Deliberately NOT refused: a payment that covers only part of the invoice.
+    # A partial payment is the case that loses money most quietly today — the
+    # cancel loop destroys it and nothing re-books it — and re-issuing it is
+    # unambiguous, because :func:`_rebook_amendment_payment` allocates only what
+    # the replacement actually owes. Refusing here would preserve the bug.
     return paid
 
 
@@ -2349,7 +2340,7 @@ def _run_invoice_amendment_job(
         # left unpaid is worse than a failed amendment, and the savepoint above
         # puts the source invoice and its payment back exactly as they were.
         rebooked_payment: Dict[str, Any] = {}
-        if payment_migration.get("is_paid") and source_payment_rows:
+        if source_payment_rows:
             rebooked_payment = _rebook_amendment_payment(
                 replacement_invoice_name=replacement_invoice_name,
                 source_payment_rows=source_payment_rows,
