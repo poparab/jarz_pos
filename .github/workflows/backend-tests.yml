@@ -222,6 +222,18 @@ jobs:
             # client sends. Together they repriced a 92 EGP B2B order at the 160 EGP
             # retail rate on its first amendment, with no way to get it back.
             test_amendment_price_list
+            # Payment survival across an amendment (Woo 17529 /
+            # ACC-SINV-2026-18388, the first Kashier-paid order ever amended).
+            # The amendment MUST cancel the source's Payment Entries to cancel
+            # the source invoice, and nothing downstream re-booked them:
+            # create_pos_invoice only pays an Employee counter order and an
+            # online *sales partner* order, so a gateway-paid order came back
+            # with its full total outstanding while the money sat in
+            # `kashier - J`. Proven on production against the real record.
+            # The Woo app's inbound lane already migrates the payment, but only
+            # when the edit starts in WooCommerce — the POS button reached none
+            # of it, which is why no other module here covers this.
+            test_amendment_paid_payment
             # Amendment hardening (idempotency keys, locks, rollback). The
             # amendment path replays the source invoice's shipping_address_name
             # verbatim, so an over-strict address guard makes an order
