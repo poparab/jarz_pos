@@ -85,9 +85,14 @@ class TestExpenseApprovalRecipients(unittest.TestCase):
             "_get_users_with_roles",
             return_value=["boss@jarz.test", "cashier@jarz.test"],
         ):
-            recipients = notifications._expense_approval_recipients("cashier@jarz.test")
+            holders, recipients = notifications._expense_approval_recipients(
+                "cashier@jarz.test"
+            )
 
         self.assertEqual(recipients, ["boss@jarz.test"])
+        # The holders are reported separately so the caller can tell "nobody has
+        # the role" from "the only holder filed it".
+        self.assertEqual(holders, ["boss@jarz.test", "cashier@jarz.test"])
 
     def test_no_requester_keeps_everyone(self):
         with patch.object(
@@ -95,9 +100,10 @@ class TestExpenseApprovalRecipients(unittest.TestCase):
             "_get_users_with_roles",
             return_value=["boss@jarz.test"],
         ):
-            self.assertEqual(
-                notifications._expense_approval_recipients(None), ["boss@jarz.test"]
-            )
+            holders, recipients = notifications._expense_approval_recipients(None)
+
+        self.assertEqual(recipients, ["boss@jarz.test"])
+        self.assertEqual(holders, ["boss@jarz.test"])
 
 
 class TestExpenseApprovalPayload(unittest.TestCase):
@@ -208,6 +214,25 @@ class TestExpenseApprovalPush(unittest.TestCase):
         send.assert_not_called()
         gap.assert_called_once()
 
+    def test_sole_manager_filing_their_own_request_is_not_a_misconfiguration(self):
+        """Telling an admin to grant a role that is already granted is a wrong answer."""
+        with _NotInATestRun():
+            with patch.object(
+                notifications,
+                "_get_users_with_roles",
+                return_value=["cashier@jarz.test"],
+            ), patch.object(notifications, "_log_notification_gap") as gap:
+                result = notifications.notify_expense_approval_required(_expense_doc())
+
+        self.assertEqual(result["status"], "skipped_requester_is_sole_manager")
+        gap.assert_not_called()
+
+    def test_worker_entry_point_refuses_a_blank_name(self):
+        self.assertEqual(
+            notifications.send_expense_approval_alert("")["status"],
+            "skipped_no_expense",
+        )
+
     def test_a_failure_never_escapes_to_the_caller(self):
         """after_insert runs inside the insert's transaction."""
         with _NotInATestRun():
@@ -248,26 +273,102 @@ class TestExpenseRequestFiresTheAlert(unittest.TestCase):
         )
 
         doc = _expense_doc(**doc_fields)
-        with patch.object(
-            notifications, "notify_expense_approval_required"
-        ) as notify:
-            JarzExpenseRequest.after_insert(doc)
-        return notify
+        with _NotInATestRun():
+            with patch.object(notifications.frappe, "enqueue") as enqueue:
+                JarzExpenseRequest.after_insert(doc)
+        return enqueue
 
     def test_pending_request_alerts(self):
-        notify = self._run_after_insert({"requires_approval": 1, "docstatus": 0})
-        notify.assert_called_once()
+        enqueue = self._run_after_insert({"requires_approval": 1, "docstatus": 0})
+        enqueue.assert_called_once()
+        kwargs = enqueue.call_args.kwargs
+        # after_commit is the whole point: the fan-out must not run inside the
+        # insert's transaction, or a failed push can roll back the expense.
+        self.assertTrue(kwargs["enqueue_after_commit"])
+        self.assertEqual(kwargs["expense"], "JEXP-2026-00042")
+        self.assertEqual(
+            enqueue.call_args.args[0],
+            "jarz_pos.api.notifications.send_expense_approval_alert",
+        )
 
     def test_manager_filed_request_does_not_alert(self):
-        """requires_approval=0 is submitted on the spot — nobody has to decide."""
-        notify = self._run_after_insert({"requires_approval": 0, "docstatus": 0})
-        notify.assert_not_called()
+        """requires_approval=0 is submitted on the spot - nobody has to decide."""
+        enqueue = self._run_after_insert({"requires_approval": 0, "docstatus": 0})
+        enqueue.assert_not_called()
 
     def test_already_rejected_request_does_not_alert(self):
-        notify = self._run_after_insert(
+        enqueue = self._run_after_insert(
             {"requires_approval": 1, "docstatus": 0, "rejection_reason": "No"}
         )
-        notify.assert_not_called()
+        enqueue.assert_not_called()
+
+    def test_a_test_run_queues_nothing(self):
+        """A queued job is not rolled back by the tearDown that undoes the row."""
+        from jarz_pos.doctype.jarz_expense_request.jarz_expense_request import (
+            JarzExpenseRequest,
+        )
+
+        with patch.object(notifications.frappe, "enqueue") as enqueue:
+            JarzExpenseRequest.after_insert(_expense_doc())
+
+        enqueue.assert_not_called()
+
+    def test_a_queue_failure_never_fails_the_expense(self):
+        from jarz_pos.doctype.jarz_expense_request.jarz_expense_request import (
+            JarzExpenseRequest,
+        )
+
+        with _NotInATestRun():
+            with patch.object(
+                notifications.frappe, "enqueue", side_effect=RuntimeError("no redis")
+            ), patch.object(notifications.frappe, "log_error") as log_error:
+                JarzExpenseRequest.after_insert(_expense_doc())
+
+        log_error.assert_called_once()
+        # Deferred, so a damaged transaction cannot make the log write itself
+        # the thing that rolls the expense back.
+        self.assertTrue(log_error.call_args.kwargs.get("defer_insert"))
+
+
+class TestExpenseApprovalWebPush(unittest.TestCase):
+    """Most managers are on the web PWA: 6 subscriptions vs 3 Android tokens."""
+
+    def test_web_tag_is_per_request_not_per_type(self):
+        """A web tag REPLACES: a shared one hides the earlier request."""
+        fake_messaging = SimpleNamespace(
+            WebpushNotification=lambda **kw: SimpleNamespace(**kw),
+            WebpushConfig=lambda **kw: SimpleNamespace(**kw),
+            WebpushFCMOptions=lambda **kw: SimpleNamespace(**kw),
+        )
+
+        def tag_for(name):
+            data = notifications._prepare_expense_approval_data_payload(
+                notifications._build_expense_approval_payload(_expense_doc(name=name))
+            )
+            with patch.object(
+                notifications, "messaging", fake_messaging, create=True
+            ):
+                config = notifications._build_webpush_config(data, "t", "b")
+            return config.notification.tag
+
+        first = tag_for("JEXP-2026-00042")
+        second = tag_for("JEXP-2026-00043")
+
+        self.assertEqual(first, "JEXP-2026-00042")
+        self.assertEqual(second, "JEXP-2026-00043")
+        self.assertNotEqual(first, second)
+
+    def test_invoice_web_tag_is_unchanged(self):
+        fake_messaging = SimpleNamespace(
+            WebpushNotification=lambda **kw: SimpleNamespace(**kw),
+            WebpushConfig=lambda **kw: SimpleNamespace(**kw),
+            WebpushFCMOptions=lambda **kw: SimpleNamespace(**kw),
+        )
+        data = {"type": "new_invoice", "invoice_id": "SINV-0003"}
+        with patch.object(notifications, "messaging", fake_messaging, create=True):
+            config = notifications._build_webpush_config(data, "t", "b")
+
+        self.assertEqual(config.notification.tag, "SINV-0003")
 
 
 if __name__ == "__main__":

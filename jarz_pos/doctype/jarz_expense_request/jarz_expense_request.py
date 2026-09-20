@@ -159,9 +159,18 @@ class JarzExpenseRequest(Document):
         neither is a new thing to be told about. Notifying on every save would
         re-alert the whole management team each time a field was corrected.
 
-        Swallows everything: after_insert runs inside the insert's
-        transaction, so an unreachable FCM must not roll back the expense the
-        cashier just filed.
+        Queued, not sent inline. The alert is one blocking HTTP request per
+        manager device (nine of them on production today), and after_insert
+        runs inside the insert's transaction -- so sending here would make the
+        cashier wait through the fan-out with the row still locked, and would
+        put an FCM timeout, the VAPID key bootstrap's frappe.db.commit() and
+        an Error Log insert all inside the transaction that owns their expense.
+        enqueue_after_commit moves every one of those past the commit: the
+        expense is durable before the first packet leaves, so no failure in the
+        notification can roll back the document it is merely ABOUT.
+
+        Still swallows: a queue that refuses the job must not fail the expense
+        either.
         """
         if self.docstatus != 0 or not flt(self.requires_approval):
             return
@@ -172,12 +181,28 @@ class JarzExpenseRequest(Document):
             return
 
         try:
-            from jarz_pos.api.notifications import notify_expense_approval_required
+            from jarz_pos.api.notifications import outbound_alerts_suppressed
 
-            notify_expense_approval_required(self)
+            # Checked before enqueuing as well as inside the job: CI runs
+            # against the live staging site, and a queued job is not rolled
+            # back by the tearDown that undoes this row.
+            if outbound_alerts_suppressed("expense_approval_required"):
+                return
+
+            frappe.enqueue(
+                "jarz_pos.api.notifications.send_expense_approval_alert",
+                queue="short",
+                enqueue_after_commit=True,
+                expense=self.name,
+            )
         except Exception:
+            # defer_insert: if what failed was a DB error, the transaction is
+            # already unusable and a direct Error Log insert would raise out of
+            # this handler and take the expense down with it.
             frappe.log_error(
-                frappe.get_traceback(), "expense_approval_notification_failed"
+                frappe.get_traceback(),
+                "expense_approval_notification_failed",
+                defer_insert=True,
             )
 
     def before_submit(self):

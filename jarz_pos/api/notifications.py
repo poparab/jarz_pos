@@ -1463,8 +1463,16 @@ def _build_webpush_config(data_payload: Dict[str, str], title: str, body: str) -
     if not webpush_config_cls or not webpush_notification_cls:
         return None
 
+    # Same collapse rule as the Android tag, and the same reason it must not be
+    # invoice_id alone: a web tag REPLACES the notification already showing.
+    # For anything that is not an invoice, invoice_id is empty and this fell
+    # through to the message TYPE -- identical for every expense approval, so
+    # the second request would silently replace the first in the tray and a
+    # manager would answer one of two. notification_id equals invoice_id on
+    # every invoice path, so nothing there changes.
     notification_tag = _pick_display_text(
         data_payload.get("invoice_id"),
+        data_payload.get("notification_id"),
         data_payload.get("type"),
         fallback="jarz_pos",
     )
@@ -2658,13 +2666,21 @@ def _safe_str(value: Any) -> str:
 # set would leave someone who can approve uninformed.
 
 
-def _expense_approval_recipients(requested_by: Optional[str] = None) -> List[str]:
-    """Managers who can answer an expense request, minus whoever filed it."""
-    recipients = _get_users_with_roles([ROLES.JARZ_MANAGER])
+def _expense_approval_recipients(
+    requested_by: Optional[str] = None,
+) -> Tuple[List[str], List[str]]:
+    """(holders, recipients) for an expense request.
+
+    Both halves are returned because an empty recipients has two causes that
+    an admin must not be asked to confuse: nobody holds the role at all (a
+    configuration fault), or the only holder is the person who filed the request
+    (normal -- a manager's own expense is submitted on the spot).
+    """
+    holders = _get_users_with_roles([ROLES.JARZ_MANAGER])
     requester = _safe_str(requested_by).strip()
-    if requester:
-        recipients = [u for u in recipients if u != requester]
-    return recipients
+    if not requester:
+        return holders, list(holders)
+    return holders, [u for u in holders if u != requester]
 
 
 def _build_expense_approval_payload(doc: Any) -> Dict[str, Any]:
@@ -2698,6 +2714,11 @@ def _build_expense_approval_payload(doc: Any) -> Dict[str, Any]:
         "pos_profile": _pick_display_text(getattr(doc, "pos_profile", None)),
         "company": _pick_display_text(getattr(doc, "company", None)),
         "expense_date": _safe_str(getattr(doc, "expense_date", "")),
+        # The month the row is FILED under, which is what the expenses screen
+        # filters on. A request dated 31 Aug and filed on 1 Sept lives in
+        # 2026-08, so a client that refreshed "the current month" would not
+        # show the very request this notification announces.
+        "expense_month": _safe_str(getattr(doc, "expense_month", "")),
         "remarks": _pick_display_text(getattr(doc, "remarks", None)),
         "requested_by": requested_by,
         "requested_by_name": requested_by_name,
@@ -2741,6 +2762,7 @@ def _prepare_expense_approval_data_payload(payload: Dict[str, Any]) -> Dict[str,
         "pos_profile": _pick_display_text(payload.get("pos_profile")),
         "company": _pick_display_text(payload.get("company")),
         "expense_date": _safe_str(payload.get("expense_date")),
+        "expense_month": _safe_str(payload.get("expense_month")),
         "requested_by": _safe_str(payload.get("requested_by")),
         "requested_by_name": requester,
         "remarks": _pick_display_text(payload.get("remarks")),
@@ -2751,6 +2773,34 @@ def _prepare_expense_approval_data_payload(payload: Dict[str, Any]) -> Dict[str,
         "title": title,
         "body": " | ".join(body_parts),
     }
+
+
+def send_expense_approval_alert(expense: str) -> Dict[str, Any]:
+    """Background-worker entry point for the expense approval alert.
+
+    Takes the NAME, not the document: RQ serialises its arguments, and a
+    half-built Document does not survive the trip.
+
+    The fan-out belongs here rather than inline in after_insert because it
+    is one blocking HTTP request PER DEVICE, serially -- measured on production
+    at 3 Android tokens plus 6 web-push subscriptions for 5 managers, so nine
+    round trips the cashier would otherwise wait through with the insert's
+    transaction still open. Queued with enqueue_after_commit by the caller,
+    which also means no HTTP, no frappe.db.commit() from the VAPID key
+    bootstrap, and no Error Log insert can touch that transaction at all: the
+    expense is durable before any of this runs.
+    """
+    name = _safe_str(expense).strip()
+    if not name:
+        return {"ok": False, "status": "skipped_no_expense"}
+    try:
+        doc = frappe.get_doc("Jarz Expense Request", name)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(), "expense_approval_alert_load_failed"
+        )
+        return {"ok": False, "status": "failed_load"}
+    return notify_expense_approval_required(doc)
 
 
 def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
@@ -2778,24 +2828,29 @@ def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
             result["status"] = "suppressed_test_run"
             return result
 
-        recipients = _expense_approval_recipients(payload.get("requested_by"))
+        holders, recipients = _expense_approval_recipients(payload.get("requested_by"))
         result["recipients"] = len(recipients)
 
         if not recipients:
             result["status"] = "skipped_no_recipients"
-            # Nobody holds the role that can answer this. That is a
-            # configuration fault, not a quiet no-op: the request would sit
-            # pending for ever and the requester would never learn why.
-            _log_notification_gap(
-                "Expense approval reached nobody (no manager holds the role)",
-                (
-                    f"Expense {payload.get('expense_id')} needs approval but ZERO "
-                    f"enabled users hold the {ROLES.JARZ_MANAGER} role, so no one was "
-                    "asked. Grant the role in Desk (User > Roles) to whoever approves "
-                    "expenses."
-                ),
-                throttle_key="expense_approval:no_recipients",
-            )
+            # Two different situations, and telling an admin the wrong one sends
+            # them to fix a role grant that is already correct. "No holders" is a
+            # configuration fault worth raising; "the only holder is the person
+            # who filed it" is normal -- a manager's own request is submitted on
+            # the spot and needs nobody's answer.
+            if not holders:
+                _log_notification_gap(
+                    "Expense approval reached nobody (no manager holds the role)",
+                    (
+                        f"Expense {payload.get('expense_id')} needs approval but ZERO "
+                        f"enabled users hold the {ROLES.JARZ_MANAGER} role, so no one "
+                        "was asked. Grant the role in Desk (User > Roles) to whoever "
+                        "approves expenses."
+                    ),
+                    throttle_key="expense_approval:no_recipients",
+                )
+            else:
+                result["status"] = "skipped_requester_is_sole_manager"
             return result
 
         _publish_to_recipients(
@@ -2853,8 +2908,15 @@ def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
         )
         return result
     except Exception:
+        # defer_insert, for the same reason _log_notification_gap uses it: this
+        # can run inside the caller's transaction, and if the failure being
+        # logged is itself a DB error the transaction is already unusable -- a
+        # direct Error Log insert would raise out of this except clause and roll
+        # back the expense the notification is merely ABOUT.
         frappe.log_error(
-            frappe.get_traceback(), "expense_approval_notification_failed"
+            frappe.get_traceback(),
+            "expense_approval_notification_failed",
+            defer_insert=True,
         )
         result["ok"] = False
         result["status"] = "failed_exception"
