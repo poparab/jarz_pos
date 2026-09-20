@@ -163,6 +163,12 @@ class WS_EVENTS:
     CUSTOM_SHIPPING_REJECTED = "jarz_pos_custom_shipping_rejected"
     SHIFT_STARTED = "jarz_pos_shift_started"
     SHIFT_ENDED = "jarz_pos_shift_ended"
+    # A Jarz Expense Request was filed that a JARZ Manager has to answer.
+    # The app is told by push (api.notifications.notify_expense_approval_required);
+    # this event is the in-session twin so an open expenses screen can refresh
+    # without waiting for its poll. No Dart listener yet -- see the class
+    # docstring on Python vs Dart parity.
+    EXPENSE_APPROVAL_REQUESTED = "jarz_pos_expense_approval_requested"
     # Consumable deduction could not post for an invoice that reached Out for
     # Delivery. Raised to a human on purpose: the handler is fire-and-forget
     # (it must never block fulfilment) and stamp_out_for_delivery_flag closes

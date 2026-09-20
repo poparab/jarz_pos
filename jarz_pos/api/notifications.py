@@ -378,6 +378,24 @@ INVOICE_STATUS_NOTIFICATION_TITLES = {
     "invoice_cancelled": "Order Cancelled",
 }
 
+# Android notification channels, named here rather than spelled inline at the
+# one place that picks between them. Each must also exist natively
+# (OrderAlertNative.prepareNotificationChannels): on Android 8+ a message
+# naming a channel the app never created is dropped by the system without a
+# trace, so these three strings and the Kotlin ones are one contract.
+ANDROID_ORDER_ALERT_CHANNEL_ID = "jarz_order_alerts"
+ANDROID_SHIFT_CHANNEL_ID = "jarz_shift_updates"
+#: Approvals get their own channel rather than riding the order channel.
+#: "Order Alerts" is IMPORTANCE_HIGH, bypasses Do Not Disturb and plays the
+#: full order-alarm tone -- right for a customer waiting at the counter, wrong
+#: for an expense that can be answered in the morning. Sharing it would also
+#: mean a manager cannot silence approvals without silencing orders.
+ANDROID_APPROVAL_CHANNEL_ID = "jarz_approvals"
+
+EXPENSE_APPROVAL_NOTIFICATION_TYPE = "expense_approval_required"
+#: Push types that belong on the approvals channel.
+APPROVAL_NOTIFICATION_TYPES = (EXPENSE_APPROVAL_NOTIFICATION_TYPE,)
+
 
 def _get_effective_profile_for_doc(doc: Any) -> str:
     return _pick_display_text(
@@ -2341,16 +2359,29 @@ def _send_fcm_notifications(
         else:
             notification = messaging.Notification(title=title, body=body)
 
-            # Use shift channel for shift events, order alerts channel for everything else
+            # Use shift channel for shift events, the approvals channel for
+            # things waiting on a decision, order alerts for everything else.
             if msg_type in ("shift_started", "shift_ended"):
-                android_channel_id = "jarz_shift_updates"
+                android_channel_id = ANDROID_SHIFT_CHANNEL_ID
+            elif msg_type in APPROVAL_NOTIFICATION_TYPES:
+                android_channel_id = ANDROID_APPROVAL_CHANNEL_ID
             else:
-                android_channel_id = "jarz_order_alerts"
+                android_channel_id = ANDROID_ORDER_ALERT_CHANNEL_ID
 
             android_notification = messaging.AndroidNotification(
                 sound='default',
                 channel_id=android_channel_id,
-                tag=data.get("invoice_id", "")
+                # A tag COLLAPSES: a second notification carrying it replaces
+                # the first in the tray. invoice_id alone was fine while every
+                # message here was about an invoice, but it is empty for
+                # anything else -- and two expense approvals sharing the empty
+                # tag would mean the second one hides the first, so a manager
+                # sees one request and pays one of two. notification_id is the
+                # per-event id every payload builder already sets (and equals
+                # invoice_id on the invoice paths, so nothing there changes).
+                tag=_pick_display_text(
+                    data.get("invoice_id"), data.get("notification_id")
+                ),
             )
 
         android_config_kwargs = {"priority": 'high'}
@@ -2526,6 +2557,42 @@ def _get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
     return users
 
 
+def _get_users_with_roles(roles: Sequence[str]) -> List[str]:
+    """Enabled users holding any of *roles*, sorted for a stable recipient list.
+
+    Administrator is deliberately NOT filtered out, matching
+    ``services.label_stock._alert_recipients``: on a site where it holds the
+    only copy of the role, excluding it would mean the alert reached nobody at
+    all and did so silently.
+    """
+    wanted = sorted({str(r).strip() for r in (roles or []) if str(r or "").strip()})
+    if not wanted:
+        return []
+
+    try:
+        rows = frappe.get_all(
+            "Has Role",
+            filters={"role": ["in", wanted], "parenttype": "User"},
+            pluck="parent",
+        )
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Failed to load users for roles")
+        return []
+
+    users: List[str] = []
+    seen: set = set()
+    for user in rows or []:
+        if not user or user == "Guest" or user in seen:
+            continue
+        seen.add(user)
+        try:
+            if frappe.db.get_value("User", user, "enabled"):
+                users.append(user)
+        except Exception:
+            continue
+    return sorted(users)
+
+
 def _get_profiles_for_user(user: str) -> List[str]:
     if not user or user == "Guest":
         return []
@@ -2575,6 +2642,224 @@ def _safe_str(value: Any) -> str:
     if value in (None, ""):
         return ""
     return str(value)
+
+# ── Expense approval alerts ───────────────────────────────────────────────────
+#
+# A Jarz Expense Request filed by a cashier lands at docstatus 0 with
+# ``requires_approval=1`` and simply sits there. Nothing told anyone: the
+# request was visible only to a manager who happened to open the expenses
+# screen and scroll, so "pending approval" routinely meant "nobody has been
+# asked yet" -- the same silence ``reject_expense`` was written to end at the
+# other end of the decision.
+#
+# Recipients are the holders of ROLES.JARZ_MANAGER, because that is exactly the
+# gate ``api.expenses._is_manager`` puts on approve_expense and reject_expense.
+# Anyone else would be told about a decision they cannot make, and any narrower
+# set would leave someone who can approve uninformed.
+
+
+def _expense_approval_recipients(requested_by: Optional[str] = None) -> List[str]:
+    """Managers who can answer an expense request, minus whoever filed it."""
+    recipients = _get_users_with_roles([ROLES.JARZ_MANAGER])
+    requester = _safe_str(requested_by).strip()
+    if requester:
+        recipients = [u for u in recipients if u != requester]
+    return recipients
+
+
+def _build_expense_approval_payload(doc: Any) -> Dict[str, Any]:
+    """The realtime payload for a pending expense request."""
+    name = _safe_str(getattr(doc, "name", ""))
+    if not name:
+        return {}
+
+    requested_by = _safe_str(getattr(doc, "requested_by", ""))
+    requested_by_name = requested_by
+    if requested_by:
+        try:
+            requested_by_name = (
+                frappe.db.get_value("User", requested_by, "full_name") or requested_by
+            )
+        except Exception:
+            requested_by_name = requested_by
+
+    return {
+        "expense_id": name,
+        "notification_id": name,
+        "amount": frappe.utils.flt(getattr(doc, "amount", 0)),
+        "currency": _safe_str(getattr(doc, "currency", "")),
+        "reason_label": _pick_display_text(
+            getattr(doc, "reason_label", None), getattr(doc, "reason_account", None)
+        ),
+        "payment_source_label": _pick_display_text(
+            getattr(doc, "payment_source_label", None),
+            getattr(doc, "paying_account", None),
+        ),
+        "pos_profile": _pick_display_text(getattr(doc, "pos_profile", None)),
+        "company": _pick_display_text(getattr(doc, "company", None)),
+        "expense_date": _safe_str(getattr(doc, "expense_date", "")),
+        "remarks": _pick_display_text(getattr(doc, "remarks", None)),
+        "requested_by": requested_by,
+        "requested_by_name": requested_by_name,
+        "timestamp": frappe.utils.now_datetime().isoformat(),
+    }
+
+
+def _prepare_expense_approval_data_payload(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Flatten the payload into the string-only map FCM and web push carry."""
+    amount = _format_total_display(payload.get("amount"))
+    currency = _pick_display_text(payload.get("currency"))
+    requester = _pick_display_text(
+        payload.get("requested_by_name"),
+        payload.get("requested_by"),
+        fallback="Someone",
+    )
+    reason = _pick_display_text(payload.get("reason_label"))
+    source = _pick_display_text(payload.get("payment_source_label"))
+
+    money = f"{amount} {currency}".strip()
+    title = f"Expense approval: {money}"
+
+    body_parts: List[str] = [f"From: {requester}"]
+    if reason:
+        body_parts.append(f"For: {reason}")
+    if source:
+        body_parts.append(f"Paid from: {source}")
+
+    return {
+        "type": EXPENSE_APPROVAL_NOTIFICATION_TYPE,
+        "expense_id": _safe_str(payload.get("expense_id")),
+        # Distinct per request, so two pending expenses cannot collapse into one
+        # tray entry on Android -- see the tag comment in _send_fcm_notifications.
+        "notification_id": _safe_str(
+            payload.get("notification_id") or payload.get("expense_id")
+        ),
+        "amount": amount,
+        "currency": currency,
+        "reason_label": reason,
+        "payment_source_label": source,
+        "pos_profile": _pick_display_text(payload.get("pos_profile")),
+        "company": _pick_display_text(payload.get("company")),
+        "expense_date": _safe_str(payload.get("expense_date")),
+        "requested_by": _safe_str(payload.get("requested_by")),
+        "requested_by_name": requester,
+        "remarks": _pick_display_text(payload.get("remarks")),
+        "timestamp": _pick_display_text(
+            payload.get("timestamp"),
+            fallback=frappe.utils.now_datetime().isoformat(),
+        ),
+        "title": title,
+        "body": " | ".join(body_parts),
+    }
+
+
+def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
+    """Alert every JARZ Manager that *doc* is waiting for a decision.
+
+    Never raises. Spending money is the point of the document and being told
+    about it is not, so a push that cannot be sent must not roll back the
+    request that triggered it -- the caller in
+    ``Jarz Expense Request.after_insert`` runs inside the insert's transaction.
+    """
+    result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+    try:
+        payload = _build_expense_approval_payload(doc)
+        if not payload:
+            result["status"] = "skipped_no_doc"
+            return result
+
+        # Before anything leaves the process, and before the gap logging
+        # below: CI's backend suite runs against the LIVE staging site, so a
+        # test that inserts a Jarz Expense Request fires this for real. The
+        # rollback in tearDown undoes the row; it cannot undo an FCM message
+        # already handed to Google, nor an Error Log claiming staging has no
+        # manager.
+        if outbound_alerts_suppressed("expense_approval_required"):
+            result["status"] = "suppressed_test_run"
+            return result
+
+        recipients = _expense_approval_recipients(payload.get("requested_by"))
+        result["recipients"] = len(recipients)
+
+        if not recipients:
+            result["status"] = "skipped_no_recipients"
+            # Nobody holds the role that can answer this. That is a
+            # configuration fault, not a quiet no-op: the request would sit
+            # pending for ever and the requester would never learn why.
+            _log_notification_gap(
+                "Expense approval reached nobody (no manager holds the role)",
+                (
+                    f"Expense {payload.get('expense_id')} needs approval but ZERO "
+                    f"enabled users hold the {ROLES.JARZ_MANAGER} role, so no one was "
+                    "asked. Grant the role in Desk (User > Roles) to whoever approves "
+                    "expenses."
+                ),
+                throttle_key="expense_approval:no_recipients",
+            )
+            return result
+
+        _publish_to_recipients(
+            WS_EVENTS.EXPENSE_APPROVAL_REQUESTED, payload, recipients
+        )
+
+        data = _prepare_expense_approval_data_payload(payload)
+        tokens, token_platforms = _get_token_targets_for_users(recipients)
+        vapid_subs = _get_vapid_subscriptions_for_users(recipients)
+
+        if tokens:
+            _log_fcm_info(
+                f"FCM send: expense_approval_required; recipients={len(recipients)}; "
+                f"tokens={len(tokens)}; expense={payload.get('expense_id')}"
+            )
+            fcm_result = _send_fcm_notifications(
+                tokens, data, platforms=token_platforms
+            )
+        else:
+            fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+            fcm_result["ok"] = True
+            if not vapid_subs:
+                _log_notification_gap(
+                    "Expense approval reached no device",
+                    (
+                        f"Expense {payload.get('expense_id')} resolved "
+                        f"{len(recipients)} manager(s) but ZERO enabled push tokens "
+                        "and ZERO web-push subscriptions, so no phone was alerted. "
+                        f"Recipients: {', '.join(recipients)}."
+                    ),
+                    throttle_key="expense_approval:notokens",
+                )
+
+        if vapid_subs:
+            vapid_result = _send_vapid_notifications(vapid_subs, data)
+        else:
+            vapid_result = {
+                "ok": True,
+                "status": "skipped_no_subscriptions",
+                "success_count": 0,
+                "failure_count": 0,
+            }
+
+        result.update(
+            {
+                "ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
+                "status": fcm_result.get("status"),
+                "success_count": fcm_result.get("success_count", 0)
+                + vapid_result.get("success_count", 0),
+                "failure_count": fcm_result.get("failure_count", 0)
+                + vapid_result.get("failure_count", 0),
+                "fcm": fcm_result,
+                "vapid": vapid_result,
+            }
+        )
+        return result
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(), "expense_approval_notification_failed"
+        )
+        result["ok"] = False
+        result["status"] = "failed_exception"
+        return result
+
 
 def _ensure_notification_health_access() -> None:
     roles = set(frappe.get_roles())

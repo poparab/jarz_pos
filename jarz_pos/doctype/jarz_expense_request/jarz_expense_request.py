@@ -145,6 +145,41 @@ class JarzExpenseRequest(Document):
         elif self.docstatus == 2:
             self.status = "Cancelled"
 
+    def after_insert(self):
+        """Tell the managers who can answer this that it is waiting.
+
+        Here rather than in api.expenses.create_expense so EVERY way a
+        pending request comes into being is covered by one rule -- the mobile
+        endpoint, a Desk entry, and anything added later. The gate is the
+        document's own state, not the caller's.
+
+        Fires on insert only, because requires_approval is decided at
+        insert on every path that creates one (0 if is_manager else 1), and
+        a request that already exists is either answered or still pending --
+        neither is a new thing to be told about. Notifying on every save would
+        re-alert the whole management team each time a field was corrected.
+
+        Swallows everything: after_insert runs inside the insert's
+        transaction, so an unreachable FCM must not roll back the expense the
+        cashier just filed.
+        """
+        if self.docstatus != 0 or not flt(self.requires_approval):
+            return
+        # A rejected request is a closed decision, not a pending one. It cannot
+        # arrive rejected today, but before_submit already guards the same case
+        # and the two must not disagree.
+        if self.rejection_reason or self.rejected_on:
+            return
+
+        try:
+            from jarz_pos.api.notifications import notify_expense_approval_required
+
+            notify_expense_approval_required(self)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(), "expense_approval_notification_failed"
+            )
+
     def before_submit(self):
         # A rejected request must never become an approved one by a later
         # submit: `on_submit` posts the Journal Entry, so letting this through
