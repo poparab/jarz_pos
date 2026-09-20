@@ -660,31 +660,54 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
             ),
         )
 
-    # A Payment Entry booked inside an already-CLOSED shift cannot be cancelled here.
-    # Cancelling it retroactively removes its GL rows from that shift, so the cash
-    # reconciliation and the Cash Over/Short journal posted at close stop matching the
-    # ledger they were computed from — the shift's total silently drops by this order
-    # and its Over/Short entry is wrong. `get_invoice_cancellation_eligibility` already
-    # refuses exactly this ("A paid invoice cancels its Payment Entries, so the shift
-    # rules apply"); the amendment lane performs the identical act and did not.
+    # A Payment Entry that sits in an already-CLOSED shift's till cannot be
+    # cancelled here. `_get_shift_account_movements` buckets a shift by ONE
+    # account — its cash-in-hand child — so cancelling a voucher inside a closed
+    # window retroactively removes its rows from that shift, and the Cash
+    # Over/Short journal posted at close stops matching the ledger it was
+    # computed from. `get_invoice_cancellation_eligibility` refuses exactly this.
+    #
+    # Scoped to the TILL, not to the clock. `find_closed_shift_covering` matches on
+    # the time window alone, for any branch — but a gateway payment
+    # (`kashier - J`) or a bank receipt appears in no shift's reconciliation, so
+    # cancelling it disturbs nothing. Refusing on the window alone would make
+    # almost every prepaid web order permanently uneditable the moment any branch
+    # closed a till over the same minutes: measured on staging, 109 of 120 paid
+    # invoices. That is the feature this topic exists to deliver, blocked by its
+    # own guard.
     #
     # Fails OPEN on a lookup error, like the caller that wraps this: an unavailable
     # shift table must not make every paid order uneditable.
     try:
         from jarz_pos.utils.access_control import find_closed_shift_covering
+        from jarz_pos.utils.account_utils import get_pos_cash_account
 
+        company = str(inv.get("company") or "").strip()
         for row in rows:
+            paid_to = str(row.get("paid_to") or "").strip()
+            if not paid_to:
+                continue
             closed = find_closed_shift_covering(
                 frappe.db.get_value("Payment Entry", row.get("name"), "creation")
             )
-            if closed:
-                return _refuse(
-                    "paid_amendment_closed_shift",
-                    _(
-                        "The payment for this order was booked in shift {0}, which is "
-                        "already closed. Use the return workflow instead."
-                    ).format(closed.get("name")),
+            if not closed:
+                continue
+            try:
+                shift_account = get_pos_cash_account(
+                    closed.get("pos_profile"), company or row.get("company")
                 )
+            except Exception:
+                shift_account = None
+            if shift_account and str(shift_account).strip() != paid_to:
+                # Closed shift, but this money never entered its till.
+                continue
+            return _refuse(
+                "paid_amendment_closed_shift",
+                _(
+                    "The payment for this order was booked in shift {0}, which is "
+                    "already closed. Use the return workflow instead."
+                ).format(closed.get("name")),
+            )
     except Exception:
         frappe.log_error(
             frappe.get_traceback(),

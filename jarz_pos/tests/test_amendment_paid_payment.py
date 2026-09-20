@@ -207,25 +207,47 @@ class TestEvaluateAmendmentPaymentMigration(unittest.TestCase):
         self.assertFalse(out["can_migrate"])
         self.assertEqual(out["block_code"], "paid_amendment_payment_has_deductions")
 
-    def test_a_payment_from_a_closed_shift_is_refused(self):
+    def _closed_shift_run(self, paid_to, shift_account):
         with (
             patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["ACC-PAY-1"]),
             patch(
                 "jarz_pos.api.manager.frappe.get_all",
-                side_effect=lambda dt, **kw: [_pe_row()] if dt == "Payment Entry" else [_alloc_row()],
+                side_effect=lambda dt, **kw: (
+                    [_pe_row(paid_to=paid_to)] if dt == "Payment Entry" else [_alloc_row()]
+                ),
             ),
             patch("jarz_pos.api.manager.frappe.db.get_value", return_value="2026-09-19 10:00:00"),
             patch(
                 "jarz_pos.utils.access_control.find_closed_shift_covering",
-                return_value={"name": "SHIFT-0007"},
+                return_value={"name": "SHIFT-0007", "pos_profile": "Dokki"},
+            ),
+            patch(
+                "jarz_pos.utils.account_utils.get_pos_cash_account",
+                return_value=shift_account,
             ),
         ):
             from jarz_pos.api.manager import evaluate_amendment_payment_migration
 
-            out = evaluate_amendment_payment_migration(_make_invoice())
+            return evaluate_amendment_payment_migration(_make_invoice(company="JARZ"))
+
+    def test_a_till_payment_from_a_closed_shift_is_refused(self):
+        """Cancelling it would retroactively change that shift's cash total."""
+        out = self._closed_shift_run(paid_to="Dokki - J", shift_account="Dokki - J")
         self.assertFalse(out["can_migrate"], out)
         self.assertEqual(out["block_code"], "paid_amendment_closed_shift")
         self.assertIn("SHIFT-0007", out["block_reason"])
+
+    def test_a_gateway_payment_is_not_blocked_by_someone_elses_closed_shift(self):
+        """The regression this guard caused: refusing on the CLOCK, not the till.
+
+        `find_closed_shift_covering` matches any branch's window, but a Kashier
+        receipt appears in no shift's reconciliation. Blocking on the window alone
+        made 109 of 120 paid staging invoices permanently uneditable — the exact
+        orders this topic exists to let an operator edit.
+        """
+        out = self._closed_shift_run(paid_to="kashier - J", shift_account="Dokki - J")
+        self.assertTrue(out["can_migrate"], out)
+        self.assertIsNone(out["block_code"])
 
     def test_partial_payment_is_migrated_not_refused(self):
         """The quietest money loss today: refusing here would preserve the bug."""
