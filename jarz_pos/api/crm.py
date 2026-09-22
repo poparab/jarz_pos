@@ -552,6 +552,7 @@ def get_account(doctype, name):
                 "Customer", customer, "custom_avg_order_cycle_days"
             )
         result["recent_invoices"] = _recent_b2b_invoices(customer)
+        _attach_branches(result, customer)
 
     # Open ToDos referencing this record.
     result["open_todos"] = _open_todos_for(doctype, name)
@@ -564,6 +565,230 @@ def get_account(doctype, name):
     # labels are not there. Guarded -> None (never raises, absent pre-migrate).
     result["labels"] = _label_summary_for_customer(customer) if customer else None
 
+    return result
+
+
+def _attach_branches(result, customer):
+    """Fold the customer's branches -- each with its own invoices and balance --
+    into an account payload, and label every recent invoice with its branch.
+    Guarded: a failure here must never take the account screen down."""
+    result["branches"] = []
+    result["unassigned_invoices"] = None
+    try:
+        from jarz_pos.services import b2b_branches
+
+        book = b2b_branches.account_branches(customer)
+        result["branches"] = book["branches"]
+        result["unassigned_invoices"] = book["unassigned"]
+        index = b2b_branches._member_index(book["branches"])
+        for invoice in result.get("recent_invoices") or []:
+            address = frappe.db.get_value(
+                "Sales Invoice",
+                invoice.get("name"),
+                ["shipping_address_name", "customer_address"],
+                as_dict=True,
+            ) or {}
+            branch = b2b_branches._branch_for_invoice(address, index)
+            invoice["branch_address"] = branch["address_name"] if branch else None
+            invoice["branch_name"] = branch["branch_name"] if branch else None
+    except Exception:
+        frappe.log_error(
+            title=f"crm: branch summary failed for {customer}",
+            message=frappe.get_traceback(),
+        )
+
+
+def _account_customer(doctype, name):
+    """The Customer behind a B2B card, after the normal access checks."""
+    if doctype not in ("Lead", "Opportunity", "Customer"):
+        frappe.throw("doctype must be 'Lead', 'Opportunity' or 'Customer'.")
+    if not _doctype_exists(doctype) or not frappe.db.exists(doctype, name):
+        frappe.throw(f"{doctype} '{name}' not found.")
+    _require_doc_permission(doctype, name, "read")
+    if doctype == "Lead":
+        customer = _resolve_lead_customer(name)
+    elif doctype == "Opportunity":
+        customer = _resolve_opportunity_customer(frappe.get_doc("Opportunity", name))
+    else:
+        customer = name
+    if not customer:
+        frappe.throw("This account has no customer yet, so it has no invoices.")
+    _require_doc_permission("Customer", customer, "read")
+    return customer
+
+
+@frappe.whitelist()
+def get_account_invoices(doctype, name, branch=None, limit=100):
+    """Every submitted invoice of a B2B account, optionally for ONE branch.
+
+    ``branch`` is a branch's ``address_name`` from ``get_account().branches``,
+    or ``"__unassigned__"`` for invoices that match no branch. ``summary`` is
+    the branch's whole history, not just the page listed.
+    """
+    _ensure_b2b_access()
+    customer = _account_customer(doctype, name)
+    try:
+        limit = max(1, min(int(limit or 100), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    from jarz_pos.services import b2b_branches
+
+    return b2b_branches.account_invoices(customer, branch=branch, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Merge one account into another as a branch
+# ---------------------------------------------------------------------------
+@frappe.whitelist()
+def search_merge_targets(doctype, name, query=None, limit=20):
+    """Accounts the given card can be merged INTO as a branch.
+
+    Returns live Leads (never a merged-away one) and Customers, dropping the
+    card itself and anything that already resolves to the same account. A
+    Customer that a returned Lead already stands for is not listed twice.
+    """
+    _ensure_b2b_access()
+    from jarz_pos.services import b2b_branches
+
+    if doctype not in ("Lead", "Customer") or not frappe.db.exists(doctype, name):
+        frappe.throw("Only a Lead or a Customer account can be merged.")
+    _require_doc_permission(doctype, name, "read")
+    source = b2b_branches.resolve_party(doctype, name)
+    query = str(query or "").strip()
+    try:
+        limit = max(1, min(int(limit or 20), 50))
+    except (TypeError, ValueError):
+        limit = 20
+
+    candidates = []
+    lead_filters = {"name": ["!=", source.get("lead") or ""]}
+    if _has_field("Lead", "custom_merged_into"):
+        lead_filters["custom_merged_into"] = ["is", "not set"]
+    lead_or = None
+    if query:
+        lead_or = {
+            "lead_name": ["like", f"%{query}%"],
+            "company_name": ["like", f"%{query}%"],
+            "mobile_no": ["like", f"%{query}%"],
+            "name": ["like", f"%{query}%"],
+        }
+    lead_fields = ["name", "lead_name", "company_name", "mobile_no", "customer"]
+    for optional in ("custom_b2b_stage", "custom_primary_area", "custom_branch_count"):
+        if _has_field("Lead", optional):
+            lead_fields.append(optional)
+    leads = frappe.get_list(
+        "Lead",
+        filters=lead_filters,
+        or_filters=lead_or,
+        fields=lead_fields,
+        order_by="modified desc",
+        limit_page_length=limit,
+    ) or []
+    customer_map = _lead_customer_map(leads)
+    seen_customers = set()
+    for row in leads:
+        customer = customer_map.get(row.get("name"))
+        if source.get("customer") and customer == source.get("customer"):
+            continue
+        if customer:
+            seen_customers.add(customer)
+        candidates.append(
+            {
+                "doctype": "Lead",
+                "name": row.get("name"),
+                "title": row.get("lead_name") or row.get("company_name") or row.get("name"),
+                "customer": customer,
+                "stage": row.get("custom_b2b_stage"),
+                "area": row.get("custom_primary_area"),
+                "mobile_no": row.get("mobile_no"),
+                "branch_count": int(row.get("custom_branch_count") or 0),
+            }
+        )
+
+    if query:
+        customers = frappe.get_list(
+            "Customer",
+            filters={"disabled": 0, "name": ["!=", source.get("customer") or ""]},
+            or_filters={
+                "name": ["like", f"%{query}%"],
+                "customer_name": ["like", f"%{query}%"],
+                "mobile_no": ["like", f"%{query}%"],
+            },
+            fields=["name", "customer_name", "mobile_no", "territory"],
+            order_by="customer_name asc",
+            limit_page_length=limit,
+        ) or []
+        for row in customers:
+            if row.get("name") in seen_customers:
+                continue
+            candidates.append(
+                {
+                    "doctype": "Customer",
+                    "name": row.get("name"),
+                    "title": row.get("customer_name") or row.get("name"),
+                    "customer": row.get("name"),
+                    "stage": None,
+                    "area": row.get("territory"),
+                    "mobile_no": row.get("mobile_no"),
+                    "branch_count": 0,
+                }
+            )
+    return {"candidates": candidates}
+
+
+def _merge_parties(source_doctype, source_name, target_doctype, target_name):
+    from jarz_pos.services import b2b_branches
+
+    for doctype, name in ((source_doctype, source_name), (target_doctype, target_name)):
+        if doctype in ("Lead", "Customer") and frappe.db.exists(doctype, name):
+            _require_doc_permission(doctype, name, "read")
+    source = b2b_branches.resolve_party(source_doctype, source_name)
+    target = b2b_branches.resolve_party(target_doctype, target_name)
+    plan = b2b_branches.build_plan(source, target)
+    # Linking a Lead's addresses onto a Customer rewrites that Customer's
+    # address book, so it needs the same right as editing the Customer.
+    if plan["customer_action"] == "link_lead_addresses":
+        _require_doc_permission("Customer", target["customer"], "write")
+    for party in (source, target):
+        _require_doc_permission(party["doctype"], party["name"], "write")
+        if party.get("lead") and party["lead"] != party["name"]:
+            _require_doc_permission("Lead", party["lead"], "write")
+        # Read, not write: the only step that rewrites a Customer (merging two
+        # of them) is refused to anyone but a manager inside execute().
+        if party.get("customer"):
+            _require_doc_permission("Customer", party["customer"], "read")
+    return source, target
+
+
+@frappe.whitelist()
+def preview_merge_as_branch(source_doctype, source_name, target_doctype, target_name):
+    """What merging SOURCE into TARGET as a branch will do. Changes nothing."""
+    _ensure_b2b_access()
+    from jarz_pos.services import b2b_branches
+
+    source, target = _merge_parties(source_doctype, source_name, target_doctype, target_name)
+    return b2b_branches.preview(source, target)
+
+
+@frappe.whitelist(methods=["POST"])
+def merge_as_branch(source_doctype, source_name, target_doctype, target_name, branch_name=None):
+    """Fold SOURCE into TARGET, keeping SOURCE's door as a branch of TARGET.
+
+    Two customer accounts are merged with every invoice, payment and address
+    moving to the target (manager only -- it cannot be undone); two catalog
+    Leads are folded by ``leads.merge_leads``. See ``services.b2b_branches``.
+    Returns the surviving card for the app to open next.
+    """
+    _ensure_b2b_access()
+    from jarz_pos.services import b2b_branches
+
+    source, target = _merge_parties(source_doctype, source_name, target_doctype, target_name)
+    result = b2b_branches.execute(source, target, branch_name=branch_name)
+    result.update(
+        success=True,
+        target_doctype=target["doctype"],
+        target_name=target["name"],
+    )
     return result
 
 

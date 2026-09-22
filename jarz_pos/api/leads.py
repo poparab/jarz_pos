@@ -1294,9 +1294,77 @@ def _branch_key(row):
     return f"url|{norm(row.get('maps_url'))}"
 
 
+def _pin(row):
+    lat = _float_or_none(row.get("latitude"))
+    lng = _float_or_none(row.get("longitude"))
+    return (lat, lng) if lat and lng else None
+
+
+def _same_branch(a, b):
+    """Same door: same name+area key, unless BOTH carry pins > ~50 m apart.
+
+    Two doors of one brand in one area share name and area; only the pin tells
+    them apart. A copy without a pin, or a re-scrape a few metres off, is still
+    the same door.
+    """
+    if _branch_key(a) != _branch_key(b):
+        return False
+    pa, pb = _pin(a), _pin(b)
+    if not (pa and pb):
+        return True
+    import math
+
+    dy = (pa[0] - pb[0]) * 111_320
+    dx = (pa[1] - pb[1]) * 111_320 * math.cos(math.radians((pa[0] + pb[0]) / 2))
+    return math.hypot(dx, dy) <= 50
+
+
 def _branch_dict(row):
     """A Jarz Lead Branch row reduced to the fields we copy."""
     return {f: row.get(f) for f in _BRANCH_FIELDS}
+
+
+def _lead_self_branch(doc):
+    """The Lead's OWN location as a branch row, or None if it has none.
+
+    A lead added by hand (or from a pasted Maps pin) carries its location on
+    the Lead itself and has no branch rows. Merging two such leads used to copy
+    nothing, so "two places on the map" collapsed into one card with one pin.
+    This row is what keeps the second door once it becomes a branch.
+    """
+    location = {
+        "area": doc.get("custom_primary_area"),
+        "maps_url": doc.get("custom_maps_url"),
+        "latitude": doc.get("custom_latitude"),
+        "longitude": doc.get("custom_longitude"),
+    }
+    if not any(location.values()):
+        return None
+    regions = _json_list(doc.get("custom_regions"))
+    governorates = _json_list(doc.get("custom_governorates"))
+    return {
+        "branch_name": doc.get("lead_name") or doc.get("company_name") or doc.get("name"),
+        "area": location["area"],
+        "region": regions[0] if regions else None,
+        "governorate": governorates[0] if governorates else None,
+        "rating": _float_or_none(doc.get("custom_avg_rating")),
+        "reviews": _int(doc.get("custom_total_reviews")) or None,
+        "price": doc.get("custom_price_band"),
+        "phone": doc.get("mobile_no") or doc.get("phone"),
+        "website": doc.get("website"),
+        "maps_url": location["maps_url"],
+        "latitude": location["latitude"],
+        "longitude": location["longitude"],
+    }
+
+
+def _branch_rows_or_self(doc):
+    """A lead's branch rows, falling back to its own location."""
+    rows = [_branch_dict(row) for row in (doc.get("custom_branches") or [])]
+    if rows:
+        return rows
+    own = _lead_self_branch(doc)
+    return [own] if own else []
 
 
 @frappe.whitelist()
@@ -1490,9 +1558,13 @@ def merge_leads(target, sources):
         )
 
     doc = frappe.get_doc("Lead", target)
-    seen_branches = {
-        _branch_key(row) for row in (doc.get("custom_branches") or [])
-    }
+    # The target's own door becomes a row before any source door joins it, or
+    # the merged card would list the sources' branches but not its own.
+    if not (doc.get("custom_branches") or []):
+        own = _lead_self_branch(doc)
+        if own:
+            doc.append("custom_branches", own)
+    seen_branches = [_branch_dict(row) for row in (doc.get("custom_branches") or [])]
     merging_contacts = _has_contacts_field()
     seen_contacts = (
         {_contact_key(row) for row in (doc.get("custom_contacts") or [])}
@@ -1514,12 +1586,11 @@ def merge_leads(target, sources):
     for source_name in sources:
         source = frappe.get_doc("Lead", source_name)
 
-        for row in (source.get("custom_branches") or []):
-            key = _branch_key(row)
-            if key in seen_branches:
+        for row in _branch_rows_or_self(source):
+            if any(_same_branch(row, seen) for seen in seen_branches):
                 continue
-            seen_branches.add(key)
-            doc.append("custom_branches", _branch_dict(row))
+            seen_branches.append(row)
+            doc.append("custom_branches", row)
 
         if merging_contacts:
             for row in (source.get("custom_contacts") or []):
