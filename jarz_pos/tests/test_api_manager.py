@@ -1661,6 +1661,7 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			 patch("jarz_pos.api.manager._resolve_amendment_delivery_income", return_value=None), \
 			 patch("jarz_pos.api.manager._resolve_amendment_price_list", return_value=None), \
 			 patch("jarz_pos.api.manager._find_submitted_payment_entries", find_pes or MagicMock(return_value=["PE-1"])), \
+			 patch("jarz_pos.api.manager._find_active_custom_shipping_requests", return_value=[]), \
 			 patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()), \
 			 patch("jarz_pos.api.manager._create_amendment_invoice", creation), \
 			 patch("jarz_pos.api.manager._mark_source_invoice_as_amended"), \
