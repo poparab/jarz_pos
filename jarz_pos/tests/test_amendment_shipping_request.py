@@ -143,6 +143,8 @@ class TestDetachCustomShippingRequests(unittest.TestCase):
             result = _detach_custom_shipping_requests("ACC-SINV-TEST-750")
 
         self.assertEqual(result, rows)
+        # `modified` must move, or a stale Approve/Reject saves its old link back.
+        self.assertTrue(all(c.kwargs.get("update_modified") for c in mf.db.set_value.call_args_list))
         cleared = [c.args for c in mf.db.set_value.call_args_list]
         self.assertEqual(
             cleared,
@@ -170,7 +172,7 @@ class TestResolveCarriedShippingOverride(unittest.TestCase):
 
         return _resolve_carried_shipping_override(source, rows)
 
-    def test_source_fields_are_copied_verbatim(self):
+    def test_an_approved_request_carries_its_amount(self):
         self.assertEqual(
             self._resolve({"override": 160, "status": "Approved"}, [_csr()]),
             {"status": "Approved", "override": 160.0},
@@ -182,11 +184,32 @@ class TestResolveCarriedShippingOverride(unittest.TestCase):
             {"status": "Pending", "override": 0.0},
         )
 
-    def test_blank_status_is_derived_from_the_requests(self):
+    def test_a_pending_request_on_top_of_an_approval_keeps_both(self):
         rows = [_csr(), _csr(name="CSR-2", docstatus=0, status="Pending", requested_amount=200)]
         self.assertEqual(
             self._resolve({"override": None, "status": None}, rows),
             {"status": "Pending", "override": 160.0},
+        )
+
+    def test_a_stale_rejected_status_does_not_drop_a_live_approval(self):
+        """Approve A at 160, raise B, reject B as a draft: the invoice then says
+        override 0 / Rejected while A is still approved and the source pays 160."""
+        rows = [_csr(), _csr(name="CSR-2", docstatus=0, status="Rejected", requested_amount=200)]
+        self.assertEqual(
+            self._resolve({"override": 0, "status": "Rejected"}, rows),
+            {"status": "Approved", "override": 160.0},
+        )
+
+    def test_the_most_recently_approved_request_wins(self):
+        first = dict(_csr(name="CSR-1", requested_amount=120), approved_on="2026-09-22 15:00:00")
+        second = dict(_csr(name="CSR-2", requested_amount=160), approved_on="2026-09-22 14:00:00")
+        second["creation"] = "2026-09-22 16:00:00"  # created later, approved earlier
+        self.assertEqual(self._resolve({}, [second, first])["override"], 120.0)
+
+    def test_only_rejected_drafts_carry_no_override(self):
+        self.assertEqual(
+            self._resolve({"override": 0, "status": "Rejected"}, [_csr(docstatus=0, status="Rejected")]),
+            {"status": "Rejected", "override": 0.0},
         )
 
 
@@ -221,6 +244,13 @@ class TestAttachCustomShippingRequests(unittest.TestCase):
         self.assertEqual(result["shipping_requests"], ["CSR-00166"])
         csr_writes = self._writes(mf, "Custom Shipping Request")
         self.assertEqual(csr_writes[0]["invoice"], "ACC-SINV-TEST-750-1")
+        self.assertTrue(
+            all(
+                c.kwargs.get("update_modified")
+                for c in mf.db.set_value.call_args_list
+                if c.args[0] == "Custom Shipping Request"
+            )
+        )
         self.assertNotIn("original_amount", csr_writes[0], "same territory: approval record untouched")
         self.assertEqual(
             self._writes(mf, "Sales Invoice"),

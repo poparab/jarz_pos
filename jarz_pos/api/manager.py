@@ -982,13 +982,18 @@ def _detach_custom_shipping_requests(invoice_name: str) -> List[Dict[str, Any]]:
     rows = frappe.get_all(
         "Custom Shipping Request",
         filters={"name": ["in", names]},
-        fields=["name", "docstatus", "status", "requested_amount", "creation"],
+        fields=["name", "docstatus", "status", "requested_amount", "approved_on", "creation"],
         order_by="creation asc",
         limit_page_length=0,
     ) or []
     for row in rows:
+        # update_modified=True is load-bearing: `modified` is Frappe's only
+        # stale-copy check. A manager's Approve/Reject that loaded the request
+        # before this move must fail with a timestamp mismatch rather than save
+        # its snapshot back — which would re-link the request to the cancelled
+        # source and write the approved cost onto it.
         frappe.db.set_value(
-            "Custom Shipping Request", row.get("name"), "invoice", None, update_modified=False
+            "Custom Shipping Request", row.get("name"), "invoice", None, update_modified=True
         )
     return rows
 
@@ -998,27 +1003,36 @@ def _resolve_carried_shipping_override(
 ) -> Dict[str, Any]:
     """The override state the replacement inherits.
 
-    The source invoice's own fields are the authority — they are what the
-    request lifecycle wrote (``request_custom_shipping`` / ``on_submit`` /
-    ``reject_custom_shipping``) and what the board and dispatch read — so they
-    are copied verbatim. Only when the status is blank, which no lifecycle step
-    writes, is it re-derived from the requests themselves.
+    Derived from the carried REQUESTS, not from the source invoice's fields. The
+    fields are only the last write, and one path leaves them lying: approve A
+    (override 160), raise B, reject B as a draft — ``reject_custom_shipping``
+    stamps override 0 / Rejected while A is still approved and the source still
+    pays 160. Copying that would settle the replacement at the territory rate.
+
+    * any approved request (docstatus 1) -> the most recently APPROVED one's
+      amount, as that was the last ``on_submit`` to write the invoice;
+    * a draft still Pending -> status Pending, which keeps the OFD gate;
+    * only rejected drafts -> the source's status, override 0.
     """
-    status = str(source_override.get("status") or "").strip()
-    override = flt(source_override.get("override"))
-    if not status:
-        approved = [row for row in shipping_requests if int(row.get("docstatus") or 0) == 1]
-        pending = [
-            row
-            for row in shipping_requests
-            if int(row.get("docstatus") or 0) == 0 and str(row.get("status") or "") == "Pending"
-        ]
-        if approved:
-            override = flt(approved[-1].get("requested_amount"))
-            status = "Approved"
-        if pending:
-            status = "Pending"
-    return {"status": status or None, "override": override}
+    def _approved_key(row: Dict[str, Any]) -> str:
+        return str(row.get("approved_on") or row.get("creation") or "")
+
+    approved = sorted(
+        (row for row in shipping_requests if int(row.get("docstatus") or 0) == 1),
+        key=_approved_key,
+    )
+    pending = any(
+        int(row.get("docstatus") or 0) == 0 and str(row.get("status") or "") == "Pending"
+        for row in shipping_requests
+    )
+    override = flt(approved[-1].get("requested_amount")) if approved else 0.0
+    if pending:
+        status = "Pending"
+    elif approved:
+        status = "Approved"
+    else:
+        status = str(source_override.get("status") or "").strip() or "Rejected"
+    return {"status": status, "override": override}
 
 
 def _attach_custom_shipping_requests(
@@ -1074,8 +1088,9 @@ def _attach_custom_shipping_requests(
         }
         if territory_changed and replacement_territory_rate > _PAYMENT_TOLERANCE:
             updates["original_amount"] = replacement_territory_rate
+        # update_modified=True: see _detach_custom_shipping_requests.
         frappe.db.set_value(
-            "Custom Shipping Request", row.get("name"), updates, update_modified=False
+            "Custom Shipping Request", row.get("name"), updates, update_modified=True
         )
         names.append(str(row.get("name")))
 
