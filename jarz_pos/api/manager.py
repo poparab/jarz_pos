@@ -960,6 +960,168 @@ def _find_active_custom_shipping_requests(invoice_name: str) -> List[str]:
     return sorted({row for row in rows if row})
 
 
+def _detach_custom_shipping_requests(invoice_name: str) -> List[Dict[str, Any]]:
+    """Unlink the invoice's active shipping requests so the source can be cancelled.
+
+    Two things refuse to cancel an invoice that a request still points at: the
+    ``before_cancel`` guard (``block_cancel_if_dispatched``), and Frappe's own
+    back-link check, which refuses while any SUBMITTED document links to it. The
+    latter cannot be waived on the invoice: it runs after ``on_cancel``, and
+    ERPNext's ``on_cancel`` overwrites ``ignore_linked_doctypes`` wholesale.
+
+    So the link is cleared for the short window between cancelling the source and
+    creating the replacement, and :func:`_attach_custom_shipping_requests` points
+    it at the replacement. Both run inside the amendment's savepoint: any failure
+    in between rolls the link back to the source. The requests themselves are
+    never cancelled — a cancel reads as "Rejected" to the approval-rate report
+    and its ``on_cancel`` would revert the courier cost.
+    """
+    names = _find_active_custom_shipping_requests(invoice_name)
+    if not names:
+        return []
+    rows = frappe.get_all(
+        "Custom Shipping Request",
+        filters={"name": ["in", names]},
+        fields=["name", "docstatus", "status", "requested_amount", "creation"],
+        order_by="creation asc",
+        limit_page_length=0,
+    ) or []
+    for row in rows:
+        frappe.db.set_value(
+            "Custom Shipping Request", row.get("name"), "invoice", None, update_modified=False
+        )
+    return rows
+
+
+def _resolve_carried_shipping_override(
+    source_override: Dict[str, Any], shipping_requests: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """The override state the replacement inherits.
+
+    The source invoice's own fields are the authority — they are what the
+    request lifecycle wrote (``request_custom_shipping`` / ``on_submit`` /
+    ``reject_custom_shipping``) and what the board and dispatch read — so they
+    are copied verbatim. Only when the status is blank, which no lifecycle step
+    writes, is it re-derived from the requests themselves.
+    """
+    status = str(source_override.get("status") or "").strip()
+    override = flt(source_override.get("override"))
+    if not status:
+        approved = [row for row in shipping_requests if int(row.get("docstatus") or 0) == 1]
+        pending = [
+            row
+            for row in shipping_requests
+            if int(row.get("docstatus") or 0) == 0 and str(row.get("status") or "") == "Pending"
+        ]
+        if approved:
+            override = flt(approved[-1].get("requested_amount"))
+            status = "Approved"
+        if pending:
+            status = "Pending"
+    return {"status": status or None, "override": override}
+
+
+def _attach_custom_shipping_requests(
+    *,
+    source_invoice_name: str,
+    replacement_invoice_name: str,
+    shipping_requests: List[Dict[str, Any]],
+    source_override: Dict[str, Any],
+    logger: Any,
+) -> Dict[str, Any]:
+    """Point the detached shipping requests at the replacement and re-apply the override.
+
+    Not best-effort: a replacement that silently dropped an approved courier cost
+    would settle the rider at the territory rate. The caller runs this inside the
+    amendment savepoint and lets it raise.
+
+    * An **approved** override (``override > 0``, status not Rejected) sets the
+      replacement's ``custom_shipping_expense`` to it, exactly as the request's
+      ``on_submit`` did on the source. That includes a second request pending on
+      top of an earlier approval — the source then also carried the approved cost.
+    * A **pending** first request copies the Pending status, which keeps the
+      replacement gated from Out for Delivery until a manager decides.
+    * A request's ``original_amount`` is what a later rejection reverts to. It is
+      re-based on the replacement's territory rate only when the territory
+      changed; otherwise the approval record is left exactly as it was.
+    """
+    if not shipping_requests:
+        return {"shipping_requests": []}
+
+    replacement = frappe.db.get_value(
+        "Sales Invoice",
+        replacement_invoice_name,
+        ["customer_name", "territory", "custom_shipping_expense"],
+        as_dict=True,
+    )
+    if not replacement:
+        frappe.throw(
+            _("Replacement invoice {0} could not be read to carry its shipping request over.").format(
+                replacement_invoice_name
+            )
+        )
+
+    territory_changed = str(replacement.get("territory") or "") != str(
+        source_override.get("territory") or ""
+    )
+    replacement_territory_rate = flt(replacement.get("custom_shipping_expense"))
+    names: List[str] = []
+    for row in shipping_requests:
+        updates: Dict[str, Any] = {
+            "invoice": replacement_invoice_name,
+            "customer_name": replacement.get("customer_name"),
+            "territory": replacement.get("territory"),
+        }
+        if territory_changed and replacement_territory_rate > _PAYMENT_TOLERANCE:
+            updates["original_amount"] = replacement_territory_rate
+        frappe.db.set_value(
+            "Custom Shipping Request", row.get("name"), updates, update_modified=False
+        )
+        names.append(str(row.get("name")))
+
+    carried = _resolve_carried_shipping_override(source_override, shipping_requests)
+    invoice_updates: Dict[str, Any] = {
+        "custom_shipping_override": carried["override"],
+        "custom_shipping_override_status": carried["status"],
+    }
+    if carried["override"] > _PAYMENT_TOLERANCE and carried["status"] != "Rejected":
+        invoice_updates["custom_shipping_expense"] = carried["override"]
+    frappe.db.set_value(
+        "Sales Invoice", replacement_invoice_name, invoice_updates, update_modified=False
+    )
+
+    logger.info(
+        {
+            "event": "invoice_amendment_shipping_request_carried",
+            "source_invoice": source_invoice_name,
+            "replacement_invoice": replacement_invoice_name,
+            "shipping_requests": names,
+            "override_status": carried["status"],
+            "override": carried["override"],
+        }
+    )
+    # Cosmetic, so it must never be able to undo the carry-over it describes.
+    try:
+        for name in names:
+            frappe.get_doc("Custom Shipping Request", name).add_comment(
+                "Comment",
+                f"Moved from {source_invoice_name} to {replacement_invoice_name} by invoice amendment.",
+            )
+    except Exception as comment_error:
+        logger.warning(
+            {
+                "event": "invoice_amendment_shipping_comment_failed",
+                "replacement_invoice": replacement_invoice_name,
+                "error": str(comment_error),
+            }
+        )
+    return {
+        "shipping_requests": names,
+        "override_status": carried["status"],
+        "override": carried["override"],
+    }
+
+
 def _mentions_invoice(text: Optional[str], invoice_name: str) -> bool:
     """True when *text* references *invoice_name* as a whole token.
 
@@ -1058,7 +1220,10 @@ def _get_active_delivery_trip_name(inv: Any) -> Optional[str]:
 
 
 def get_invoice_hard_mutation_blocker(
-    inv: Any, *, ignore_unsettled_partner_transactions: bool = False
+    inv: Any,
+    *,
+    ignore_unsettled_partner_transactions: bool = False,
+    ignore_custom_shipping_requests: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Return the first downstream artifact that blocks cancel/amend mutations.
 
@@ -1067,6 +1232,12 @@ def get_invoice_hard_mutation_blocker(
     it is created, and until the fee is settled that row is a pending charge with
     no ledger behind it. Amendment keeps the strict reading because it would
     leave the row pointing at a cancelled invoice.
+
+    ``ignore_custom_shipping_requests`` is what amendment passes, and only
+    amendment: the job moves every active request onto the replacement (see
+    :func:`_detach_custom_shipping_requests`), so the request is carried rather
+    than orphaned. Every other caller — the ``before_cancel`` guard included —
+    keeps refusing, because a plain cancel has nowhere to move it to.
     """
     invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
     if not invoice_name:
@@ -1114,7 +1285,9 @@ def get_invoice_hard_mutation_blocker(
             "journal_entries": journal_entries,
         }
 
-    custom_shipping_requests = _find_active_custom_shipping_requests(invoice_name)
+    custom_shipping_requests = (
+        [] if ignore_custom_shipping_requests else _find_active_custom_shipping_requests(invoice_name)
+    )
     if custom_shipping_requests:
         return {
             "mutation_block_code": "custom_shipping_request_exists",
@@ -1155,7 +1328,10 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
             _("This invoice can only be amended before dispatch while it is still in an operational prep state."),
         )
 
-    mutation_blocker = get_invoice_hard_mutation_blocker(inv)
+    # A custom shipping request is carried onto the replacement by the job, not a
+    # reason to refuse: an approved courier cost (order 17575: 65 -> 160 for a
+    # 31 kg order) made a Received, unpaid order permanently uneditable.
+    mutation_blocker = get_invoice_hard_mutation_blocker(inv, ignore_custom_shipping_requests=True)
     if mutation_blocker:
         return _blocked(
             mutation_blocker.get("mutation_block_code") or "mutation_blocked",
@@ -2032,6 +2208,7 @@ def _build_invoice_amendment_response(
     cancelled_payment_entries: Optional[List[str]] = None,
     already_processed: bool = False,
     rebooked_payment: Optional[Dict[str, Any]] = None,
+    carried_shipping_requests: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Return the stable API response for a completed amendment orchestration."""
     replacement_invoice = frappe.get_doc("Sales Invoice", replacement_invoice_name)
@@ -2050,6 +2227,8 @@ def _build_invoice_amendment_response(
         # not loaded, and this file reads optional fields through `.get` throughout.
         "payment_shortfall": flt(replacement_invoice.get("outstanding_amount")),
         "payment_credit": flt(rebooked_payment.get("unallocated")),
+        # Custom Shipping Requests moved from the source onto the replacement.
+        "carried_shipping_requests": carried_shipping_requests or [],
         "already_processed": already_processed,
         "invoice": format_invoice_data(replacement_invoice),
     }
@@ -2505,6 +2684,17 @@ def _run_invoice_amendment_job(
             # it survived -- the unpaid path is the one that gets exercised.
             source_invoice.reload()
 
+        # Carry any custom shipping request across (order 17575). Read the override
+        # the request lifecycle wrote BEFORE the cancel, then unlink the requests so
+        # neither the before_cancel guard nor Frappe's back-link check refuses it.
+        # Inside the savepoint: a failure anywhere below re-links them to the source.
+        source_shipping_override = {
+            "override": source_invoice.get("custom_shipping_override"),
+            "status": source_invoice.get("custom_shipping_override_status"),
+            "territory": source_invoice.get("territory"),
+        }
+        carried_shipping_requests = _detach_custom_shipping_requests(invoice_id)
+
         source_invoice.flags.ignore_permissions = True
         source_invoice.flags.ignore_woo_outbound = True
         source_invoice.cancel()
@@ -2601,6 +2791,36 @@ def _run_invoice_amendment_job(
                         }
                     )
 
+        # Not wrapped in a try, for the same reason as the payment above: an
+        # approved courier cost silently dropped would settle at the territory rate.
+        carried_shipping: Dict[str, Any] = {}
+        if carried_shipping_requests:
+            carried_shipping = _attach_custom_shipping_requests(
+                source_invoice_name=invoice_id,
+                replacement_invoice_name=replacement_invoice_name,
+                shipping_requests=carried_shipping_requests,
+                source_override=source_shipping_override,
+                logger=logger,
+            )
+            try:
+                _add_invoice_audit_comment(
+                    replacement_invoice_name,
+                    (
+                        f"Custom shipping carried over from {invoice_id}: "
+                        f"{', '.join(carried_shipping.get('shipping_requests') or [])} "
+                        f"({carried_shipping.get('override_status') or 'no status'}, "
+                        f"{flt(carried_shipping.get('override')):.2f})."
+                    ),
+                )
+            except Exception as comment_error:
+                logger.warning(
+                    {
+                        "event": "invoice_amendment_shipping_audit_comment_failed",
+                        "replacement_invoice": replacement_invoice_name,
+                        "error": str(comment_error),
+                    }
+                )
+
         _mark_source_invoice_as_amended(
             invoice_id,
             replacement_invoice_name=replacement_invoice_name,
@@ -2684,6 +2904,7 @@ def _run_invoice_amendment_job(
             replacement_invoice_name=replacement_invoice_name,
             cancelled_payment_entries=cancelled_payment_entries,
             rebooked_payment=rebooked_payment,
+            carried_shipping_requests=carried_shipping.get("shipping_requests") or [],
         )
     except Exception as exc:
         if save_point:

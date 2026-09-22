@@ -234,6 +234,13 @@ jobs:
             # when the edit starts in WooCommerce — the POS button reached none
             # of it, which is why no other module here covers this.
             test_amendment_paid_payment
+            # Custom Shipping Request survival across an amendment (Woo 17575 /
+            # ACC-SINV-2026-18433). An approved courier-cost override (65 -> 160
+            # for a 31 kg order) made a Received, unpaid order uneditable: any
+            # active request was a hard blocker. The job now moves the request
+            # onto the replacement. Also pins that every OTHER caller -- the
+            # before_cancel guard included -- still refuses.
+            test_amendment_shipping_request
             # Amendment hardening (idempotency keys, locks, rollback). The
             # amendment path replays the source invoice's shipping_address_name
             # verbatim, so an over-strict address guard makes an order
