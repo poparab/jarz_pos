@@ -35,10 +35,24 @@ Q_PAYMENT_RECEIPTS = "payment_receipts"
 Q_CUSTOM_SHIPPING = "custom_shipping"
 
 
-def _log(title: str) -> None:
-    """``frappe.log_error`` that cannot itself raise (it can; see employee_advances._log)."""
+#: One Error Log row per broken queue per this many seconds. The endpoint is
+#: polled every minute by every manager, so an unthrottled persistent fault
+#: would write thousands of identical rows a day.
+_LOG_THROTTLE_SECONDS = 900
+
+
+def _log(key: str) -> None:
+    """Throttled ``frappe.log_error`` that cannot itself raise (it can; see employee_advances._log)."""
     try:
-        frappe.log_error(title=title, message=frappe.get_traceback())
+        cache_key = f"jarz_pos:approvals_error:{key}"
+        cache = frappe.cache()
+        if cache.get_value(cache_key):
+            return
+        cache.set_value(cache_key, 1, expires_in_sec=_LOG_THROTTLE_SECONDS)
+        frappe.log_error(
+            title=f"get_pending_approvals: {key} queue failed",
+            message=frappe.get_traceback(),
+        )
     except Exception:
         pass
 
@@ -177,7 +191,7 @@ def get_pending_approvals() -> Dict[str, Any]:
         try:
             result = build()
         except Exception:
-            _log(f"get_pending_approvals: {key} queue failed")
+            _log(key)
             # The caller may well be entitled to this queue; staying eligible
             # keeps the client polling so the count returns once it recovers.
             eligible = True

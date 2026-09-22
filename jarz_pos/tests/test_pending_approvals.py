@@ -119,6 +119,37 @@ class TestExpensesQueue(unittest.TestCase):
 		self.assertEqual(result, {"count": 0, "oldest_month": None})
 
 
+class TestErrorLogThrottle(unittest.TestCase):
+	def test_logs_once_per_window(self):
+		store = {}
+		cache = SimpleNamespace(
+			get_value=lambda k: store.get(k),
+			set_value=lambda k, v, expires_in_sec=None: store.__setitem__(k, v),
+		)
+		with patch.object(approvals.frappe, "cache", return_value=cache, create=True), \
+			patch.object(approvals.frappe, "log_error", create=True) as log_error:
+			approvals._log("expenses")
+			approvals._log("expenses")
+			approvals._log("payment_receipts")
+		self.assertEqual(log_error.call_count, 2)
+
+
+class TestPaymentReceiptsQueue(unittest.TestCase):
+	def test_no_branch_means_zero_never_all(self):
+		fake = SimpleNamespace(
+			_has_payment_receipt_confirm_access=lambda profile: True,
+			_receipt_branch_scope=lambda: [],
+			RECEIPT_STATUS_UNCONFIRMED="Unconfirmed",
+		)
+		package = sys.modules["jarz_pos.api"]
+		with patch.dict(sys.modules, {"jarz_pos.api.payment_receipts": fake}), \
+			patch.object(package, "payment_receipts", fake, create=True), \
+			patch.object(approvals.frappe.db, "count", return_value=99, create=True) as count:
+			result = approvals._payment_receipts_queue()
+		self.assertEqual(result, {"count": 0})
+		count.assert_not_called()
+
+
 class TestMonthOf(unittest.TestCase):
 	def test_date_and_month_strings(self):
 		self.assertEqual(approvals._month_of("2026-08-14"), "2026-08")
