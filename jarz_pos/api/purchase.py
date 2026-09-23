@@ -753,9 +753,15 @@ def create_purchase_invoice(
         opt_lower = opt_raw.lower()
         mop: Optional[str] = None
         account: Optional[str] = None
+        custody_account = _resolve_custody_option(opt_raw, resolved_company)
 
+        # Paid out of an employee's cash custody ("custody:<holder>"). The
+        # ledger guard refuses the submit if the custody cannot cover it.
+        if custody_account:
+            mop = PAYMENT_MODES.CASH
+            account = custody_account
         # If payment_option matches a POS Profile name, use that profile's exact-named account
-        if opt_raw and frappe.db.exists("POS Profile", opt_raw):
+        elif opt_raw and frappe.db.exists("POS Profile", opt_raw):
             mop = PAYMENT_MODES.CASH
             account = _get_exact_pos_profile_account(opt_raw, resolved_company) or _get_default_cash_account(resolved_company)
         elif opt_lower == "instapay":
@@ -1318,10 +1324,63 @@ def return_purchase_invoice(
     }
 
 
+#: ``payment_option`` prefix naming a cash-custody holder: ``custody:<holder>``.
+CUSTODY_OPTION_PREFIX = "custody:"
+
+
+def _resolve_custody_option(payment_option: Optional[str], company: Optional[str]) -> Optional[str]:
+    """The custody account behind a ``custody:<holder>`` option, else None.
+
+    Allowed for the holder themself, or for the manager tier (ROLES.MANAGER,
+    which includes JARZ Manager). The holder must be enabled and hold its
+    custody in *company*. Spending more than the custody holds is refused by
+    ``services.cash_custody.guard_custody_balance`` at submit.
+    """
+    raw = str(payment_option or "").strip()
+    if not raw.lower().startswith(CUSTODY_OPTION_PREFIX):
+        return None
+    holder = raw[len(CUSTODY_OPTION_PREFIX):].strip()
+    if not holder:
+        frappe.throw(_("Custody payment option is missing the holder."))
+
+    from jarz_pos.services.cash_custody import HOLDER_DOCTYPE
+
+    row = frappe.db.get_value(
+        HOLDER_DOCTYPE,
+        holder,
+        ["name", "user", "enabled", "account", "company", "employee_name"],
+        as_dict=True,
+    )
+    if not row:
+        frappe.throw(_("Custody holder {0} not found.").format(holder))
+
+    roles = set(frappe.get_roles() or [])
+    is_holder = bool(row.get("user")) and row.get("user") == frappe.session.user
+    if not is_holder and not roles.intersection(set(ROLES.MANAGER) | {ROLES.JARZ_MANAGER}):
+        frappe.throw(
+            _("Not permitted to pay from the custody of {0}.").format(row.get("employee_name") or holder),
+            frappe.PermissionError,
+        )
+    if not int(row.get("enabled") or 0):
+        frappe.throw(_("Custody holder {0} is disabled.").format(row.get("employee_name") or holder))
+    if not row.get("account"):
+        frappe.throw(_("Custody holder {0} has no custody account.").format(row.get("employee_name") or holder))
+    if company and row.get("company") and row.get("company") != company:
+        frappe.throw(
+            _("The custody of {0} is held in {1}, not {2}.").format(
+                row.get("employee_name") or holder, row.get("company"), company
+            )
+        )
+    return row.get("account")
+
+
 def _resolve_payment_account(payment_option: Optional[str], company: str) -> str:
     opt_raw = (payment_option or "cash").strip()
     opt_lower = opt_raw.lower()
     account: Optional[str] = None
+    custody_account = _resolve_custody_option(opt_raw, company)
+    if custody_account:
+        return custody_account
     if opt_raw and frappe.db.exists("POS Profile", opt_raw):
         account = _get_exact_pos_profile_account(opt_raw, company) or _get_default_cash_account(company)
     elif opt_lower == "instapay":

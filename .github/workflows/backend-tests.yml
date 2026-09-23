@@ -531,6 +531,14 @@ jobs:
             # that field still posts the expense, and that expense_month stays
             # derived from the date alone.
             test_expense_posting_time
+            # Cash custody (عهدة). The ledger guard is the load-bearing part: it
+            # runs on EVERY Journal Entry / Payment Entry / Purchase Invoice
+            # submit, so the cases pin both that it refuses an overdraw (under a
+            # LOCKING read, not a stale snapshot) and that it returns without
+            # taking a lock when no custody account is credited. Also pins the
+            # issue/return permission matrix, the holder's expense routing and
+            # the purchase custody:<holder> option.
+            test_cash_custody
             # Reversing a courier settlement. Until this shipped, every reversal
             # was a hand-written script piped into a production bench console.
             # The load-bearing cases are the refusals: an arbitrary Journal

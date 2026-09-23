@@ -10,6 +10,7 @@ from frappe.utils import flt, formatdate, getdate, now_datetime
 
 from jarz_pos.api.pos import get_pos_profiles
 from jarz_pos.constants import ACCOUNTS, ROLES, STATUS
+from jarz_pos.services import cash_custody
 from jarz_pos.utils.posting_datetime import split_posting_datetime
 
 
@@ -272,9 +273,31 @@ def _pos_profile_accounts(company: str, profiles: Sequence[str]) -> List[Payment
     return result
 
 
+def _custody_account_map(company: Optional[str] = None) -> Dict[str, str]:
+    """``{account: holder}`` for display tagging only — never an access decision.
+
+    Swallows failures (e.g. a site not migrated yet, or a harness without a
+    site) because the only consequence is a custody account shown as "cash".
+    Every money decision calls ``cash_custody`` directly and fails closed.
+    """
+    try:
+        return cash_custody.custody_accounts(company)
+    except Exception:
+        return {}
+
+
+def _own_custody_holder():
+    """The caller's enabled custody holder, for display (fails soft)."""
+    try:
+        return cash_custody.holder_for_user(frappe.session.user)
+    except Exception:
+        return None
+
+
 def _cashlike_accounts(company: str, excluded_accounts: Optional[Iterable[str]] = None) -> List[PaymentSource]:
     accounts: List[PaymentSource] = []
     excluded = {str(account).strip() for account in (excluded_accounts or []) if str(account).strip()}
+    custody = _custody_account_map(company)
     rows = frappe.get_all(
         "Account",
         filters={"company": company, "is_group": 0, "account_type": ["in", ["Cash", "Bank"]]},
@@ -284,7 +307,10 @@ def _cashlike_accounts(company: str, excluded_accounts: Optional[Iterable[str]] 
     for row in rows:
         if row["name"] in excluded:
             continue
-        category = "cash" if (row.get("account_type") or "").lower() == "cash" else "bank"
+        if row["name"] in custody:
+            category = "custody"
+        else:
+            category = "cash" if (row.get("account_type") or "").lower() == "cash" else "bank"
         accounts.append(
             PaymentSource(
                 account=row["name"],
@@ -572,6 +598,25 @@ def get_expense_bootstrap(filters: Optional[str] = None):
         excluded_accounts = {source.account for source in payment_sources if source.account}
         payment_sources.extend(_cashlike_accounts(company, excluded_accounts=excluded_accounts))
 
+    # Cash custody: a holder spends from their own custody through this same
+    # request/approval cycle. Managers already see every custody account in
+    # the cash list above (category "custody"); a non-manager sees only theirs.
+    own_holder = _own_custody_holder()
+    custody_account = (own_holder.get("account") if own_holder else None) or None
+    if custody_account and not is_manager:
+        if custody_account not in {source.account for source in payment_sources}:
+            labels = cash_custody.custody_account_labels(custody_account, own_holder.get("employee_name"))
+            payment_sources.append(
+                PaymentSource(
+                    account=custody_account,
+                    label=cash_custody.custody_label_en(own_holder.get("employee_name")),
+                    category="custody",
+                    balance=cash_custody.custody_balance(custody_account, own_holder.get("company")),
+                    label_en=labels["label_en"],
+                    label_ar=labels["label_ar"],
+                )
+            )
+
     serialized_sources = _serialize_payment_sources(payment_sources)
 
     months = _load_months()
@@ -601,6 +646,7 @@ def get_expense_bootstrap(filters: Optional[str] = None):
             for m in months
         ],
         "payment_sources": serialized_sources,
+        "custody_account": custody_account,
         "reasons": _indirect_expense_accounts(company),
         "expenses": _serialize_expenses(expenses),
         "summary": {
@@ -648,24 +694,59 @@ def create_expense(payload: Optional[str] = None, **kwargs):
     pos_profile = None
     paying_account: Optional[str] = None
 
+    # The holder whose custody is being spent, if any. Resolved through the
+    # fail-CLOSED service calls, because it decides where money comes from.
+    custody_holder: Optional[str] = None
+
     if is_manager:
         paying_account = data.get("paying_account") or data.get("payment_account")
         payment_type = data.get("payment_source_type") or data.get("category") or "Account"
         if not paying_account:
             frappe.throw(_("Paying account is required."))
         payment_label = data.get("payment_label") or frappe.db.get_value("Account", paying_account, "account_name") or paying_account
+        custody_holder = cash_custody.custody_accounts().get(paying_account)
+        if custody_holder:
+            # The Select on Jarz Expense Request only knows the canonical
+            # spelling; the client may send the lower-case category.
+            payment_type = "Custody"
     else:
-        pos_profile = data.get("pos_profile") or data.get("payment_label") or data.get("payment_source")
-        if not pos_profile:
-            frappe.throw(_("POS profile is required for expense."))
-        accessible = set(_current_user_pos_profile_names())
-        if pos_profile not in accessible:
-            frappe.throw(_("You do not have access to POS Profile: {0}").format(pos_profile))
-        paying_account = _resolve_named_account(company, pos_profile)
-        if not paying_account:
-            frappe.throw(_("Could not resolve a paying account for POS Profile {0}").format(pos_profile))
-        payment_type = "POS Profile"
-        payment_label = pos_profile
+        requested_type = str(data.get("payment_source_type") or "").strip().lower()
+        requested_account = str(data.get("paying_account") or data.get("payment_account") or "").strip()
+        wants_custody = requested_type == "custody"
+        if requested_account and not wants_custody:
+            wants_custody = requested_account in cash_custody.custody_accounts()
+
+        if wants_custody:
+            holder = cash_custody.holder_for_user(frappe.session.user)
+            if not holder or not holder.get("account"):
+                frappe.throw(_("You do not hold a custody account."), frappe.PermissionError)
+            if requested_account and requested_account != holder.get("account"):
+                frappe.throw(_("You can only spend from your own custody."), frappe.PermissionError)
+            paying_account = holder.get("account")
+            custody_holder = holder.get("name")
+            payment_type = "Custody"
+            payment_label = cash_custody.custody_account_labels(
+                paying_account, holder.get("employee_name")
+            )["label_en"]
+            pos_profile = None
+        else:
+            pos_profile = data.get("pos_profile") or data.get("payment_label") or data.get("payment_source")
+            if not pos_profile:
+                frappe.throw(_("POS profile is required for expense."))
+            accessible = set(_current_user_pos_profile_names())
+            if pos_profile not in accessible:
+                frappe.throw(_("You do not have access to POS Profile: {0}").format(pos_profile))
+            paying_account = _resolve_named_account(company, pos_profile)
+            if not paying_account:
+                frappe.throw(_("Could not resolve a paying account for POS Profile {0}").format(pos_profile))
+            payment_type = "POS Profile"
+            payment_label = pos_profile
+
+    if custody_holder:
+        # Early, unlocked refusal so the requester is told now rather than at
+        # approval. The ledger guard re-checks under lock when the Journal
+        # Entry is submitted, which is what actually protects the balance.
+        cash_custody.ensure_custody_can_cover(paying_account, amount, holder=custody_holder)
 
     doc = frappe.get_doc(
         {

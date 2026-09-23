@@ -378,9 +378,28 @@ doc_events = {
     # and books its value; cancelling it takes the value back out. Both look up
     # the batch by link or by the label-po-<name> idempotency key, so any other
     # Purchase Invoice costs one indexed read and nothing else.
+    #
+    # Cash custody (عهدة) — before_submit / before_cancel below: a custody
+    # account can never go negative. Enforced at the ledger boundary rather
+    # than in the custody endpoints, so an expense approved days later, a
+    # purchase paid from custody and a Journal Entry typed in Desk all reach
+    # the same check. Returns before any query when the voucher credits no
+    # custody account; otherwise locks the holder row, reads the balance with
+    # a locking read, and FAILS CLOSED. before_cancel covers the mirror case:
+    # cancelling the entry that put money into custody after some was spent.
     "Purchase Invoice": {
+        "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
+        "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
         "on_submit": "jarz_pos.services.label_stock.link_bill_on_purchase_invoice_submit",
         "on_cancel": "jarz_pos.services.label_stock.unlink_bill_on_purchase_invoice_cancel",
+    },
+    "Journal Entry": {
+        "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
+        "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
+    },
+    "Payment Entry": {
+        "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
+        "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
     },
     "Sales Invoice": {
         # Promo-code engine: single apply path for Woo / Desk invoices. Runs
@@ -613,6 +632,19 @@ try:
     from jarz_pos.api import tracking as _tracking_api
     _tracking_api.get_public_status
     _tracking_api.get_tracking_link
+except Exception:
+    pass
+
+try:
+    # Cash custody (عهدة) endpoints.
+    from jarz_pos.api import cash_custody as _cash_custody_api
+    _cash_custody_api.get_custody_overview
+    _cash_custody_api.list_custody_candidates
+    _cash_custody_api.add_custody_holder
+    _cash_custody_api.set_custody_holder_enabled
+    _cash_custody_api.issue_custody
+    _cash_custody_api.return_custody
+    _cash_custody_api.get_custody_statement
 except Exception:
     pass
 
