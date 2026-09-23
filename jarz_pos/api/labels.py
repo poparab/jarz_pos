@@ -715,6 +715,10 @@ def record_movement(label, movement_type, qty, posting_date=None, remarks=None):
         qty=amount,
         posting_date=_clean(posting_date),
         remarks=_clean(remarks),
+        # A hand-entered receipt has no bill behind it. Pricing it at the
+        # running average would credit Label Cost for money never spent, so it
+        # lands at zero; batch value only ever arrives with a supplier bill.
+        unit_cost=0.0 if kind == "Print Received" else None,
     )
     return {"movement": movement, "label": get_label_detail(name)}
 

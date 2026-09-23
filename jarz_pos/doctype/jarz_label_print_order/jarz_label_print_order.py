@@ -53,6 +53,17 @@ class JarzLabelPrintOrder(Document):
             self.requested_on = frappe.utils.today()
 
         self.expected_ready_date = label_stock.expected_ready_date(self.requested_on)
+        if not self.is_new():
+            # The bill link is written ONLY by label_stock.link_bill / the
+            # Purchase Invoice hooks. A form carrying an older value (opened
+            # before the bill was submitted or cancelled) must not save it back:
+            # that would silently unbill a billed batch, or re-link a dead one.
+            current = frappe.db.get_value(
+                "Jarz Label Print Order", self.name, ["purchase_invoice", "total_cost"], as_dict=True
+            ) or {}
+            self.purchase_invoice = current.get("purchase_invoice")
+            if self.purchase_invoice:
+                self.total_cost = current.get("total_cost")
         self.billing_status = "Billed" if self.purchase_invoice else "Unbilled"
 
         if self.status == "Received":

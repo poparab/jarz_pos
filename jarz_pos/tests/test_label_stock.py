@@ -709,7 +709,7 @@ class TestSyncBatchValue(unittest.TestCase):
     def _po(self, *, pi="PI-1", total_cost=210.0):
         return {"name": "JLPO-1", "label": "L1", "purchase_invoice": pi, "total_cost": total_cost}
 
-    def _run(self, po, *, booked, received=42, on_hand=42, has_receipt=True):
+    def _run(self, po, *, booked, received=42, on_hand=42, has_receipt=True, pool=None):
         from unittest.mock import MagicMock
 
         rows = []
@@ -724,7 +724,8 @@ class TestSyncBatchValue(unittest.TestCase):
         with patch.object(ls.frappe.db, "exists", exists), patch.object(
             ls.frappe.db, "get_value", return_value=received
         ), patch.object(ls, "batch_booked_value", return_value=booked), patch.object(
-            ls, "get_on_hand", return_value=on_hand
+            ls, "get_position",
+            return_value={"on_hand": on_hand, "value": booked if pool is None else pool, "avg_cost": 0},
         ), patch.object(ls, "_insert_value_row", side_effect=insert_row), patch.object(
             ls, "_post_value_journal"
         ) as je, patch.object(ls, "refresh_label"):
@@ -758,6 +759,29 @@ class TestSyncBatchValue(unittest.TestCase):
         self.assertEqual(rows[0]["value"], -210.0)
         self.assertAlmostEqual(rows[1]["value"], 50.0, places=2)
         je.assert_called_once()
+
+    def test_bill_cancel_with_another_batch_on_the_shelf_never_leaves_a_negative_pool(self):
+        # Review finding: A billed 100 for 100 labels, B unbilled 100 at 0,
+        # 150 used at the 0.5 average -> 50 labels carrying 25. Cancelling A's
+        # bill with the naive 50% share would leave -25 stuck on 50 labels.
+        diff, rows, je = self._run(
+            self._po(pi=None, total_cost=100.0), booked=100.0, received=100, on_hand=50, pool=25.0
+        )
+        self.assertEqual(rows[0]["value"], -100.0)
+        self.assertAlmostEqual(rows[1]["value"], 75.0, places=2)  # pool ends at exactly 0
+
+    def test_bill_cancel_after_a_sale_came_back_does_not_strand_minus_100(self):
+        # Review finding: receive unbilled, use all, bill 100 (expensed), the
+        # sale is cancelled (100 labels back at 0), then the bill is cancelled.
+        diff, rows, je = self._run(
+            self._po(pi=None, total_cost=100.0), booked=100.0, received=100, on_hand=100, pool=0.0
+        )
+        self.assertEqual(rows[0]["value"], -100.0)
+        self.assertAlmostEqual(rows[1]["value"], 100.0, places=2)  # Label Cost reversed
+
+    def test_label_cost_row_je_is_strict(self):
+        _, _, je = self._run(self._po(), booked=0.0, on_hand=0)
+        self.assertTrue(je.call_args.kwargs.get("strict"))
 
     def test_in_step_is_a_no_op(self):
         diff, rows, je = self._run(self._po(), booked=210.0)
@@ -801,12 +825,60 @@ class TestBillHooks(unittest.TestCase):
         write.assert_not_called()
         sync.assert_not_called()
 
+    def _settings(self):
+        return {"printing_item": "Customer Label Printing", "inventory_account": "Labels Inventory - J"}
+
     def test_pi_amount_is_the_printing_lines_net(self):
         pi = SimpleNamespace(items=[
-            SimpleNamespace(item_code="Customer Label Printing", base_net_amount=200.0),
-            SimpleNamespace(item_code="Other", base_net_amount=50.0),
+            SimpleNamespace(item_code="Customer Label Printing", base_net_amount=200.0,
+                            expense_account="Labels Inventory - J"),
+            SimpleNamespace(item_code="Other", base_net_amount=50.0,
+                            expense_account="Labels Inventory - J"),
         ])
-        self.assertEqual(ls._pi_label_amount(pi, "Customer Label Printing"), 200.0)
+        self.assertEqual(ls._pi_label_amount(pi, self._settings()), 200.0)
+
+    def test_a_line_booked_to_another_account_is_not_label_value(self):
+        pi = SimpleNamespace(items=[
+            SimpleNamespace(item_code="Customer Label Printing", base_net_amount=200.0,
+                            expense_account="Stationery - J"),
+        ])
+        self.assertEqual(ls._pi_label_amount(pi, self._settings()), 0.0)
+
+    def test_no_printing_item_configured_counts_nothing(self):
+        pi = SimpleNamespace(items=[
+            SimpleNamespace(item_code="Anything", base_net_amount=200.0, expense_account="X"),
+        ])
+        self.assertEqual(ls._pi_label_amount(pi, {"printing_item": "", "inventory_account": ""}), 0.0)
+
+    def test_a_debit_note_resyncs_through_return_against(self):
+        note = SimpleNamespace(name="PI-RET-1", is_return=1, return_against="PI-1",
+                               custom_jarz_idempotency_key="")
+        with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
+            ls, "_resync_after_debit_note"
+        ) as resync, patch.object(ls, "link_bill") as link:
+            ls.link_bill_on_purchase_invoice_submit(note)
+            ls.unlink_bill_on_purchase_invoice_cancel(note)
+        self.assertEqual(resync.call_count, 2)
+        link.assert_not_called()
+
+
+class TestExpensedOnRevaluation(unittest.TestCase):
+    def test_plain_share(self):
+        self.assertEqual(ls.expensed_on_revaluation(difference=210, share=10 / 42, pool_value=0, on_hand=32), 50.0)
+
+    def test_empty_shelf_takes_everything(self):
+        self.assertEqual(ls.expensed_on_revaluation(difference=210, share=0.3, pool_value=5, on_hand=0), 215.0)
+
+    def test_never_leaves_a_negative_pool(self):
+        self.assertEqual(ls.expensed_on_revaluation(difference=-100, share=0.5, pool_value=25, on_hand=50), -75.0)
+
+
+class TestStrictJournal(unittest.TestCase):
+    def test_strict_reraises(self):
+        movement = SimpleNamespace(value=-5.0, name="JLMV-1")
+        with patch.object(ls, "get_label_settings", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                ls._post_value_journal(movement, strict=True)
 
 
 class TestValueJournalGuards(unittest.TestCase):

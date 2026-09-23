@@ -639,6 +639,22 @@ def refresh_label(label_name: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Ledger writes
 # ---------------------------------------------------------------------------
+def _lock_label(label: str) -> None:
+    """Serialise ledger writes per label.
+
+    Every write reads the position (on hand, value) and prices off it; two
+    sales submitted at once must not both see the same last labels and both
+    take the shelf's whole value. Frappe runs each request in one transaction,
+    so the row lock holds until that request commits.
+    """
+    try:
+        frappe.db.sql(
+            "select name from `tabJarz Customer Label` where name=%s for update", (label,)
+        )
+    except Exception:
+        pass  # a missing table/row is not a reason to block the write
+
+
 def post_movement(
     *,
     label: str,
@@ -682,6 +698,7 @@ def post_movement(
     elif movement_type in _NEGATIVE_TYPES:
         qty = -abs(qty)
 
+    _lock_label(label)
     position = get_position(label) if (unit_cost is None or qty < 0) else None
     if unit_cost is None:
         unit_cost = position["avg_cost"]
@@ -691,8 +708,9 @@ def post_movement(
         # This movement empties the shelf, so it takes ALL the value that is
         # left, not qty x a rounded average. Otherwise the rounding residue --
         # or a late bill's value that arrived after most labels were gone --
-        # would sit in Labels Inventory forever against zero labels.
-        value = -round(max(_float(position["value"]), 0.0), 2)
+        # would sit in Labels Inventory forever against zero labels. Whatever
+        # its sign: a negative residue cleared here is the only way one ends.
+        value = -round(_float(position["value"]), 2)
 
     doc = frappe.new_doc(MOVEMENT_DOCTYPE)
     doc.label = label
@@ -720,7 +738,7 @@ def post_movement(
     return doc.name
 
 
-def _post_value_journal(movement: Any) -> None:
+def _post_value_journal(movement: Any, *, strict: bool = False) -> None:
     """Mirror one movement's value into the GL: inventory <-> label COGS.
 
     Negative value (labels leaving the shelf) debits Label Cost and credits
@@ -779,6 +797,11 @@ def _post_value_journal(movement: Any) -> None:
             MOVEMENT_DOCTYPE, movement.name, "journal_entry", je.name, update_modified=False
         )
     except Exception:
+        if strict:
+            # Bill-side revaluations run inside the Purchase Invoice's own
+            # submit/cancel: failing it is honest, a ledger row whose JE is
+            # missing is not.
+            raise
         frappe.log_error(
             frappe.get_traceback(),
             f"label_stock: COGS journal failed for movement {getattr(movement, 'name', '?')}",
@@ -838,6 +861,23 @@ def consumed_share(received_qty: int, on_hand: int) -> float:
     return max(received - left, 0) / received
 
 
+def expensed_on_revaluation(*, difference: float, share: float, pool_value: float,
+                            on_hand: int) -> float:
+    """How much of a revaluation goes to Label Cost instead of the shelf.
+
+    Normally the batch's used share. Two limits keep the pool honest, because
+    labels from several batches share one average cost and the share is only
+    an estimate: with nothing on the shelf the pool must end at exactly zero,
+    and with labels on it the pool must never go negative -- a negative pool
+    prices at zero and would stay stuck forever.
+    """
+    expensed = round(difference * share, 2)
+    after = round(_float(pool_value) + difference - expensed, 2)
+    if _int(on_hand) <= 0 or after < 0:
+        expensed = round(_float(pool_value) + difference, 2)
+    return expensed
+
+
 def sync_batch_value(po: Any, *, reference_doctype: Optional[str] = None,
                      reference_name: Optional[str] = None) -> float:
     """Bring a received batch's ledger value to its target; return the change.
@@ -861,10 +901,13 @@ def sync_batch_value(po: Any, *, reference_doctype: Optional[str] = None,
     label = po.get("label")
     ref_dt = reference_doctype or PRINT_ORDER_DOCTYPE
     ref_name = reference_name or name
+    _lock_label(label)
     received = _int(frappe.db.get_value(
         MOVEMENT_DOCTYPE, {"print_order": name, "movement_type": "Print Received"}, "qty"
     ))
-    share = consumed_share(received, get_on_hand(label))
+    position = get_position(label)
+    on_hand = position["on_hand"]
+    share = consumed_share(received, on_hand)
 
     _insert_value_row(
         label=label,
@@ -875,7 +918,9 @@ def sync_batch_value(po: Any, *, reference_doctype: Optional[str] = None,
         remarks=f"Revaluation: batch {name} now carries {batch_target_value(po):.2f}",
     )
 
-    expensed = round(difference * share, 2)
+    expensed = expensed_on_revaluation(
+        difference=difference, share=share, pool_value=position["value"], on_hand=on_hand
+    )
     if abs(expensed) >= 0.01:
         row = _insert_value_row(
             label=label,
@@ -888,7 +933,7 @@ def sync_batch_value(po: Any, *, reference_doctype: Optional[str] = None,
                 f"{expensed:.2f} goes to label cost"
             ),
         )
-        _post_value_journal(row)
+        _post_value_journal(row, strict=True)
 
     refresh_label(label)
     return difference
@@ -915,12 +960,39 @@ def _insert_value_row(*, label: str, value: float, print_order: Optional[str],
     return doc
 
 
-def _pi_label_amount(pi: Any, printing_item: str) -> float:
-    """Net amount the PI debited for the label-printing item (VAT excluded)."""
+def _pi_label_amount(pi: Any, settings: Optional[Dict[str, Any]] = None) -> float:
+    """Net amount the PI put on Labels Inventory for the printing item (VAT excluded).
+
+    Counts only lines that are BOTH the printing item AND booked to the
+    inventory account: a bill amended in Desk onto another account never
+    reached Labels Inventory, so the ledger must not claim it did. Signed, so a
+    debit note (negative qty) comes back negative.
+    """
+    settings = settings or get_label_settings()
+    item = settings.get("printing_item")
+    account = settings.get("inventory_account")
+    if not item:
+        return 0.0
     total = 0.0
     for row in getattr(pi, "items", None) or []:
-        if not printing_item or getattr(row, "item_code", None) == printing_item:
-            total += _float(getattr(row, "base_net_amount", None) or getattr(row, "net_amount", 0))
+        if getattr(row, "item_code", None) != item:
+            continue
+        if account and getattr(row, "expense_account", None) != account:
+            continue
+        total += _float(getattr(row, "base_net_amount", None) or getattr(row, "net_amount", 0))
+    return round(total, 2)
+
+
+def billed_amount(purchase_invoice: str) -> float:
+    """The bill's label value net of every submitted debit note against it."""
+    settings = get_label_settings()
+    total = _pi_label_amount(frappe.get_doc("Purchase Invoice", purchase_invoice), settings)
+    for name in frappe.get_all(
+        "Purchase Invoice",
+        filters={"return_against": purchase_invoice, "docstatus": 1, "is_return": 1},
+        pluck="name",
+    ) or []:
+        total += _pi_label_amount(frappe.get_doc("Purchase Invoice", name), settings)
     return round(total, 2)
 
 
@@ -955,14 +1027,16 @@ def link_bill(print_order: str, purchase_invoice: str) -> Dict[str, Any]:
         if frappe.db.get_value("Purchase Invoice", current, "docstatus") == 1:
             frappe.throw(f"{print_order} is already billed on {current}.")
 
-    pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
-    amount = _pi_label_amount(pi, get_label_settings()["printing_item"])
+    supplier = frappe.db.get_value("Purchase Invoice", purchase_invoice, "supplier")
+    amount = billed_amount(purchase_invoice)
+    # update_modified=True on purpose: a Desk form opened before this link
+    # must fail its stale-timestamp check rather than save the link away.
     frappe.db.set_value(PRINT_ORDER_DOCTYPE, print_order, {
         "purchase_invoice": purchase_invoice,
         "billing_status": "Billed",
         "total_cost": amount,
-        "supplier": pi.supplier,
-    }, update_modified=False)
+        "supplier": supplier,
+    })
     po.reload()
     _recompute_cost_per_label(po)
     sync_batch_value(po, reference_doctype="Purchase Invoice", reference_name=purchase_invoice)
@@ -973,7 +1047,7 @@ def _recompute_cost_per_label(po: Any) -> None:
     received = _int(po.get("received_qty"))
     total = _float(po.get("total_cost"))
     cpl = round(total / received, 4) if received > 0 and total > 0 else 0
-    frappe.db.set_value(PRINT_ORDER_DOCTYPE, po.name, "cost_per_label", cpl, update_modified=False)
+    frappe.db.set_value(PRINT_ORDER_DOCTYPE, po.name, "cost_per_label", cpl)
     po.cost_per_label = cpl
 
 
@@ -986,6 +1060,9 @@ def link_bill_on_purchase_invoice_submit(doc: Any, method: Optional[str] = None)
     idempotent, so the second call it makes is a no-op.
     """
     if not frappe or not _doctype_exists(PRINT_ORDER_DOCTYPE):
+        return
+    if _int(getattr(doc, "is_return", 0)):
+        _resync_after_debit_note(doc)
         return
     po_name = _print_order_for_pi(doc)
     if not po_name:
@@ -1009,14 +1086,36 @@ def unlink_bill_on_purchase_invoice_cancel(doc: Any, method: Optional[str] = Non
     """
     if not frappe or not _doctype_exists(PRINT_ORDER_DOCTYPE):
         return
+    if _int(getattr(doc, "is_return", 0)):
+        _resync_after_debit_note(doc)
+        return
     po_name = frappe.db.get_value(PRINT_ORDER_DOCTYPE, {"purchase_invoice": doc.name}, "name")
     if not po_name:
         return
     frappe.db.set_value(PRINT_ORDER_DOCTYPE, po_name, {
         "purchase_invoice": None,
         "billing_status": "Unbilled",
-    }, update_modified=False)
+    })
     po = frappe.get_doc(PRINT_ORDER_DOCTYPE, po_name)
+    sync_batch_value(po, reference_doctype="Purchase Invoice", reference_name=doc.name)
+
+
+def _resync_after_debit_note(doc: Any) -> None:
+    """A debit note against a label bill (submitted or cancelled) moves its value.
+
+    The note carries no idempotency key (the field is no_copy), so the batch is
+    found through ``return_against``. The batch's target becomes the bill net
+    of its live debit notes; ``sync_batch_value`` moves the difference.
+    """
+    original = str(getattr(doc, "return_against", "") or "")
+    if not original:
+        return
+    po_name = frappe.db.get_value(PRINT_ORDER_DOCTYPE, {"purchase_invoice": original}, "name")
+    if not po_name:
+        return
+    frappe.db.set_value(PRINT_ORDER_DOCTYPE, po_name, "total_cost", billed_amount(original))
+    po = frappe.get_doc(PRINT_ORDER_DOCTYPE, po_name)
+    _recompute_cost_per_label(po)
     sync_batch_value(po, reference_doctype="Purchase Invoice", reference_name=doc.name)
 
 
