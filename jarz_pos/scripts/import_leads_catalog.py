@@ -292,6 +292,12 @@ def _upsert_lead(lead):
 
     # Branches child table (metrics: always refreshed).
     branches = lead.get("branches") or []
+    # A re-import refreshes metrics; the pairing of a Maps branch with a
+    # delivery Address (set on the B2B account screen) is not catalog data.
+    from jarz_pos.api.leads import _branch_dict, carry_branch_links
+
+    previous = [_branch_dict(r) for r in (doc.get("custom_branches") or [])]
+    new_rows = []
     doc.set("custom_branches", [])
     for b in branches:
         if not isinstance(b, dict):
@@ -314,6 +320,9 @@ def _upsert_lead(lead):
                     row[f] = _cap(b.get(f))
                 else:
                     row[f] = b.get(f)
+        new_rows.append(row)
+    carry_branch_links(new_rows, previous)
+    for row in new_rows:
         doc.append("custom_branches", row)
 
     # Geo on the Lead from the primary branch (metric: always refreshed).

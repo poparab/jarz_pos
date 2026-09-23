@@ -752,10 +752,11 @@ def link_branch(doctype, name, maps_row, address_name=None):
             frappe.throw(
                 "This account has no customer yet, so it has no delivery branches to link to."
             )
-        from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
-
-        if address_name not in (get_linked_customer_address_names(customer) or []):
-            frappe.throw("That delivery address does not belong to this customer.")
+        # Only an address in the delivery-branch book: a billing-only address
+        # would be stored but never matched, so the link would silently fail.
+        branch_index = b2b_branches._member_index(b2b_branches.customer_branches(customer))
+        if address_name not in branch_index:
+            frappe.throw("That address is not one of this customer's delivery branches.")
 
     if maps_row == b2b_branches.SELF_BRANCH_ROW:
         row_name = _materialize_self_branch(lead)
@@ -772,9 +773,7 @@ def link_branch(doctype, name, maps_row, address_name=None):
         row_name = maps_row
 
     if address_name:
-        branch = b2b_branches._member_index(
-            b2b_branches.customer_branches(customer)
-        ).get(address_name)
+        branch = branch_index.get(address_name)
         members = list((branch or {}).get("member_address_names") or []) or [address_name]
         others = frappe.get_all(
             "Jarz Lead Branch",

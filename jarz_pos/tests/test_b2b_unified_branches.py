@@ -410,6 +410,13 @@ class TestLinkBranch(_Base):
             crm.link_branch("Lead", "L-1", "r1", "SOMEONE-ELSES")
         self.assertEqual(self.set_calls, [])
 
+    def test_billing_only_address_is_refused(self):
+        # Linked to the customer but not a delivery branch: the matcher would
+        # never find it, so the link would be stored and silently do nothing.
+        with self.assertRaises(frappe.ValidationError):
+            crm.link_branch("Lead", "L-1", "r1", "BILLING-ONLY")
+        self.assertEqual(self.set_calls, [])
+
     def test_link_without_customer_is_refused(self):
         with patch.object(crm, "_resolve_lead_customer", return_value=None):
             with self.assertRaises(frappe.ValidationError):
@@ -468,6 +475,66 @@ class TestLinkBranch(_Base):
         with patch.object(bb, "_leads_for_customer", return_value=[]):
             with self.assertRaises(frappe.ValidationError):
                 crm.link_branch("Customer", "C-1", "r1", "A")
+
+
+class TestCarryBranchLinks(unittest.TestCase):
+    """A lead edit or catalog re-import rebuilds the branch rows; the Address
+    pairings must survive it and must never move to a different door."""
+
+    @staticmethod
+    def _row(name="Brand", area="Zayed", lat=None, lng=None, url=None, **extra):
+        row = {"branch_name": name, "area": area, "latitude": lat, "longitude": lng, "maps_url": url}
+        row.update(extra)
+        return row
+
+    def test_exact_identity_carries_the_link(self):
+        from jarz_pos.api.leads import carry_branch_links
+
+        previous = [self._row(lat=30.1, lng=31.1, linked_address="A", match_dismissed=0)]
+        rows = [self._row(lat=30.1, lng=31.1)]
+        carry_branch_links(rows, previous)
+        self.assertEqual(rows[0]["linked_address"], "A")
+
+    def test_two_unpinned_twins_do_not_steal_a_pinned_rows_link(self):
+        from jarz_pos.api.leads import carry_branch_links
+
+        # X (no pin) comes first; Y (pinned) holds the link. Y must keep it.
+        previous = [
+            self._row(),
+            self._row(lat=30.1, lng=31.1, linked_address="A", match_dismissed=0),
+        ]
+        rows = [self._row(), self._row(lat=30.1, lng=31.1)]
+        carry_branch_links(rows, previous)
+        self.assertIsNone(rows[0].get("linked_address"))
+        self.assertEqual(rows[1]["linked_address"], "A")
+
+    def test_ambiguous_loose_match_carries_nothing(self):
+        from jarz_pos.api.leads import carry_branch_links
+
+        previous = [self._row(lat=30.1, lng=31.1, linked_address="A")]
+        # Re-scraped pin moved slightly and two unpinned twins arrive: which
+        # one is the linked door cannot be told, so neither gets the link.
+        rows = [self._row(), self._row()]
+        carry_branch_links(rows, previous)
+        self.assertFalse(any(r.get("linked_address") for r in rows))
+
+    def test_rescrape_a_few_metres_off_keeps_the_link(self):
+        from jarz_pos.api.leads import carry_branch_links
+
+        previous = [self._row(lat=30.1, lng=31.1, match_dismissed=1)]
+        rows = [self._row(lat=30.10002, lng=31.10002)]
+        carry_branch_links(rows, previous)
+        self.assertEqual(rows[0]["match_dismissed"], 1)
+
+    def test_explicitly_sent_value_is_not_overwritten(self):
+        from jarz_pos.api.leads import carry_branch_links
+
+        previous = [self._row(linked_address="A", match_dismissed=0)]
+        sent = [self._row(linked_address="B")]
+        rows = [dict(sent[0])]
+        carry_branch_links(rows, previous, sent)
+        self.assertEqual(rows[0]["linked_address"], "B")
+        self.assertEqual(rows[0]["match_dismissed"], 0)
 
 
 if __name__ == "__main__":

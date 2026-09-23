@@ -1610,6 +1610,12 @@ def delete_customer_shipping_address(customer, address_name):
             customer_doc.save(ignore_permissions=True)
 
         frappe.delete_doc("Address", address_name, ignore_permissions=True, force=True)
+        # A Google Maps branch paired with this door goes back to unpaired.
+        if frappe.db.has_column("Jarz Lead Branch", "linked_address"):
+            frappe.db.sql(
+                "UPDATE `tabJarz Lead Branch` SET linked_address = NULL WHERE linked_address = %s",
+                (address_name,),
+            )
         frappe.db.commit()
 
         return {"success": True, "address_book": _build_customer_shipping_address_book(customer)}

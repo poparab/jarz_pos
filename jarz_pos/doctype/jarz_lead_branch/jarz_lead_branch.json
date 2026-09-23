@@ -109,10 +109,9 @@
   },
   {
    "fieldname": "linked_address",
-   "fieldtype": "Link",
+   "fieldtype": "Data",
    "label": "Delivery Branch (Address)",
-   "options": "Address",
-   "description": "The customer's delivery address for this door. Set from the B2B account screen."
+   "description": "Name of the customer's delivery Address for this door. Set from the B2B account screen. Plain text on purpose: a Link would make the Lead unsavable once that Address is deleted."
   },
   {
    "fieldname": "match_dismissed",

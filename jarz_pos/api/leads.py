@@ -1070,11 +1070,10 @@ def save_lead(payload, name=None):
         # not the edit form; a form that does not send it must not erase it.
         previous = [_branch_dict(row) for row in (doc.get("custom_branches") or [])]
         doc.set("custom_branches", [])
-        for b in (payload.get("branches") or []):
-            if not isinstance(b, dict):
-                continue
-            row = {f: b.get(f) for f in _BRANCH_FIELDS if f in b}
-            _carry_branch_link(row, b, previous)
+        sent = [b for b in (payload.get("branches") or []) if isinstance(b, dict)]
+        rows = [{f: b.get(f) for f in _BRANCH_FIELDS if f in b} for b in sent]
+        carry_branch_links(rows, previous, sent)
+        for row in rows:
             doc.append("custom_branches", row)
 
     if creating:
@@ -1335,19 +1334,68 @@ def _branch_dict(row):
     return {f: row.get(f) for f in _BRANCH_FIELDS}
 
 
-def _carry_branch_link(row, sent, previous):
-    """Keep a replaced branch row's Address pairing when the edit omitted it."""
-    missing = [f for f in _BRANCH_LINK_FIELDS if f not in sent]
-    if not missing:
+def _branch_identity(row):
+    """Exact identity of a branch row: every field that locates the door."""
+    def norm(value):
+        return " ".join(str(value or "").split()).strip().lower()
+
+    def coord(value):
+        number = _float_or_none(value)
+        return round(number, 6) if number else None
+
+    return (
+        norm(row.get("branch_name")),
+        norm(row.get("area")),
+        norm(row.get("maps_url")),
+        coord(row.get("latitude")),
+        coord(row.get("longitude")),
+    )
+
+
+def carry_branch_links(rows, previous, sent=None):
+    """Keep replaced branch rows' Address pairings when the rewrite omitted them.
+
+    ``rows`` are the new row dicts (mutated in place), ``previous`` the rows
+    they replace, ``sent[i]`` the payload row ``rows[i]`` came from (a key the
+    caller sent explicitly is never overwritten). Pass 1 pairs rows whose
+    identity is exactly equal. Pass 2 falls back to ``_same_branch`` only
+    where it is unambiguous in BOTH directions: two unpinned rows with one
+    name and area must not trade one door's pairing for the other's.
+    """
+    need = []
+    for i, row in enumerate(rows):
+        source = (sent[i] if sent else None) or {}
+        missing = [f for f in _BRANCH_LINK_FIELDS if f not in source]
+        if missing:
+            need.append((row, missing))
+    priors = [p for p in previous if any(p.get(f) for f in _BRANCH_LINK_FIELDS)]
+    if not need or not priors:
         return
-    for i, prior in enumerate(previous):
-        if not any(prior.get(f) for f in _BRANCH_LINK_FIELDS):
+
+    def apply(row, missing, prior):
+        for f in missing:
+            row[f] = prior.get(f)
+
+    remaining = []
+    for row, missing in need:
+        key = _branch_identity(row)
+        hit = next((p for p in priors if _branch_identity(p) == key), None)
+        if hit is not None:
+            apply(row, missing, hit)
+            priors.remove(hit)
+        else:
+            remaining.append((row, missing))
+
+    for row, missing in remaining:
+        candidates = [p for p in priors if _same_branch(row, p)]
+        if len(candidates) != 1:
             continue
-        if _same_branch(row, prior):
-            for f in missing:
-                row[f] = prior.get(f)
-            previous.pop(i)  # one prior row feeds one new row
-            return
+        prior = candidates[0]
+        rivals = [r for r, _ in remaining if _same_branch(r, prior)]
+        if len(rivals) != 1:
+            continue
+        apply(row, missing, prior)
+        priors.remove(prior)
 
 
 def _lead_self_branch(doc):
