@@ -230,7 +230,14 @@ _BRANCH_FIELDS = (
     "talabat_rating",
     "talabat_reviews",
     "talabat_rating_source",
+    # The pairing with the customer's delivery Address (set from the B2B
+    # account screen). Copied so a merge or an edit keeps the pairing.
+    "linked_address",
+    "match_dismissed",
 )
+
+# Pairing fields an edit that did not send them must not wipe.
+_BRANCH_LINK_FIELDS = ("linked_address", "match_dismissed")
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +759,8 @@ def get_lead(name):
                 "talabat_rating": _rating_or_none(row.get("talabat_rating")),
                 "talabat_reviews": _int(row.get("talabat_reviews")),
                 "talabat_rating_source": _rating_source(row.get("talabat_rating_source")),
+                # The delivery Address this door is paired with (or null).
+                "linked_address": row.get("linked_address") or None,
             }
         )
     result["branches"] = branches
@@ -1057,14 +1066,16 @@ def save_lead(payload, name=None):
 
     # Branches child table (replace wholesale when provided).
     if "branches" in payload and payload.get("branches") is not None:
+        # The pairing with a delivery Address is set from the account screen,
+        # not the edit form; a form that does not send it must not erase it.
+        previous = [_branch_dict(row) for row in (doc.get("custom_branches") or [])]
         doc.set("custom_branches", [])
         for b in (payload.get("branches") or []):
             if not isinstance(b, dict):
                 continue
-            doc.append(
-                "custom_branches",
-                {f: b.get(f) for f in _BRANCH_FIELDS if f in b},
-            )
+            row = {f: b.get(f) for f in _BRANCH_FIELDS if f in b}
+            _carry_branch_link(row, b, previous)
+            doc.append("custom_branches", row)
 
     if creating:
         doc.insert(ignore_permissions=True)
@@ -1322,6 +1333,21 @@ def _same_branch(a, b):
 def _branch_dict(row):
     """A Jarz Lead Branch row reduced to the fields we copy."""
     return {f: row.get(f) for f in _BRANCH_FIELDS}
+
+
+def _carry_branch_link(row, sent, previous):
+    """Keep a replaced branch row's Address pairing when the edit omitted it."""
+    missing = [f for f in _BRANCH_LINK_FIELDS if f not in sent]
+    if not missing:
+        return
+    for i, prior in enumerate(previous):
+        if not any(prior.get(f) for f in _BRANCH_LINK_FIELDS):
+            continue
+        if _same_branch(row, prior):
+            for f in missing:
+                row[f] = prior.get(f)
+            previous.pop(i)  # one prior row feeds one new row
+            return
 
 
 def _lead_self_branch(doc):

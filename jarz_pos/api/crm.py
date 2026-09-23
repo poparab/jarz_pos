@@ -494,7 +494,10 @@ def get_account(doctype, name):
             "predicted_next_order": str | None,
             "avg_order_cycle_days": float | None,
             "recent_invoices": [ {"name","woo_order_id","posting_date","grand_total","custom_order_purpose","status"} ],
-            "open_todos": [ {"name","description","date"} ]
+            "open_todos": [ {"name","description","date"} ],
+            "branch_lead": str | None,   # Lead whose Maps branches are paired in
+            "branches": [ ... ],         # b2b_branches.unified_branches(); absent
+            "unassigned_invoices": {...} | None,  # when neither customer nor lead
         }
     """
     _ensure_b2b_access()
@@ -552,7 +555,14 @@ def get_account(doctype, name):
                 "Customer", customer, "custom_avg_order_cycle_days"
             )
         result["recent_invoices"] = _recent_b2b_invoices(customer)
-        _attach_branches(result, customer)
+
+    # One branch list: the customer's delivery Addresses paired with the
+    # catalog Lead's Google Maps branches. A Lead with no customer yet still
+    # shows its Maps doors.
+    lead = _readable_branch_lead(doctype, name, doc, customer)
+    result["branch_lead"] = lead
+    if customer or lead:
+        _attach_branches(result, customer, lead)
 
     # Open ToDos referencing this record.
     result["open_todos"] = _open_todos_for(doctype, name)
@@ -568,16 +578,63 @@ def get_account(doctype, name):
     return result
 
 
-def _attach_branches(result, customer):
-    """Fold the customer's branches -- each with its own invoices and balance --
-    into an account payload, and label every recent invoice with its branch.
+def _branch_lead(doctype, name, doc=None, customer=None):
+    """The catalog Lead whose Google Maps branches belong to this card, or None.
+
+    Lead -> itself. Customer -> its one live Lead (two is an unresolved
+    duplicate; neither is picked). Opportunity -> its Lead when it came from
+    one, else its customer's one live Lead.
+    """
+    from jarz_pos.services import b2b_branches
+
+    if doctype == "Lead":
+        return name
+    if doctype == "Customer":
+        leads = b2b_branches._leads_for_customer(name)
+        return leads[0] if len(leads) == 1 else None
+    if doctype == "Opportunity":
+        if doc is None:
+            doc = frappe.get_doc("Opportunity", name)
+        origin = str(doc.get("opportunity_from") or "").strip()
+        party = str(doc.get("party_name") or "").strip()
+        if origin == "Lead":
+            return party if party and frappe.db.exists("Lead", party) else None
+        if customer:
+            leads = b2b_branches._leads_for_customer(customer)
+            return leads[0] if len(leads) == 1 else None
+    return None
+
+
+def _readable_branch_lead(doctype, name, doc, customer):
+    """``_branch_lead`` for the account screen: never raises, and drops a Lead
+    the caller may not read (the screen then shows delivery branches only)."""
+    try:
+        lead = _branch_lead(doctype, name, doc, customer)
+        if lead and lead != name and not frappe.has_permission("Lead", ptype="read", doc=lead):
+            return None
+        return lead
+    except Exception:
+        try:
+            frappe.log_error(
+                title=f"crm: branch lead lookup failed for {doctype} {name}",
+                message=frappe.get_traceback(),
+            )
+        except Exception:
+            pass
+        return None
+
+
+def _attach_branches(result, customer, lead=None):
+    """Fold the account's branches -- each with its own invoices and balance,
+    and paired with the Lead's Google Maps branch where one matches -- into an
+    account payload, and label every recent invoice with its branch.
     Guarded: a failure here must never take the account screen down."""
     result["branches"] = []
     result["unassigned_invoices"] = None
     try:
         from jarz_pos.services import b2b_branches
 
-        book = b2b_branches.account_branches(customer)
+        book = b2b_branches.unified_branches(customer, lead)
         result["branches"] = book["branches"]
         result["unassigned_invoices"] = book["unassigned"]
         index = b2b_branches._member_index(book["branches"])
@@ -634,6 +691,140 @@ def get_account_invoices(doctype, name, branch=None, limit=100):
     from jarz_pos.services import b2b_branches
 
     return b2b_branches.account_invoices(customer, branch=branch, limit=limit)
+
+
+@frappe.whitelist(methods=["POST"])
+def link_branch(doctype, name, maps_row, address_name=None):
+    """Pair one Google Maps branch of the account's Lead with a delivery Address,
+    or (``address_name`` empty) unpair it for good.
+
+    ``maps_row`` is ``branches[].maps.row`` from ``get_account``: a Jarz Lead
+    Branch row name, or ``"__self__"`` for a branch-less Lead's own location
+    (which is then saved as a real branch row so the pairing has a home).
+    Linking clears any other row of the Lead paired with the same door;
+    unlinking sets ``match_dismissed`` so auto-matching never pairs it again.
+    Returns ``unified_branches(customer, lead)``: the refreshed branch list.
+    """
+    from jarz_pos.services import b2b_branches
+
+    _ensure_b2b_access()
+    if doctype not in ("Lead", "Opportunity", "Customer"):
+        frappe.throw("doctype must be 'Lead', 'Opportunity' or 'Customer'.")
+    if not _doctype_exists(doctype) or not frappe.db.exists(doctype, name):
+        frappe.throw(f"{doctype} '{name}' not found.")
+    _require_doc_permission(doctype, name, "read")
+
+    doc = frappe.get_doc(doctype, name) if doctype == "Opportunity" else None
+    if doctype == "Lead":
+        customer = _resolve_lead_customer(name, strict=False)
+    elif doctype == "Opportunity":
+        customer = _resolve_opportunity_customer(doc, strict=False)
+    else:
+        customer = name
+    lead = _branch_lead(doctype, name, doc, customer)
+    if not lead:
+        frappe.throw(
+            "This account has no single catalog lead, so it has no Google Maps "
+            "branches to link."
+        )
+    _require_doc_permission("Lead", lead, "write")
+    if customer:
+        _require_doc_permission("Customer", customer, "read")
+
+    if not (
+        b2b_branches._has_column("Jarz Lead Branch", "linked_address")
+        and b2b_branches._has_column("Jarz Lead Branch", "match_dismissed")
+    ):
+        frappe.throw(
+            "This site has not migrated the branch link fields yet. "
+            "Run `bench migrate` and try again."
+        )
+
+    maps_row = str(maps_row or "").strip()
+    address_name = str(address_name or "").strip() or None
+    if not maps_row:
+        frappe.throw("Pick the Google Maps branch to link.")
+
+    # Validate the address BEFORE anything is written (a virtual self row is
+    # materialized below, and must not be left behind by a refused request).
+    if address_name:
+        if not customer:
+            frappe.throw(
+                "This account has no customer yet, so it has no delivery branches to link to."
+            )
+        from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
+
+        if address_name not in (get_linked_customer_address_names(customer) or []):
+            frappe.throw("That delivery address does not belong to this customer.")
+
+    if maps_row == b2b_branches.SELF_BRANCH_ROW:
+        row_name = _materialize_self_branch(lead)
+    else:
+        row = frappe.db.get_value(
+            "Jarz Lead Branch", maps_row, ["parenttype", "parent", "parentfield"], as_dict=True
+        )
+        if not row or (
+            row.get("parenttype"),
+            row.get("parent"),
+            row.get("parentfield"),
+        ) != ("Lead", lead, "custom_branches"):
+            frappe.throw("That Google Maps branch does not belong to this account.")
+        row_name = maps_row
+
+    if address_name:
+        branch = b2b_branches._member_index(
+            b2b_branches.customer_branches(customer)
+        ).get(address_name)
+        members = list((branch or {}).get("member_address_names") or []) or [address_name]
+        others = frappe.get_all(
+            "Jarz Lead Branch",
+            filters={
+                "parenttype": "Lead",
+                "parent": lead,
+                "parentfield": "custom_branches",
+                "linked_address": ["in", members],
+                "name": ["!=", row_name],
+            },
+            pluck="name",
+            limit_page_length=0,
+        ) or []
+        for other in others:
+            frappe.db.set_value(
+                "Jarz Lead Branch", other, "linked_address", None, update_modified=False
+            )
+        frappe.db.set_value(
+            "Jarz Lead Branch",
+            row_name,
+            {"linked_address": address_name, "match_dismissed": 0},
+            update_modified=False,
+        )
+    else:
+        frappe.db.set_value(
+            "Jarz Lead Branch",
+            row_name,
+            {"linked_address": None, "match_dismissed": 1},
+            update_modified=False,
+        )
+
+    return b2b_branches.unified_branches(customer, lead)
+
+
+def _materialize_self_branch(lead):
+    """Save a branch-less Lead's own location as its first branch row."""
+    from jarz_pos.api.leads import _lead_self_branch
+
+    lead_doc = frappe.get_doc("Lead", lead)
+    if lead_doc.get("custom_branches"):
+        frappe.throw(
+            "This lead already has Google Maps branches. Refresh the account and pick one."
+        )
+    own = _lead_self_branch(lead_doc)
+    if not own:
+        frappe.throw("This lead has no location to link.")
+    row = lead_doc.append("custom_branches", own)
+    lead_doc.flags.ignore_permissions = True
+    lead_doc.save(ignore_permissions=True)
+    return row.name
 
 
 # ---------------------------------------------------------------------------

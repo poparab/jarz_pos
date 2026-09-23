@@ -192,6 +192,9 @@ jobs:
             # door, and folding a duplicate account into another as a branch
             # (customer merge must move every total unchanged; manager only).
             test_b2b_branches
+            # One branch list: the Lead's Google Maps rows paired with the
+            # Customer's delivery Addresses (link, pin, name, area matching).
+            test_b2b_unified_branches
             test_b2b_reorder_forecast
             test_b2b_pos_bridge_delivery
             test_leads_api

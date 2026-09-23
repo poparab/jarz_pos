@@ -22,6 +22,8 @@
   "address",
   "latitude",
   "longitude",
+  "linked_address",
+  "match_dismissed",
   "on_talabat",
   "talabat_rating",
   "talabat_reviews",
@@ -106,6 +108,20 @@
    "label": "Longitude"
   },
   {
+   "fieldname": "linked_address",
+   "fieldtype": "Link",
+   "label": "Delivery Branch (Address)",
+   "options": "Address",
+   "description": "The customer's delivery address for this door. Set from the B2B account screen."
+  },
+  {
+   "fieldname": "match_dismissed",
+   "fieldtype": "Check",
+   "label": "Not a Delivery Branch",
+   "default": "0",
+   "description": "Set when someone unlinked this row, so it is never auto-matched again."
+  },
+  {
    "fieldname": "on_talabat",
    "fieldtype": "Check",
    "label": "On Talabat",
@@ -136,7 +152,7 @@
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-08-26 00:00:00.000000",
+ "modified": "2026-09-24 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Lead Branch",

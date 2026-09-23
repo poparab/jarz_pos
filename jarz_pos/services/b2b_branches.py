@@ -237,6 +237,367 @@ def account_branches(customer: str) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# One branch list: delivery Addresses + the Lead's Google Maps branches
+# ---------------------------------------------------------------------------
+# A B2B shop's doors reach the account screen from two places: the Customer's
+# shipping Addresses (where invoices go) and the Lead's ``custom_branches`` rows
+# (what the Maps scrape found). Both describe the same physical doors, so the
+# screen merges them: every door once, carrying its delivery/invoice data AND
+# its Maps data. A rep can pin a pairing by hand (``linked_address``) or break
+# one (``match_dismissed``); everything else is matched automatically, and only
+# when the match is unambiguous -- a wrong pairing would show one door's rating
+# and pin against another door's debt.
+
+SELF_BRANCH_ROW = "__self__"
+AUTO_MATCH_METRES = 150
+
+_MAPS_ROW_FIELDS = (
+    "name",
+    "idx",
+    "branch_name",
+    "area",
+    "region",
+    "governorate",
+    "rating",
+    "reviews",
+    "maps_url",
+    "phone",
+    "address",
+    "latitude",
+    "longitude",
+)
+_MAPS_OPTIONAL_FIELDS = ("on_talabat", "linked_address", "match_dismissed")
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _truthy(value: Any) -> bool:
+    try:
+        return bool(int(value or 0))
+    except (TypeError, ValueError):
+        return bool(value)
+
+
+def _pin(row: Dict[str, Any]) -> Optional[tuple]:
+    lat = _float_or_none(row.get("latitude"))
+    lng = _float_or_none(row.get("longitude"))
+    return (lat, lng) if lat and lng else None
+
+
+def _metres(a: tuple, b: tuple) -> float:
+    """Equirectangular distance, as ``leads._same_branch`` measures it."""
+    import math
+
+    dy = (a[0] - b[0]) * 111_320
+    dx = (a[1] - b[1]) * 111_320 * math.cos(math.radians((a[0] + b[0]) / 2))
+    return math.hypot(dx, dy)
+
+
+def _name_key(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _area_tokens(*values: Any) -> set:
+    """Normalised area labels; "Heliopolis - مصر الجديده" yields both halves."""
+    tokens = set()
+    for value in values:
+        text = _norm(value).lower()
+        if not text:
+            continue
+        tokens.add(text)
+        for part in text.split(" - "):
+            part = _norm(part)
+            if part:
+                tokens.add(part)
+    return tokens
+
+
+def _log_quietly(title: str) -> None:
+    """``frappe.log_error`` can itself raise; a degraded read must not."""
+    try:
+        frappe.log_error(title=title, message=frappe.get_traceback())
+    except Exception:
+        pass
+
+
+def _lead_maps_rows(lead: str) -> List[Dict[str, Any]]:
+    """The lead's Jarz Lead Branch rows in idx order. Never raises."""
+    try:
+        fields = list(_MAPS_ROW_FIELDS) + [
+            f for f in _MAPS_OPTIONAL_FIELDS if _has_column("Jarz Lead Branch", f)
+        ]
+        return frappe.get_all(
+            "Jarz Lead Branch",
+            filters={"parenttype": "Lead", "parent": lead, "parentfield": "custom_branches"},
+            fields=fields,
+            order_by="idx asc",
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        _log_quietly(f"b2b_branches: maps rows lookup failed for {lead}")
+        return []
+
+
+def _lead_self_row(lead: str) -> Optional[Dict[str, Any]]:
+    """A branch-less Lead's own location as one virtual row, or None."""
+    try:
+        from jarz_pos.api.leads import _lead_self_branch
+
+        own = _lead_self_branch(frappe.get_doc("Lead", lead))
+    except Exception:
+        _log_quietly(f"b2b_branches: self branch failed for {lead}")
+        return None
+    if not own:
+        return None
+    row = dict(own)
+    row["name"] = SELF_BRANCH_ROW
+    return row
+
+
+def _lead_title(lead: Optional[str]) -> Optional[str]:
+    if not lead:
+        return None
+    try:
+        row = frappe.db.get_value("Lead", lead, ["lead_name", "company_name"], as_dict=True) or {}
+    except Exception:
+        row = {}
+    return row.get("lead_name") or row.get("company_name") or lead
+
+
+def _maps_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "row": row.get("name"),
+        "branch_name": row.get("branch_name"),
+        "area": row.get("area"),
+        "region": row.get("region"),
+        "governorate": row.get("governorate"),
+        "rating": _float_or_none(row.get("rating")),
+        "reviews": _int_or_none(row.get("reviews")),
+        "maps_url": row.get("maps_url"),
+        "phone": row.get("phone"),
+        "address": row.get("address"),
+        "latitude": _float_or_none(row.get("latitude")),
+        "longitude": _float_or_none(row.get("longitude")),
+        "on_talabat": _truthy(row.get("on_talabat")),
+    }
+
+
+def _territory_labels(names: List[str]) -> Dict[str, List[Any]]:
+    """Territory docname -> [name, territory_name, Arabic name]. One query."""
+    names = sorted({n for n in names if n})
+    if not names:
+        return {}
+    fields = ["name", "territory_name"]
+    if _has_column("Territory", "custom_territory_name_ar"):
+        fields.append("custom_territory_name_ar")
+    try:
+        rows = frappe.get_all(
+            "Territory", filters={"name": ["in", names]}, fields=fields, limit_page_length=0
+        ) or []
+    except Exception:
+        return {}
+    return {
+        row.get("name"): [row.get(f) for f in fields]
+        for row in rows
+    }
+
+
+def _match_rows(branches: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> Dict[int, tuple]:
+    """Pair maps rows with address branches. -> {row index: (branch index, how)}.
+
+    Each side is used at most once. In order: a hand link; the nearest pins
+    within ``AUTO_MATCH_METRES``; an identical name; an identical area. The name
+    and area rules pair only a match that is unique in BOTH directions among
+    what is still unpaired -- two Sheikh Zayed rows and one Sheikh Zayed address
+    stay apart, because either guess could be the wrong door.
+    """
+    pairs: Dict[int, tuple] = {}
+    taken = set()
+    index = {}
+    for b_idx, branch in enumerate(branches):
+        for member in branch.get("member_address_names") or []:
+            if member:
+                index[member] = b_idx
+
+    # 1. Hand links. First row (by idx) wins a contested branch.
+    for r_idx, row in enumerate(rows):
+        linked = row.get("linked_address")
+        b_idx = index.get(linked) if linked else None
+        if b_idx is not None and b_idx not in taken:
+            pairs[r_idx] = (b_idx, "linked")
+            taken.add(b_idx)
+
+    # 2. Dismissed rows are never auto-matched.
+    def free_rows():
+        return [
+            r for r in range(len(rows))
+            if r not in pairs and not _truthy(rows[r].get("match_dismissed"))
+        ]
+
+    def free_branches():
+        return [b for b in range(len(branches)) if b not in taken]
+
+    # 3. Pins: greedy nearest pairs.
+    candidates = []
+    for r_idx in free_rows():
+        r_pin = _pin(rows[r_idx])
+        if not r_pin:
+            continue
+        for b_idx in free_branches():
+            b_pin = _pin(branches[b_idx])
+            if not b_pin:
+                continue
+            distance = _metres(r_pin, b_pin)
+            if distance <= AUTO_MATCH_METRES:
+                candidates.append((distance, r_idx, b_idx))
+    for _distance, r_idx, b_idx in sorted(candidates):
+        if r_idx in pairs or b_idx in taken:
+            continue
+        pairs[r_idx] = (b_idx, "auto")
+        taken.add(b_idx)
+
+    def unique_pairs(row_keys, branch_keys):
+        """Pair where a row matches exactly one branch and that branch one row."""
+        r_list, b_list = free_rows(), free_branches()
+        row_hits = {
+            r: [b for b in b_list if row_keys(r) & branch_keys(b)] for r in r_list
+        }
+        branch_hits = {
+            b: [r for r in r_list if row_keys(r) & branch_keys(b)] for b in b_list
+        }
+        for r_idx in r_list:
+            hits = row_hits[r_idx]
+            if len(hits) == 1 and len(branch_hits[hits[0]]) == 1:
+                pairs[r_idx] = (hits[0], "auto")
+                taken.add(hits[0])
+
+    # 4. Names.
+    def row_name(r):
+        key = _name_key(rows[r].get("branch_name"))
+        return {key} if key else set()
+
+    def branch_name(b):
+        key = _name_key(branches[b].get("branch_name"))
+        return {key} if key else set()
+
+    unique_pairs(row_name, branch_name)
+
+    # 5. Areas: the maps row's area/region against the address's city and
+    # every label its territory goes by.
+    remaining = free_branches()
+    if free_rows() and remaining:
+        labels = _territory_labels([branches[b].get("territory") for b in remaining])
+        branch_areas = {
+            b: _area_tokens(
+                branches[b].get("city"),
+                branches[b].get("territory"),
+                *labels.get(branches[b].get("territory"), []),
+            )
+            for b in remaining
+        }
+        unique_pairs(
+            lambda r: _area_tokens(rows[r].get("area"), rows[r].get("region")),
+            lambda b: branch_areas.get(b, set()),
+        )
+    return pairs
+
+
+def _maps_only_entry(row: Dict[str, Any], lead_title: Optional[str]) -> Dict[str, Any]:
+    maps = _maps_payload(row)
+    return {
+        "source": "maps",
+        "address_name": None,
+        "branch_name": maps["branch_name"] or lead_title,
+        "address_line1": maps["address"],
+        "address_line2": None,
+        "city": maps["area"],
+        "phone": maps["phone"],
+        "territory": None,
+        "territory_missing": False,
+        "is_primary_address": False,
+        "latitude": maps["latitude"],
+        "longitude": maps["longitude"],
+        "member_address_names": [],
+        "invoice_count": 0,
+        "total_billed": 0.0,
+        "outstanding": 0.0,
+        "last_order_date": None,
+        "maps": maps,
+        "maps_match": None,
+    }
+
+
+def unified_branches(customer: Optional[str], lead: Optional[str]) -> Dict[str, Any]:
+    """Every door of the account once, with delivery and Maps data side by side.
+
+    Address branches (with their invoice totals) come first, each carrying the
+    Maps row it was paired with, if any; Maps rows no address was paired with
+    follow as their own entries with zero invoice stats. Returns
+    ``{"branches": [...], "unassigned": <account_branches unassigned> | None}``.
+    """
+    if customer:
+        book = account_branches(customer)
+        branches = list(book.get("branches") or [])
+        unassigned = book.get("unassigned")
+    else:
+        branches, unassigned = [], None
+    for branch in branches:
+        branch["source"] = "address"
+        branch["maps"] = None
+        branch["maps_match"] = None
+
+    rows: List[Dict[str, Any]] = []
+    if lead:
+        try:
+            exists = frappe.db.exists("Lead", lead)
+        except Exception:
+            exists = False
+        if exists:
+            rows = _lead_maps_rows(lead)
+            if not rows:
+                own = _lead_self_row(lead)
+                rows = [own] if own else []
+
+    if not rows:
+        return {"branches": branches, "unassigned": unassigned}
+
+    pairs = _match_rows(branches, rows)
+    for r_idx, (b_idx, how) in pairs.items():
+        branch = branches[b_idx]
+        maps = _maps_payload(rows[r_idx])
+        branch["maps"] = maps
+        branch["maps_match"] = how
+        if not _pin(branch) and maps["latitude"] and maps["longitude"]:
+            branch["latitude"] = maps["latitude"]
+            branch["longitude"] = maps["longitude"]
+
+    title = None
+    for r_idx, row in enumerate(rows):
+        if r_idx in pairs:
+            continue
+        if title is None and not row.get("branch_name"):
+            title = _lead_title(lead)
+        branches.append(_maps_only_entry(row, title))
+    return {"branches": branches, "unassigned": unassigned}
+
+
 def map_invoice(row: Dict[str, Any], index: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
