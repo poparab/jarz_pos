@@ -281,6 +281,10 @@ jobs:
             # had never once executed before being converted to TestCase classes.
             test_observability
             test_shipping_income_resolution
+            # Customer delivery charge -> Shipping Income (not Freight), purchase
+            # delivery and the owner's car on their own ledgers, and the patch
+            # that creates them.
+            test_expense_classification_accounts
             test_territory_resolution
             test_woo_order_id_display
             test_invoice_return

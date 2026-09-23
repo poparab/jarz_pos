@@ -17,6 +17,17 @@ class ACCOUNTS:
     CASH_OVER_SHORT = "Cash Over Short"
     INDIRECT_EXPENSES = "Indirect Expenses"
     FREIGHT_AND_FORWARDING = "Freight and Forwarding Charges"
+    # What the customer is billed for delivery. Income, never netted against
+    # Freight: until 2026-09 it was credited to Freight and hid both numbers.
+    SHIPPING_INCOME = "Shipping Income"
+    DIRECT_INCOME = "Direct Income"
+    # Delivery paid to bring purchased goods in. Kept off Freight, which is
+    # the courier cost of delivering orders to customers.
+    PURCHASE_DELIVERY = "Purchase Delivery Charges"
+    VEHICLE_EXPENSES = "Vehicle Expenses"
+    VEHICLE_FUEL = "Vehicle Fuel"
+    VEHICLE_MAINTENANCE = "Vehicle Maintenance and Repairs"
+    VEHICLE_OTHER = "Vehicle Other Expenses"
     COURIER_OUTSTANDING = "Courier Outstanding"
     CREDITORS = "Creditors"
     CASH_IN_HAND = "Cash In Hand"

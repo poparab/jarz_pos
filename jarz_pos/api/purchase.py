@@ -4,7 +4,7 @@ import frappe
 from frappe import _
 from typing import List, Dict, Any, Optional
 
-from jarz_pos.constants import ACCOUNTS, PAYMENT_MODES, PRICE_LISTS, ROLES
+from jarz_pos.constants import PAYMENT_MODES, PRICE_LISTS, ROLES
 from jarz_pos.utils.warehouse_utils import resolve_purchase_warehouse
 from jarz_pos.utils.posting_datetime import (
     apply_ledger_posting_datetime,
@@ -719,7 +719,10 @@ def create_purchase_invoice(
     # it is computed from the item lines and not from the freight charge.
     _ensure_item_tax_rows(pi, resolved_company)
 
-    # Shipping as an Actual charge on Freight and Forwarding Charges.
+    # Shipping as an Actual charge on Purchase Delivery Charges — its own
+    # ledger, not Freight, which is the courier cost of delivering orders to
+    # customers. "Valuation and Total" still capitalises it into the stock's
+    # cost on an update_stock invoice, so the account nets to zero there.
     #
     # This block used to sit inside `try/except Exception: log_error()`, which
     # swallowed its own frappe.throw — so a missing freight account silently
@@ -727,13 +730,9 @@ def create_purchase_invoice(
     # shipping cost simply gone. Errors propagate now.
     amt = float(shipping_amount or 0)
     if amt > 0:
-        account = _get_freight_and_forwarding_account(resolved_company)
-        if not account:
-            frappe.throw(
-                _("Freight and Forwarding Charges account not found for company {0}. Please create or map it.").format(
-                    resolved_company
-                )
-            )
+        from jarz_pos.utils.account_utils import get_purchase_delivery_account
+
+        account = get_purchase_delivery_account(resolved_company)
         pi.append("taxes", {
             "category": "Valuation and Total",
             "add_deduct_tax": "Add",
@@ -1397,33 +1396,6 @@ def _resolve_payment_account(payment_option: Optional[str], company: str) -> str
 def _resolve_payment_mode(payment_option: Optional[str], company: str) -> str:
     opt_lower = (payment_option or "cash").strip().lower()
     return "InstaPay" if opt_lower == "instapay" else PAYMENT_MODES.CASH
-
-
-def _get_freight_and_forwarding_account(company: str) -> Optional[str]:
-    """Resolve the 'Freight and Forwarding Charges' expense account for the company.
-
-    Prefer exact account named "Freight and Forwarding Charges - <Company Abbr>".
-    Fallback: any non-group Account in the company with account_name exactly 'Freight and Forwarding Charges'.
-    """
-    try:
-        abbr = frappe.db.get_value("Company", company, "abbr") or ""
-        if abbr:
-            exact = f"{ACCOUNTS.FREIGHT_AND_FORWARDING} - {abbr}"
-            if frappe.db.exists("Account", exact):
-                acc = frappe.get_doc("Account", exact)
-                if acc.company == company and int(acc.is_group or 0) == 0:
-                    return exact
-        rows = frappe.get_all(
-            "Account",
-            filters={"company": company, "is_group": 0, "account_name": ACCOUNTS.FREIGHT_AND_FORWARDING},
-            fields=["name"],
-            limit=1,
-        )
-        if rows:
-            return rows[0]["name"]
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), title="_get_freight_and_forwarding_account failed")
-    return None
 
 
 def _get_pos_profile_cash_account(company: str) -> Optional[str]:

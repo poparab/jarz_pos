@@ -39,3 +39,8 @@ jarz_pos.Patches.v1_9.backfill_journal_entry_tag_field
 # Leaves alone the ones where a manager confirmed proof but no payment was
 # booked -- that is real money and the owner's call. Idempotent.
 jarz_pos.Patches.v1_9.reconcile_awaiting_online_payments
+# Separates the money that shared Freight and Forwarding Charges: creates
+# Shipping Income (the customer's delivery charge, previously credited to
+# Freight), Purchase Delivery Charges, and a Vehicle Expenses group for the
+# owner's car. Creates ledgers only; history is reclassified separately.
+jarz_pos.Patches.v1_9.create_expense_classification_accounts

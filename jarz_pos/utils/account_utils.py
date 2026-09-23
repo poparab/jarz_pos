@@ -144,6 +144,50 @@ def get_freight_expense_account(company: str) -> str:
     return acc
 
 
+def _company_leaf(account_name: str, company: str):
+    """``<account_name> - <abbr>`` if it exists as a leaf of this company, else None."""
+    abbr = frappe.db.get_value("Company", company, "abbr")
+    if not abbr:
+        return None
+    name = f"{account_name} - {abbr}"
+    row = frappe.db.get_value("Account", name, ["company", "is_group"], as_dict=True)
+    if row and row.company == company and not int(row.is_group or 0):
+        return name
+    return None
+
+
+def get_shipping_income_account(company: str) -> str:
+    """Return the account the customer's delivery charge is credited to.
+
+    ``Shipping Income - <abbr>`` (an Income account, created by the
+    ``create_expense_classification_accounts`` patch). Falls back to the
+    Freight account only on a site the patch has not reached yet, so invoicing
+    never stops over a missing ledger — that is the pre-2026-09 behaviour,
+    which netted the charge against the courier cost.
+    """
+    acc = _company_leaf(ACCOUNTS.SHIPPING_INCOME, company)
+    if acc:
+        return acc
+    frappe.logger("jarz_pos").warning(
+        {"event": "shipping_income_account_missing", "company": company}
+    )
+    return get_freight_expense_account(company)
+
+
+def get_purchase_delivery_account(company: str) -> str:
+    """Return the account a purchase's delivery charge is booked to.
+
+    ``Purchase Delivery Charges - <abbr>``; Freight only as a pre-patch fallback.
+    """
+    acc = _company_leaf(ACCOUNTS.PURCHASE_DELIVERY, company)
+    if acc:
+        return acc
+    frappe.logger("jarz_pos").warning(
+        {"event": "purchase_delivery_account_missing", "company": company}
+    )
+    return get_freight_expense_account(company)
+
+
 def get_courier_outstanding_account(company: str) -> str:
     """Return Courier Outstanding account (non-group) for company.
 

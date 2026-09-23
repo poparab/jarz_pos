@@ -2,7 +2,7 @@
 Delivery Utilities for Jarz POS
 
 Handles delivery charges integration with ERPNext's Sales Taxes and Charges table.
-Delivery charges are added as 'Actual' type charges to the Freight and Forwarding Charges account.
+Delivery charges are added as 'Actual' type charges to the Shipping Income account.
 """
 
 import frappe
@@ -12,57 +12,21 @@ from frappe.utils import flt
 
 def get_delivery_account(company):
     """
-    Get the Freight and Forwarding Charges account for the company
-    Format: "Freight and Forwarding Charges - {company_abbr}"
+    Return the account the customer's delivery charge is credited to.
+
+    Shipping Income - {abbr}. Until 2026-09 this was Freight and Forwarding
+    Charges, which netted what the customer paid for delivery against what the
+    courier cost and left a negative expense in the P&L.
     """
-    try:
-        # Get company abbreviation
-        company_doc = frappe.get_doc("Company", company)
-        company_abbr = company_doc.abbr
-        
-        # Construct account name
-        account_name = f"Freight and Forwarding Charges - {company_abbr}"
-        
-        # Verify account exists
-        if not frappe.db.exists("Account", account_name):
-            # Try to find similar account
-            similar_accounts = frappe.get_all("Account", 
-                filters={
-                    "account_name": ["like", "%Freight%"],
-                    "company": company
-                },
-                fields=["name"])
-            
-            if similar_accounts:
-                account_name = similar_accounts[0].name
-                frappe.log_error(f"Using similar account: {account_name} for delivery charges", "Delivery Charges")
-            else:
-                # Try to find any expense account as fallback
-                expense_accounts = frappe.get_all("Account",
-                    filters={
-                        "account_type": "Expense Account",
-                        "company": company,
-                        "is_group": 0
-                    },
-                    fields=["name"],
-                    limit=1)
-                
-                if expense_accounts:
-                    account_name = expense_accounts[0].name
-                    frappe.log_error(f"Using fallback expense account: {account_name} for delivery charges", "Delivery Charges")
-                else:
-                    frappe.throw(_("No suitable account found for delivery charges in company {0}").format(company))
-                
-        return account_name
-    except Exception as e:
-        frappe.log_error(f"Error getting delivery account: {str(e)}", "Delivery Charges")
-        raise
+    from jarz_pos.utils.account_utils import get_shipping_income_account
+
+    return get_shipping_income_account(company)
 
 
 def add_delivery_charges_to_taxes(invoice_doc, delivery_charges, delivery_description="Delivery Charges"):
     """
     Add delivery charges to Sales Taxes and Charges table
-    As per requirements: Type=Actual, Account=Freight and Forwarding Charges - {abbr}
+    Type=Actual, Account=Shipping Income - {abbr} (see get_delivery_account)
     """
     if not delivery_charges or flt(delivery_charges) <= 0:
         frappe.log_error("No delivery charges to add or invalid amount", "Delivery Charges")
