@@ -490,7 +490,13 @@ def build_material_rows(
     item_meta: Mapping[str, Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Leaf materials, missing first (largest share missing), then by name."""
-    needs: Dict[str, float] = dict(exploded.get("materials") or {})
+    # A non-stock line (``Water (tap)``) is never held, so it is never missing
+    # and is not something to buy: it is left off the list entirely.
+    needs: Dict[str, float] = {
+        code: qty
+        for code, qty in (exploded.get("materials") or {}).items()
+        if _meta(item_meta, code).get("is_stock_item", True) is not False
+    }
     # An alternative lends only what it has LEFT after its own need this round,
     # and each jar of it is lent once: two-way pairs that are both needed must
     # not each count the other's whole stock.

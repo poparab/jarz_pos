@@ -688,7 +688,7 @@ def _resolve_item_meta(
         rows = frappe.get_all(
             "Item",
             filters={"name": ["in", item_codes]},
-            fields=["name", "item_name", "item_group", "stock_uom"],
+            fields=["name", "item_name", "item_group", "stock_uom", "is_stock_item"],
             limit_page_length=0,
         )
     except Exception:
@@ -709,6 +709,7 @@ def _resolve_item_meta(
             "item_group": str(row.get("item_group") or ""),
             "stock_uom": str(row.get("stock_uom") or ""),
             "whole_number": str(row.get("stock_uom") or "") in whole,
+            "is_stock_item": bool(int(plan.to_float(row.get("is_stock_item"), 1.0))),
         }
         for row in rows or []
         if row.get("name")

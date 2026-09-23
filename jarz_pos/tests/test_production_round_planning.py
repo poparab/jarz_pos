@@ -301,6 +301,12 @@ class TestMaterialRows(unittest.TestCase):
         self.assertEqual(15.0, rows["LID"]["alternative_on_hand"])
         self.assertEqual(0.0, rows["LID"]["missing"])
 
+    def test_a_non_stock_line_is_never_missing(self):
+        exploded = {"materials": {"WATER": 1.5, "FLOUR": 2.0}, "used_by": {}}
+        meta = {"WATER": {"item_name": "Water (tap)", "is_stock_item": False}}
+        rows = rp.build_material_rows(exploded, {}, {}, meta)
+        self.assertEqual(["FLOUR"], [r["item_code"] for r in rows])
+
     def test_two_way_alternatives_are_not_counted_twice(self):
         # Both lids needed x100, 60 each on hand: the real shortage is 80.
         exploded = {"materials": {"LID-A": 100.0, "LID-B": 100.0}, "used_by": {}}
