@@ -2690,28 +2690,85 @@ def submit_single_work_order(
     return out
 
 
+# The history dialog pages through Work Orders; a cap keeps a wide date range
+# from dragging the whole table over the wire.
+MAX_RECENT_WORK_ORDERS = 500
+# Which date the history filters and sorts on: when the Work Order record was
+# created, or when its Manufacture entry actually moved stock.
+RECENT_WORK_ORDER_DATE_BASES = ("creation", "posting")
+
+
 @frappe.whitelist()
-def list_recent_work_orders(limit: int = 50) -> List[Dict[str, Any]]:
-    """Return recent Work Orders sorted by creation (last added first)."""
+def list_recent_work_orders(
+    limit: int = 50,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    date_basis: str = "creation",
+) -> List[Dict[str, Any]]:
+    """Return recent Work Orders, newest first, with the date each hit stock.
+
+    ``creation`` is when the Work Order record was made. ``posted_at`` is the
+    posting date+time of its latest submitted Manufacture Stock Entry, which is
+    the date the finished goods and consumed materials count against in every
+    stock report. The two differ for a backdated batch, and ``posted_at`` is
+    empty until the batch is finished.
+
+    ``date_basis`` picks which of the two ``from_date``/``to_date`` filter on and
+    the list sorts by. The defaults reproduce the old creation-ordered list.
+    """
     _ensure_manager_access()
 
-    rows = frappe.get_all(
-        "Work Order",
-        filters={},
-        fields=[
-            "name",
-            "production_item",
-            "qty",
-            "bom_no",
-            "status",
-            "company",
-            "planned_start_date",
-            "wip_warehouse",
-            "fg_warehouse",
-            "creation",
-        ],
-        order_by="creation desc",
-        limit=limit,
+    limit = max(1, min(frappe.utils.cint(limit) or 50, MAX_RECENT_WORK_ORDERS))
+    if date_basis not in RECENT_WORK_ORDER_DATE_BASES:
+        date_basis = "creation"
+    date_expr = "DATE(se.posted_at)" if date_basis == "posting" else "DATE(wo.creation)"
+
+    conditions: List[str] = []
+    params: Dict[str, Any] = {"limit": limit}
+    if search and str(search).strip():
+        conditions.append(
+            "(wo.name LIKE %(search)s OR wo.production_item LIKE %(search)s"
+            " OR wo.item_name LIKE %(search)s)"
+        )
+        params["search"] = f"%{str(search).strip()}%"
+    if status and str(status).strip():
+        conditions.append("wo.status = %(status)s")
+        params["status"] = str(status).strip()
+    if from_date:
+        conditions.append(f"{date_expr} >= %(from_date)s")
+        params["from_date"] = frappe.utils.getdate(from_date)
+    if to_date:
+        conditions.append(f"{date_expr} <= %(to_date)s")
+        params["to_date"] = frappe.utils.getdate(to_date)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    order = (
+        "COALESCE(se.posted_at, wo.creation) DESC"
+        if date_basis == "posting"
+        else "wo.creation DESC"
+    )
+    rows = frappe.db.sql(
+        f"""
+        SELECT wo.name, wo.production_item, wo.item_name, wo.qty, wo.produced_qty,
+               wo.bom_no, wo.status, wo.company, wo.planned_start_date,
+               wo.wip_warehouse, wo.fg_warehouse, wo.creation, se.posted_at
+        FROM `tabWork Order` wo
+        LEFT JOIN (
+            SELECT s.work_order,
+                   MAX(TIMESTAMP(s.posting_date, s.posting_time)) AS posted_at
+            FROM `tabStock Entry` s
+            WHERE s.docstatus = 1 AND s.purpose = 'Manufacture'
+              AND IFNULL(s.work_order, '') != ''
+            GROUP BY s.work_order
+        ) se ON se.work_order = wo.name
+        {where}
+        ORDER BY {order}
+        LIMIT %(limit)s
+        """,
+        params,
+        as_dict=True,
     )
     # Cast/normalize types
     out: List[Dict[str, Any]] = []
@@ -2720,7 +2777,9 @@ def list_recent_work_orders(limit: int = 50) -> List[Dict[str, Any]]:
             {
                 "name": r.get("name"),
                 "production_item": r.get("production_item"),
+                "item_name": r.get("item_name"),
                 "qty": float(r.get("qty") or 0),
+                "produced_qty": float(r.get("produced_qty") or 0),
                 "bom_no": r.get("bom_no"),
                 "status": r.get("status"),
                 "company": r.get("company"),
@@ -2728,6 +2787,7 @@ def list_recent_work_orders(limit: int = 50) -> List[Dict[str, Any]]:
                 "wip_warehouse": r.get("wip_warehouse"),
                 "fg_warehouse": r.get("fg_warehouse"),
                 "creation": r.get("creation"),
+                "posted_at": r.get("posted_at"),
             }
         )
     return out

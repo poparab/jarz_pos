@@ -89,3 +89,17 @@ class TestManufacturingAPI(unittest.TestCase):
 
 		# Should not exceed limit
 		self.assertLessEqual(len(result), 5, "Should not exceed specified limit")
+
+	def test_list_recent_work_orders_posting_filter(self):
+		"""Posting-basis filters return only batches that hit stock in range."""
+		from frappe.utils import getdate
+
+		from jarz_pos.api.manufacturing import list_recent_work_orders
+
+		result = list_recent_work_orders(
+			limit=20, date_basis="posting", from_date="2020-01-01", to_date="2099-12-31"
+		)
+		for row in result:
+			self.assertIn("posted_at", row)
+			self.assertIsNotNone(row["posted_at"], "Range filter must drop unposted batches")
+			self.assertGreaterEqual(getdate(row["posted_at"]), getdate("2020-01-01"))
