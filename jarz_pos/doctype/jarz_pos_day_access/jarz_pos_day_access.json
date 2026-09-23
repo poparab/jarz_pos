@@ -1,0 +1,228 @@
+{
+ "actions": [],
+ "autoname": "JPDA-.YYYY.-.#####",
+ "creation": "2026-09-23 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "user",
+  "user_full_name",
+  "employee",
+  "employee_name",
+  "column_break_grant",
+  "pos_profile",
+  "access_date",
+  "status",
+  "row_added",
+  "section_break_window",
+  "starts_at",
+  "expires_at",
+  "column_break_window",
+  "started_at",
+  "ended_at",
+  "section_break_origin",
+  "source",
+  "column_break_origin",
+  "roster_day_off",
+  "section_break_note",
+  "notes",
+  "last_deferral",
+  "section_break_audit",
+  "granted_by",
+  "column_break_audit",
+  "granted_by_name"
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "User",
+   "options": "User",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "user_full_name",
+   "fieldtype": "Data",
+   "label": "User Full Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee"
+  },
+  {
+   "fetch_from": "employee.employee_name",
+   "fieldname": "employee_name",
+   "fieldtype": "Data",
+   "label": "Employee Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_grant",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Branch (POS Profile)",
+   "options": "POS Profile",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "The branch day this access is for. It runs from this date's midnight to 03:00 the next morning, so the closing count after midnight is still covered.",
+   "fieldname": "access_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Access Date",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Scheduled",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Scheduled\nActive\nEnded\nCancelled",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "0",
+   "description": "Ticked only when this grant inserted the POS Profile User row. Unticked means the user already had permanent access, so ending this grant must remove nothing.",
+   "fieldname": "row_added",
+   "fieldtype": "Check",
+   "label": "Row Added By This Grant",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_window",
+   "fieldtype": "Section Break",
+   "label": "Window"
+  },
+  {
+   "fieldname": "starts_at",
+   "fieldtype": "Datetime",
+   "label": "Starts At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_window",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "When access was actually given. Later than Starts At when the branch had an open shift at the planned start.",
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "ended_at",
+   "fieldtype": "Datetime",
+   "label": "Ended At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_origin",
+   "fieldtype": "Section Break",
+   "label": "Origin"
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Source",
+   "options": "Branch Access Screen\nShift Assignment\nDay Off Cover"
+  },
+  {
+   "fieldname": "column_break_origin",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "roster_day_off",
+   "fieldtype": "Link",
+   "label": "Roster Day Off",
+   "options": "Jarz Roster Day Off"
+  },
+  {
+   "fieldname": "section_break_note",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "description": "Why the hourly job could not start or end this grant yet, e.g. the branch had an open shift.",
+   "fieldname": "last_deferral",
+   "fieldtype": "Small Text",
+   "label": "Last Deferral",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_audit",
+   "fieldtype": "Section Break",
+   "label": "Granted By"
+  },
+  {
+   "fieldname": "granted_by",
+   "fieldtype": "Link",
+   "label": "Granted By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_audit",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "granted_by_name",
+   "fieldtype": "Data",
+   "label": "Granted By Name",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-23 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz POS Day Access",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager"
+  }
+ ],
+ "sort_field": "access_date",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

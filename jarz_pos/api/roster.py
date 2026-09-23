@@ -25,6 +25,7 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
+from jarz_pos.services import branch_access as branch_access_service
 from jarz_pos.services import roster as roster_service
 
 
@@ -113,7 +114,7 @@ def get_bootstrap() -> Dict[str, Any]:
         "hrms_available": roster_service.hrms_available(),
         "can_manage": True,
         "shift_catalog": roster_service.shift_catalog(),
-        "shift_locations": roster_service.shift_locations(),
+        "shift_locations": roster_service.shift_locations(include_pos_access=True),
         "off_types": ["Weekly Off", "Vacation", "Sick", "Unpaid", "Other"],
         "scope": {
             "configured": roster_service.roster_scope_configured(),
@@ -154,6 +155,7 @@ def assign_shift(
     date: str,
     shift_type: str,
     shift_location: Optional[str] = None,
+    grant_pos_access: Any = 0,
 ) -> Dict[str, Any]:
     """Put one employee on one shift for one day.
 
@@ -161,6 +163,10 @@ def assign_shift(
     branch for a day" -- the second is the same operation with a different
     ``shift_location``, and it is the location that decides where their phone
     has to be to clock in.
+
+    ``grant_pos_access`` also gives them POS access at that branch for the day.
+    It is best-effort: the shift is saved whatever happens to the grant, and
+    ``pos_access`` in the response says what did.
     """
     _ensure_access()
     employee = _clean(employee)
@@ -178,6 +184,15 @@ def assign_shift(
     result["success"] = True
     result["employee"] = employee
     result["date"] = day
+    result["pos_access"] = None
+    if branch_access_service.as_flag(grant_pos_access):
+        result["pos_access"] = branch_access_service.grant_for_roster(
+            employee,
+            day,
+            result.get("shift_location"),
+            source=branch_access_service.SOURCE_SHIFT,
+            notes=_("Rostered on {0}.").format(shift_type),
+        )
     return result
 
 
@@ -189,8 +204,14 @@ def set_day_off(
     covered_by: Optional[str] = None,
     cover_shift_type: Optional[str] = None,
     notes: Optional[str] = None,
+    grant_pos_access: Any = 0,
 ) -> Dict[str, Any]:
-    """Mark somebody off and, in the same step, name who covers the day."""
+    """Mark somebody off and, in the same step, name who covers the day.
+
+    ``grant_pos_access`` gives the COVERING colleague POS access at the branch
+    the cover landed on, for that day. Best-effort, like ``assign_shift``: the
+    day off and the cover are saved whatever happens to the grant.
+    """
     _ensure_access()
     employee = _clean(employee)
     if not employee:
@@ -213,6 +234,29 @@ def set_day_off(
         notes=_clean(notes),
     )
     result["success"] = True
+    result["pos_access"] = None
+    if branch_access_service.as_flag(grant_pos_access):
+        if covered_by:
+            result["pos_access"] = branch_access_service.grant_for_roster(
+                covered_by,
+                day,
+                result.get("cover_shift_location"),
+                source=branch_access_service.SOURCE_COVER,
+                roster_day_off=result.get("day_off"),
+                notes=_("Covering for {0}.").format(
+                    frappe.db.get_value("Employee", employee, "employee_name") or employee
+                ),
+            )
+        else:
+            result["pos_access"] = {
+                "requested": True,
+                "granted": False,
+                "status": None,
+                "already_member": False,
+                "reason": _("Nobody is covering this day, so there is nobody to give POS access to."),
+                "pos_profile": None,
+                "day_access": None,
+            }
     return result
 
 

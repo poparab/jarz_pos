@@ -548,6 +548,13 @@ scheduler_events = {
         # Escalate unpaid InstaPay/Mobile Wallet orders that have sat Out for
         # Delivery awaiting payment confirmation past the configured threshold.
         "jarz_pos.tasks.escalate_unconfirmed_online_payments",
+        # Branch day access (Jarz POS Day Access): start grants whose day has
+        # come, remove the POS Profile User row of grants past 03:00 the next
+        # morning, cancel grants that never got to start. Every step waits
+        # while the branch has an open shift, so this is also the retry loop
+        # for a branch left open overnight. Never raises. See
+        # jarz_pos.services.branch_access.
+        "jarz_pos.services.branch_access.run_day_access_cycle",
     ],
     "cron": {
         # Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,

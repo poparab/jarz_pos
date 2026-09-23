@@ -351,7 +351,16 @@ def _shift_hours_map() -> Dict[str, float]:
     return {row["shift_type"]: row["hours"] for row in shift_catalog()}
 
 
-def shift_locations() -> List[Dict[str, Any]]:
+def shift_locations(include_pos_access: bool = False) -> List[Dict[str, Any]]:
+    """Every Shift Location, optionally with the POS branch it maps to.
+
+    ``include_pos_access`` adds ``pos_profile`` (the enabled POS Profile whose
+    ``custom_shift_location`` is this location, or None -- the Factory has
+    none) and ``pos_manageable`` (whether the caller may give day access
+    there). The roster sheet uses the pair to decide whether to offer "also
+    give POS access for this day"; offering it where the grant can only be
+    refused would be a tick box that always fails.
+    """
     if not hrms_available():
         return []
     try:
@@ -362,15 +371,34 @@ def shift_locations() -> List[Dict[str, Any]]:
         )
     except Exception:
         return []
-    return [
-        {
+
+    profile_by_location: Dict[str, str] = {}
+    manageable: Set[str] = set()
+    if include_pos_access:
+        try:
+            from jarz_pos.services import branch_access
+
+            profile_by_location = branch_access.profiles_by_shift_location()
+            manageable = set(branch_access.manageable_profiles())
+        except Exception:
+            # The tick box is optional; a lookup failure hides it rather than
+            # taking the whole roster screen down with it.
+            profile_by_location, manageable = {}, set()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        item = {
             "shift_location": r["name"],
             "checkin_radius": r.get("checkin_radius") or 0,
             "latitude": r.get("latitude"),
             "longitude": r.get("longitude"),
         }
-        for r in rows
-    ]
+        if include_pos_access:
+            profile = profile_by_location.get(r["name"])
+            item["pos_profile"] = profile
+            item["pos_manageable"] = bool(profile and profile in manageable)
+        out.append(item)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +786,19 @@ def set_shift_for_day(
     }
 
 
+def _release_pos_access(day_off: str) -> None:
+    """Wind down the POS day access a cover was given, before the day off goes.
+
+    The grant links to the day-off row, and Frappe refuses to delete a record
+    that something still links to -- so without this, ticking "also give POS
+    access" on a cover made that day off impossible to undo or overwrite.
+    Imported here because ``branch_access`` imports this module.
+    """
+    from jarz_pos.services import branch_access
+
+    branch_access.release_for_day_off(day_off)
+
+
 def _discard_day_off_record(employee: str, day: Any) -> None:
     """Delete a day-off row without touching any Shift Assignment.
 
@@ -766,6 +807,7 @@ def _discard_day_off_record(employee: str, day: Any) -> None:
     """
     name = frappe.db.exists(DAY_OFF_DOCTYPE, {"employee": employee, "off_date": getdate(day)})
     if name:
+        _release_pos_access(name)
         frappe.delete_doc(DAY_OFF_DOCTYPE, name, ignore_permissions=True)
 
 
@@ -784,6 +826,14 @@ def set_day_off(
     remaining person has to stretch onto the full-day shift, and doing that as a
     separate second action leaves a window where the branch is rostered
     half-open. Recording the pair together is also what makes the undo exact.
+
+    The cover is rostered at the ABSENT person's location first, then at the
+    coverer's own location that day, then (inside ``set_shift_for_day``) at the
+    coverer's schedule location. The order used to be the other way round:
+    the coverer's home branch won, so a Dokki cashier covering Nasr City was
+    rostered at Dokki and the geofence refused their check-in at the branch
+    they had actually been sent to. A cover exists to fill the absent person's
+    branch, so that branch is the answer whenever it is known.
     """
     day = getdate(off_date)
     original = _assignment_on(employee, day)
@@ -807,8 +857,8 @@ def set_day_off(
             covered_by,
             day,
             cover_shift_type,
-            (cover_previous.shift_location if cover_previous else None)
-            or (original.shift_location if original else None),
+            (original.shift_location if original else None)
+            or (cover_previous.shift_location if cover_previous else None),
         )
 
     doc = frappe.new_doc(DAY_OFF_DOCTYPE)
@@ -832,6 +882,9 @@ def set_day_off(
         "off_date": str(day),
         "covered_by": covered_by,
         "cover_shift_type": cover_shift_type if covered_by else None,
+        # Where the cover actually landed -- the roster API gives day POS
+        # access at this branch, so it must be the resolved value, not a guess.
+        "cover_shift_location": doc.cover_shift_location,
     }
 
 
@@ -875,6 +928,7 @@ def clear_day_off(employee: str, off_date: Any) -> Dict[str, Any]:
         )
         restored_cover = doc.cover_previous_shift_type
 
+    _release_pos_access(doc.name)
     doc.flags.ignore_permissions = True
     doc.delete(ignore_permissions=True)
 
@@ -1108,6 +1162,10 @@ def get_month(
                 "designation": designation,
                 "department": row.get("department"),
                 "shift_locations": sorted(locations_by_employee.get(employee, set())),
+                # The branch an unrostered day falls back to on the server. The
+                # client needs the same answer to label "also give POS access"
+                # with the branch the grant will really land on.
+                "schedule_location": _schedule_location(employee),
                 "standard_hours": baseline,
                 "is_courier": is_courier(employee, designation),
                 "overtime_multiplier": multiplier,

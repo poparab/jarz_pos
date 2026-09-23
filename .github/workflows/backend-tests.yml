@@ -427,6 +427,14 @@ jobs:
             # thing in this app that can stop a real person from clocking in --
             # each of its allow-paths is pinned individually.
             test_roster
+            # Branch access (POS Profile membership + one-day access). The
+            # reason this must be in CI: it writes the table that decides who
+            # can use the till, so a regression either locks a cashier out of
+            # their own branch (a day access that removes a permanent row) or
+            # leaves a cover with access forever (overlapping grants that
+            # never remove theirs) -- and the open-shift refusal is the only
+            # thing stopping a mid-shift membership change.
+            test_branch_access
             # Attendance reporting. Three reasons this must be in CI: the whole
             # feature is derived on read from raw check-ins, so a wrong rule
             # never errors -- it reports a person who was at work as absent; the
