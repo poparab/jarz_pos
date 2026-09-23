@@ -648,7 +648,9 @@ def _resolve_material_stock(
 ) -> Dict[str, float]:
     """ONE query: on-hand per item summed over the given (factory-side) warehouses.
 
-    Raw, negatives included; the maths floors them.
+    Each bin is floored at zero BEFORE summing: a negative bin in one store is
+    a counting error there, and summing it raw would cancel real stock in
+    another store and invent a shortage.
     """
     warehouses = _unique(warehouses)
     item_codes = _unique(item_codes)
@@ -657,7 +659,7 @@ def _resolve_material_stock(
     try:
         rows = frappe.db.sql(
             """
-            SELECT b.item_code AS item_code, SUM(b.actual_qty) AS qty
+            SELECT b.item_code AS item_code, SUM(GREATEST(b.actual_qty, 0)) AS qty
             FROM `tabBin` b
             WHERE b.warehouse IN %(warehouses)s
               AND b.item_code IN %(codes)s

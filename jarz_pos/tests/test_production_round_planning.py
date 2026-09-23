@@ -297,8 +297,26 @@ class TestMaterialRows(unittest.TestCase):
 
     def test_an_alternative_covers_a_shortage(self):
         rows = {r["item_code"]: r for r in self._rows({"LID": 5, "LID-B": 20, "FLOUR": 10, "SUGAR": 4}, {"LID": ["LID-B"]})}
-        self.assertEqual(20.0, rows["LID"]["alternative_on_hand"])
+        # 20 needed, 5 own: 15 lent by the alternative, not its whole 20.
+        self.assertEqual(15.0, rows["LID"]["alternative_on_hand"])
         self.assertEqual(0.0, rows["LID"]["missing"])
+
+    def test_two_way_alternatives_are_not_counted_twice(self):
+        # Both lids needed x100, 60 each on hand: the real shortage is 80.
+        exploded = {"materials": {"LID-A": 100.0, "LID-B": 100.0}, "used_by": {}}
+        alts = {"LID-A": ["LID-B"], "LID-B": ["LID-A"]}
+        rows = rp.build_material_rows(exploded, {"LID-A": 60, "LID-B": 60}, alts, {})
+        self.assertEqual(80.0, sum(r["missing"] for r in rows))
+        self.assertEqual([0.0, 0.0], [r["alternative_on_hand"] for r in rows])
+
+    def test_an_alternative_lends_only_its_spare(self):
+        # A needs 100 (has 60); B needs 30 (has 70) -> B lends 40, nothing missing.
+        exploded = {"materials": {"A": 100.0, "B": 30.0}, "used_by": {}}
+        rows = {r["item_code"]: r for r in rp.build_material_rows(
+            exploded, {"A": 60, "B": 70}, {"A": ["B"], "B": ["A"]}, {})}
+        self.assertEqual(40.0, rows["A"]["alternative_on_hand"])
+        self.assertEqual(0.0, rows["A"]["missing"])
+        self.assertEqual(0.0, rows["B"]["missing"])
 
     def test_negative_stock_is_reported_raw_and_floored(self):
         rows = {r["item_code"]: r for r in self._rows({"FLOUR": -10})}

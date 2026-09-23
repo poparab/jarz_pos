@@ -490,14 +490,31 @@ def build_material_rows(
     item_meta: Mapping[str, Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Leaf materials, missing first (largest share missing), then by name."""
+    needs: Dict[str, float] = dict(exploded.get("materials") or {})
+    # An alternative lends only what it has LEFT after its own need this round,
+    # and each jar of it is lent once: two-way pairs that are both needed must
+    # not each count the other's whole stock.
+    spare: Dict[str, float] = {}
+
+    def spare_of(code: str) -> float:
+        if code not in spare:
+            spare[code] = max(0.0, countable(stock.get(code)) - needs.get(code, 0.0))
+        return spare[code]
+
     rows: List[Dict[str, Any]] = []
-    for code, required in (exploded.get("materials") or {}).items():
+    for code in sorted(needs):
+        required = needs[code]
         meta = _meta(item_meta, code)
         on_hand = to_float(stock.get(code), 0.0)
-        alt_on_hand = sum(
-            countable(stock.get(alt)) for alt in alternatives.get(code) or [] if alt != code
-        )
-        missing = max(0.0, required - countable(on_hand) - alt_on_hand)
+        short = max(0.0, required - countable(on_hand))
+        alt_on_hand = 0.0
+        for alt in alternatives.get(code) or []:
+            if alt == code or short - alt_on_hand <= QTY_EPSILON:
+                continue
+            take = min(spare_of(alt), short - alt_on_hand)
+            spare[alt] = spare_of(alt) - take
+            alt_on_hand += take
+        missing = max(0.0, short - alt_on_hand)
         if meta.get("whole_number"):
             # Eggs, lids and labels come whole: "short 0.878 eggs" is one egg.
             required = float(math.ceil(required - QTY_EPSILON))
