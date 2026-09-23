@@ -398,6 +398,15 @@ class TestBuildProductionRound(unittest.TestCase):
             ["OLD-M", "TIRA-M", "BLU-L"], [i["item_code"] for i in self._round()["items"]]
         )
 
+    def test_a_sliver_short_is_missing_but_not_blocking(self):
+        # 77 lids needed, 76 on hand: listed as missing, jar not flagged.
+        payload = self._round(material_stock={"LID": 76.0, "BISCUIT": 2.7, "FLOUR": 10.0})
+        lid = next(m for m in payload["materials"] if m["item_code"] == "LID")
+        self.assertEqual(1.0, lid["missing"])
+        self.assertEqual([], self._item(payload, "BLU-L")["blocked_by"])
+        self.assertEqual(0, payload["summary"]["blocked_count"])
+        self.assertEqual(1, payload["summary"]["missing_count"])
+
     def test_the_contract_example_jar(self):
         blu = self._item(self._round(), "BLU-L")
         self.assertEqual("Blueberry", blu["flavour"])

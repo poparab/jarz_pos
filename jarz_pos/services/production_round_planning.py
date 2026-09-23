@@ -50,6 +50,10 @@ from jarz_pos.services.replenishment_planning import (
 SERVICE_LEVEL_Z = 1.28
 #: Anything that sells keeps at least this many jars on the shelf.
 MIN_PAR = 3
+#: A material short by no more than this share of its need is still listed as
+#: missing, but does not mark the jars that use it as blocked: one egg short
+#: of 57 is a shopping note, not a reason to flag five flavours.
+BLOCKING_SHARE = 0.02
 
 DEFAULT_CYCLE_DAYS, MIN_CYCLE_DAYS, MAX_CYCLE_DAYS = 14, 1, 60
 DEFAULT_BACKUP_DAYS, MIN_BACKUP_DAYS, MAX_BACKUP_DAYS = 7, 0, 30
@@ -695,11 +699,15 @@ def build_production_round(
     prep = build_prep_rows(exploded, boms, material_stock or {}, item_meta or {})
     materials = build_material_rows(exploded, material_stock or {}, alternatives or {}, item_meta or {})
 
-    missing_codes = [row["item_code"] for row in materials if row["missing"] > 0]
+    blocking_codes = [
+        row["item_code"]
+        for row in materials
+        if row["missing"] > 0 and row["missing"] > BLOCKING_SHARE * row["required"]
+    ]
     for row in item_rows:
         if row["jars"] > 0:
             row["blocked_by"] = [
-                code for code in missing_codes
+                code for code in blocking_codes
                 if row["item_code"] in (exploded["used_by"].get(code) or set())
             ]
 
@@ -731,7 +739,7 @@ def build_production_round(
         "jars_total": sum(r["jars"] for r in to_make),
         "items_to_make": len(to_make),
         "needed_now_count": sum(1 for r in item_rows if r["status"] == "now"),
-        "missing_count": len(missing_codes),
+        "missing_count": sum(1 for row in materials if row["missing"] > 0),
         "blocked_count": sum(1 for r in to_make if r["blocked_by"]),
     }
 
