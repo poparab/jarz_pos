@@ -472,6 +472,7 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 			{"name": "CT-1", "partner_fee": 55.0, "reference_invoice": "INV-1"},
 			{"name": "CT-2", "partner_fee": 45.0, "reference_invoice": "INV-2"},
 		]
+		mock_frappe.db.get_values.return_value = mock_frappe.get_all.return_value
 		mock_frappe.db.get_value.return_value = "Test Co"
 		mock_je.return_value = "JE-SETTLE-1"
 
@@ -501,6 +502,7 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 		mock_frappe.get_all.return_value = [
 			{"name": "CT-1", "partner_fee": 55.0, "reference_invoice": "INV-1"},
 		]
+		mock_frappe.db.get_values.return_value = mock_frappe.get_all.return_value
 		mock_frappe.db.get_value.return_value = "Test Co"
 		mock_je.return_value = "JE-SETTLE-2"
 
@@ -527,6 +529,7 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 		dp.partner_name = "Partner A"
 		mock_frappe.get_doc.return_value = dp
 		mock_frappe.get_all.return_value = []
+		mock_frappe.db.get_values.return_value = mock_frappe.get_all.return_value
 		mock_frappe.db.get_value.return_value = "Test Co"
 		mock_je.return_value = "JE-SETTLE-3"
 
@@ -544,6 +547,7 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 		dp.settlement_account = "Partner A - J"
 		mock_frappe.get_doc.return_value = dp
 		mock_frappe.get_all.return_value = []
+		mock_frappe.db.get_values.return_value = mock_frappe.get_all.return_value
 		res = settle_delivery_partner("Partner A")
 		self.assertTrue(res["success"])
 		self.assertEqual(res["order_count"], 0)
@@ -558,6 +562,7 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 		mock_frappe.get_all.return_value = [
 			{"name": "CT-1", "partner_fee": 55.0, "reference_invoice": "INV-1"},
 		]
+		mock_frappe.db.get_values.return_value = mock_frappe.get_all.return_value
 		mock_frappe.throw.side_effect = Exception("thrown")
 		with self.assertRaises(Exception):
 			settle_delivery_partner("Partner A", courier_transactions=["CT-1", "CT-DOES-NOT-EXIST"])

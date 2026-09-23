@@ -234,8 +234,11 @@ def settle_delivery_partner(
         delivery_partner: the partner to pay.
         bank_account: ledger to pay from. Defaults to the partner's Bank Account,
             then the company default.
-        courier_transactions: optional list of Courier Transaction names to settle —
-            this is the reconciliation hook. Omit to settle everything unbilled.
+        courier_transactions: optional list of Courier Transaction and recurring
+            fee period names to settle — this is the reconciliation hook. OMIT it to
+            settle everything unbilled; an explicit EMPTY list settles no trip and no
+            fee period (only ``extra_charges``) — the screens send ``[]`` when the
+            operator ticked nothing, and "nothing ticked" must never mean "pay all".
             Names that are already settled, or belong to another partner, are
             refused rather than silently skipped.
         extra_charges: optional list of ``{"description", "amount", "account"}``
@@ -249,6 +252,7 @@ def settle_delivery_partner(
 
     dp = frappe.get_doc("Delivery Partner", delivery_partner)
 
+    settle_all = courier_transactions is None or courier_transactions == ""
     selected = [str(n).strip() for n in _coerce_rows(courier_transactions) if str(n or "").strip()]
     charges = _coerce_rows(extra_charges)
 
@@ -261,21 +265,28 @@ def settle_delivery_partner(
         "is_partner_order": 1,
         "partner_settled": 0,
     }
-    if selected:
-        # All-fee selection: match no trip rather than falling through to "all".
+    if not settle_all:
+        # An explicit selection — possibly empty, possibly fee periods only — must
+        # match exactly those trips and never fall through to "all".
         filters["name"] = ["in", selected_trips or [""]]
 
-    unbilled = frappe.get_all(
+    # Locking read: two managers paying the same trip at once must not both
+    # clear it. FOR UPDATE reads the latest committed row, so the second waits
+    # and then no longer sees the trip as unbilled. (``db.get_values`` because
+    # v16's ``get_all`` has no ``for_update``.)
+    unbilled = frappe.db.get_values(
         "Courier Transaction",
-        filters=filters,
-        fields=["name", "partner_fee", "reference_invoice"],
+        filters,
+        ["name", "partner_fee", "reference_invoice"],
+        as_dict=True,
         order_by="date asc",
-    )
+        for_update=True,
+    ) or []
 
     # The recurring-fee periods being paid, locked so two managers settling at
     # once cannot both clear the same day's fee.
     fee_rows = lock_accruals_for_settlement(
-        delivery_partner, selected_fee_names if selected else None
+        delivery_partner, None if settle_all else selected_fee_names
     )
 
     if selected:

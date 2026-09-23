@@ -140,6 +140,7 @@ class TestSettleDeliveryPartnerGate(_EndpointGuardOrderingMixin, unittest.TestCa
         dp.settlement_account = "Partner A - J"
         mock_frappe.get_doc.return_value = dp
         mock_frappe.get_all.return_value = []  # nothing unbilled
+        mock_frappe.db.get_values.return_value = []
         result = module.settle_delivery_partner("Partner A")
         self.assertTrue(result["success"])
         self.assertEqual(result["order_count"], 0)

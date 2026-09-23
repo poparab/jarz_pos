@@ -219,3 +219,75 @@ class TestSettlementJeRecurringLine(unittest.TestCase):
 		self.assertEqual(len(lines), 2)
 		self.assertEqual(sum(r["debit_in_account_currency"] for r in lines), 50)
 		self.assertEqual(sum(r["credit_in_account_currency"] for r in lines), 50)
+
+
+class TestExplicitEmptySelectionPaysNothing(unittest.TestCase):
+	"""Ticking nothing and adding a fixed charge must pay the charge only.
+
+	The screens send ``courier_transactions=[]`` when nothing is ticked. It used to
+	fall through to "settle everything", paying every unbilled trip (and, with
+	recurring fees, every unpaid fee day) behind a dialog that said 0 trips.
+	"""
+
+	@patch("jarz_pos.api.delivery_partners.lock_accruals_for_settlement", return_value=[])
+	@patch("jarz_pos.api.delivery_partners.create_partner_settlement_je", return_value="JE-X")
+	@patch("jarz_pos.api.delivery_partners.frappe")
+	def test_empty_list_filters_to_no_trip(self, mock_frappe, _je, mock_lock):
+		from jarz_pos.api.delivery_partners import settle_delivery_partner
+
+		dp = MagicMock(settlement_account="Partner A - J", bank_account=None, partner_name="Partner A")
+		mock_frappe.get_doc.return_value = dp
+		mock_frappe.get_all.return_value = []
+		mock_frappe.db.get_values.return_value = []
+		mock_frappe.db.get_value.return_value = "Test Co"
+		mock_frappe.get_roles.return_value = ["System Manager"]
+
+		settle_delivery_partner(
+			"Partner A", bank_account="Bank - J", courier_transactions="[]",
+			extra_charges='[{"description": "Waiting", "amount": 30}]',
+		)
+		ct_call = mock_frappe.db.get_values.call_args
+		self.assertEqual(ct_call.args[0], "Courier Transaction")
+		self.assertEqual(ct_call.args[1]["name"], ["in", [""]])
+		self.assertTrue(ct_call.kwargs.get("for_update"))
+		mock_lock.assert_called_once_with("Partner A", [])
+
+	@patch("jarz_pos.api.delivery_partners.lock_accruals_for_settlement", return_value=[])
+	@patch("jarz_pos.api.delivery_partners.frappe")
+	def test_omitted_list_still_means_everything(self, mock_frappe, mock_lock):
+		from jarz_pos.api.delivery_partners import settle_delivery_partner
+
+		mock_frappe.get_doc.return_value = MagicMock(settlement_account="Partner A - J")
+		mock_frappe.get_all.return_value = []
+		mock_frappe.db.get_values.return_value = []
+		mock_frappe.get_roles.return_value = ["System Manager"]
+		settle_delivery_partner("Partner A")
+		self.assertNotIn("name", mock_frappe.db.get_values.call_args.args[1])
+		mock_lock.assert_called_once_with("Partner A", None)
+
+
+class TestOneBadPeriodDoesNotBlockTheRest(unittest.TestCase):
+	@patch.object(prf, "_post_accrual_je")
+	@patch.object(prf, "frappe")
+	def test_failed_day_is_logged_and_later_days_still_post(self, mock_frappe, mock_post):
+		mock_frappe.db.get_value.side_effect = [
+			frappe._dict(
+				name="Deliverk", is_active=1, settlement_account="Deliverk - J",
+				recurring_fee_amount=50, recurring_fee_frequency="Daily",
+				recurring_fee_start_date="2026-09-21", recurring_fee_end_date=None,
+			),
+			"JARZ",
+		]
+		mock_frappe.get_all.return_value = []
+		mock_frappe.generate_hash.side_effect = lambda length=8: "h"
+		mock_frappe.DuplicateEntryError = frappe.DuplicateEntryError
+		mock_frappe.UniqueValidationError = frappe.UniqueValidationError
+		rows = iter([MagicMock(name=f"r{i}") for i in range(3)])
+		mock_frappe.get_doc.side_effect = lambda _d: next(rows)
+		mock_post.side_effect = [RuntimeError("closed accounting period"), "JE-2", "JE-3"]
+
+		created = prf.accrue_partner("Deliverk", up_to="2026-09-23")
+
+		self.assertEqual(len(created), 2)
+		mock_frappe.log_error.assert_called_once()
+		self.assertEqual(mock_frappe.db.rollback.call_count, 1)

@@ -112,7 +112,7 @@
    "fieldtype": "Date",
    "label": "Recurring Fee Start Date",
    "mandatory_depends_on": "eval:flt(doc.recurring_fee_amount) > 0",
-   "description": "First day charged. Weekly and monthly periods are counted from this date. A past date is caught up on the next run."
+   "description": "First day charged. Weekly and monthly periods are counted from this date. A past date is caught up on the next run. When changing the frequency, set this to the first day not yet accrued."
   },
   {
    "fieldname": "recurring_fee_end_date",

@@ -99,8 +99,10 @@ def due_periods(
     already-accrued ``(period_start, period_end)`` in *existing* rather than when
     its start matches one exactly, because an edit to the start date or the
     frequency re-anchors every later period: exact matching would then bill the
-    same days twice under a new grid. Overlap-skipping means an edit applies to
-    the days not yet paid for, never to days already accrued.
+    same days twice under a new grid. The price of that guarantee: a new-grid
+    period that overlaps ANY accrued day is skipped whole, so when changing the
+    frequency set the new start date to the first day not yet accrued (the
+    Delivery Partner form says so) — otherwise the straddling period is lost.
 
     *end_date* (inclusive) stops the contract: no period starting after it is due.
     """
@@ -186,8 +188,10 @@ def accrue_partner(delivery_partner: str, up_to=None) -> list[str]:
     """Accrue every due period for one partner. Returns the new accrual names.
 
     Each period is its own savepoint: one bad day (a closed accounting period, a
-    duplicate lost to a concurrent worker) is rolled back on its own and does not
-    take the rest of the catch-up with it. The caller commits.
+    duplicate lost to a concurrent worker) is rolled back and logged on its own and
+    does not take the rest of the catch-up with it — a start date typed inside a
+    closed period must not stop today's fee from being booked. The failed day is
+    retried on the next run. The caller commits.
     """
     dp = frappe.db.get_value(
         "Delivery Partner",
@@ -252,7 +256,13 @@ def accrue_partner(delivery_partner: str, up_to=None) -> list[str]:
             frappe.db.rollback(save_point=sp)
         except Exception:
             frappe.db.rollback(save_point=sp)
-            raise
+            try:
+                frappe.log_error(
+                    title=f"Partner recurring fee not accrued: {delivery_partner} {ps}",
+                    message=frappe.get_traceback(),
+                )
+            except Exception:
+                pass
     return created
 
 
@@ -304,20 +314,34 @@ def _accruals_available() -> bool:
 
 
 def unsettled_accruals(delivery_partner: str | None = None, names: list[str] | None = None) -> list[dict]:
+    """Unpaid periods whose accrual Journal Entry is still SUBMITTED.
+
+    Cancelling a period's accrual entry is how a day is waived: the payable was
+    never credited, so paying it would debit the partner account with nothing
+    behind it. Such a row stays (it still blocks re-accruing that period) but is
+    no longer owed.
+    """
     if not _accruals_available():
         return []
-    filters: dict = {"settled": 0}
+    if names is not None and not names:
+        return []
+    conds = ["a.settled = 0", "je.docstatus = 1"]
+    params: dict = {}
     if delivery_partner:
-        filters["delivery_partner"] = delivery_partner
+        conds.append("a.delivery_partner = %(dp)s")
+        params["dp"] = delivery_partner
     if names is not None:
-        if not names:
-            return []
-        filters["name"] = ["in", names]
-    return frappe.get_all(
-        ACCRUAL_DOCTYPE,
-        filters=filters,
-        fields=["name", "delivery_partner", "frequency", "amount", "period_start", "period_end"],
-        order_by="period_start asc",
+        conds.append("a.name IN %(names)s")
+        params["names"] = tuple(names)
+    return frappe.db.sql(
+        f"""SELECT a.name, a.delivery_partner, a.frequency, a.amount,
+                   a.period_start, a.period_end
+            FROM `tabDelivery Partner Fee Accrual` a
+            JOIN `tabJournal Entry` je ON je.name = a.journal_entry
+            WHERE {' AND '.join(conds)}
+            ORDER BY a.period_start ASC""",
+        params,
+        as_dict=True,
     )
 
 
@@ -348,9 +372,11 @@ def lock_accruals_for_settlement(delivery_partner: str, names: list[str] | None)
     if not candidates:
         return []
     return frappe.db.sql(
-        """SELECT name, amount, period_start FROM `tabDelivery Partner Fee Accrual`
-           WHERE name IN %(n)s AND settled = 0 AND delivery_partner = %(dp)s
-           ORDER BY period_start
+        """SELECT a.name, a.amount, a.period_start
+           FROM `tabDelivery Partner Fee Accrual` a
+           JOIN `tabJournal Entry` je ON je.name = a.journal_entry AND je.docstatus = 1
+           WHERE a.name IN %(n)s AND a.settled = 0 AND a.delivery_partner = %(dp)s
+           ORDER BY a.period_start
            FOR UPDATE""",
         {"n": tuple(r["name"] for r in candidates), "dp": delivery_partner},
         as_dict=True,
