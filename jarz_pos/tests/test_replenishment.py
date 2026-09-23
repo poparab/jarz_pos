@@ -613,8 +613,10 @@ class TestEndpoint(unittest.TestCase):
     def test_the_endpoint_composes_the_same_plan(self):
         payload = self._call()
         self.assertEqual("Finished Goods - J", payload["source"]["warehouse"])
-        self.assertEqual(14, payload["cover_days"])
-        self.assertEqual(30, payload["sales_days"])
+        # 14-day cycle + 7-day backup, 8 weeks of sales: the production round's
+        # stock level, so the two screens agree.
+        self.assertEqual(21, payload["cover_days"])
+        self.assertEqual(56, payload["sales_days"])
         self.assertEqual(
             ["Dokki - J", "Nasr city - J"],
             sorted(branch["warehouse"] for branch in payload["branches"]),
@@ -668,6 +670,141 @@ class TestEndpoint(unittest.TestCase):
             with self.assertRaises(Denied):
                 api.get_branch_replenishment()
             company.assert_not_called()
+
+
+class TestProductionRoundEndpoint(unittest.TestCase):
+    """``get_production_round`` with every database read patched out."""
+
+    WAREHOUSES = [
+        {"name": "Finished Goods - J", "warehouse_type": "", "is_group": 0, "disabled": 0},
+        {"name": "Nasr city - J", "warehouse_type": "", "is_group": 0, "disabled": 0},
+        {"name": "Dokki - J", "warehouse_type": "", "is_group": 0, "disabled": 0},
+        {"name": "Raw Material - J", "warehouse_type": "", "is_group": 0, "disabled": 0},
+        {"name": "Work In Progress - J", "warehouse_type": "", "is_group": 0, "disabled": 0},
+    ]
+
+    def _patches(self, **overrides):
+        self.seen = {}
+
+        def _material_stock(warehouses, codes, notices):
+            self.seen["material_warehouses"] = sorted(warehouses)
+            self.seen["material_codes"] = sorted(codes)
+            return {"LID": 30.0, "LID-B": 10.0}
+
+        patches = {
+            "_ensure_production_view_access": lambda: None,
+            "_resolve_company": lambda company: "Jarz",
+            "_resolve_warehouse_rows": lambda company: self.WAREHOUSES,
+            "_resolve_source_warehouse": lambda source, rows, company: "Finished Goods - J",
+            "_resolve_branch_labels": lambda: {},
+            "_resolve_jar_items": lambda: [
+                {"item_code": "BLU-L", "item_name": "Blueberry Large",
+                 "stock_uom": "Nos", "item_group": "Large"},
+            ],
+            "_resolve_stock": lambda warehouses, codes: {
+                ("Finished Goods - J", "BLU-L"): 76.0,
+                ("Nasr city - J", "BLU-L"): 1.0,
+                ("Dokki - J", "BLU-L"): 28.0,
+            },
+            "_resolve_weekly_sales": lambda warehouses, codes, from_date, to_date, notices: {
+                ("Nasr city - J", "BLU-L"): {i: 35.8 for i in range(8)},
+                ("Dokki - J", "BLU-L"): {i: 20.0 for i in range(8)},
+            },
+            "_resolve_bom_tree": lambda codes, notices: {
+                "BLU-L": {"name": "BOM-BLU-L", "quantity": 1, "lines": [
+                    {"item_code": "LID", "stock_qty": 1, "stock_uom": "Nos", "do_not_explode": 0},
+                ]},
+            },
+            "_resolve_item_alternatives": lambda codes, notices: [
+                {"item_code": "LID", "alternative_item_code": "LID-B", "two_way": 0},
+            ],
+            "_resolve_material_stock": _material_stock,
+            "_resolve_item_meta": lambda codes, notices: {
+                "LID": {"item_name": "Jar Lid 330", "item_group": "Packaging", "stock_uom": "Nos"},
+            },
+            "_generated_on": lambda: "2026-09-23 18:00:00.123456",
+        }
+        patches.update(overrides)
+        return patches
+
+    def _call(self, overrides=None, **kwargs):
+        from jarz_pos.api import replenishment as api
+
+        patches = self._patches(**(overrides or {}))
+        with mock.patch.multiple(api, **{k: mock.Mock(side_effect=v) for k, v in patches.items()}):
+            return api.get_production_round(**kwargs)
+
+    def test_contract_shape_and_defaults(self):
+        payload = self._call()
+        self.assertEqual(
+            {
+                "generated_on", "company", "source_warehouse", "cycle_days", "backup_days",
+                "cover_days", "sales_weeks", "sales_from", "sales_to", "batch_sizes",
+                "summary", "branches", "items", "prep", "materials", "notices",
+            },
+            set(payload),
+        )
+        self.assertEqual("2026-09-23 18:00:00", payload["generated_on"])
+        self.assertEqual((14, 7, 21, 8), (
+            payload["cycle_days"], payload["backup_days"], payload["cover_days"], payload["sales_weeks"],
+        ))
+        self.assertEqual({"Medium": 120, "Large": 77}, payload["batch_sizes"])
+        self.assertEqual("Finished Goods - J", payload["source_warehouse"])
+
+    def test_the_round_is_computed_end_to_end(self):
+        payload = self._call()
+        item = payload["items"][0]
+        self.assertEqual((139, 63, 1.0, 77, "now"), (
+            item["total_fill"], item["net_need"], item["batches"], item["jars"], item["status"],
+        ))
+        lid = payload["materials"][0]
+        self.assertEqual(77.0, lid["required"])
+        self.assertEqual(10.0, lid["alternative_on_hand"])
+        self.assertEqual(37.0, lid["missing"])
+        self.assertEqual(["LID"], item["blocked_by"])
+
+    def test_query_params_are_clamped(self):
+        payload = self._call(cycle_days="999", backup_days="0", sales_weeks="1",
+                             batch_medium="abc", batch_large="60")
+        self.assertEqual(60, payload["cycle_days"])
+        self.assertEqual(0, payload["backup_days"])
+        self.assertEqual(2, payload["sales_weeks"])
+        self.assertEqual({"Medium": 120, "Large": 60}, payload["batch_sizes"])
+
+    def test_material_stock_excludes_branches_and_wip(self):
+        self._call()
+        self.assertEqual(
+            ["Finished Goods - J", "Raw Material - J"], self.seen["material_warehouses"]
+        )
+        # Alternatives' stock is read in the same query.
+        self.assertIn("LID-B", self.seen["material_codes"])
+
+    def test_no_factory_store_is_a_notice_not_an_error(self):
+        payload = self._call(
+            overrides={"_resolve_source_warehouse": lambda source, rows, company: None}
+        )
+        self.assertIsNone(payload["source_warehouse"])
+        self.assertTrue(any("factory store" in n for n in payload["notices"]))
+        # Factory stock counts as zero: the full 139 has to be made.
+        self.assertEqual(139, payload["items"][0]["net_need"])
+
+    def test_the_gate_runs_before_any_read(self):
+        from jarz_pos.api import replenishment as api
+
+        class Denied(Exception):
+            pass
+
+        with mock.patch.object(api, "_ensure_production_view_access", side_effect=Denied), \
+                mock.patch.object(api, "_resolve_company") as company:
+            with self.assertRaises(Denied):
+                api.get_production_round()
+            company.assert_not_called()
+
+    def test_the_gate_is_the_production_board_gate(self):
+        from jarz_pos.api import production
+        from jarz_pos.api import replenishment as api
+
+        self.assertIs(production._ensure_production_view_access, api._ensure_production_view_access)
 
 
 if __name__ == "__main__":
