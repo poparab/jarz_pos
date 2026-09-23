@@ -25,6 +25,29 @@ from unittest.mock import patch, MagicMock
 import frappe
 
 
+def _isolate_recurring_fee_reads(testcase):
+	"""Keep the accrual helpers off the real database in a mocked API test.
+
+	``api.delivery_partners`` reads recurring-fee periods through
+	``services.partner_recurring_fees``, which has its own (real) ``frappe``.
+	Patching the API module's ``frappe`` does not reach it, so on a migrated site
+	(the CI gate runs on staging's) a live accrual row leaks into a mocked test.
+	"""
+	for name, value in (
+		("unsettled_accruals", []),
+		("lock_accruals_for_settlement", []),
+	):
+		p = patch(f"jarz_pos.api.delivery_partners.{name}", return_value=value)
+		p.start()
+		testcase.addCleanup(p.stop)
+	p = patch(
+		"jarz_pos.api.delivery_partners.split_accrual_names",
+		side_effect=lambda names: (list(names or []), []),
+	)
+	p.start()
+	testcase.addCleanup(p.stop)
+
+
 class TestResolveDeliveryPartner(unittest.TestCase):
 	"""Test _resolve_delivery_partner helper."""
 
@@ -438,6 +461,9 @@ class TestPartnerStrategyDict(unittest.TestCase):
 
 class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 	"""The weekly run: what we owe, reconciled against the partner's own invoice."""
+
+	def setUp(self):
+		_isolate_recurring_fee_reads(self)
 
 	@patch("jarz_pos.api.delivery_partners.frappe")
 	def test_balances_read_the_fee_column(self, mock_frappe):

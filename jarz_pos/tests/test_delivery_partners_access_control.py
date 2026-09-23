@@ -73,6 +73,17 @@ class _EndpointGuardOrderingMixin:
         patcher = patch.object(delivery_partners, "frappe")
         mock_frappe = patcher.start()
         self.addCleanup(patcher.stop)
+        # The accrual helpers have their own real ``frappe``; keep them off the DB.
+        for name in ("unsettled_accruals", "lock_accruals_for_settlement"):
+            p = patch.object(delivery_partners, name, return_value=[])
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch.object(
+            delivery_partners, "split_accrual_names",
+            side_effect=lambda names: (list(names or []), []),
+        )
+        p.start()
+        self.addCleanup(p.stop)
         mock_frappe.PermissionError = PermissionError
         mock_frappe.throw.side_effect = PermissionError
         mock_frappe.get_roles.return_value = roles
