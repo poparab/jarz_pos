@@ -18,11 +18,19 @@ frappe.ui.form.on("Delivery Partner", {
 			callback(r) {
 				const data = (r.message || [])[0];
 				if (data && data.order_count) {
+					const trips = data.trip_count ?? data.order_count;
+					const periods = data.recurring_fee_count || 0;
 					frm.dashboard.set_headline(
-						__("Unbilled: {0} trips, fees {1}", [
-							data.order_count,
-							format_currency(data.total_fee || 0),
-						])
+						periods
+							? __("Unbilled: {0} trips + {1} recurring-fee periods, total {2}", [
+									trips,
+									periods,
+									format_currency(data.total_fee || 0),
+							  ])
+							: __("Unbilled: {0} trips, fees {1}", [
+									trips,
+									format_currency(data.total_fee || 0),
+							  ])
 					);
 				} else {
 					frm.dashboard.set_headline(__("Nothing outstanding"));
@@ -32,6 +40,28 @@ frappe.ui.form.on("Delivery Partner", {
 
 		frm.add_custom_button(__("Settle Partner"), () => _settlement_dialog(frm), __("Actions"));
 		frm.add_custom_button(__("View Unbilled Trips"), () => _unbilled_dialog(frm), __("Actions"));
+		if (flt(frm.doc.recurring_fee_amount) > 0) {
+			// The scheduler does this every hour; the button is for right after the
+			// fee is set up or its start date is moved back.
+			frm.add_custom_button(
+				__("Accrue Recurring Fees Now"),
+				() =>
+					frappe.call({
+						method: "jarz_pos.api.delivery_partners.accrue_delivery_partner_recurring_fees",
+						args: { delivery_partner: frm.doc.name },
+						freeze: true,
+						callback(r) {
+							const n = (r.message || {})[frm.doc.name] || 0;
+							frappe.show_alert({
+								message: __("{0} recurring-fee periods posted", [n]),
+								indicator: n ? "green" : "blue",
+							});
+							frm.reload_doc();
+						},
+					}),
+				__("Actions")
+			);
+		}
 	},
 });
 

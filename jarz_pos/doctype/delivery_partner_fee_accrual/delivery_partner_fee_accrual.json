@@ -1,0 +1,142 @@
+{
+ "actions": [],
+ "autoname": "DPFEE-.#####",
+ "creation": "2026-09-23 12:00:00.000000",
+ "description": "One period of a Delivery Partner's recurring fee (daily / weekly / monthly subscription), accrued to the partner payable whether or not the partner delivered anything that period. Written only by jarz_pos.services.partner_recurring_fees; cleared by the weekly partner settlement.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "delivery_partner",
+  "frequency",
+  "amount",
+  "company",
+  "column_break_1",
+  "period_start",
+  "period_end",
+  "journal_entry",
+  "section_break_settlement",
+  "settled",
+  "settlement_je",
+  "settled_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "delivery_partner",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Delivery Partner",
+   "options": "Delivery Partner",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "frequency",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Frequency",
+   "options": "Daily\nWeekly\nMonthly",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "period_start",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Period Start",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "period_end",
+   "fieldtype": "Date",
+   "label": "Period End",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "journal_entry",
+   "fieldtype": "Link",
+   "label": "Accrual Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_settlement",
+   "fieldtype": "Section Break",
+   "label": "Settlement"
+  },
+  {
+   "default": "0",
+   "fieldname": "settled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Settled",
+   "read_only": 1
+  },
+  {
+   "fieldname": "settlement_je",
+   "fieldtype": "Link",
+   "label": "Settlement Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "settled_on",
+   "fieldtype": "Datetime",
+   "label": "Settled On",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-23 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Delivery Partner Fee Accrual",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager"
+  }
+ ],
+ "sort_field": "period_start",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "delivery_partner",
+ "track_changes": 1
+}

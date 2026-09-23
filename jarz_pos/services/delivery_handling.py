@@ -6768,10 +6768,12 @@ def create_partner_settlement_je(
     extra_charges: list | None = None,
     token: str,
     human: str | None = None,
+    recurring_fee_total: float = 0,
 ) -> str | None:
     """Post the weekly bank transfer that pays a Delivery Partner.
 
         DR  Partner settlement_account (Σ per-order fees)  [Supplier party]
+        DR  Partner settlement_account (Σ recurring fees)  [Supplier party]
         DR  Freight & Forwarding      (each fixed charge)
         CR  Bank                       (total)
 
@@ -6793,6 +6795,10 @@ def create_partner_settlement_je(
         return existing
 
     fees = round(float(order_fee_total or 0), 2)
+    # Daily/weekly/monthly partner fees, accrued per period by
+    # ``services/partner_recurring_fees.py`` — so, like the trip fees, paying them
+    # only clears the payable. Their own line keeps the two readable apart.
+    recurring = round(float(recurring_fee_total or 0), 2)
     charges = []
     for row in (extra_charges or []):
         amt = round(float((row or {}).get("amount") or 0), 2)
@@ -6803,7 +6809,7 @@ def create_partner_settlement_je(
         charges.append({"description": desc, "amount": amt, "account": acc})
 
     charges_total = round(sum(c["amount"] for c in charges), 2)
-    total = round(fees + charges_total, 2)
+    total = round(fees + recurring + charges_total, 2)
     if abs(total) < 0.005:
         return None
 
@@ -6840,6 +6846,15 @@ def create_partner_settlement_je(
             "debit_in_account_currency": fees if fees > 0 else 0,
             "credit_in_account_currency": 0 if fees > 0 else abs(fees),
             "user_remark": f"Delivery fees – {delivery_partner}",
+        })
+    if abs(recurring) > 0.005:
+        je.append("accounts", {
+            "account": partner_acc,
+            "party_type": "Supplier",
+            "party": supplier,
+            "debit_in_account_currency": recurring if recurring > 0 else 0,
+            "credit_in_account_currency": 0 if recurring > 0 else abs(recurring),
+            "user_remark": f"Recurring fees – {delivery_partner}",
         })
 
     # Fixed charges off the partner's invoice, expensed here because nothing

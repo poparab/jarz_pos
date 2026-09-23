@@ -15,9 +15,15 @@ invoice and it does not always agree with ours:
   * Reconciliation — settle only the trips you actually agree with, by passing an
     explicit ``courier_transactions`` list. Anything you leave out stays unbilled
     and shows up again next week.
-  * Fixed charges — a subscription, waiting time, a returned-trip charge. Those
-    were never accrued per order, so they are expensed at payment time via
-    ``extra_charges``.
+  * Fixed charges — waiting time, a returned-trip charge. Those were never
+    accrued per order, so they are expensed at payment time via ``extra_charges``.
+  * Recurring fees — a fee the partner charges every day / week / month whether
+    or not they delivered (Deliverk: 50 EGP a day). Those ARE accrued, one
+    ``Delivery Partner Fee Accrual`` per period, by
+    ``services/partner_recurring_fees.py``. Each period is listed next to the
+    trips (``row_type = "recurring_fee"``) and is ticked and paid the same way:
+    its name travels in the same ``courier_transactions`` list, so the app's
+    settlement screen needs no change to pay it.
 """
 from __future__ import annotations
 
@@ -29,6 +35,13 @@ from frappe import _
 
 from jarz_pos.constants import ROLES
 from jarz_pos.services.delivery_handling import create_partner_settlement_je
+from jarz_pos.services.partner_recurring_fees import (
+    accrual_label,
+    lock_accruals_for_settlement,
+    mark_accruals_settled,
+    split_accrual_names,
+    unsettled_accruals,
+)
 
 
 def _ensure_delivery_partner_access() -> None:
@@ -99,13 +112,46 @@ def get_delivery_partner_balances(delivery_partner: str | None = None):
         partner_filter=("AND ct.delivery_partner = %(delivery_partner)s" if delivery_partner else "")
     ), {"delivery_partner": delivery_partner} if delivery_partner else {}, as_dict=True)
 
+    by_partner = {r["delivery_partner"]: r for r in rows}
     for r in rows:
-        total = float(r.get("total_fee") or 0)
+        r["trip_count"] = int(r.get("order_count") or 0)
+        r["trip_fee_total"] = float(r.get("total_fee") or 0)
+        r["recurring_fee_count"] = 0
+        r["recurring_fee_total"] = 0.0
+
+    # Recurring fees are owed too. A partner with no trips at all this week still
+    # has its daily fee outstanding, so it must appear on this list.
+    for a in unsettled_accruals(delivery_partner):
+        r = by_partner.get(a["delivery_partner"])
+        if r is None:
+            r = frappe._dict(
+                delivery_partner=a["delivery_partner"],
+                partner_name=frappe.db.get_value(
+                    "Delivery Partner", a["delivery_partner"], "partner_name"
+                ),
+                order_count=0, total_fee=0.0, oldest_date=None,
+                trip_count=0, trip_fee_total=0.0,
+                recurring_fee_count=0, recurring_fee_total=0.0,
+            )
+            by_partner[a["delivery_partner"]] = r
+            rows.append(r)
+        r["recurring_fee_count"] += 1
+        r["recurring_fee_total"] = round(r["recurring_fee_total"] + float(a.get("amount") or 0), 2)
+        ps = a.get("period_start")
+        if ps and (not r.get("oldest_date") or str(ps) < str(r["oldest_date"])[:10]):
+            r["oldest_date"] = ps
+
+    for r in rows:
+        # ``order_count`` / ``total_fee`` are what the list screens show: every line
+        # on the settlement screen and everything owed, recurring fees included.
+        r["order_count"] = r["trip_count"] + r["recurring_fee_count"]
+        total = round(r["trip_fee_total"] + r["recurring_fee_total"], 2)
         r["total_fee"] = total
         # Aliases for callers written against the older field names.
         r["total_shipping"] = total
         r["total_shipping_fee"] = total
-        r["unsettled_count"] = r.get("order_count")
+        r["unsettled_count"] = r["order_count"]
+    rows.sort(key=lambda r: r["total_fee"], reverse=True)
     return rows
 
 
@@ -136,6 +182,34 @@ def get_delivery_partner_unsettled_details(delivery_partner: str):
         # ``invoice`` alias so the settlement screen can render one field name.
         r["invoice"] = r.get("reference_invoice")
         r["fee"] = float(r.get("partner_fee") or 0)
+        r["row_type"] = "trip"
+
+    # Recurring-fee periods ride in the same list, shaped like a trip so the
+    # existing screens render and tick them unchanged. ``invoice`` carries the
+    # human label ("Daily fee 2026-09-23") because it is the line's title there.
+    for a in unsettled_accruals(delivery_partner):
+        label = accrual_label(a)
+        fee = float(a.get("amount") or 0)
+        rows.append(frappe._dict(
+            name=a["name"],
+            row_type="recurring_fee",
+            reference_invoice=None,
+            invoice=label,
+            description=label,
+            party_type=None,
+            party=None,
+            amount=0.0,
+            partner_fee=fee,
+            fee=fee,
+            shipping_amount=0.0,
+            date=a.get("period_start"),
+            period_start=a.get("period_start"),
+            period_end=a.get("period_end"),
+            frequency=a.get("frequency"),
+            payment_mode=None,
+            status="Recurring Fee",
+        ))
+    rows.sort(key=lambda r: str(r.get("date") or ""))
     return rows
 
 
@@ -178,13 +252,18 @@ def settle_delivery_partner(
     selected = [str(n).strip() for n in _coerce_rows(courier_transactions) if str(n or "").strip()]
     charges = _coerce_rows(extra_charges)
 
+    # Recurring-fee periods arrive in the same list as the trips (that is how the
+    # screens tick them). Split them out by the table they live in.
+    selected_trips, selected_fee_names = split_accrual_names(selected)
+
     filters = {
         "delivery_partner": delivery_partner,
         "is_partner_order": 1,
         "partner_settled": 0,
     }
     if selected:
-        filters["name"] = ["in", selected]
+        # All-fee selection: match no trip rather than falling through to "all".
+        filters["name"] = ["in", selected_trips or [""]]
 
     unbilled = frappe.get_all(
         "Courier Transaction",
@@ -193,15 +272,21 @@ def settle_delivery_partner(
         order_by="date asc",
     )
 
+    # The recurring-fee periods being paid, locked so two managers settling at
+    # once cannot both clear the same day's fee.
+    fee_rows = lock_accruals_for_settlement(
+        delivery_partner, selected_fee_names if selected else None
+    )
+
     if selected:
         # Say which names were rejected rather than quietly billing fewer trips than
         # the operator ticked — this screen exists precisely to make the total match
         # the partner's invoice.
-        found = {r["name"] for r in unbilled}
+        found = {r["name"] for r in unbilled} | {r["name"] for r in fee_rows}
         missing = [n for n in selected if n not in found]
         if missing:
             frappe.throw(
-                "These courier transactions are not unbilled trips for {0}: {1}".format(
+                "These are not unbilled trips or fee periods for {0}: {1}".format(
                     delivery_partner, ", ".join(missing[:10])
                 )
             )
@@ -210,7 +295,9 @@ def settle_delivery_partner(
         sum(float((c or {}).get("amount") or 0) for c in charges), 2
     )
 
-    if not unbilled and abs(charges_total) < 0.005:
+    recurring_total = round(sum(float(r.get("amount") or 0) for r in fee_rows), 2)
+
+    if not unbilled and not fee_rows and abs(charges_total) < 0.005:
         return {
             "success": True,
             "delivery_partner": delivery_partner,
@@ -249,6 +336,10 @@ def settle_delivery_partner(
     # Deterministic per-batch idempotency token (stable across retries of the same
     # set, and sensitive to the fixed charges so a corrected total posts its own entry).
     token_src = "|".join(sorted(str(ct["name"]) for ct in unbilled))
+    if fee_rows:
+        # Appended only when present so a trips-only batch keeps the token (and so
+        # the idempotency key) it had before recurring fees existed.
+        token_src += "||fees:" + "|".join(sorted(str(r["name"]) for r in fee_rows))
     token_src += "||" + json.dumps(
         [
             {
@@ -271,10 +362,12 @@ def settle_delivery_partner(
         bank_account=bank_account,
         order_fee_total=fee_total,
         extra_charges=charges,
+        recurring_fee_total=recurring_total,
         token=token,
         human=(
             f"Delivery Partner settlement: {delivery_partner} "
-            f"({len(unbilled)} trips, fees {fee_total}, fixed {charges_total}). "
+            f"({len(unbilled)} trips, fees {fee_total}, "
+            f"{len(fee_rows)} recurring {recurring_total}, fixed {charges_total}). "
             f"Invoices: {invoice_refs}"
         ),
     )
@@ -293,6 +386,7 @@ def settle_delivery_partner(
             },
             update_modified=False,
         )
+    mark_accruals_settled([r["name"] for r in fee_rows], je_name, now)
 
     frappe.db.commit()
 
@@ -304,7 +398,30 @@ def settle_delivery_partner(
         "total_fee": fee_total,
         "extra_charges": charges,
         "extra_charges_total": charges_total,
-        "total_paid": round(fee_total + charges_total, 2),
+        "recurring_fee_count": len(fee_rows),
+        "recurring_fee_total": recurring_total,
+        "total_paid": round(fee_total + recurring_total + charges_total, 2),
         "bank_account": bank_account,
         "journal_entry": je_name,
     }
+
+
+@frappe.whitelist()
+def accrue_delivery_partner_recurring_fees(delivery_partner: str | None = None):
+    """Accrue any recurring-fee periods that are due, now, instead of on the hour.
+
+    The same idempotent job the scheduler runs, for a manager who has just set a
+    partner's fee (or back-dated its start) and wants the balance right away.
+    Returns ``{partner: number of periods posted}``.
+    """
+    _ensure_delivery_partner_access()
+    from jarz_pos.services.partner_recurring_fees import (
+        accrue_partner,
+        run_partner_recurring_fees,
+    )
+
+    if delivery_partner:
+        created = accrue_partner(delivery_partner)
+        frappe.db.commit()
+        return {delivery_partner: len(created)}
+    return run_partner_recurring_fees()

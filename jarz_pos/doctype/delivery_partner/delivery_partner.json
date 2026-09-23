@@ -15,6 +15,12 @@
   "bank_account",
   "settlement_account",
   "supplier",
+  "section_break_recurring_fee",
+  "recurring_fee_amount",
+  "recurring_fee_frequency",
+  "column_break_recurring_fee",
+  "recurring_fee_start_date",
+  "recurring_fee_end_date",
   "section_break_notes",
   "notes"
  ],
@@ -79,6 +85,42 @@
    "description": "Supplier used as the party on every settlement_account ledger line. Auto-resolved/created on first settlement; keep consistent per partner."
   },
   {
+   "fieldname": "section_break_recurring_fee",
+   "fieldtype": "Section Break",
+   "label": "Recurring Fee",
+   "description": "A fixed fee the partner charges every period whether or not they delivered for us (e.g. a daily subscription). Accrued automatically to the Settlement Account and paid with the weekly settlement."
+  },
+  {
+   "fieldname": "recurring_fee_amount",
+   "fieldtype": "Currency",
+   "label": "Recurring Fee Amount",
+   "description": "Charged once per period. Leave 0 for no recurring fee. A change applies to periods not yet accrued."
+  },
+  {
+   "fieldname": "recurring_fee_frequency",
+   "fieldtype": "Select",
+   "label": "Recurring Fee Frequency",
+   "options": "\nDaily\nWeekly\nMonthly",
+   "mandatory_depends_on": "eval:flt(doc.recurring_fee_amount) > 0"
+  },
+  {
+   "fieldname": "column_break_recurring_fee",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "recurring_fee_start_date",
+   "fieldtype": "Date",
+   "label": "Recurring Fee Start Date",
+   "mandatory_depends_on": "eval:flt(doc.recurring_fee_amount) > 0",
+   "description": "First day charged. Weekly and monthly periods are counted from this date. A past date is caught up on the next run."
+  },
+  {
+   "fieldname": "recurring_fee_end_date",
+   "fieldtype": "Date",
+   "label": "Recurring Fee End Date",
+   "description": "Last day of the contract. Blank = open-ended. Deactivating the partner also stops the fee."
+  },
+  {
    "fieldname": "section_break_notes",
    "fieldtype": "Section Break",
    "label": "Notes"
@@ -91,7 +133,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-07-20 12:00:00.000000",
+ "modified": "2026-09-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Delivery Partner",

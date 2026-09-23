@@ -555,6 +555,12 @@ scheduler_events = {
         # for a branch left open overnight. Never raises. See
         # jarz_pos.services.branch_access.
         "jarz_pos.services.branch_access.run_day_access_cycle",
+        # Delivery-partner recurring fees (Deliverk: 50 EGP every day, worked or
+        # not): accrue each period on its first day. Hourly rather than daily so a
+        # failed or skipped run costs an hour, not a day; idempotent and catches
+        # up, so it posts nothing until a new period starts. Never raises. See
+        # jarz_pos.services.partner_recurring_fees.
+        "jarz_pos.services.partner_recurring_fees.run_partner_recurring_fees",
     ],
     "cron": {
         # Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,

@@ -147,6 +147,10 @@ jobs:
             # that a partner's fee stays off `shipping_amount`, which is the single
             # convention keeping normal deliveries out of all of this.
             test_delivery_partner
+            # Recurring partner fees (Deliverk's 50 EGP a day, worked or not): the
+            # period grid, catch-up/re-anchor rules and the settlement's recurring
+            # line. Pure and mocked, so it runs before migrate like the rest.
+            test_partner_recurring_fees
             # The approved-override sync. Its partner case pins that a corrected
             # cost moves `partner_fee` and not the cash column - writing the wrong
             # one starts deducting the partner's fee from what the branch collects.
