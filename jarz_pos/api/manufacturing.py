@@ -2745,9 +2745,9 @@ def list_recent_work_orders(
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     order = (
-        "COALESCE(se.posted_at, wo.creation) DESC"
+        "COALESCE(se.posted_at, wo.creation) DESC, wo.name DESC"
         if date_basis == "posting"
-        else "wo.creation DESC"
+        else "wo.creation DESC, wo.name DESC"
     )
     rows = frappe.db.sql(
         f"""
