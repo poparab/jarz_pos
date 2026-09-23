@@ -39,6 +39,10 @@ import frappe
 
 UNASSIGNED_BRANCH = "__unassigned__"
 
+# Owned by jarz_woocommerce_integration (read by name only, never imported):
+# Woo accounts a Customer answers for besides its own woo_customer_id.
+_WOO_ALIAS_FIELD = "woo_customer_id_aliases"
+
 _MANAGER_ROLES = {"JARZ Manager", "System Manager", "Administrator"}
 
 
@@ -433,8 +437,15 @@ def _label_clash(source: str, target: str) -> List[str]:
 def _woo_id(customer: str) -> Optional[str]:
     if not _has_column("Customer", "woo_customer_id"):
         return None
-    value = frappe.db.get_value("Customer", customer, "woo_customer_id")
-    return str(value).strip() if value not in (None, "", 0, "0") else None
+    return _norm_woo_id(frappe.db.get_value("Customer", customer, "woo_customer_id"))
+
+
+def _norm_woo_id(value) -> Optional[str]:
+    """A Woo id as the Woo app compares it: positive digits, no leading zeros."""
+    text = str(value if value is not None else "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        return None
+    return str(int(text))
 
 
 def customer_merge_blockers(source: str, target: str) -> List[str]:
@@ -452,12 +463,23 @@ def customer_merge_blockers(source: str, target: str) -> List[str]:
             + "). Combine those label records first."
         )
     s_woo, t_woo = _woo_id(source), _woo_id(target)
-    if s_woo and t_woo and s_woo != t_woo:
+    if s_woo and t_woo and s_woo != t_woo and not _has_column("Customer", _WOO_ALIAS_FIELD):
+        # Without the Woo app's alias field the source's Woo account would stop
+        # resolving to anyone, and its next order or order update would mint the
+        # duplicate again. With it, the Woo app's merge hook keeps that account
+        # answering for the survivor.
         blockers.append(
             "Both accounts are linked to different WooCommerce customers; one link "
             "would be lost. Resolve that in the Woo integration first."
         )
     return blockers
+
+
+def _woo_aliases(customer: str) -> List[str]:
+    if not _has_column("Customer", _WOO_ALIAS_FIELD):
+        return []
+    raw = frappe.db.get_value("Customer", customer, _WOO_ALIAS_FIELD) or ""
+    return [n for n in (_norm_woo_id(part) for part in str(raw).split(",")) if n]
 
 
 def _customer_summary(customer: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -504,6 +526,9 @@ def preview(source: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append("irreversible_customer_merge")
         if s_sum and s_sum.get("credit_allowed") and not (t_sum or {}).get("credit_allowed"):
             warnings.append("credit_terms_carried_over")
+        s_woo_id, t_woo_id = _woo_id(source["customer"]), _woo_id(target["customer"])
+        if s_woo_id and t_woo_id and s_woo_id != t_woo_id:
+            warnings.append("woo_account_kept_as_alias")
         blockers = customer_merge_blockers(source["customer"], target["customer"])
     return {
         "source": {k: source.get(k) for k in ("doctype", "name", "title", "lead", "customer")},
@@ -714,6 +739,13 @@ def _merge_customers_in_savepoint(rename_doc, source, target, branch_name):
         drift.append("source_still_present")
     if (s_woo or t_woo) and not _woo_id(target):
         drift.append("woo_customer_id")
+    # Every Woo account either side answered for must still answer for the
+    # survivor -- as its own id or as an alias -- or the next Woo event from
+    # it would recreate the duplicate.
+    held = {_woo_id(target), *_woo_aliases(target)}
+    for woo in (s_woo, t_woo):
+        if woo and woo not in held:
+            drift.append(f"woo_customer_id {woo} not carried")
     if drift:
         frappe.throw(
             "Merge stopped: the account totals did not survive the merge unchanged "

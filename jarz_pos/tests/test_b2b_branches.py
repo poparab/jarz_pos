@@ -377,8 +377,58 @@ class TestCustomerMergeGuards(unittest.TestCase):
     def test_two_different_woo_accounts_block(self):
         with patch.object(bb, "_structural_use", return_value=None), patch.object(
             bb, "_label_clash", return_value=[]
-        ), patch.object(bb, "_woo_id", side_effect=lambda c: {"A": "11", "B": "22"}[c]):
+        ), patch.object(bb, "_woo_id", side_effect=lambda c: {"A": "11", "B": "22"}[c]), patch.object(
+            bb, "_has_column", return_value=False
+        ):
+            # Without the Woo app's alias field one binding would simply vanish.
             self.assertTrue(bb.customer_merge_blockers("A", "B"))
+
+    def test_two_woo_accounts_are_allowed_once_the_woo_app_keeps_aliases(self):
+        with patch.object(bb, "_structural_use", return_value=None), patch.object(
+            bb, "_label_clash", return_value=[]
+        ), patch.object(bb, "_woo_id", side_effect=lambda c: {"A": "6540", "B": "7000"}[c]), patch.object(
+            bb, "_has_column", side_effect=lambda dt, f: f == bb._WOO_ALIAS_FIELD
+        ):
+            self.assertEqual(bb.customer_merge_blockers("A", "B"), [])
+
+    def test_merge_rolls_back_when_the_absorbed_woo_account_is_not_carried(self):
+        snap = {"invoices": 1, "billed": 5.0}
+        woo = {"ORBT": "6540", "ORBT-1": "7000"}
+        with patch.object(bb, "customer_merge_blockers", return_value=[]), patch.object(
+            bb, "_snapshot", return_value=dict(snap)
+        ), patch.object(bb, "_stamp_unaddressed_invoices", return_value=0), patch.object(
+            bb, "_title_source_addresses", return_value=0
+        ), patch.object(bb, "_carry_credit_terms", return_value=False), patch.object(
+            bb, "_leads_for_customer", return_value=[]
+        ), patch.object(bb.frappe, "get_all", return_value=[]), patch.object(
+            _DB, "get_value", return_value=None
+        ), patch.object(_DB, "exists", return_value=False), patch.object(
+            bb, "_woo_id", side_effect=lambda c: woo.get(c)
+        ), patch.object(bb, "_woo_aliases", return_value=[]), patch(
+            "frappe.model.rename_doc.rename_doc"
+        ):
+            with self.assertRaises(frappe.ValidationError) as ctx:
+                bb.merge_customers("ORBT", "ORBT-1")
+        self.assertIn("6540", str(ctx.exception))
+
+    def test_merge_passes_when_the_absorbed_woo_account_is_an_alias(self):
+        snap = {"invoices": 1, "billed": 5.0}
+        woo = {"ORBT": "6540", "ORBT-1": "7000"}
+        with patch.object(bb, "customer_merge_blockers", return_value=[]), patch.object(
+            bb, "_snapshot", return_value=dict(snap)
+        ), patch.object(bb, "_stamp_unaddressed_invoices", return_value=0), patch.object(
+            bb, "_title_source_addresses", return_value=0
+        ), patch.object(bb, "_carry_credit_terms", return_value=False), patch.object(
+            bb, "_leads_for_customer", return_value=[]
+        ), patch.object(bb.frappe, "get_all", return_value=[]), patch.object(
+            _DB, "get_value", return_value=None
+        ), patch.object(_DB, "exists", return_value=False), patch.object(
+            bb, "_woo_id", side_effect=lambda c: woo.get(c)
+        ), patch.object(bb, "_woo_aliases", return_value=["6540"]), patch(
+            "frappe.model.rename_doc.rename_doc"
+        ):
+            out = bb.merge_customers("ORBT", "ORBT-1")
+        self.assertIsNone(out["woo_customer_id_carried"])
 
     def test_source_woo_binding_is_carried_to_target(self):
         snap = {"invoices": 1, "billed": 5.0}
