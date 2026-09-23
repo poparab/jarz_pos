@@ -127,6 +127,10 @@ class ROLES:
     # Review the whole request queue and reject entries.  Requesters see only
     # their own branch's queue; this set sees and acts on everything.
     PURCHASE_REQUEST_REVIEW = PURCHASE | {JARZ_MANAGER}
+    # Task Board "manager": may create tasks, sees every line manager's work and
+    # may hand work to someone else. Deliberately NOT LINE_MANAGER_TIER -- that
+    # is the board's door (who may use it at all), this is who runs it.
+    TASK_MANAGER = {JARZ_MANAGER, SYSTEM_MANAGER, ADMINISTRATOR}
 
 
 # ── WebSocket / realtime event names ────────────────────────────────────
@@ -189,6 +193,9 @@ class WS_EVENTS:
     ADDRESS_PIN_UPDATED = "jarz_pos_address_pin_updated"
     # B2B printed-label stock running low (see services/label_stock.py).
     LABEL_STOCK_ALERT = "jarz_pos_label_stock_alert"
+    # Task Board: a task a recipient is involved in changed (see
+    # api.notifications.send_task_notification). Payload {"task", "event"}.
+    TASK_UPDATED = "jarz_task_updated"
     TEST_EVENT = "test_event"
 
 

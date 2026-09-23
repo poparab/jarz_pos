@@ -396,10 +396,15 @@ EXPENSE_APPROVAL_NOTIFICATION_TYPE = "expense_approval_required"
 #: Daily "labels must go to the print house" digest. Same quiet channel as
 #: approvals: it is a decision for the morning, not an order alarm.
 LABEL_STOCK_NOTIFICATION_TYPE = "label_stock_alert"
+#: Task Board pushes (assigned, submitted, sent back, mentioned, reminders...).
+#: Same quiet channel and sound managers already get for approvals: a task is
+#: a thing to act on, not an order alarm.
+TASK_NOTIFICATION_TYPE = "task_notification"
 #: Push types that belong on the approvals channel.
 APPROVAL_NOTIFICATION_TYPES = (
     EXPENSE_APPROVAL_NOTIFICATION_TYPE,
     LABEL_STOCK_NOTIFICATION_TYPE,
+    TASK_NOTIFICATION_TYPE,
 )
 
 
@@ -3010,6 +3015,195 @@ def notify_label_stock_alert(
         return result
     except Exception:
         frappe.log_error(frappe.get_traceback(), "label_stock_notification_failed")
+        result["ok"] = False
+        result["status"] = "failed_exception"
+        return result
+
+
+# ── Task Board ────────────────────────────────────────────────────────────────
+#
+# Who hears about what is decided in ``services.task_board.notification_recipients``
+# (the actor is never told about their own action); the wording is
+# ``services.task_board.notification_text``. This half only delivers: realtime
+# to each recipient, then FCM and web push, on the approvals channel.
+#
+# Always from a background job. Callers go through enqueue_task_notification,
+# which queues run_task_notification_job with enqueue_after_commit, so the task
+# change is durable before any device is told about it and a slow or failing
+# push can never hold -- or roll back -- the request that caused it.
+
+
+def _json_safe_task_extra(extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Strings (and lists of strings) only: RQ pickles the job kwargs, and a
+    date or a Document in here is a job that dies before it starts."""
+    out: Dict[str, Any] = {}
+    for key, value in (extra or {}).items():
+        if isinstance(value, (list, tuple, set)):
+            out[str(key)] = [_safe_str(v) for v in value]
+        else:
+            out[str(key)] = _safe_str(value)
+    return out
+
+
+def enqueue_task_notification(
+    task: Any,
+    event: str,
+    recipients: Sequence[str],
+    actor: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Queue a task push for after the current transaction commits. Never raises.
+
+    Returns True when a job was queued. Nothing is queued when every recipient
+    is the actor, or during a test run (CI runs against the live staging site,
+    and a queued job is not undone by the tearDown rollback).
+    """
+    try:
+        from jarz_pos.services.task_board import clean_recipients
+
+        name = _safe_str(getattr(task, "name", None) or task).strip()
+        cleaned = clean_recipients(recipients, actor)
+        if not name or not cleaned:
+            return False
+        if outbound_alerts_suppressed(f"task_notification:{event}"):
+            return False
+        # NOTE the job kwarg is ``task_event``, not ``event``: frappe.enqueue has
+        # its own ``event`` parameter and would silently swallow ours.
+        frappe.enqueue(
+            "jarz_pos.api.notifications.run_task_notification_job",
+            queue="short",
+            enqueue_after_commit=True,
+            task=name,
+            task_event=_safe_str(event),
+            recipients=cleaned,
+            actor=_safe_str(actor),
+            extra=_json_safe_task_extra(extra),
+        )
+        return True
+    except Exception:
+        try:
+            frappe.log_error(
+                frappe.get_traceback(), "task_notification_enqueue_failed", defer_insert=True
+            )
+        except Exception:
+            pass
+        return False
+
+
+def run_task_notification_job(
+    task: str,
+    task_event: str,
+    recipients: Sequence[str],
+    actor: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Background-worker entry point (see enqueue_task_notification)."""
+    return send_task_notification(task, task_event, recipients, actor, extra)
+
+
+def send_task_notification(
+    task: Any,
+    event: str,
+    recipients: Sequence[str],
+    actor: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Deliver one Task Board event to *recipients*. Never raises.
+
+    *task* is a Jarz Task name (or anything with ``.name``). Sends the realtime
+    ``jarz_task_updated`` event to each recipient, then a ``task_notification``
+    push (FCM + web push). A recipient with no device is recorded as a
+    notification gap rather than passing silently.
+    """
+    result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+    try:
+        from jarz_pos.services.task_board import clean_recipients, notification_text
+
+        name = _safe_str(getattr(task, "name", None) or task).strip()
+        if not name:
+            result["status"] = "skipped_no_task"
+            return result
+        if outbound_alerts_suppressed(f"task_notification:{event}"):
+            result["status"] = "suppressed_test_run"
+            return result
+
+        cleaned = clean_recipients(recipients, actor)
+        result["recipients"] = len(cleaned)
+        if not cleaned:
+            result["status"] = "skipped_no_recipients"
+            return result
+
+        info = frappe.db.get_value("Jarz Task", name, ["title"], as_dict=True)
+        if not info:
+            result["status"] = "skipped_task_missing"
+            return result
+
+        actor_id = _safe_str(actor).strip()
+        actor_name = "Jarz"
+        if actor_id:
+            try:
+                actor_name = frappe.db.get_value("User", actor_id, "full_name") or actor_id
+            except Exception:
+                actor_name = actor_id
+
+        title, body = notification_text(event, _safe_str(info.get("title")), actor_name, extra or {})
+        now = frappe.utils.now_datetime()
+        data = {
+            "type": TASK_NOTIFICATION_TYPE,
+            "event": _safe_str(event),
+            "task_id": name,
+            # Per event AND per moment: two different events on one task must
+            # not collapse into one tray entry (see the tag note in
+            # _send_fcm_notifications), and neither must two comments.
+            "notification_id": f"task-{name}-{_safe_str(event)}-{int(now.timestamp())}",
+            "title": title,
+            "body": body,
+            "actor": actor_id,
+            "actor_name": _safe_str(actor_name),
+            "timestamp": now.isoformat(),
+        }
+
+        _publish_to_recipients(
+            WS_EVENTS.TASK_UPDATED, {"task": name, "event": _safe_str(event)}, cleaned
+        )
+
+        tokens, token_platforms = _get_token_targets_for_users(cleaned)
+        vapid_subs = _get_vapid_subscriptions_for_users(cleaned)
+        if tokens:
+            fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
+        else:
+            fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+            fcm_result["ok"] = True
+        if vapid_subs:
+            vapid_result = _send_vapid_notifications(vapid_subs, data)
+        else:
+            vapid_result = {"ok": True, "status": "skipped_no_subscriptions",
+                            "success_count": 0, "failure_count": 0}
+        if not tokens and not vapid_subs:
+            _log_notification_gap(
+                "Task notification reached no device",
+                (
+                    f"Task {name} event '{event}' resolved {len(cleaned)} recipient(s) "
+                    "but none has an enabled push token or web-push subscription. "
+                    f"Recipients: {', '.join(cleaned)}."
+                ),
+                throttle_key="task_notification:notokens",
+            )
+
+        result.update({
+            "ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
+            "status": fcm_result.get("status"),
+            "success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+            "failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+        })
+        return result
+    except Exception:
+        try:
+            frappe.log_error(
+                frappe.get_traceback(), "task_notification_failed", defer_insert=True
+            )
+        except Exception:
+            pass
         result["ok"] = False
         result["status"] = "failed_exception"
         return result

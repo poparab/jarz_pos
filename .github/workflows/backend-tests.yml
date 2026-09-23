@@ -607,6 +607,15 @@ jobs:
             # Delivery slots: no preparation buffer, the running slot offered
             # but never the default, and the snap onto the real slot grid.
             test_api_delivery_slots
+            # Task Board rules, pure mocks (no DocType needed, so meaningful
+            # even on the pre-migrate first run). The load-bearing cases are the
+            # visibility ones: a manager must see every line manager's work but
+            # NOT a task one manager handed another, and a line manager must see
+            # only what they are on. Also pins the transition matrix (reason
+            # required to send back/reopen, open subtasks block a submit), that
+            # a line manager can only assign subtasks to themselves, and that
+            # the actor is never pushed about their own action.
+            test_task_board
           )
           rc=0
           for m in "${MODULES[@]}"; do

@@ -33,6 +33,9 @@ Q_EMPLOYEE_ADVANCES = "employee_advances"
 Q_ITEM_REQUESTS = "item_requests"
 Q_PAYMENT_RECEIPTS = "payment_receipts"
 Q_CUSTOM_SHIPPING = "custom_shipping"
+#: Task Board (``api.tasks``): open work on my plate, and cards waiting on my review.
+Q_TASKS_ASSIGNED = "tasks_assigned"
+Q_TASKS_REVIEW = "tasks_review"
 
 
 #: One Error Log row per broken queue per this many seconds. The endpoint is
@@ -165,12 +168,47 @@ def _custom_shipping_queue() -> Optional[Dict[str, Any]]:
     return {"count": int(count or 0)}
 
 
+def _task_board_viewer():
+    """The caller's Task Board viewer, or None when they are not a board user.
+
+    Same gate the board itself enforces (``api.tasks._require_board``), so a
+    task count never leads to a screen that answers 403.
+    """
+    from jarz_pos.services import task_board
+
+    viewer = task_board.get_viewer(frappe.session.user)
+    return viewer if viewer.is_board_user else None
+
+
+def _tasks_assigned_queue() -> Optional[Dict[str, Any]]:
+    from jarz_pos.services import task_board
+
+    viewer = _task_board_viewer()
+    if viewer is None:
+        return None
+    # Two COUNT(*)s: open cards assigned to me + my open subtasks on live cards.
+    return {"count": task_board.count_assigned_open(viewer.user)}
+
+
+def _tasks_review_queue() -> Optional[Dict[str, Any]]:
+    from jarz_pos.services import task_board
+
+    viewer = _task_board_viewer()
+    if viewer is None:
+        return None
+    # Cards In Review that this caller may approve: the ones they created, or
+    # every one for a full-access user -- exactly set_status's approve rule.
+    return {"count": task_board.count_review_waiting(viewer)}
+
+
 _QUEUES: List[tuple] = [
     (Q_EXPENSES, _expenses_queue),
     (Q_EMPLOYEE_ADVANCES, _employee_advances_queue),
     (Q_ITEM_REQUESTS, _item_requests_queue),
     (Q_PAYMENT_RECEIPTS, _payment_receipts_queue),
     (Q_CUSTOM_SHIPPING, _custom_shipping_queue),
+    (Q_TASKS_ASSIGNED, _tasks_assigned_queue),
+    (Q_TASKS_REVIEW, _tasks_review_queue),
 ]
 
 

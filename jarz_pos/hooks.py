@@ -178,6 +178,9 @@ after_migrate = [
     # the box. Guarded on HRMS being installed, never raises. Deliberately last:
     # it reads POS Profiles, which earlier seeders may create.
     "jarz_pos.setup.roster_setup.ensure_roster_setup",
+    # Task Board: seed the full-access list with the owner account, only while
+    # the list is empty and only if that User exists. Create-only, never raises.
+    "jarz_pos.setup.task_board_setup.ensure_task_board_settings",
 ]
 
 # Apps
@@ -329,10 +332,16 @@ after_uninstall = "jarz_pos.utils.cleanup.remove_required_delivery_datetime_fiel
 
 permission_query_conditions = {
     "Address": "jarz_pos.permissions.address.get_permission_query_conditions",
+    # Task Board: the only DocPerm is System Manager; these narrow it to the
+    # board's own visibility rule (services.task_board.is_visible).
+    "Jarz Task": "jarz_pos.permissions.tasks.get_permission_query_conditions",
+    "Jarz Task Entry": "jarz_pos.permissions.tasks.get_entry_permission_query_conditions",
 }
 
 has_permission = {
     "Address": "jarz_pos.permissions.address.has_permission",
+    "Jarz Task": "jarz_pos.permissions.tasks.has_permission",
+    "Jarz Task Entry": "jarz_pos.permissions.tasks.has_permission",
 }
 
 # DocType Class
@@ -372,6 +381,15 @@ doc_events = {
     # never raises, and never touches a field in Woo's outbound trigger set.
     "Address": {
         "before_save": "jarz_pos.events.address.clamp_geo_confidence",
+    },
+    # Task Board attachments are private Files whose core DocPerm lets their
+    # uploader delete or re-point them via /api/resource/File. These guards
+    # refuse that for EXISTING files attached to Jarz Task / Jarz Task Entry
+    # (inserts and every other File are untouched; never raise otherwise).
+    # The board's own remove path sets frappe.flags.jarz_task_file_ok.
+    "File": {
+        "validate": "jarz_pos.permissions.tasks.guard_task_file_update",
+        "on_trash": "jarz_pos.permissions.tasks.guard_task_file_trash",
     },
     # B2B printed labels: the printer's bill is the GL side of a label batch.
     # Submitting it (from the app OR a bill re-issued in Desk) links the batch
@@ -531,6 +549,14 @@ scheduler_events = {
         # Delivery awaiting payment confirmation past the configured threshold.
         "jarz_pos.tasks.escalate_unconfirmed_online_payments",
     ],
+    "cron": {
+        # Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,
+        # overdue (assignee daily, creator once), open subtasks. Capped, never
+        # raises; bookkeeping on the rows makes a same-day re-run a no-op.
+        "0 9 * * *": [
+            "jarz_pos.services.task_reminders.run_task_reminders",
+        ],
+    },
 }
 
 # Testing
@@ -655,6 +681,18 @@ try:
     _cash_custody_api.issue_custody
     _cash_custody_api.return_custody
     _cash_custody_api.get_custody_statement
+except Exception:
+    pass
+
+try:
+    # Task Board endpoints (feature task-board).
+    from jarz_pos.api import tasks as _tasks_api
+    _tasks_api.get_board_context
+    _tasks_api.get_board
+    _tasks_api.get_task
+    _tasks_api.create_task
+    _tasks_api.set_status
+    _tasks_api.download_attachment
 except Exception:
     pass
 
