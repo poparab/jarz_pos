@@ -62,8 +62,9 @@ def _for_company(company: str) -> None:
     _ensure(company, abbr, ACCOUNTS.SHIPPING_INCOME, income_parent, "Income Account")
     _ensure(company, abbr, ACCOUNTS.PURCHASE_DELIVERY, expense_parent, freight_type or "Chargeable")
     vehicle_group = _ensure(company, abbr, ACCOUNTS.VEHICLE_EXPENSES, expense_parent, None, is_group=1)
-    for leaf in (ACCOUNTS.VEHICLE_FUEL, ACCOUNTS.VEHICLE_MAINTENANCE, ACCOUNTS.VEHICLE_OTHER):
-        _ensure(company, abbr, leaf, vehicle_group, "Expense Account")
+    if vehicle_group:
+        for leaf in (ACCOUNTS.VEHICLE_FUEL, ACCOUNTS.VEHICLE_MAINTENANCE, ACCOUNTS.VEHICLE_OTHER):
+            _ensure(company, abbr, leaf, vehicle_group, "Expense Account")
 
     # Freight keeps its name (code resolves it by name) but its label now says
     # what it is for, so nobody picks it for fuel again.
@@ -93,7 +94,13 @@ def _root_group(company: str, root_type: str):
 
 def _ensure(company, abbr, account_name, parent, account_type, is_group=0):
     name = f"{account_name} - {abbr}"
-    if not frappe.db.exists("Account", name):
+    existing = frappe.db.get_value("Account", name, "is_group") if frappe.db.exists("Account", name) else None
+    if existing is not None and int(existing or 0) != int(is_group):
+        # A hand-made account of the wrong kind (e.g. a leaf "Vehicle Expenses"):
+        # inserting children under it would abort migrate. Leave it for a human.
+        print(f"create_expense_classification_accounts: {name} exists with is_group={existing}, expected {is_group}; skipped")
+        return None
+    if existing is None:
         doc = frappe.get_doc({
             "doctype": "Account",
             "account_name": account_name,

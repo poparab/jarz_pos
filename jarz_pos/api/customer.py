@@ -1797,6 +1797,16 @@ def change_invoice_shipping_address(invoice_name, address_name):
                 for t in (inv.get("taxes") or [])
             )
             if had_shipping_income_row:
+                # Keep the account the row is already posted to: an invoice
+                # submitted before 2026-09 credits Freight, and re-resolving it
+                # to Shipping Income would repost this invoice's ledger.
+                posted_account = next(
+                    (
+                        t.account_head for t in (inv.get("taxes") or [])
+                        if str(t.description or "").lower().startswith("shipping income") and t.account_head
+                    ),
+                    None,
+                ) if int(inv.docstatus or 0) == 1 else None
                 inv.set("taxes", [
                     t for t in (inv.get("taxes") or [])
                     if not str(t.description or "").lower().startswith("shipping income")
@@ -1807,6 +1817,7 @@ def change_invoice_shipping_address(invoice_name, address_name):
                         inv,
                         new_income,
                         delivery_description=f"Shipping Income ({new_territory})",
+                        account_head=posted_account,
                     )
                 inv.calculate_taxes_and_totals()
                 inv.flags.ignore_validate_update_after_submit = True

@@ -23,10 +23,12 @@ def get_delivery_account(company):
     return get_shipping_income_account(company)
 
 
-def add_delivery_charges_to_taxes(invoice_doc, delivery_charges, delivery_description="Delivery Charges"):
+def add_delivery_charges_to_taxes(invoice_doc, delivery_charges, delivery_description="Delivery Charges", account_head=None):
     """
     Add delivery charges to Sales Taxes and Charges table
-    Type=Actual, Account=Shipping Income - {abbr} (see get_delivery_account)
+    Type=Actual, Account=Shipping Income - {abbr} (see get_delivery_account).
+    ``account_head`` overrides it: a caller rebuilding the row on a SUBMITTED
+    invoice passes the account already posted, so the ledger is not reposted.
     """
     if not delivery_charges or flt(delivery_charges) <= 0:
         frappe.log_error("No delivery charges to add or invalid amount", "Delivery Charges")
@@ -34,7 +36,7 @@ def add_delivery_charges_to_taxes(invoice_doc, delivery_charges, delivery_descri
         
     try:
         # Get the correct account
-        delivery_account = get_delivery_account(invoice_doc.company)
+        delivery_account = account_head or get_delivery_account(invoice_doc.company)
         
         # Get cost center for the company
         cost_center = invoice_doc.cost_center or frappe.get_cached_value('Company', 

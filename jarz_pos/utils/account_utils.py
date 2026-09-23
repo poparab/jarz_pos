@@ -156,6 +156,22 @@ def _company_leaf(account_name: str, company: str):
     return None
 
 
+def _report_ledger_fallback(account_name: str, company: str) -> None:
+    """Leave a visible trace when a new ledger is missing and Freight is used.
+
+    logger().warning is invisible on the servers; an Error Log is not. Never
+    raises: a failed log must not stop an invoice.
+    """
+    try:
+        frappe.log_error(
+            title=f"{account_name} account missing - booked to Freight",
+            message=f"{account_name} - <abbr> not found for company {company}; "
+            "run the create_expense_classification_accounts patch (bench migrate).",
+        )
+    except Exception:
+        pass
+
+
 def get_shipping_income_account(company: str) -> str:
     """Return the account the customer's delivery charge is credited to.
 
@@ -168,9 +184,7 @@ def get_shipping_income_account(company: str) -> str:
     acc = _company_leaf(ACCOUNTS.SHIPPING_INCOME, company)
     if acc:
         return acc
-    frappe.logger("jarz_pos").warning(
-        {"event": "shipping_income_account_missing", "company": company}
-    )
+    _report_ledger_fallback("Shipping Income", company)
     return get_freight_expense_account(company)
 
 
@@ -182,9 +196,7 @@ def get_purchase_delivery_account(company: str) -> str:
     acc = _company_leaf(ACCOUNTS.PURCHASE_DELIVERY, company)
     if acc:
         return acc
-    frappe.logger("jarz_pos").warning(
-        {"event": "purchase_delivery_account_missing", "company": company}
-    )
+    _report_ledger_fallback("Purchase Delivery Charges", company)
     return get_freight_expense_account(company)
 
 

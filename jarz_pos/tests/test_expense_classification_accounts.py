@@ -83,6 +83,39 @@ class TestShippingIncomeAccount(unittest.TestCase):
             self.assertEqual(delivery_utils.get_delivery_account(COMPANY), "Shipping Income - J")
 
 
+class TestRebuiltRowKeepsItsPostedAccount(unittest.TestCase):
+    """A submitted pre-2026-09 invoice's row stays on Freight when rebuilt.
+
+    Re-resolving it would move it to Shipping Income, and ERPNext would repost
+    that invoice's ledger at its original date.
+    """
+
+    def test_explicit_account_wins_over_the_resolver(self):
+        from jarz_pos.utils import delivery_utils
+
+        inv = MagicMock(company=COMPANY, cost_center="Main - J", net_total=100, taxes=[])
+        with patch.object(delivery_utils, "get_delivery_account", return_value="Shipping Income - J"), patch.object(
+            delivery_utils.frappe, "log_error"
+        ):
+            delivery_utils.add_delivery_charges_to_taxes(
+                inv, 60, "Shipping Income (EGNASRCITY)", account_head="Freight and Forwarding Charges - J"
+            )
+
+        row = inv.append.call_args.args[1]
+        self.assertEqual(row["account_head"], "Freight and Forwarding Charges - J")
+
+    def test_new_row_without_override_uses_shipping_income(self):
+        from jarz_pos.utils import delivery_utils
+
+        inv = MagicMock(company=COMPANY, cost_center="Main - J", net_total=100, taxes=[])
+        with patch.object(delivery_utils, "get_delivery_account", return_value="Shipping Income - J"), patch.object(
+            delivery_utils.frappe, "log_error"
+        ):
+            delivery_utils.add_delivery_charges_to_taxes(inv, 60, "Shipping Income (EGNASRCITY)")
+
+        self.assertEqual(inv.append.call_args.args[1]["account_head"], "Shipping Income - J")
+
+
 class TestPurchaseDeliveryAccount(unittest.TestCase):
     def test_purchase_delivery_has_its_own_ledger(self):
         from jarz_pos.utils import account_utils
@@ -107,7 +140,7 @@ class TestPurchaseDeliveryAccount(unittest.TestCase):
 class TestCreateAccountsPatch(unittest.TestCase):
     """The patch creates the tree once, under the right parents, and is idempotent."""
 
-    def _run(self, existing):
+    def _run(self, existing, vehicle_is_group=1):
         from jarz_pos.Patches.v1_9 import create_expense_classification_accounts as mod
 
         created = []
@@ -125,6 +158,8 @@ class TestCreateAccountsPatch(unittest.TestCase):
                 return filters["name"] if filters["name"] in groups else None
             if doctype == "Account" and fieldname == "account_type":
                 return "Chargeable"
+            if doctype == "Account" and fieldname == "is_group":
+                return vehicle_is_group if filters == "Vehicle Expenses - J" else 0
             return None
 
         groups = {"Direct Income - J", "Indirect Expenses - J"}
@@ -149,6 +184,14 @@ class TestCreateAccountsPatch(unittest.TestCase):
         for leaf in ("Vehicle Fuel", "Vehicle Maintenance and Repairs", "Vehicle Other Expenses"):
             self.assertEqual(created[leaf]["parent_account"], "Vehicle Expenses - J")
             self.assertEqual(created[leaf]["is_group"], 0)
+
+    def test_a_hand_made_leaf_vehicle_account_does_not_abort_migrate(self):
+        """Children under a leaf would throw; the patch skips the group instead."""
+        existing = {"Freight and Forwarding Charges - J", "Vehicle Expenses - J"}
+        with patch("builtins.print"):
+            created = {c["account_name"] for c in self._run(existing, vehicle_is_group=0)}
+        self.assertIn("Shipping Income", created)
+        self.assertFalse(created & {"Vehicle Fuel", "Vehicle Maintenance and Repairs", "Vehicle Other Expenses"})
 
     def test_second_run_creates_nothing(self):
         existing = {"Freight and Forwarding Charges - J"}
