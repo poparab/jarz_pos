@@ -355,6 +355,36 @@ def guard_custody_balance(doc, method=None) -> None:
     _check(doc, +1)
 
 
+def verify_custody_after_posting(doc, method=None) -> None:
+    """``on_submit`` / ``on_cancel`` backstop, read from the voucher's own GL.
+
+    ``guard_custody_balance`` reads only a voucher's main cash line. A Payment
+    Entry deduction, a tax "Deduct" row or a write-off can credit an account
+    too, so after the ledger is written this re-reads every custody account
+    the voucher actually touched and refuses (rolling the whole voucher back)
+    if any is now below zero. Returns before any lock when no custody account
+    is involved.
+    """
+    holders = custody_accounts()
+    if not holders:
+        return
+    touched = frappe.db.sql(
+        "SELECT DISTINCT account FROM `tabGL Entry` WHERE voucher_type = %s AND voucher_no = %s",
+        (doc.get("doctype"), doc.get("name")),
+    )
+    involved = sorted({row[0] for row in touched or [] if row[0] in holders})
+    company = doc.get("company")
+    for account in involved:
+        balance = custody_balance(account, company, for_update=True)
+        if balance < -EPSILON:
+            frappe.throw(
+                _("Custody {0} would be left at {1}. A custody account cannot go below zero.").format(
+                    holder_employee_name(holders[account]) or account, _fmt(balance)
+                ),
+                title=_("Custody balance"),
+            )
+
+
 def guard_custody_balance_on_cancel(doc, method=None) -> None:
     """``before_cancel`` twin: cancelling a voucher that PUT money into custody
     takes it back out, and must not leave the account negative either (issue
@@ -410,7 +440,19 @@ def custody_parent_group(company: str) -> str:
         }
     )
     doc.flags.ignore_permissions = True
-    doc.insert()
+    try:
+        doc.insert()
+    except frappe.DuplicateEntryError:
+        # Two holders added at the same moment: the other request created it.
+        frappe.clear_messages()
+        existing = frappe.db.get_value(
+            "Account",
+            {"company": company, "is_group": 1, "account_name": CUSTODY_GROUP_NAME},
+            "name",
+        )
+        if not existing:
+            raise
+        return existing
     return doc.name
 
 
@@ -495,6 +537,15 @@ def validate_custody_account(account: str, company: Optional[str]) -> None:
         frappe.throw(_("Custody account {0} belongs to another company.").format(account))
     if (row.get("account_type") or "") != "Cash":
         frappe.throw(_("Custody account {0} must be of type Cash.").format(account))
+    # Only a ledger under Staff Custody may be a custody. Anything else — a
+    # branch drawer, the main safe — would vanish from every issue/return
+    # list and be fenced by the negative-balance guard.
+    parent = frappe.db.get_value("Account", account, "parent_account")
+    parent_name = frappe.db.get_value("Account", parent, "account_name") if parent else None
+    if parent_name != CUSTODY_GROUP_NAME:
+        frappe.throw(
+            _("Custody account {0} must sit under the '{1}' group.").format(account, CUSTODY_GROUP_NAME)
+        )
 
 
 def account_has_gl_entries(account: str) -> bool:

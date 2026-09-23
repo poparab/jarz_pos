@@ -390,16 +390,26 @@ doc_events = {
     "Purchase Invoice": {
         "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
         "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
-        "on_submit": "jarz_pos.services.label_stock.link_bill_on_purchase_invoice_submit",
-        "on_cancel": "jarz_pos.services.label_stock.unlink_bill_on_purchase_invoice_cancel",
+        "on_submit": [
+            "jarz_pos.services.label_stock.link_bill_on_purchase_invoice_submit",
+            "jarz_pos.services.cash_custody.verify_custody_after_posting",
+        ],
+        "on_cancel": [
+            "jarz_pos.services.label_stock.unlink_bill_on_purchase_invoice_cancel",
+            "jarz_pos.services.cash_custody.verify_custody_after_posting",
+        ],
     },
     "Journal Entry": {
         "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
         "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
+        "on_submit": "jarz_pos.services.cash_custody.verify_custody_after_posting",
+        "on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
     },
     "Payment Entry": {
         "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
         "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
+        "on_submit": "jarz_pos.services.cash_custody.verify_custody_after_posting",
+        "on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
     },
     "Sales Invoice": {
         # Promo-code engine: single apply path for Woo / Desk invoices. Runs

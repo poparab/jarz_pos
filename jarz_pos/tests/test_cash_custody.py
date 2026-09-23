@@ -762,5 +762,114 @@ class TestHolderDisable(unittest.TestCase):
         bal.assert_not_called()
 
 
+
+class TestPostingDateRule(_ApiCase):
+    """Review fix: a holder cannot date a custody move; nobody can future-date one."""
+
+    def test_holder_cannot_backdate_a_withdrawal(self):
+        with self.assertRaises(_Refused):
+            self._call("issue_custody", from_account="Nasr - J", amount=100, posting_date="2026-01-01")
+
+    def test_holder_cannot_backdate_a_return(self):
+        with self.assertRaises(_Refused):
+            self._call("return_custody", to_account="Dokki - J", amount=100, posting_date="2026-01-01")
+
+    def test_manager_may_backdate(self):
+        _result, posted, _cover = self._call(
+            "issue_custody", user="boss@example.com", can_manage=True,
+            from_account="Cash - J", amount=100, posting_date="2026-01-01 10:00:00",
+        )
+        self.assertEqual(posted.call_args.kwargs["posting_date"], "2026-01-01 10:00:00")
+
+    def test_nobody_may_future_date(self):
+        with self.assertRaises(_Refused):
+            self._call("issue_custody", user="boss@example.com", can_manage=True,
+                       from_account="Cash - J", amount=100, posting_date="2999-01-01")
+
+    def test_holder_without_a_date_posts_now(self):
+        _result, posted, _cover = self._call("issue_custody", from_account="Nasr - J", amount=100)
+        self.assertIsNone(posted.call_args.kwargs["posting_date"])
+
+
+class TestAssetOnlyOptions(unittest.TestCase):
+    """Review fix: a wallet matched by name must still be an Asset ledger."""
+
+    def test_non_asset_and_custody_accounts_are_dropped(self):
+        from jarz_pos.api import cash_custody as api
+
+        mock_frappe = _mock_frappe()
+        mock_frappe.get_all.return_value = ["Nasr - J", "Wallet - J"]
+        sources = [_src("Nasr - J"), _src("Wallet - J"), _src("Mobile Allowance - J"), _src(CUSTODY)]
+        with patch.object(api, "frappe", mock_frappe):
+            kept = api._without_custody(sources, {CUSTODY: "EMP-0001"})
+        self.assertEqual([s.account for s in kept], ["Nasr - J", "Wallet - J"])
+        queried = mock_frappe.get_all.call_args.kwargs["filters"]["name"][1]
+        self.assertNotIn(CUSTODY, queried)
+
+
+class TestVerifyAfterPosting(unittest.TestCase):
+    """Review fix: the backstop reads the voucher's own GL, so a deduction or
+    tax row that credits custody is caught even though the before_submit
+    guard only sees the main cash line."""
+
+    def _run(self, touched, balance, holders=None):
+        from jarz_pos.services import cash_custody
+
+        holders = {CUSTODY: "EMP-0001"} if holders is None else holders
+        mock_frappe = _mock_frappe()
+        mock_frappe.db.sql.return_value = [(a,) for a in touched]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cash_custody, "frappe", mock_frappe))
+            stack.enter_context(patch.object(cash_custody, "custody_accounts", return_value=holders))
+            bal = stack.enter_context(patch.object(cash_custody, "custody_balance", return_value=balance))
+            stack.enter_context(patch.object(cash_custody, "holder_employee_name", return_value="Ali"))
+            cash_custody.verify_custody_after_posting(_Doc("Payment Entry", name="PE-1", company="Jarz"))
+        return bal, mock_frappe
+
+    def test_negative_custody_after_posting_is_refused(self):
+        with self.assertRaises(_Refused):
+            self._run([CUSTODY, "CIB - J"], balance=-500)
+
+    def test_zero_is_fine_and_read_under_lock(self):
+        bal, _f = self._run([CUSTODY, "CIB - J"], balance=0)
+        bal.assert_called_once_with(CUSTODY, "Jarz", for_update=True)
+
+    def test_voucher_without_custody_takes_no_lock(self):
+        bal, _f = self._run(["CIB - J", "Supplier - J"], balance=-1)
+        bal.assert_not_called()
+
+    def test_no_holders_skips_the_gl_read(self):
+        bal, mock_frappe = self._run([CUSTODY], balance=-1, holders={})
+        mock_frappe.db.sql.assert_not_called()
+        bal.assert_not_called()
+
+
+class TestHolderAccountIsFixed(unittest.TestCase):
+    """Review fix: re-pointing a holder would drop the old account out of the guard."""
+
+    def _validate(self, before_account, new_account):
+        from jarz_pos.doctype.jarz_custody_holder import jarz_custody_holder as mod
+
+        doc = mod.JarzCustodyHolder.__new__(mod.JarzCustodyHolder)
+        doc.__dict__.update({"doctype": "Jarz Custody Holder", "name": "EMP-0001", "employee": "EMP-0001",
+                             "company": "Jarz", "account": new_account, "enabled": 1})
+        doc.get_doc_before_save = lambda: {"account": before_account, "enabled": 1}
+        doc.is_new = lambda: False
+        doc._fill_from_employee = lambda: None
+        mock_frappe = _mock_frappe()
+        mock_frappe.db.get_value.return_value = None
+        with patch.object(mod, "frappe", mock_frappe), patch.object(
+            mod.cash_custody, "validate_custody_account"
+        ):
+            doc.validate()
+
+    def test_changing_the_account_is_refused(self):
+        with self.assertRaises(_Refused):
+            self._validate(CUSTODY, "Nasr - J")
+
+    def test_saving_with_the_same_account_is_fine(self):
+        self._validate(CUSTODY, CUSTODY)
+
+
 if __name__ == "__main__":
     unittest.main()

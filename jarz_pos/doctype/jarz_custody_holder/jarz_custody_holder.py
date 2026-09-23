@@ -58,6 +58,12 @@ class JarzCustodyHolder(Document):
 
     def validate(self) -> None:
         self._fill_from_employee()
+        if not self.is_new():
+            before = self.get_doc_before_save()
+            if before and before.get("account") and before.get("account") != self.account:
+                # Re-pointing would drop the old account out of the guard with
+                # its money still in it.
+                frappe.throw(_("The custody account of a holder cannot be changed."))
         if self.account:
             cash_custody.validate_custody_account(self.account, self.company)
             other = frappe.db.get_value(

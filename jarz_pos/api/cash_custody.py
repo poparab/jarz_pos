@@ -164,7 +164,23 @@ def _serialize_option(src) -> Dict[str, Any]:
 
 
 def _without_custody(sources, custody: Dict[str, str]):
-    return [s for s in sources if s.account and s.account not in custody]
+    """Drop custody accounts and anything that is not an ASSET ledger.
+
+    ``expenses._cashlike_accounts`` matches wallets by NAME, so an expense or
+    liability account called "Mobile ..." would otherwise be offered, and
+    issuing from it would mint custody cash that never left a drawer.
+    """
+    candidates = [s for s in sources if s.account and s.account not in custody]
+    if not candidates:
+        return []
+    assets = set(
+        frappe.get_all(
+            "Account",
+            filters={"name": ["in", [s.account for s in candidates]], "root_type": "Asset"},
+            pluck="name",
+        )
+    )
+    return [s for s in candidates if s.account in assets]
 
 
 def _manager_source_accounts(company: str):
@@ -258,6 +274,23 @@ def _post_custody_je(
     je.insert()
     je.submit()
     return je
+
+
+def _checked_posting_date(posting_date: Optional[str], can_manage: bool) -> Optional[str]:
+    """Only a manager may date a custody move, and never in the future.
+
+    A holder dating their own withdrawal back would move drawer money inside a
+    shift that is already closed and counted; a future date would show custody
+    the drawer has not yet given up.
+    """
+    value = str(posting_date or "").strip()
+    if not value:
+        return None
+    if not can_manage:
+        frappe.throw(_("Only a manager can choose the date of a custody movement."), frappe.PermissionError)
+    if getdate(value.split(" ")[0]) > getdate(today()):
+        frappe.throw(_("A custody movement cannot be dated in the future."))
+    return value
 
 
 def _human(prefix: str, employee_name: str, remark: Optional[str]) -> str:
@@ -421,6 +454,7 @@ def issue_custody(
             frappe.PermissionError,
         )
     _validate_counter_account(from_account, doc)
+    posting_date = _checked_posting_date(posting_date, can_manage)
 
     je = _post_custody_je(
         doc,
@@ -465,6 +499,7 @@ def return_custody(
             frappe.PermissionError,
         )
     _validate_counter_account(to_account, doc)
+    posting_date = _checked_posting_date(posting_date, can_manage)
 
     cash_custody.ensure_custody_can_cover(
         doc.account, value, company, for_update=True, holder=doc.name
