@@ -639,6 +639,175 @@ class TestMovementValuation(unittest.TestCase):
         self.assertEqual(doc.unit_cost, 0.0)
         self.assertEqual(doc.value, 0.0)
 
+    def _run_position(self, position, *, movement_type="Consumed", qty):
+        from unittest.mock import MagicMock
+
+        doc = MagicMock()
+        with patch.object(ls.frappe, "new_doc", return_value=doc), patch.object(
+            ls, "get_position", return_value=position
+        ), patch.object(ls, "_post_value_journal") as je, patch.object(ls, "refresh_label"):
+            ls.post_movement(label="L1", movement_type=movement_type, qty=qty)
+        return doc, je
+
+    def test_emptying_the_shelf_takes_all_remaining_value(self):
+        # 3 labels carrying 10.00 (avg 3.3333): qty x avg would leave 0.0001
+        # x 3 behind forever. The last movement drains the lot.
+        doc, je = self._run_position(
+            {"on_hand": 3, "value": 10.0, "avg_cost": 3.3333}, qty=3
+        )
+        self.assertEqual(doc.value, -10.0)
+        je.assert_called_once()
+
+    def test_overdrawing_the_shelf_also_takes_all_value_and_no_more(self):
+        doc, je = self._run_position(
+            {"on_hand": 5, "value": 25.0, "avg_cost": 5.0}, qty=8
+        )
+        self.assertEqual(doc.qty, -8)
+        self.assertEqual(doc.value, -25.0)
+
+    def test_consuming_from_an_already_empty_shelf_moves_no_value(self):
+        doc, je = self._run_position(
+            {"on_hand": 0, "value": 0.0, "avg_cost": 0.0}, qty=4
+        )
+        self.assertEqual(doc.value, 0.0)
+        je.assert_not_called()
+
+    def test_a_partial_draw_still_prices_at_average(self):
+        doc, _ = self._run_position(
+            {"on_hand": 10, "value": 50.0, "avg_cost": 5.0}, qty=4
+        )
+        self.assertEqual(doc.value, -20.0)
+
+
+# ---------------------------------------------------------------------------
+# Batch valuation: the bill is the batch's value, whatever the order of events
+# ---------------------------------------------------------------------------
+class TestConsumedShare(unittest.TestCase):
+    def test_all_left_means_none_used(self):
+        self.assertEqual(ls.consumed_share(42, 42), 0.0)
+
+    def test_more_left_than_the_batch_means_none_used(self):
+        # Older stock on the shelf too: the batch is taken as what is left first.
+        self.assertEqual(ls.consumed_share(42, 100), 0.0)
+
+    def test_nothing_left_means_all_used(self):
+        self.assertEqual(ls.consumed_share(42, 0), 1.0)
+
+    def test_negative_stock_counts_as_nothing_left(self):
+        self.assertEqual(ls.consumed_share(42, -5), 1.0)
+
+    def test_partial(self):
+        self.assertAlmostEqual(ls.consumed_share(42, 32), 10 / 42)
+
+    def test_no_receipt_means_no_share(self):
+        self.assertEqual(ls.consumed_share(0, 0), 0.0)
+
+
+class TestSyncBatchValue(unittest.TestCase):
+    """sync_batch_value: the revaluation row plus the used share to Label Cost."""
+
+    def _po(self, *, pi="PI-1", total_cost=210.0):
+        return {"name": "JLPO-1", "label": "L1", "purchase_invoice": pi, "total_cost": total_cost}
+
+    def _run(self, po, *, booked, received=42, on_hand=42, has_receipt=True):
+        from unittest.mock import MagicMock
+
+        rows = []
+
+        def insert_row(**kwargs):
+            row = MagicMock()
+            row.value = kwargs["value"]
+            rows.append(kwargs)
+            return row
+
+        exists = MagicMock(return_value=has_receipt)
+        with patch.object(ls.frappe.db, "exists", exists), patch.object(
+            ls.frappe.db, "get_value", return_value=received
+        ), patch.object(ls, "batch_booked_value", return_value=booked), patch.object(
+            ls, "get_on_hand", return_value=on_hand
+        ), patch.object(ls, "_insert_value_row", side_effect=insert_row), patch.object(
+            ls, "_post_value_journal"
+        ) as je, patch.object(ls, "refresh_label"):
+            diff = ls.sync_batch_value(po)
+        return diff, rows, je
+
+    def test_billed_before_any_use_revalues_and_expenses_nothing(self):
+        diff, rows, je = self._run(self._po(), booked=0.0, on_hand=42)
+        self.assertEqual(diff, 210.0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], 210.0)
+        self.assertEqual(rows[0]["print_order"], "JLPO-1")
+        je.assert_not_called()
+
+    def test_billed_after_every_label_was_used_expenses_all_of_it(self):
+        # The stranding case: nothing is left for the value to ride on.
+        diff, rows, je = self._run(self._po(), booked=0.0, on_hand=0)
+        self.assertEqual([r["value"] for r in rows], [210.0, -210.0])
+        self.assertIsNone(rows[1]["print_order"])
+        je.assert_called_once()
+
+    def test_billed_after_partial_use_expenses_the_used_share(self):
+        diff, rows, je = self._run(self._po(), booked=0.0, on_hand=32)
+        self.assertEqual(rows[0]["value"], 210.0)
+        self.assertAlmostEqual(rows[1]["value"], -50.0, places=2)
+        je.assert_called_once()
+
+    def test_bill_cancelled_takes_value_out_and_reverses_the_used_share(self):
+        diff, rows, je = self._run(self._po(pi=None), booked=210.0, on_hand=32)
+        self.assertEqual(diff, -210.0)
+        self.assertEqual(rows[0]["value"], -210.0)
+        self.assertAlmostEqual(rows[1]["value"], 50.0, places=2)
+        je.assert_called_once()
+
+    def test_in_step_is_a_no_op(self):
+        diff, rows, je = self._run(self._po(), booked=210.0)
+        self.assertEqual(diff, 0.0)
+        self.assertEqual(rows, [])
+
+    def test_unreceived_batch_is_left_to_its_receipt(self):
+        diff, rows, je = self._run(self._po(), booked=0.0, has_receipt=False)
+        self.assertEqual(diff, 0.0)
+        self.assertEqual(rows, [])
+
+    def test_target_is_zero_without_a_bill(self):
+        self.assertEqual(ls.batch_target_value({"purchase_invoice": None, "total_cost": 99}), 0.0)
+        self.assertEqual(ls.batch_target_value({"purchase_invoice": "PI", "total_cost": 99}), 99.0)
+
+
+class TestBillHooks(unittest.TestCase):
+    def test_an_ordinary_purchase_invoice_is_ignored(self):
+        pi = SimpleNamespace(name="PI-9", custom_jarz_idempotency_key="")
+        with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
+            ls.frappe.db, "get_value", return_value=None
+        ), patch.object(ls, "link_bill") as link:
+            ls.link_bill_on_purchase_invoice_submit(pi)
+        link.assert_not_called()
+
+    def test_an_amended_bill_is_found_by_its_key(self):
+        pi = SimpleNamespace(name="PI-9-1", custom_jarz_idempotency_key="label-po-JLPO-7")
+        with patch.object(ls.frappe.db, "get_value", return_value=None), patch.object(
+            ls.frappe.db, "exists", return_value=True
+        ):
+            self.assertEqual(ls._print_order_for_pi(pi), "JLPO-7")
+
+    def test_cancel_of_an_unrelated_pi_touches_nothing(self):
+        pi = SimpleNamespace(name="PI-9")
+        with patch.object(ls, "_doctype_exists", return_value=True), patch.object(
+            ls.frappe.db, "get_value", return_value=None
+        ), patch.object(ls.frappe.db, "set_value") as write, patch.object(
+            ls, "sync_batch_value"
+        ) as sync:
+            ls.unlink_bill_on_purchase_invoice_cancel(pi)
+        write.assert_not_called()
+        sync.assert_not_called()
+
+    def test_pi_amount_is_the_printing_lines_net(self):
+        pi = SimpleNamespace(items=[
+            SimpleNamespace(item_code="Customer Label Printing", base_net_amount=200.0),
+            SimpleNamespace(item_code="Other", base_net_amount=50.0),
+        ])
+        self.assertEqual(ls._pi_label_amount(pi, "Customer Label Printing"), 200.0)
+
 
 class TestValueJournalGuards(unittest.TestCase):
     """_post_value_journal must fail into a log line, never into the sale."""

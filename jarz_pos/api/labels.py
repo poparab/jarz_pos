@@ -827,9 +827,11 @@ def update_print_order(
         doc.received_qty = max(_int(received_qty), 0)
     if received_on is not None:
         doc.received_on = _clean(received_on)
-    if total_cost is not None:
+    # Once billed, the cost and supplier ARE the Purchase Invoice's; a stale
+    # value sent back by a client must not drift the batch off its bill.
+    if total_cost is not None and not doc.purchase_invoice:
         doc.total_cost = max(_float(total_cost), 0.0)
-    if supplier is not None:
+    if supplier is not None and not doc.purchase_invoice:
         doc.supplier = _clean(supplier)
     if notes is not None:
         doc.notes = _clean(notes)
@@ -859,9 +861,10 @@ def bill_print_order(
 
     Works before OR after the batch is received:
       * before -- the receipt that follows prices at this bill's cost;
-      * after  -- the receipt was booked at its recorded cost, so a zero-qty
-        revaluation movement posts the difference (``post_gl=False``: the PI is
-        the GL side), keeping ledger value == account balance.
+      * after  -- the receipt was booked at zero, so the bill's value arrives
+        as a revaluation; the share of the batch already used goes straight to
+        Label Cost (see ``label_stock.sync_batch_value``).
+    Cancelling the PI reverses all of it and returns the batch to Unbilled.
     """
     _ensure_manager()
 
@@ -916,46 +919,19 @@ def bill_print_order(
         idempotency_key=f"label-po-{name}",
     )
     pi_name = result.get("purchase_invoice")
+    if frappe.db.get_value("Purchase Invoice", pi_name, "docstatus") != 1:
+        # The idempotency key matched a DRAFT bill (someone started it in
+        # Desk). A draft is not on the books; linking it would claim it is.
+        frappe.throw(
+            f"A draft bill {pi_name} already exists for {name}. Submit it in Desk "
+            "and the batch links to it automatically."
+        )
 
-    doc.supplier = supplier_name
-    doc.total_cost = cost
-    doc.purchase_invoice = pi_name
-    doc.save(ignore_permissions=True)
-
-    # Receipt already posted at a different cost? True the ledger up so its
-    # summed value matches what the PI just put on the balance sheet.
-    receipt = frappe.db.get_value(
-        MOVEMENT_DOCTYPE,
-        {"print_order": name, "movement_type": "Print Received"},
-        ["name", "qty", "value"],
-        as_dict=True,
-    )
-    if receipt:
-        booked = _float(receipt.get("value"))
-        difference = round(cost - booked, 2)
-        if abs(difference) >= 0.01:
-            # Inserted directly, NOT via post_movement: a revaluation is a
-            # zero-quantity, value-only row, and post_movement (correctly)
-            # refuses zero-qty movements. No JE either -- the PI itself is the
-            # GL side of this value; the row only keeps ledger value in step.
-            reval = frappe.new_doc(MOVEMENT_DOCTYPE)
-            reval.label = doc.label
-            reval.movement_type = "Adjustment"
-            reval.qty = 0
-            reval.unit_cost = 0
-            reval.value = difference
-            reval.posting_date = frappe.utils.today()
-            reval.reference_doctype = "Purchase Invoice"
-            reval.reference_name = pi_name
-            reval.print_order = name
-            reval.remarks = (
-                f"Revaluation: batch {name} billed at {cost:.2f} "
-                f"(was booked at {booked:.2f})"
-            )
-            reval.flags.ignore_permissions = True
-            reval.flags.allow_zero_qty = True
-            reval.insert(ignore_permissions=True)
-            label_stock.refresh_label(doc.label)
+    # Submitting the PI already linked the batch and booked its value
+    # (label_stock.link_bill_on_purchase_invoice_submit). Calling link_bill
+    # again is idempotent -- it covers a deduplicated retry, where the PI
+    # existed before this call and no submit hook fired this time.
+    label_stock.link_bill(name, pi_name)
 
     return {
         "print_order": name,

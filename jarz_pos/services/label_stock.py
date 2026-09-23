@@ -682,10 +682,17 @@ def post_movement(
     elif movement_type in _NEGATIVE_TYPES:
         qty = -abs(qty)
 
+    position = get_position(label) if (unit_cost is None or qty < 0) else None
     if unit_cost is None:
-        unit_cost = get_position(label)["avg_cost"]
+        unit_cost = position["avg_cost"]
     unit_cost = round(max(_float(unit_cost), 0.0), 4)
     value = round(qty * unit_cost, 2)
+    if qty < 0 and position and position["on_hand"] > 0 and position["on_hand"] + qty <= 0:
+        # This movement empties the shelf, so it takes ALL the value that is
+        # left, not qty x a rounded average. Otherwise the rounding residue --
+        # or a late bill's value that arrived after most labels were gone --
+        # would sit in Labels Inventory forever against zero labels.
+        value = -round(max(_float(position["value"]), 0.0), 2)
 
     doc = frappe.new_doc(MOVEMENT_DOCTYPE)
     doc.label = label
@@ -776,6 +783,241 @@ def _post_value_journal(movement: Any) -> None:
             frappe.get_traceback(),
             f"label_stock: COGS journal failed for movement {getattr(movement, 'name', '?')}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Batch valuation: receipt, bill and bill cancellation
+# ---------------------------------------------------------------------------
+#
+# One rule keeps the ledger and the Labels Inventory account equal whatever
+# order things happen in: a batch's value in the ledger is what its supplier
+# Purchase Invoice put on the balance sheet -- the billed net amount while a
+# live PI is linked, and ZERO while none is. A receipt of an unbilled batch
+# therefore books its labels at no cost, and the value arrives with the bill.
+#
+# When the value changes after the labels are already on the shelf (billed
+# late, bill cancelled), part of the batch may have been used up. That share
+# is not inventory any more, it is cost of sales, so it goes straight to Label
+# Cost through a Journal Entry instead of being loaded onto the labels that
+# happen to be left -- which, when none are left, stranded it in the asset
+# account for good.
+
+
+def batch_booked_value(print_order: str) -> float:
+    """Value this batch currently carries in the ledger (receipt + revaluations)."""
+    if not print_order:
+        return 0.0
+    rows = frappe.get_all(
+        MOVEMENT_DOCTYPE,
+        filters={"print_order": print_order},
+        fields=["value"],
+        limit_page_length=0,
+    )
+    return round(sum(_float(r.get("value")) for r in rows or []), 2)
+
+
+def batch_target_value(po: Any) -> float:
+    """What the batch should carry: its billed amount while a PI is linked, else 0."""
+    if not po.get("purchase_invoice"):
+        return 0.0
+    return round(max(_float(po.get("total_cost")), 0.0), 2)
+
+
+def consumed_share(received_qty: int, on_hand: int) -> float:
+    """Fraction of a received batch that is no longer on the shelf.
+
+    Labels are pooled at weighted-average cost, so which physical labels left
+    is unknowable; the batch is taken to be the stock still on hand first.
+    That is the choice that never strands value: if nothing is left the whole
+    batch counts as used, and if at least a batch's worth is left none of it does.
+    """
+    received = _int(received_qty)
+    if received <= 0:
+        return 0.0
+    left = max(_int(on_hand), 0)
+    return max(received - left, 0) / received
+
+
+def sync_batch_value(po: Any, *, reference_doctype: Optional[str] = None,
+                     reference_name: Optional[str] = None) -> float:
+    """Bring a received batch's ledger value to its target; return the change.
+
+    Posts at most two rows, both zero-quantity:
+      * a revaluation tagged with the print order and NO Journal Entry -- the
+        Purchase Invoice (or its cancellation) is the GL side of that value;
+      * for the share of the batch already consumed, a Label Cost row with a
+        Journal Entry, so that share lands in cost of sales now.
+    A batch that was never received has no value in the ledger to adjust: its
+    receipt will be booked at the right cost when it lands.
+    """
+    name = po.get("name")
+    if not name or not frappe.db.exists(MOVEMENT_DOCTYPE, {"print_order": name, "movement_type": "Print Received"}):
+        return 0.0
+
+    difference = round(batch_target_value(po) - batch_booked_value(name), 2)
+    if abs(difference) < 0.01:
+        return 0.0
+
+    label = po.get("label")
+    ref_dt = reference_doctype or PRINT_ORDER_DOCTYPE
+    ref_name = reference_name or name
+    received = _int(frappe.db.get_value(
+        MOVEMENT_DOCTYPE, {"print_order": name, "movement_type": "Print Received"}, "qty"
+    ))
+    share = consumed_share(received, get_on_hand(label))
+
+    _insert_value_row(
+        label=label,
+        value=difference,
+        print_order=name,
+        reference_doctype=ref_dt,
+        reference_name=ref_name,
+        remarks=f"Revaluation: batch {name} now carries {batch_target_value(po):.2f}",
+    )
+
+    expensed = round(difference * share, 2)
+    if abs(expensed) >= 0.01:
+        row = _insert_value_row(
+            label=label,
+            value=-expensed,
+            print_order=None,
+            reference_doctype=ref_dt,
+            reference_name=ref_name,
+            remarks=(
+                f"Batch {name}: {share:.0%} of it was already used, so "
+                f"{expensed:.2f} goes to label cost"
+            ),
+        )
+        _post_value_journal(row)
+
+    refresh_label(label)
+    return difference
+
+
+def _insert_value_row(*, label: str, value: float, print_order: Optional[str],
+                      reference_doctype: str, reference_name: str, remarks: str) -> Any:
+    """A zero-quantity, value-only ledger row (post_movement refuses qty 0)."""
+    doc = frappe.new_doc(MOVEMENT_DOCTYPE)
+    doc.label = label
+    doc.movement_type = "Adjustment"
+    doc.qty = 0
+    doc.unit_cost = 0
+    doc.value = round(value, 2)
+    doc.posting_date = _today()
+    doc.reference_doctype = reference_doctype
+    doc.reference_name = reference_name
+    if print_order:
+        doc.print_order = print_order
+    doc.remarks = remarks
+    doc.flags.ignore_permissions = True
+    doc.flags.allow_zero_qty = True
+    doc.insert(ignore_permissions=True)
+    return doc
+
+
+def _pi_label_amount(pi: Any, printing_item: str) -> float:
+    """Net amount the PI debited for the label-printing item (VAT excluded)."""
+    total = 0.0
+    for row in getattr(pi, "items", None) or []:
+        if not printing_item or getattr(row, "item_code", None) == printing_item:
+            total += _float(getattr(row, "base_net_amount", None) or getattr(row, "net_amount", 0))
+    return round(total, 2)
+
+
+def _print_order_for_pi(pi: Any) -> Optional[str]:
+    """The print order a PI bills: by link first, then by the idempotency key.
+
+    The key (``label-po-<name>``) is what ``bill_print_order`` stamps, and an
+    amended PI inherits it -- so a bill re-issued in Desk still finds its batch.
+    """
+    linked = frappe.db.get_value(PRINT_ORDER_DOCTYPE, {"purchase_invoice": pi.name}, "name")
+    if linked:
+        return linked
+    key = str(getattr(pi, "custom_jarz_idempotency_key", "") or "")
+    if key.startswith("label-po-"):
+        candidate = key[len("label-po-"):]
+        if frappe.db.exists(PRINT_ORDER_DOCTYPE, candidate):
+            return candidate
+    return None
+
+
+def link_bill(print_order: str, purchase_invoice: str) -> Dict[str, Any]:
+    """Attach a submitted PI to its batch and bring the batch's value in line.
+
+    Idempotent: linking the PI that is already linked only re-syncs value.
+    Refuses a second, different live PI -- a batch is billed once.
+    """
+    po = frappe.get_doc(PRINT_ORDER_DOCTYPE, print_order)
+    if po.status == "Cancelled":
+        frappe.throw(f"{print_order} is cancelled and cannot be billed.")
+    current = po.purchase_invoice
+    if current and current != purchase_invoice:
+        if frappe.db.get_value("Purchase Invoice", current, "docstatus") == 1:
+            frappe.throw(f"{print_order} is already billed on {current}.")
+
+    pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
+    amount = _pi_label_amount(pi, get_label_settings()["printing_item"])
+    frappe.db.set_value(PRINT_ORDER_DOCTYPE, print_order, {
+        "purchase_invoice": purchase_invoice,
+        "billing_status": "Billed",
+        "total_cost": amount,
+        "supplier": pi.supplier,
+    }, update_modified=False)
+    po.reload()
+    _recompute_cost_per_label(po)
+    sync_batch_value(po, reference_doctype="Purchase Invoice", reference_name=purchase_invoice)
+    return {"print_order": print_order, "purchase_invoice": purchase_invoice, "amount": amount}
+
+
+def _recompute_cost_per_label(po: Any) -> None:
+    received = _int(po.get("received_qty"))
+    total = _float(po.get("total_cost"))
+    cpl = round(total / received, 4) if received > 0 and total > 0 else 0
+    frappe.db.set_value(PRINT_ORDER_DOCTYPE, po.name, "cost_per_label", cpl, update_modified=False)
+    po.cost_per_label = cpl
+
+
+def link_bill_on_purchase_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
+    """A PI for a label batch that was submitted outside ``bill_print_order``.
+
+    Covers an amended bill re-issued in Desk after the original was cancelled:
+    without this the batch would read Unbilled with its bill sitting right there.
+    ``bill_print_order`` itself also lands here first; ``link_bill`` is
+    idempotent, so the second call it makes is a no-op.
+    """
+    if not frappe or not _doctype_exists(PRINT_ORDER_DOCTYPE):
+        return
+    po_name = _print_order_for_pi(doc)
+    if not po_name:
+        return
+    current = frappe.db.get_value(PRINT_ORDER_DOCTYPE, po_name, "purchase_invoice")
+    if current and current != doc.name and frappe.db.get_value("Purchase Invoice", current, "docstatus") == 1:
+        return  # batch billed on another live PI: leave it to a human
+    link_bill(po_name, doc.name)
+
+
+def unlink_bill_on_purchase_invoice_cancel(doc: Any, method: Optional[str] = None) -> None:
+    """The printer's bill was cancelled: the batch is unbilled again.
+
+    Its value comes back out of the ledger -- the share still on the shelf
+    simply stops being inventory (the PI's reversal is the GL side of that),
+    and the share already used has its Label Cost reversed by Journal Entry.
+
+    Unlike the sale-side hooks this one RAISES on failure: a PI cancellation
+    that left the batch billed in the ledger would break the one invariant the
+    feature rests on, and the transaction rolling back is the honest outcome.
+    """
+    if not frappe or not _doctype_exists(PRINT_ORDER_DOCTYPE):
+        return
+    po_name = frappe.db.get_value(PRINT_ORDER_DOCTYPE, {"purchase_invoice": doc.name}, "name")
+    if not po_name:
+        return
+    frappe.db.set_value(PRINT_ORDER_DOCTYPE, po_name, {
+        "purchase_invoice": None,
+        "billing_status": "Unbilled",
+    }, update_modified=False)
+    po = frappe.get_doc(PRINT_ORDER_DOCTYPE, po_name)
+    sync_batch_value(po, reference_doctype="Purchase Invoice", reference_name=doc.name)
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +1501,15 @@ def run_label_stock_alerts() -> Dict[str, Any]:
             except Exception:
                 pass
             result["alerted"] += 1
+
+        # One phone push for the whole run. The bell entries above reach Desk
+        # only, and the realtime event reaches only an app that is open.
+        try:
+            from jarz_pos.api.notifications import notify_label_stock_alert
+
+            result["push"] = notify_label_stock_alert(due, recipients).get("status")
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "label_stock: push failed")
 
         try:
             frappe.db.commit()

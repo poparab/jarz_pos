@@ -65,6 +65,19 @@ class JarzLabelPrintOrder(Document):
                 self.received_qty = int(self.qty or 0)
             self._derive_cost_per_label()
         elif self.status == "Cancelled":
+            if self.purchase_invoice and frappe.db.get_value(
+                "Purchase Invoice", self.purchase_invoice, "docstatus"
+            ) == 1:
+                # The bill already put this batch's cost on the balance sheet.
+                # Cancelling only the batch would leave that money in Labels
+                # Inventory with no labels behind it. Cancelling the bill first
+                # takes the value back out and unlinks it (label_stock hook).
+                frappe.throw(
+                    _(
+                        "This batch is billed on {0}. Cancel that Purchase Invoice "
+                        "first; the batch then returns to Unbilled and can be cancelled."
+                    ).format(self.purchase_invoice)
+                )
             self.received_qty = 0
             self.received_on = None
 
@@ -117,6 +130,11 @@ class JarzLabelPrintOrder(Document):
         Labels Inventory directly), so mirroring the receipt into a Journal
         Entry as well would double-count the asset. The movement still CARRIES
         the value -- that is what keeps ledger value == account balance.
+
+        An UNBILLED batch is received at zero cost: a quoted price is not on
+        the balance sheet until the bill is, and booking it early let the
+        ledger run ahead of the account. The value arrives with the bill
+        (``label_stock.link_bill``).
         """
         from jarz_pos.services import label_stock
 
@@ -128,6 +146,9 @@ class JarzLabelPrintOrder(Document):
         if frappe.db.exists("Jarz Label Movement", {"print_order": self.name}):
             return  # already credited
 
+        billed = bool(self.purchase_invoice) and frappe.db.get_value(
+            "Purchase Invoice", self.purchase_invoice, "docstatus"
+        ) == 1
         sheets_note = f" ({self.qty_sheets} sheet(s))" if int(self.qty_sheets or 0) else ""
         label_stock.post_movement(
             label=self.label,
@@ -137,11 +158,15 @@ class JarzLabelPrintOrder(Document):
             print_order=self.name,
             reference_doctype=self.doctype,
             reference_name=self.name,
-            unit_cost=float(self.cost_per_label or 0),
+            unit_cost=float(self.cost_per_label or 0) if billed else 0.0,
             post_gl=False,
             remarks=f"Print batch {self.name} received{sheets_note}",
             refresh=False,
         )
+        # qty x a 4-decimal unit cost rarely equals the bill to the piastre;
+        # true the batch up to exactly what the PI booked.
+        if billed:
+            label_stock.sync_batch_value(self)
 
     def _refresh_label(self):
         from jarz_pos.services import label_stock

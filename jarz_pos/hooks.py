@@ -373,6 +373,15 @@ doc_events = {
     "Address": {
         "before_save": "jarz_pos.events.address.clamp_geo_confidence",
     },
+    # B2B printed labels: the printer's bill is the GL side of a label batch.
+    # Submitting it (from the app OR a bill re-issued in Desk) links the batch
+    # and books its value; cancelling it takes the value back out. Both look up
+    # the batch by link or by the label-po-<name> idempotency key, so any other
+    # Purchase Invoice costs one indexed read and nothing else.
+    "Purchase Invoice": {
+        "on_submit": "jarz_pos.services.label_stock.link_bill_on_purchase_invoice_submit",
+        "on_cancel": "jarz_pos.services.label_stock.unlink_bill_on_purchase_invoice_cancel",
+    },
     "Sales Invoice": {
         # Promo-code engine: single apply path for Woo / Desk invoices. Runs
         # before validate so calculate_taxes_and_totals picks up discount_amount.

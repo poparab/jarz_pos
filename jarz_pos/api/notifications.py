@@ -393,8 +393,14 @@ ANDROID_SHIFT_CHANNEL_ID = "jarz_shift_updates"
 ANDROID_APPROVAL_CHANNEL_ID = "jarz_approvals"
 
 EXPENSE_APPROVAL_NOTIFICATION_TYPE = "expense_approval_required"
+#: Daily "labels must go to the print house" digest. Same quiet channel as
+#: approvals: it is a decision for the morning, not an order alarm.
+LABEL_STOCK_NOTIFICATION_TYPE = "label_stock_alert"
 #: Push types that belong on the approvals channel.
-APPROVAL_NOTIFICATION_TYPES = (EXPENSE_APPROVAL_NOTIFICATION_TYPE,)
+APPROVAL_NOTIFICATION_TYPES = (
+    EXPENSE_APPROVAL_NOTIFICATION_TYPE,
+    LABEL_STOCK_NOTIFICATION_TYPE,
+)
 
 
 def _get_effective_profile_for_doc(doc: Any) -> str:
@@ -2918,6 +2924,92 @@ def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
             "expense_approval_notification_failed",
             defer_insert=True,
         )
+        result["ok"] = False
+        result["status"] = "failed_exception"
+        return result
+
+
+def notify_label_stock_alert(
+    snapshots: Sequence[Dict[str, Any]], recipients: Sequence[str]
+) -> Dict[str, Any]:
+    """Push ONE daily digest of the B2B labels that need printing.
+
+    Until this existed the daily label alert wrote a Desk bell entry and a
+    realtime event nothing in the app subscribed to, so a shortage reached a
+    phone only if somebody happened to open the labels screen. One push per
+    run rather than per label: five low labels are one decision about one
+    print order, and the per-day notification_id makes a re-run replace the
+    tray entry instead of stacking a second one. Never raises.
+    """
+    result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": len(recipients or [])}
+    try:
+        due = [s for s in snapshots or [] if s]
+        if not due or not recipients:
+            result["status"] = "skipped_nothing_due" if not due else "skipped_no_recipients"
+            return result
+        if outbound_alerts_suppressed("label_stock_alert"):
+            result["status"] = "suppressed_test_run"
+            return result
+
+        out = sum(1 for s in due if s.get("status") == "Out of Stock")
+        title = (
+            f"Labels: {len(due)} need printing"
+            + (f" ({out} out of stock)" if out else "")
+        )
+        lines = []
+        for snap in due[:4]:
+            size = f" {snap.get('size')}" if snap.get("size") else ""
+            lines.append(
+                f"{snap.get('customer_name')} - {snap.get('label_title')}{size}: "
+                f"{snap.get('on_hand_qty')} left"
+            )
+        if len(due) > 4:
+            lines.append(f"+{len(due) - 4} more")
+
+        today = _safe_str(frappe.utils.today())
+        data = {
+            "type": LABEL_STOCK_NOTIFICATION_TYPE,
+            "notification_id": f"label-stock-{today}",
+            "count": str(len(due)),
+            "out_of_stock": str(out),
+            "labels": ",".join(_safe_str(s.get("name")) for s in due[:20]),
+            "timestamp": frappe.utils.now_datetime().isoformat(),
+            "title": title,
+            "body": " | ".join(lines),
+        }
+
+        tokens, token_platforms = _get_token_targets_for_users(list(recipients))
+        vapid_subs = _get_vapid_subscriptions_for_users(list(recipients))
+        if tokens:
+            fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
+        else:
+            fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+            fcm_result["ok"] = True
+        if vapid_subs:
+            vapid_result = _send_vapid_notifications(vapid_subs, data)
+        else:
+            vapid_result = {"ok": True, "status": "skipped_no_subscriptions",
+                            "success_count": 0, "failure_count": 0}
+        if not tokens and not vapid_subs:
+            _log_notification_gap(
+                "Label stock alert reached no device",
+                (
+                    f"{len(due)} label(s) need printing and {len(recipients)} "
+                    "recipient(s) resolved, but none has a push token or web-push "
+                    f"subscription. Recipients: {', '.join(recipients)}."
+                ),
+                throttle_key="label_stock:notokens",
+            )
+
+        result.update({
+            "ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
+            "status": fcm_result.get("status"),
+            "success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+            "failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+        })
+        return result
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "label_stock_notification_failed")
         result["ok"] = False
         result["status"] = "failed_exception"
         return result
