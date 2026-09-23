@@ -69,27 +69,26 @@ def _get_account_balance(account: str | None, company: str) -> float:
 
 
 def _ensure_mode_of_payment_account(mode_of_payment: str, company: str, default_account: str | None):
+    """Make sure *mode_of_payment* has SOME account for *company* (ERPNext's
+    POS Opening validation 417s without one). Never overwrite an existing row.
+
+    The Mode of Payment Account is one company-wide value, but every branch has
+    its own till. This used to rewrite the row to the opening branch's till on
+    every shift open, so the company-wide "Cash" account became whichever branch
+    opened last — and anything reading it (the purchase screen's "Cash" option)
+    paid out of that branch's drawer. Shift code always passes the till account
+    explicitly and never needs this row to name it.
+    """
     if not mode_of_payment or not company or not default_account:
         return
 
-    existing = frappe.db.get_value(
+    if frappe.db.exists(
         "Mode of Payment Account",
         {
             "parent": mode_of_payment,
             "company": company,
         },
-        ["name", "default_account"],
-        as_dict=True,
-    )
-
-    if existing:
-        if existing.default_account != default_account:
-            frappe.db.set_value(
-                "Mode of Payment Account",
-                existing.name,
-                "default_account",
-                default_account,
-            )
+    ):
         return
 
     row = frappe.get_doc(

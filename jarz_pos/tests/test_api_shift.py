@@ -90,6 +90,33 @@ class TestShiftAPI(unittest.TestCase):
 		self.assertNotIn("default_amount", result[0])
 		self.assertNotIn("suggested_opening_amount", result[0])
 
+	def test_ensure_mode_of_payment_account_never_overwrites(self):
+		"""One company-wide row, three tills: opening a shift must not repoint it."""
+		from jarz_pos.api.shift import _ensure_mode_of_payment_account
+
+		mock_frappe = _make_mock_frappe()
+		mock_frappe.db.exists.return_value = "row-1"
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe):
+			_ensure_mode_of_payment_account("Cash", "JARZ", "Nasr city - J")
+
+		mock_frappe.db.set_value.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
+
+	def test_ensure_mode_of_payment_account_creates_when_missing(self):
+		"""Still seeds a row when none exists, which is what avoids the 417."""
+		from jarz_pos.api.shift import _ensure_mode_of_payment_account
+
+		mock_frappe = _make_mock_frappe()
+		mock_frappe.db.exists.return_value = None
+
+		with patch("jarz_pos.api.shift.frappe", mock_frappe):
+			_ensure_mode_of_payment_account("Cash", "JARZ", "Dokki - J")
+
+		mock_frappe.get_doc.assert_called_once()
+		self.assertEqual(mock_frappe.get_doc.call_args[0][0]["default_account"], "Dokki - J")
+		mock_frappe.db.set_value.assert_not_called()
+
 	def test_start_shift_requires_explicit_opening_amount(self):
 		from jarz_pos.api.shift import start_shift
 

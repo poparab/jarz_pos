@@ -772,7 +772,7 @@ def create_purchase_invoice(
             if opt_lower == "pos_profile":
                 account = _get_pos_profile_cash_account(resolved_company) or _get_default_cash_account(resolved_company)
             else:
-                account = _get_mop_account_account(mop, resolved_company) or _get_default_cash_account(resolved_company)
+                account = _get_cash_option_account(resolved_company)
         else:
             # Unknown option: try as POS Profile, else default to Cash
             mop = PAYMENT_MODES.CASH
@@ -1385,7 +1385,7 @@ def _resolve_payment_account(payment_option: Optional[str], company: str) -> str
     elif opt_lower == "instapay":
         account = _get_mop_account_account("InstaPay", company) or _get_default_bank_account(company)
     else:
-        account = _get_mop_account_account(PAYMENT_MODES.CASH, company) or _get_default_cash_account(company)
+        account = _get_cash_option_account(company)
     if not account:
         frappe.throw(
             _("No account resolved for payment option '{0}'. Configure the Mode of Payment or the POS Profile account.").format(opt_raw)
@@ -1482,6 +1482,21 @@ def _get_mop_account_account(mode_of_payment: str, company: str) -> Optional[str
     except Exception:
         frappe.log_error(frappe.get_traceback(), title="_get_mop_account_account failed")
     return None
+
+
+def _get_cash_option_account(company: str) -> Optional[str]:
+    """The account behind the app's plain "Cash" option: the company's main cash.
+
+    The app labels this option "Use company default Cash account", so that is
+    what it resolves to first. It used to ask the "Cash" Mode of Payment Account
+    first — but ``shift.start_shift`` rewrote that row to the till of whichever
+    branch opened a shift last, so a purchase paid from the main safe was
+    silently booked out of a branch drawer (production, 2026-09-23: 2,140 EGP
+    taken from ``Nasr city - J``, which then read short at the next count).
+    The Mode of Payment row stays as the fallback for a company with no
+    default cash account configured.
+    """
+    return _get_default_cash_account(company) or _get_mop_account_account(PAYMENT_MODES.CASH, company)
 
 
 def _get_default_cash_account(company: str) -> Optional[str]:

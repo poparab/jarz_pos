@@ -139,5 +139,39 @@ class _PaymentDefaultsCase(unittest.TestCase):
         self.assertEqual(self.doc.cash_bank_account, CASH_ACCOUNT)
 
 
+class CashOptionAccountTest(unittest.TestCase):
+    """The plain "Cash" option pays from the company's main cash, not a till.
+
+    Production 2026-09-23: the "Cash" Mode of Payment Account had been rewritten
+    to ``Nasr city - J`` by the last shift open, and because it was consulted
+    first, two purchases the buyer paid from the main safe were booked out of
+    the Nasr City drawer.
+    """
+
+    BRANCH_TILL = "Nasr city - JZ"
+
+    def _resolve(self, default_cash, mop_account):
+        fake = MagicMock()
+        fake.db.exists.return_value = False  # "cash" is not a POS Profile name
+        with patch.object(pu, "frappe", fake),                 patch.object(pu, "_get_default_cash_account", return_value=default_cash),                 patch.object(pu, "_get_mop_account_account", return_value=mop_account):
+            return pu._resolve_payment_account("cash", COMPANY)
+
+    def test_company_default_cash_wins_over_mode_of_payment_row(self):
+        self.assertEqual(self._resolve(CASH_ACCOUNT, self.BRANCH_TILL), CASH_ACCOUNT)
+
+    def test_mode_of_payment_row_is_only_a_fallback(self):
+        self.assertEqual(self._resolve(None, self.BRANCH_TILL), self.BRANCH_TILL)
+
+    def test_create_purchase_invoice_cash_ignores_branch_mode_of_payment(self):
+        case = _PaymentDefaultsCase("test_paid_invoice_still_resolves_its_cash_account")
+        case.setUp()
+        try:
+            with patch.object(pu, "_get_mop_account_account", return_value=self.BRANCH_TILL):
+                case._create(is_paid=1, payment_option="cash")
+            self.assertEqual(case.doc.cash_bank_account, CASH_ACCOUNT)
+        finally:
+            case.doCleanups()
+
+
 if __name__ == "__main__":
     unittest.main()
