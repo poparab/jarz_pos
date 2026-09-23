@@ -58,12 +58,24 @@ BLOCKING_SHARE = 0.02
 DEFAULT_CYCLE_DAYS, MIN_CYCLE_DAYS, MAX_CYCLE_DAYS = 14, 1, 60
 DEFAULT_BACKUP_DAYS, MIN_BACKUP_DAYS, MAX_BACKUP_DAYS = 7, 0, 30
 DEFAULT_SALES_WEEKS, MIN_SALES_WEEKS, MAX_SALES_WEEKS = 8, 2, 26
+#: Jars one 9.52 kg cheesecake-mix batch fills, per size.  A Small (147 ml)
+#: jar takes 2/3 of a Medium's (212 ml) filling, hence 180 = 120 * 3/2.
+DEFAULT_BATCH_SMALL = 180
 DEFAULT_BATCH_MEDIUM = 120
 DEFAULT_BATCH_LARGE = 77
 MIN_BATCH_SIZE, MAX_BATCH_SIZE = 1, 10000
 
 #: Item groups of the finished jars, in the order the screen lists them.
-SIZE_ORDER = ("Medium", "Large")
+SIZE_ORDER = ("Small", "Medium", "Large")
+
+#: Each size's own default batch.  A size the caller did not configure falls
+#: back to *its own* default, never to another size's batch; a size with no
+#: default at all is not planned (see :func:`build_item_row`).
+DEFAULT_BATCH_BY_SIZE = {
+    "Small": DEFAULT_BATCH_SMALL,
+    "Medium": DEFAULT_BATCH_MEDIUM,
+    "Large": DEFAULT_BATCH_LARGE,
+}
 
 QTY_PRECISION = 3
 SALES_PRECISION = 1
@@ -95,6 +107,7 @@ def coerce_parameters(
     sales_weeks: Any = None,
     batch_medium: Any = None,
     batch_large: Any = None,
+    batch_small: Any = None,
 ) -> Dict[str, int]:
     """Every query-string knob, defaulted and clamped per the contract."""
     return {
@@ -115,6 +128,9 @@ def coerce_parameters(
         ),
         "batch_large": coerce_days(
             batch_large, default=DEFAULT_BATCH_LARGE, minimum=MIN_BATCH_SIZE, maximum=MAX_BATCH_SIZE
+        ),
+        "batch_small": coerce_days(
+            batch_small, default=DEFAULT_BATCH_SMALL, minimum=MIN_BATCH_SIZE, maximum=MAX_BATCH_SIZE
         ),
     }
 
@@ -218,7 +234,7 @@ def is_below_backup(*, on_hand: Any, avg: Any, backup_days: Any) -> bool:
 
 
 def batch_tolerance(batch_size: Any) -> int:
-    """Jars short that are not worth another quarter batch: Medium 8, Large 5."""
+    """Jars short that are not worth another quarter batch: Small 12, Medium 8, Large 5."""
     return max(5, int(math.ceil(to_float(batch_size, 0.0) / 16.0 - QTY_EPSILON)))
 
 
@@ -250,7 +266,7 @@ def jar_status(*, weekly_sales: Any, batches: Any, any_below_backup: bool) -> st
 
 
 def flavour_of(item_name: Any) -> str:
-    """``"Blueberry Large"`` -> ``"Blueberry"``."""
+    """``"Blueberry Large"`` -> ``"Blueberry"``; likewise ``" Small"`` / ``" Medium"``."""
     name = str(item_name or "").strip()
     lowered = name.lower()
     for size in SIZE_ORDER:
@@ -550,7 +566,22 @@ def build_material_rows(
 
 
 def _size_rank(size: str) -> int:
+    """Small 0, Medium 1, Large 2; anything else after them."""
     return SIZE_ORDER.index(size) if size in SIZE_ORDER else len(SIZE_ORDER)
+
+
+def batch_size_for(size: str, batch_sizes: Mapping[str, Any]) -> int:
+    """Jars per batch for one jar size.
+
+    The configured value for that size, else that size's own default.  An
+    unknown size gets ``0`` -- nothing is planned for it and the payload says
+    so -- rather than silently borrowing another size's batch: a Small jar
+    planned on a Medium batch would be 60 jars short of every mix.
+    """
+    configured = int(to_float((batch_sizes or {}).get(size), 0.0))
+    if configured > 0:
+        return configured
+    return int(DEFAULT_BATCH_BY_SIZE.get(size, 0))
 
 
 def build_item_row(
@@ -569,7 +600,7 @@ def build_item_row(
     code = str(item.get("item_code") or "")
     name = str(item.get("item_name") or code)
     size = str(item.get("item_group") or "")
-    batch_size = int(batch_sizes.get(size) or batch_sizes.get(SIZE_ORDER[0]) or DEFAULT_BATCH_MEDIUM)
+    batch_size = batch_size_for(size, batch_sizes)
 
     branch_rows: List[Dict[str, Any]] = []
     total_avg = 0.0
@@ -702,6 +733,12 @@ def build_production_round(
     item_rows.sort(
         key=lambda row: (_size_rank(row["size"]), row["flavour"].lower(), row["item_code"])
     )
+    for row in item_rows:
+        if row["batch_size"] <= 0:
+            notes.append(
+                f"{row['item_name']} is in item group '{row['size']}', which has no batch size; "
+                "it is not planned."
+            )
 
     boms = boms or {}
     roots: Dict[str, float] = {}
@@ -749,7 +786,13 @@ def build_production_round(
                 f"{label} has {negative} jar(s) with negative stock - count the shelf before loading."
             )
 
-    sizes = list(batch_sizes) or list(SIZE_ORDER)
+    # Every configured size, plus any size that actually has a jar on the round
+    # (a Small jar must be counted even if the caller only configured Medium and
+    # Large), smallest jar first.
+    sizes = sorted(
+        set(batch_sizes) | {r["size"] for r in item_rows if r["size"]},
+        key=lambda size: (_size_rank(size), size),
+    ) or list(SIZE_ORDER)
     to_make = [row for row in item_rows if row["jars"] > 0]
     summary = {
         "batches": {

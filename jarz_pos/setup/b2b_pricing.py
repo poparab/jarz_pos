@@ -1,4 +1,4 @@
-"""B2B base price list: every large jar 92, every medium jar 77 — seeded, not enforced.
+"""B2B base price list: every large jar 92, every medium jar 77, every small jar 30 — seeded, not enforced.
 
 WHY this exists
 ---------------
@@ -35,8 +35,8 @@ The two layers
    is what keeps the guarantee alive for a jar flavour created next month: it
    prices the GROUP, so a new item lands correctly priced with nobody re-running
    anything, and the coverage validator in ``invoice_creation`` accepts it.
-2. ``Item Price`` — a generic per-item row for every large/medium item that exists
-   today. Item Price outranks the category rate in ``_resolve_item_rate``, so
+2. ``Item Price`` — a generic per-item row for every large/medium/small item that
+   exists today. Item Price outranks the category rate in ``_resolve_item_rate``, so
    writing both layers to the same number makes the precedence irrelevant.
 
 Only the GENERIC row (no customer) is ever touched. A customer-scoped Item Price
@@ -45,7 +45,9 @@ touch it.
 
 Size is plain ``Item.item_group``. "Meduim" is a real item group on some sites
 (a typo that predates this app and holds real items), so both spellings are
-enumerated — see ``setup/employee_pricing`` for the same treatment.
+enumerated — see ``setup/employee_pricing`` for the same treatment. "Small"
+(147 ml) is seeded here only; ``setup/employee_pricing`` deliberately has no
+Small staff price yet.
 
 This module must import cleanly with NO top-level frappe calls.
 """
@@ -64,13 +66,16 @@ PRICE_LIST = "B2B Selling"
 #: shipping income waived, and must keep pricing at retail.
 B2B_SUPPLY_PURPOSE = "B2B Supply"
 
-#: The two base rates.
+#: The three base rates.
 LARGE_RATE = 92.0
 MEDIUM_RATE = 77.0
+SMALL_RATE = 30.0
 
-#: Item Groups per size. Mirrors ``setup/employee_pricing``.
+#: Item Groups per size. Large/Medium mirror ``setup/employee_pricing``; Small
+#: has no counterpart there (no staff price for Small yet, by the owner's call).
 _LARGE_GROUPS = ("Large",)
 _MEDIUM_GROUPS = ("Medium", "Meduim")
+_SMALL_GROUPS = ("Small",)
 
 #: Float comparison tolerance — money here is whole piastres, so anything under
 #: half a piastre is "the same value" and must not count as drift.
@@ -282,7 +287,8 @@ def _report_realignment(log):
 	if not log["updated"]:
 		return
 	message = (
-		f"B2B base price list realigned (Large={LARGE_RATE}, Medium={MEDIUM_RATE}): "
+		f"B2B base price list realigned (Large={LARGE_RATE}, Medium={MEDIUM_RATE}, "
+		f"Small={SMALL_RATE}): "
 		+ "; ".join(log["updated"])
 	)
 	_logger().warning(message)
@@ -293,7 +299,7 @@ def _report_realignment(log):
 
 
 def ensure_b2b_base_prices(realign=False):
-	"""Seed the B2B base rates (Large 92 / Medium 77) on the "B2B Selling" list.
+	"""Seed the B2B base rates (Large 92 / Medium 77 / Small 30) on the "B2B Selling" list.
 
 	Registered on ``after_migrate`` with the default ``realign=False``: it creates
 	what is missing and NEVER overwrites an existing rate, so a manager's pricing
@@ -311,6 +317,7 @@ def ensure_b2b_base_prices(realign=False):
 		"realign": bool(realign),
 		"large_items": 0,
 		"medium_items": 0,
+		"small_items": 0,
 		"category_rates_created": 0,
 		"category_rates_updated": 0,
 		"item_prices_created": 0,
@@ -339,7 +346,9 @@ def ensure_b2b_base_prices(realign=False):
 
 		large_groups = _existing_item_groups(_LARGE_GROUPS)
 		medium_groups = _existing_item_groups(_MEDIUM_GROUPS)
-		for missing in set(_LARGE_GROUPS + _MEDIUM_GROUPS) - set(large_groups + medium_groups):
+		small_groups = _existing_item_groups(_SMALL_GROUPS)
+		all_groups = _LARGE_GROUPS + _MEDIUM_GROUPS + _SMALL_GROUPS
+		for missing in set(all_groups) - set(large_groups + medium_groups + small_groups):
 			summary["skipped"].append(f"Item Group '{missing}' does not exist")
 
 		# Layer 1: the category rates. Written first because they are the layer that
@@ -348,22 +357,29 @@ def ensure_b2b_base_prices(realign=False):
 			_ensure_category_rate(group, LARGE_RATE, realign, log, summary)
 		for group in medium_groups:
 			_ensure_category_rate(group, MEDIUM_RATE, realign, log, summary)
+		for group in small_groups:
+			_ensure_category_rate(group, SMALL_RATE, realign, log, summary)
 
 		# Layer 2: per-item prices for everything that exists today.
 		large_items = _items_for_groups(large_groups)
 		medium_items = _items_for_groups(medium_groups)
+		small_items = _items_for_groups(small_groups)
 		summary["large_items"] = len(large_items)
 		summary["medium_items"] = len(medium_items)
+		summary["small_items"] = len(small_items)
 
 		for code in large_items:
 			_ensure_item_price(code, LARGE_RATE, currency, realign, log, summary)
 		for code in medium_items:
 			_ensure_item_price(code, MEDIUM_RATE, currency, realign, log, summary)
+		for code in small_items:
+			_ensure_item_price(code, SMALL_RATE, currency, realign, log, summary)
 
 		logger.info(
 			f"B2B pricing resolved {summary['large_items']} large item(s) in {large_groups} "
-			f"@ {LARGE_RATE} and {summary['medium_items']} medium item(s) in {medium_groups} "
-			f"@ {MEDIUM_RATE} (realign={bool(realign)})"
+			f"@ {LARGE_RATE}, {summary['medium_items']} medium item(s) in {medium_groups} "
+			f"@ {MEDIUM_RATE} and {summary['small_items']} small item(s) in {small_groups} "
+			f"@ {SMALL_RATE} (realign={bool(realign)})"
 		)
 
 		if log["created"]:

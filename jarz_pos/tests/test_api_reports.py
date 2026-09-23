@@ -29,7 +29,7 @@ class TestReportsAPI(unittest.TestCase):
         def fake_get_all(doctype, **kwargs):
             if doctype == "Item":
                 self.assertEqual(
-                    ["in", ["Large", "Medium", "Meduim"]],
+                    ["in", ["Large", "Medium", "Meduim", "Small"]],
                     kwargs["filters"]["item_group"],
                 )
                 return items
@@ -90,6 +90,43 @@ class TestReportsAPI(unittest.TestCase):
         self.assertEqual(1, len(result["groups"]))
         self.assertEqual("Medium", result["groups"][0]["group_name"])
         self.assertEqual("Medium", result["groups"][0]["items"][0]["item_group"])
+
+    def test_get_final_products_report_lists_small_first(self):
+        from jarz_pos.api import reports
+
+        items = [
+            {"item_code": "ITEM-L", "item_name": "Molten Large", "item_group": "Large", "stock_uom": "Nos"},
+            {"item_code": "ITEM-M", "item_name": "Molten Medium", "item_group": "Medium", "stock_uom": "Nos"},
+            {"item_code": "ITEM-S", "item_name": "Molten Small", "item_group": "Small", "stock_uom": "Nos"},
+        ]
+        bins = [{"item_code": "ITEM-S", "warehouse": "WH-A", "actual_qty": 9}]
+
+        def fake_get_all(doctype, **kwargs):
+            if doctype == "Item":
+                self.assertIn("Small", kwargs["filters"]["item_group"][1])
+                return items
+            if doctype == "Bin":
+                return bins
+            if doctype == "Company":
+                return []
+            self.fail(f"Unexpected doctype lookup: {doctype}")
+
+        with patch("jarz_pos.api.reports._ensure_jarz_manager"), patch(
+            "jarz_pos.api.reports.frappe.get_all",
+            side_effect=fake_get_all,
+        ):
+            result = reports.get_final_products_report()
+
+        self.assertEqual(
+            ["Small", "Medium", "Large"], [group["group_name"] for group in result["groups"]]
+        )
+        small = result["groups"][0]
+        self.assertEqual("Molten Small", small["items"][0]["item_name"])
+        self.assertEqual(9.0, small["items"][0]["total_qty"])
+        # Every size carries the same warehouse columns.
+        self.assertEqual(
+            {tuple(g["warehouses"]) for g in result["groups"]}, {tuple(small["warehouses"])}
+        )
 
     def test_get_final_products_report_columns_do_not_move_with_the_stock(self):
         """Columns used to be per-group and derived from the Bin rows that

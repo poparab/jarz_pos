@@ -86,8 +86,9 @@ SEED_DEFAULTS: Dict[str, Any] = {
     "label_auto_consume_on_invoice": 1,
     "label_alerts_enabled": 1,
     # Sheet geometry + COGS posting. The print house lays out 21 labels on a
-    # Medium sheet and 18 on a Large one; ordering happens in sheets while
-    # stock is counted in labels.
+    # Small sheet, 21 on a Medium sheet and 18 on a Large one; ordering happens
+    # in sheets while stock is counted in labels.
+    "labels_per_sheet_small": 21,
     "labels_per_sheet_medium": 21,
     "labels_per_sheet_large": 18,
     "label_default_print_sheets": 2,

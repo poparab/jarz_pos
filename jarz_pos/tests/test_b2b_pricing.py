@@ -184,6 +184,35 @@ class TestSeedsBothLayers(unittest.TestCase):
 		self.assertEqual(_inserted_category_rates(site)["Meduim"], 77.0)
 		self.assertEqual(_inserted_item_prices(site), {"JAR-TYPO": 77.0})
 
+	def test_small_group_gets_category_rate_and_item_prices_at_30(self):
+		site = _Site(
+			item_groups=("Large", "Medium", "Small"),
+			items={"Large": ["JAR-L1"], "Medium": ["JAR-M1"], "Small": ["Molten Small", "Lotus Small"]},
+		)
+		log = _run(site)
+
+		self.assertEqual(
+			_inserted_category_rates(site), {"Large": 92.0, "Medium": 77.0, "Small": 30.0}
+		)
+		self.assertEqual(
+			_inserted_item_prices(site),
+			{"JAR-L1": 92.0, "JAR-M1": 77.0, "Molten Small": 30.0, "Lotus Small": 30.0},
+		)
+		self.assertEqual(log["summary"]["small_items"], 2)
+		self.assertEqual(log["summary"]["category_rates_created"], 3)
+		self.assertEqual(log["summary"]["item_prices_created"], 4)
+		self.assertEqual(site.writes, [])
+
+	def test_missing_small_group_is_skipped_not_invented(self):
+		site = _Site(items={"Large": ["JAR-L1"], "Medium": []})
+		log = _run(site)
+
+		self.assertNotIn("Small", _inserted_category_rates(site))
+		self.assertTrue(
+			any("Small" in s for s in log["summary"]["skipped"]),
+			log["summary"]["skipped"],
+		)
+
 	def test_missing_price_list_is_a_clean_no_op(self):
 		site = _Site(items={"Large": ["JAR-L1"]}, price_list_exists=False)
 		log = _run(site)
@@ -231,6 +260,32 @@ class TestCreateOnly(unittest.TestCase):
 
 		self.assertEqual(site.writes, [])
 		self.assertEqual(site.category_rates[0]["rate"], 105.0)
+
+	def test_existing_small_rates_are_left_alone_without_realign(self):
+		site = _Site(
+			item_groups=("Large", "Medium", "Small"),
+			items={"Large": [], "Medium": [], "Small": ["Molten Small"]},
+			category_rates=[
+				{"name": "CR-S", "price_list": bp.PRICE_LIST, "item_group": "Small", "rate": 35.0}
+			],
+			item_prices=[
+				{
+					"name": "IP-S",
+					"item_code": "Molten Small",
+					"price_list": bp.PRICE_LIST,
+					"price_list_rate": 33.0,
+				}
+			],
+		)
+		log = _run(site)
+
+		self.assertEqual(site.writes, [])
+		# Only the empty Large/Medium category rows are created; nothing for Small.
+		self.assertNotIn("Small", _inserted_category_rates(site))
+		self.assertEqual(_inserted_item_prices(site), {})
+		self.assertEqual(site.category_rates[0]["rate"], 35.0)
+		self.assertEqual(site.item_prices[0]["price_list_rate"], 33.0)
+		self.assertEqual(log["summary"]["kept"], 2)
 
 	def test_correct_rate_is_never_rewritten(self):
 		# A no-op migrate must perform no writes at all, or every one of them churns
@@ -324,6 +379,7 @@ class TestConstants(unittest.TestCase):
 	def test_rates_are_the_agreed_numbers(self):
 		self.assertEqual(bp.LARGE_RATE, 92.0)
 		self.assertEqual(bp.MEDIUM_RATE, 77.0)
+		self.assertEqual(bp.SMALL_RATE, 30.0)
 
 	def test_price_list_and_purpose_are_the_names_the_resolver_imports(self):
 		# services/invoice_creation and api/pos both import these; a rename here that

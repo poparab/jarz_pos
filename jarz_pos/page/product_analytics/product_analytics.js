@@ -129,6 +129,7 @@ class ProductAnalyticsDashboard {
 
   .badge { border-radius: 4px; padding: 2px 7px; font-size: 11px; font-weight: 600; }
   .badge-bundle { background: #ede9fe; color: #5b21b6; }
+  .badge-small  { background: #e0f2fe; color: #075985; }
   .badge-medium { background: #dcfce7; color: #166534; }
   .badge-large  { background: #ffedd5; color: #9a3412; }
 
@@ -295,7 +296,8 @@ class ProductAnalyticsDashboard {
 				labels: rows.map(r => r.type),
 				datasets: [{ values: rows.map(r => r.revenue) }],
 			},
-			colors: ['#7B61FF', '#22C55E', '#F97316'],
+			// One slice per type, in the API's order: Bundle, Small, Medium, Large.
+			colors: ['#7B61FF', '#0EA5E9', '#22C55E', '#F97316'],
 			tooltipOptions: { formatTooltipY: v => _egp(v) },
 		});
 
@@ -306,7 +308,7 @@ class ProductAnalyticsDashboard {
 				labels: rows.map(r => r.type),
 				datasets: [{ name: 'Units Sold', values: rows.map(r => r.units) }],
 			},
-			colors: ['#7B61FF', '#22C55E', '#F97316'],
+			colors: ['#7B61FF', '#0EA5E9', '#22C55E', '#F97316'],
 		});
 
 		$('#pa-table-type').html(`
@@ -552,6 +554,7 @@ function _kpi(label, value, cls) {
 
 function _type_badge(type) {
 	if (type === 'Bundle') return 'badge-bundle';
+	if (type === 'Small') return 'badge-small';
 	if (type === 'Medium') return 'badge-medium';
 	return 'badge-large';
 }

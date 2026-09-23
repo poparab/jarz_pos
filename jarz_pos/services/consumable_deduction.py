@@ -1,14 +1,24 @@
 """
 Automatic consumable stock deduction when a Sales Invoice transitions to "Out for Delivery".
 
-Items deducted per order:
-  - covier          : 1 per medium or large jar
-  - colored bag     : ceil(large_qty / 5 + medium_qty / 7)
+Jars are counted per size from the invoice lines' Item Group: Small (147 ml),
+Medium (212 ml, also the "Meduim" typo spelling) and Large (330 ml).
+
+Items deducted per RETAIL order (any ``custom_order_purpose`` other than
+"B2B Supply"):
+  - covier          : 1 per jar (small + medium + large)
+  - colored bag     : ceil(large_qty / 5 + medium_qty / 7 + small_qty / 10)
   - Nylon Inside bag: same count as colored bag
 
-Stock is deducted from the site's consumables store (resolved per item via
+Items deducted per "B2B Supply" order — the jars ship in cartons, so NO covier,
+colored bag or Nylon Inside bag:
+  - B2B Carton      : ceil(medium_qty / 12 + large_qty / 8 + small_qty / 20)
+
+Stock is deducted from each item's own store (resolved per item via
 ``jarz_pos.utils.warehouse_utils.resolve_purchase_warehouse`` — see
-``_get_warehouse`` below), NOT the invoice's POS Profile warehouse. A Material
+``_get_warehouse`` below): the Consumable items from ``Consumables - J`` and
+``B2B Carton`` (Item Group "Packaging") from ``Raw Material - J``; never the
+invoice's POS Profile warehouse. A Material
 Issue Stock Entry is created and its name stored on the invoice so it can be
 cancelled if the invoice is later cancelled.
 
@@ -81,7 +91,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     import frappe
@@ -91,6 +101,18 @@ except Exception:  # pragma: no cover
 _COUVERT_ITEM = "covier"
 _COLORED_BAG_ITEM = "colored bag"
 _NYLON_BAG_ITEM = "Nylon Inside bag"
+_B2B_CARTON_ITEM = "B2B Carton"
+
+#: ``Sales Invoice.custom_order_purpose`` of a wholesale order: its jars ship in
+#: cartons, not in retail bags.
+_B2B_ORDER_PURPOSE = "B2B Supply"
+
+# Jars per bag / per carton, by size.
+_JARS_PER_BAG = {"small": 10, "medium": 7, "large": 5}
+_JARS_PER_CARTON = {"small": 20, "medium": 12, "large": 8}
+
+# Float noise guard for ceil(): 3/7 + 4/7 must be 1 bag, not 2.
+_CEIL_EPSILON = 1e-9
 
 # ``Error Log.method`` is a Data column -- varchar(140) -- and
 # ``BaseDocument._validate_length`` THROWS on overflow rather than truncating.
@@ -126,6 +148,7 @@ def _log(title: str, message: str) -> None:
     except Exception:
         pass
 
+_SMALL_GROUPS = {"Small"}
 _MEDIUM_GROUPS = {"Medium", "Meduim"}  # second spelling is a known data typo
 _LARGE_GROUPS = {"Large"}
 
@@ -162,13 +185,15 @@ def deduct_consumables_on_ofd(doc: Any, method: Optional[str] = None) -> None:
         if existing_se:
             return
 
-        medium_qty, large_qty = _calc_jar_quantities(doc)
-        couvert_qty = medium_qty + large_qty
-        if couvert_qty == 0:
-            return  # no medium/large jars in this order — nothing to deduct
-
-        bag_qty = math.ceil(large_qty / 5 + medium_qty / 7)
-        nylon_qty = bag_qty
+        small_qty, medium_qty, large_qty = _calc_jar_quantities(doc)
+        requested = _requested_consumables(
+            small_qty=small_qty,
+            medium_qty=medium_qty,
+            large_qty=large_qty,
+            is_b2b=_is_b2b_supply(doc),
+        )
+        if not requested:
+            return  # no jars in this order — nothing to deduct
 
         company = str(getattr(doc, "company", "") or "").strip()
         if not company:
@@ -182,9 +207,7 @@ def deduct_consumables_on_ofd(doc: Any, method: Optional[str] = None) -> None:
         se_name = _create_material_issue(
             invoice_name=doc.name,
             company=company,
-            couvert_qty=couvert_qty,
-            bag_qty=bag_qty,
-            nylon_qty=nylon_qty,
+            lines=requested,
         )
 
         if not se_name:
@@ -241,18 +264,73 @@ def reverse_consumable_deduction_on_cancel(doc: Any, method: Optional[str] = Non
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _calc_jar_quantities(doc: Any) -> tuple[float, float]:
-    """Return (medium_qty, large_qty) from the invoice items table."""
+def _calc_jar_quantities(doc: Any) -> tuple[float, float, float]:
+    """Return (small_qty, medium_qty, large_qty) from the invoice items table."""
+    small_qty = 0.0
     medium_qty = 0.0
     large_qty = 0.0
     for item in getattr(doc, "items", []):
         group = str(getattr(item, "item_group", "") or "").strip()
         qty = float(getattr(item, "qty", 0) or 0)
-        if group in _MEDIUM_GROUPS:
+        if group in _SMALL_GROUPS:
+            small_qty += qty
+        elif group in _MEDIUM_GROUPS:
             medium_qty += qty
         elif group in _LARGE_GROUPS:
             large_qty += qty
-    return medium_qty, large_qty
+    return small_qty, medium_qty, large_qty
+
+
+def _is_b2b_supply(doc: Any) -> bool:
+    """Whether the invoice is a wholesale ("B2B Supply") order."""
+    purpose = str(getattr(doc, "custom_order_purpose", "") or "").strip()
+    return purpose == _B2B_ORDER_PURPOSE
+
+
+def _ceil_units(value: float) -> int:
+    """``ceil`` for a sum of jar fractions, immune to float noise; never negative."""
+    if value <= _CEIL_EPSILON:
+        return 0
+    return int(math.ceil(value - _CEIL_EPSILON))
+
+
+def _requested_consumables(
+    *,
+    small_qty: float,
+    medium_qty: float,
+    large_qty: float,
+    is_b2b: bool,
+) -> List[Tuple[str, float]]:
+    """The ``(item_code, qty)`` lines to issue for one order; ``[]`` for no jars.
+
+    Retail: one covier per jar, bags by the jars each bag holds per size, one
+    Nylon Inside bag per colored bag.  B2B Supply: cartons only.
+    """
+    small_qty = max(0.0, float(small_qty or 0))
+    medium_qty = max(0.0, float(medium_qty or 0))
+    large_qty = max(0.0, float(large_qty or 0))
+    jar_qty = small_qty + medium_qty + large_qty
+    if jar_qty <= 0:
+        return []
+
+    if is_b2b:
+        carton_qty = _ceil_units(
+            medium_qty / _JARS_PER_CARTON["medium"]
+            + large_qty / _JARS_PER_CARTON["large"]
+            + small_qty / _JARS_PER_CARTON["small"]
+        )
+        return [(_B2B_CARTON_ITEM, carton_qty)]
+
+    bag_qty = _ceil_units(
+        large_qty / _JARS_PER_BAG["large"]
+        + medium_qty / _JARS_PER_BAG["medium"]
+        + small_qty / _JARS_PER_BAG["small"]
+    )
+    return [
+        (_COUVERT_ITEM, jar_qty),
+        (_COLORED_BAG_ITEM, bag_qty),
+        (_NYLON_BAG_ITEM, bag_qty),
+    ]
 
 
 def _get_warehouse(item_code: str, company: str) -> Optional[str]:
@@ -275,8 +353,9 @@ def _get_warehouse(item_code: str, company: str) -> Optional[str]:
     :func:`jarz_pos.utils.warehouse_utils.resolve_purchase_warehouse` — instead
     of hardcoding ``"Consumables - J"`` keeps this in step with whatever an
     operator later reconfigures on Jarz POS Settings, and resolution is done
-    per item code (this is called once per consumable line) because the three
-    items could in principle be routed to different stores.
+    per item code (this is called once per consumable line) because the items
+    are routed to different stores: ``B2B Carton`` is Packaging and resolves to
+    ``Raw Material - J``, not ``Consumables - J``.
 
     Returns ``None`` — never raises — when no route can be resolved.
     ``resolve_purchase_warehouse`` is written for purchasing, where a blank
@@ -386,13 +465,15 @@ def _create_material_issue(
     *,
     invoice_name: str,
     company: str,
-    couvert_qty: float,
-    bag_qty: int,
-    nylon_qty: int,
+    lines: Sequence[Tuple[str, float]],
 ) -> Optional[str]:
     """Build, insert, and submit a Material Issue Stock Entry. Returns the SE name.
 
-    Returns ``None`` (never raises for this case) when none of the three
+    ``lines`` is the ``(item_code, qty)`` list from ``_requested_consumables``
+    — covier / colored bag / Nylon Inside bag for a retail order, B2B Carton
+    for a B2B Supply order.
+
+    Returns ``None`` (never raises for this case) when none of the
     requested lines could be covered by real stock in their resolved
     warehouse — see ``_build_coverable_lines``.
 
@@ -405,11 +486,7 @@ def _create_material_issue(
     fires; the rollback itself is defensive so a failure to roll back can
     never mask the original error.
     """
-    requested = [
-        (_COUVERT_ITEM, couvert_qty),
-        (_COLORED_BAG_ITEM, bag_qty),
-        (_NYLON_BAG_ITEM, nylon_qty),
-    ]
+    requested = [(str(item_code), qty) for item_code, qty in (lines or [])]
     lines = _build_coverable_lines(company, requested, invoice_name=invoice_name)
     if not lines:
         _log(

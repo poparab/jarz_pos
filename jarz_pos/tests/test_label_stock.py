@@ -143,6 +143,15 @@ class TestSettings(unittest.TestCase):
         # there is no dark switch for anybody to forget.
         self.assertTrue(settings["auto_consume"])
         self.assertTrue(settings["alerts_enabled"])
+        self.assertEqual(settings["sheet_small"], 21)
+        self.assertEqual(settings["sheet_medium"], 21)
+        self.assertEqual(settings["sheet_large"], 18)
+
+    def test_small_sheet_reads_its_own_setting(self):
+        with _settings(labels_per_sheet_small=24, labels_per_sheet_medium=21):
+            settings = ls.get_label_settings()
+        self.assertEqual(settings["sheet_small"], 24)
+        self.assertEqual(settings["sheet_medium"], 21)
 
     def test_operator_can_switch_the_flags_off(self):
         with _settings(label_auto_consume_on_invoice=0, label_alerts_enabled=0):
@@ -305,6 +314,15 @@ class TestInvoiceUsage(unittest.TestCase):
         usage, unmatched = ls.invoice_label_usage(doc, [_label("L-MANGO", "MANGO-M")])
         self.assertEqual(usage, {"L-MANGO": 5})
 
+    def test_small_jars_carry_a_label(self):
+        doc = SimpleNamespace(items=[_item(6, "MANGO-S", item_group="Small"), _item(2, "NEW-S", item_group="Small")])
+        usage, unmatched = ls.invoice_label_usage(doc, [_label("L-MANGO-S", "MANGO-S")])
+        self.assertEqual(usage, {"L-MANGO-S": 6})
+        self.assertEqual([u["item_code"] for u in unmatched], ["NEW-S"])
+
+    def test_small_is_a_label_bearing_group(self):
+        self.assertIn("Small", ls.LABEL_BEARING_GROUPS)
+
     def test_labels_per_unit_multiplies(self):
         # A jar that carries a body label and a lid label.
         doc = SimpleNamespace(items=[_item(10, "MANGO-M")])
@@ -333,10 +351,24 @@ class TestInvoiceUsage(unittest.TestCase):
 
 
 class TestSheets(unittest.TestCase):
-    """Sheet geometry: 21 labels per Medium sheet, 18 per Large."""
+    """Sheet geometry: 21 labels per Small sheet, 21 per Medium, 18 per Large."""
 
     def _settings(self):
-        return {"sheet_medium": 21, "sheet_large": 18, "default_print_sheets": 2}
+        return {"sheet_small": 21, "sheet_medium": 21, "sheet_large": 18, "default_print_sheets": 2}
+
+    def test_small_uses_21(self):
+        row = {"size": "Small", "labels_per_sheet": 0}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=self._settings()), 21)
+
+    def test_small_uses_its_own_sheet_count_not_the_medium_one(self):
+        settings = {"sheet_small": 24, "sheet_medium": 21, "sheet_large": 18}
+        row = {"size": "Small", "labels_per_sheet": 0}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=settings), 24)
+
+    def test_small_falls_back_to_its_default_when_settings_lack_it(self):
+        settings = {"sheet_medium": 30, "sheet_large": 18}
+        row = {"size": "Small", "labels_per_sheet": 0}
+        self.assertEqual(ls.labels_per_sheet_for(row, settings=settings), ls.DEFAULT_SHEET_SMALL)
 
     def test_medium_uses_21(self):
         row = {"size": "Medium", "labels_per_sheet": 0}

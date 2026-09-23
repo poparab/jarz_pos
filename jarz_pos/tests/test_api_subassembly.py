@@ -384,6 +384,38 @@ class TestResolveVelocityTargets(unittest.TestCase):
         self.assertEqual([], self._call([_jar("Weird Jar", -5.0)]))
 
 
+class TestSmallJarsAreFinishedGoods(unittest.TestCase):
+    """A Small (147 ml) jar is a finished jar, never a base."""
+
+    def test_jar_rows_keep_small_jars(self):
+        from jarz_pos.api import subassembly
+
+        rows = subassembly._jar_rows({"items": [
+            _jar("Molten Small", 4.0, item_group="Small"),
+            _jar("Molten Medium", 4.0),
+            _jar("Butter Biscuit", 0.0, item_group="Sub Assemblies"),
+        ]})
+        self.assertEqual(["Molten Small", "Molten Medium"], [r["item_code"] for r in rows])
+
+    def test_base_rows_exclude_small_jars(self):
+        from jarz_pos.api import subassembly
+
+        producible = [
+            _base("Butter Biscuit"),
+            _base("Molten Small", item_group="Small"),
+            _base("Molten Medium", item_group="Medium"),
+            _base("Molten Large", item_group="Large"),
+        ]
+        with patch(
+            "jarz_pos.api.subassembly.planning._resolve_producible_rows", return_value=producible
+        ), patch(
+            "jarz_pos.api.subassembly.planning.exclude_phantom_rows", side_effect=lambda rows: rows
+        ):
+            rows = subassembly._resolve_base_rows("Jarz Co", None)
+
+        self.assertEqual(["Butter Biscuit"], [r["item_code"] for r in rows])
+
+
 class TestResolveJarBoard(unittest.TestCase):
     def test_a_board_failure_degrades_to_no_signal(self):
         # The Bases screen must still render its stock and capacity figures; the

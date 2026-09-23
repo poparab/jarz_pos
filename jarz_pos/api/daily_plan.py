@@ -26,8 +26,9 @@ PLAN_DOCTYPE = "Jarz Production Plan"
 
 # Item groups that represent a sellable finished jar.  Used to default the
 # morning screen to the things somebody actually fills, rather than every item
-# in the catalogue that happens to own a BOM.
-FINISHED_GOODS_GROUPS = ("Medium", "Large")
+# in the catalogue that happens to own a BOM.  Ordered smallest jar first:
+# Small (147 ml), Medium (212 ml), Large (330 ml).
+FINISHED_GOODS_GROUPS = ("Small", "Medium", "Large")
 
 # Mix ingredients that a jar may also use for something else entirely, so their
 # presence as a direct BOM line says nothing about whether the mix was migrated.

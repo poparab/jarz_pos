@@ -1033,6 +1033,14 @@ def _validate_policy_price_list_coverage(
         )
 
 
+#: Item groups that may only be sold at a price a price list backs. The Small
+#: (147 ml) jar is a B2B sample product priced on "B2B Selling" and has no retail
+#: price, so on a Standard order its rate would come from the client -- the POS
+#: shows 0 -- and book a free jar. Refused in _process_regular_item instead; an
+#: explicit rate override or a 100%-discount (free sample) order is still allowed.
+PRICE_LIST_ONLY_ITEM_GROUPS = frozenset({"Small"})
+
+
 def _resolve_item_rate_with_provenance(
     item_code, price_list, fallback_rate=0.0, customer=None
 ) -> tuple[float, str]:
@@ -2133,6 +2141,11 @@ def create_pos_invoice(
         enforce_price_list_pricing = (
             bool(policy_decision.matched) and _policy_disc_for_rate_check < 100
         )
+        # A free-sample order nets every line to zero, so a price-list-only item
+        # (the Small jar) may ride it unpriced, exactly like the coverage check.
+        free_of_charge_order = (
+            bool(policy_decision.matched) and _policy_disc_for_rate_check >= 100
+        )
         processed_items = _process_cart_items(
             cart_items,
             pos_profile,
@@ -2140,6 +2153,7 @@ def create_pos_invoice(
             price_list=effective_price_list,
             customer=getattr(customer_doc, "name", None),
             enforce_price_list_pricing=enforce_price_list_pricing,
+            free_of_charge_order=free_of_charge_order,
         )
 
         # Sample policies may carry a fallback discount %. Apply it to plain item rows
@@ -2825,6 +2839,7 @@ def _process_cart_items(
     price_list=None,
     customer=None,
     enforce_price_list_pricing=False,
+    free_of_charge_order=False,
 ):
     """Process all cart items including bundles."""
     logger.debug(f"Processing {len(cart_items)} cart items")
@@ -2917,6 +2932,7 @@ def _process_cart_items(
                 price_list=price_list,
                 customer=customer,
                 enforce_price_list_pricing=enforce_price_list_pricing,
+                free_of_charge_order=free_of_charge_order,
             )
             processed_items.append(regular_item)
     
@@ -2992,6 +3008,7 @@ def _process_regular_item(
     price_list=None,
     customer=None,
     enforce_price_list_pricing=False,
+    free_of_charge_order=False,
 ):
     """Process a regular item."""
     item_code = item_data.get("item_code")
@@ -3076,6 +3093,16 @@ def _process_regular_item(
                     f"'{price_list}' (generic, category, or for this customer), and "
                     f"no manual rate override was supplied. Add an Item Price / "
                     f"category rate for this item, or apply an explicit rate override."
+                )
+            if (
+                str(item_doc.item_group or "") in PRICE_LIST_ONLY_ITEM_GROUPS
+                and not free_of_charge_order
+            ):
+                frappe.throw(
+                    f"'{item_code}' is sold only through a price list that prices it "
+                    f"(the B2B list does), and price list '{price_list}' has no price "
+                    f"for it. Place it as a B2B Supply order, or apply an explicit "
+                    f"rate override."
                 )
             client_priced = True
 

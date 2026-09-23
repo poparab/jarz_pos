@@ -509,6 +509,25 @@ class TestCoerceDays(unittest.TestCase):
         self.assertEqual(90, self._call(3650))
 
 
+class TestResolveJarItems(unittest.TestCase):
+    """The jar catalogue is every size: Small, Medium and Large."""
+
+    def test_reads_all_three_sizes(self):
+        from jarz_pos.api import replenishment as api
+
+        rows = [
+            {"item_code": "MOL-S", "item_name": "Molten Small", "stock_uom": "Nos", "item_group": "Small"},
+            {"item_code": "MOL-M", "item_name": "Molten Medium", "stock_uom": "Nos", "item_group": "Medium"},
+        ]
+        get_all = mock.Mock(return_value=rows)
+        with mock.patch.object(api.frappe, "get_all", get_all, create=True):
+            items = api._resolve_jar_items()
+
+        filters = get_all.call_args.kwargs["filters"]
+        self.assertEqual(["in", ["Small", "Medium", "Large"]], filters["item_group"])
+        self.assertEqual(["Small", "Medium"], [i["item_group"] for i in items])
+
+
 class TestResolveSourceWarehouse(unittest.TestCase):
     """The factory store is the Company's ``default_fg_warehouse``.
 
@@ -748,7 +767,7 @@ class TestProductionRoundEndpoint(unittest.TestCase):
         self.assertEqual((14, 7, 21, 8), (
             payload["cycle_days"], payload["backup_days"], payload["cover_days"], payload["sales_weeks"],
         ))
-        self.assertEqual({"Medium": 120, "Large": 77}, payload["batch_sizes"])
+        self.assertEqual({"Small": 180, "Medium": 120, "Large": 77}, payload["batch_sizes"])
         self.assertEqual("Finished Goods - J", payload["source_warehouse"])
 
     def test_the_round_is_computed_end_to_end(self):
@@ -769,7 +788,41 @@ class TestProductionRoundEndpoint(unittest.TestCase):
         self.assertEqual(60, payload["cycle_days"])
         self.assertEqual(0, payload["backup_days"])
         self.assertEqual(2, payload["sales_weeks"])
-        self.assertEqual({"Medium": 120, "Large": 60}, payload["batch_sizes"])
+        self.assertEqual({"Small": 180, "Medium": 120, "Large": 60}, payload["batch_sizes"])
+
+    def test_small_batch_param_reaches_the_round(self):
+        payload = self._call(batch_small="150")
+        self.assertEqual(150, payload["batch_sizes"]["Small"])
+        payload = self._call(batch_small="junk")
+        self.assertEqual(180, payload["batch_sizes"]["Small"])
+
+    def test_small_jars_are_planned_on_the_small_batch(self):
+        items = [
+            {"item_code": "BLU-L", "item_name": "Blueberry Large",
+             "stock_uom": "Nos", "item_group": "Large"},
+            {"item_code": "MOL-S", "item_name": "Molten Small",
+             "stock_uom": "Nos", "item_group": "Small"},
+        ]
+        weekly = {
+            ("Nasr city - J", "BLU-L"): {i: 35.8 for i in range(8)},
+            ("Dokki - J", "BLU-L"): {i: 20.0 for i in range(8)},
+            ("Nasr city - J", "MOL-S"): {i: 20.0 for i in range(8)},
+        }
+        payload = self._call(overrides={
+            "_resolve_jar_items": lambda: items,
+            "_resolve_weekly_sales": lambda warehouses, codes, from_date, to_date, notices: weekly,
+        })
+        self.assertEqual(["MOL-S", "BLU-L"], [i["item_code"] for i in payload["items"]])
+        small = payload["items"][0]
+        self.assertEqual((180, 0.5, 90), (small["batch_size"], small["batches"], small["jars"]))
+        self.assertEqual(90, payload["summary"]["jars"]["Small"])
+
+    def test_empty_catalogue_notice_names_every_size(self):
+        payload = self._call(overrides={"_resolve_jar_items": lambda: []})
+        self.assertIn(
+            "No finished jars found in the Small, Medium or Large item groups.",
+            payload["notices"],
+        )
 
     def test_material_stock_excludes_branches_and_wip(self):
         self._call()

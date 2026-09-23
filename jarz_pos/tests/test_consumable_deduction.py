@@ -59,6 +59,7 @@ def _invoice(
     company="_Test Company",
     items=None,
     kanban_profile="_TEST BRANCH",
+    order_purpose=None,
 ):
     return _Doc(
         name=name,
@@ -67,8 +68,12 @@ def _invoice(
         company=company,
         custom_kanban_profile=kanban_profile,
         pos_profile=kanban_profile,
+        custom_order_purpose=order_purpose,
         items=items if items is not None else [_jar_line("Medium", 3)],
     )
+
+
+_RETAIL_LINES = [("covier", 3), ("colored bag", 1), ("Nylon Inside bag", 1)]
 
 
 class _FakeStockEntry:
@@ -312,9 +317,7 @@ class TestCreateMaterialIssue(unittest.TestCase):
             result = cd._create_material_issue(
                 invoice_name="_TEST-SINV-1",
                 company="_Test Company",
-                couvert_qty=3,
-                bag_qty=1,
-                nylon_qty=1,
+                lines=_RETAIL_LINES,
             )
 
         self.assertIsNone(result)
@@ -344,9 +347,7 @@ class TestCreateMaterialIssue(unittest.TestCase):
             result = cd._create_material_issue(
                 invoice_name="_TEST-SINV-1",
                 company="_Test Company",
-                couvert_qty=3,
-                bag_qty=1,
-                nylon_qty=1,
+                lines=_RETAIL_LINES,
             )
 
         self.assertEqual(result, se.name)
@@ -374,9 +375,7 @@ class TestCreateMaterialIssue(unittest.TestCase):
             cd._create_material_issue(
                 invoice_name="_TEST-SINV-1",
                 company="_Test Company",
-                couvert_qty=3,
-                bag_qty=0,
-                nylon_qty=0,
+                lines=[("covier", 3), ("colored bag", 0), ("Nylon Inside bag", 0)],
             )
 
         fake.db.set_value.assert_called_once_with(
@@ -400,9 +399,7 @@ class TestCreateMaterialIssue(unittest.TestCase):
                 cd._create_material_issue(
                     invoice_name="_TEST-SINV-1",
                     company="_Test Company",
-                    couvert_qty=3,
-                    bag_qty=0,
-                    nylon_qty=0,
+                    lines=[("covier", 3)],
                 )
 
         fake.db.savepoint.assert_called_once()
@@ -424,9 +421,7 @@ class TestCreateMaterialIssue(unittest.TestCase):
                 cd._create_material_issue(
                     invoice_name="_TEST-SINV-1",
                     company="_Test Company",
-                    couvert_qty=3,
-                    bag_qty=0,
-                    nylon_qty=0,
+                    lines=[("covier", 3)],
                 )
 
         self.assertEqual(str(ctx.exception), "negative stock")
@@ -508,6 +503,156 @@ class TestDeductConsumablesOnOfd(unittest.TestCase):
 
         mock_create.assert_not_called()
         mock_notify.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Jar sizes and the retail / B2B Supply rules.
+# ---------------------------------------------------------------------------
+
+class TestCalcJarQuantities(unittest.TestCase):
+    def test_counts_each_size_including_the_medium_typo(self):
+        doc = _invoice(items=[
+            _jar_line("Small", 4),
+            _jar_line("Medium", 2),
+            _jar_line("Meduim", 1),
+            _jar_line("Large", 3),
+            _jar_line("Merch", 9),
+        ])
+        self.assertEqual(cd._calc_jar_quantities(doc), (4.0, 3.0, 3.0))
+
+
+class TestRequestedConsumables(unittest.TestCase):
+    def _retail(self, small=0, medium=0, large=0):
+        return dict(cd._requested_consumables(
+            small_qty=small, medium_qty=medium, large_qty=large, is_b2b=False
+        ))
+
+    def _cartons(self, small=0, medium=0, large=0):
+        lines = cd._requested_consumables(
+            small_qty=small, medium_qty=medium, large_qty=large, is_b2b=True
+        )
+        self.assertEqual([code for code, _qty in lines], ["B2B Carton"])
+        return lines[0][1]
+
+    def test_no_jars_requests_nothing(self):
+        self.assertEqual(cd._requested_consumables(
+            small_qty=0, medium_qty=0, large_qty=0, is_b2b=False), [])
+        self.assertEqual(cd._requested_consumables(
+            small_qty=0, medium_qty=0, large_qty=0, is_b2b=True), [])
+
+    def test_retail_medium_and_large_unchanged(self):
+        self.assertEqual(
+            self._retail(medium=3),
+            {"covier": 3, "colored bag": 1, "Nylon Inside bag": 1},
+        )
+        # ceil(5/5 + 7/7) = 2
+        self.assertEqual(
+            self._retail(medium=7, large=5),
+            {"covier": 12, "colored bag": 2, "Nylon Inside bag": 2},
+        )
+
+    def test_retail_small_one_covier_per_jar_ten_per_bag(self):
+        self.assertEqual(
+            self._retail(small=1),
+            {"covier": 1, "colored bag": 1, "Nylon Inside bag": 1},
+        )
+        self.assertEqual(self._retail(small=10)["colored bag"], 1)
+        self.assertEqual(self._retail(small=11)["colored bag"], 2)
+
+    def test_retail_mixed_sizes_ceil_the_sum(self):
+        # 10/10 + 7/7 + 5/5 = 3 bags exactly; 22 couverts.
+        self.assertEqual(
+            self._retail(small=10, medium=7, large=5),
+            {"covier": 22, "colored bag": 3, "Nylon Inside bag": 3},
+        )
+        # 5/10 + 3/7 + 1/5 = 1.13 -> 2
+        self.assertEqual(self._retail(small=5, medium=3, large=1)["colored bag"], 2)
+
+    def test_b2b_carton_maths(self):
+        self.assertEqual(self._cartons(medium=12), 1)
+        self.assertEqual(self._cartons(medium=13), 2)
+        self.assertEqual(self._cartons(large=8, small=20), 2)
+        self.assertEqual(self._cartons(small=20), 1)
+        self.assertEqual(self._cartons(small=21), 2)
+        # Mixed: 6/12 + 4/8 + 10/20 = 1.5 -> 2
+        self.assertEqual(self._cartons(small=10, medium=6, large=4), 2)
+        # Mixed: 24/12 + 0/8 + 1/20 = 2.05 -> 3
+        self.assertEqual(self._cartons(small=1, medium=24), 3)
+
+    def test_b2b_requests_no_covier_bag_or_nylon(self):
+        lines = dict(cd._requested_consumables(
+            small_qty=20, medium_qty=12, large_qty=8, is_b2b=True
+        ))
+        self.assertEqual(lines, {"B2B Carton": 3})
+
+    def test_ceil_ignores_float_noise(self):
+        self.assertEqual(cd._ceil_units(1.0000000000000002), 1)
+        self.assertEqual(cd._ceil_units(0.9999999999999999), 1)
+        self.assertEqual(cd._ceil_units(1.01), 2)
+        self.assertEqual(cd._ceil_units(0), 0)
+
+
+class TestDeductRoutesByOrderPurpose(unittest.TestCase):
+    def _lines_sent(self, doc):
+        fake = _make_fake_frappe()
+        with patch.object(cd, "frappe", fake), patch.object(
+            cd, "_create_material_issue", return_value="STE-0001"
+        ) as mock_create, patch.object(cd, "_notify_deduction_failure"):
+            cd.deduct_consumables_on_ofd(doc)
+        mock_create.assert_called_once()
+        return dict(mock_create.call_args.kwargs["lines"])
+
+    def test_retail_order_with_small_jars(self):
+        doc = _invoice(items=[_jar_line("Small", 10), _jar_line("Medium", 7)])
+        self.assertEqual(
+            self._lines_sent(doc),
+            {"covier": 17, "colored bag": 2, "Nylon Inside bag": 2},
+        )
+
+    def test_standard_purpose_is_retail(self):
+        doc = _invoice(items=[_jar_line("Large", 5)], order_purpose="Standard")
+        self.assertEqual(
+            self._lines_sent(doc),
+            {"covier": 5, "colored bag": 1, "Nylon Inside bag": 1},
+        )
+
+    def test_b2b_supply_order_deducts_only_cartons(self):
+        doc = _invoice(
+            items=[_jar_line("Large", 8), _jar_line("Small", 20)],
+            order_purpose="B2B Supply",
+        )
+        self.assertEqual(self._lines_sent(doc), {"B2B Carton": 2})
+
+    def test_small_only_order_is_not_a_no_op(self):
+        doc = _invoice(items=[_jar_line("Small", 1)])
+        self.assertEqual(self._lines_sent(doc)["covier"], 1)
+
+    def test_b2b_carton_issues_from_its_own_resolved_warehouse(self):
+        """B2B Carton is Packaging: the shared router sends it to Raw Material - J."""
+        se = _FakeStockEntry()
+        fake = _make_fake_frappe(bin_qty_by_item={"B2B Carton": 40}, stock_entry=se)
+        routes = {"B2B Carton": "Raw Material - J"}
+        with patch.object(cd, "frappe", fake), patch(
+            "jarz_pos.utils.warehouse_utils.resolve_purchase_warehouse",
+            side_effect=lambda item, company: routes.get(item, "Consumables - J"),
+        ):
+            result = cd._create_material_issue(
+                invoice_name="_TEST-SINV-B2B",
+                company="_Test Company",
+                lines=[("B2B Carton", 2)],
+            )
+
+        self.assertEqual(result, se.name)
+        self.assertEqual(
+            se.items,
+            [{"item_code": "B2B Carton", "qty": 2, "uom": "Nos", "s_warehouse": "Raw Material - J"}],
+        )
+        fake.db.savepoint.assert_called_once()
+        se.submit.assert_called_once()
+
+    def test_savepoint_name_is_stable_per_invoice(self):
+        self.assertEqual(cd._savepoint_name("ACC-SINV-1"), cd._savepoint_name("ACC-SINV-1"))
+        self.assertNotEqual(cd._savepoint_name("ACC-SINV-1"), cd._savepoint_name("ACC-SINV-2"))
 
 
 # ---------------------------------------------------------------------------

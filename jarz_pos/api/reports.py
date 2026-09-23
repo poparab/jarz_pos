@@ -101,10 +101,10 @@ def _expand_item_groups(roots: tuple) -> List[str]:
 @frappe.whitelist()
 def get_final_products_report() -> Dict[str, Any]:
     """
-    Return stock balances for items in the "Medium" and "Large" item groups,
-    pivoted by warehouse.
+    Return stock balances for items in the "Small", "Medium" and "Large" item
+    groups, pivoted by warehouse.
 
-    Both tables carry the *same* warehouse columns — see
+    Every table carries the *same* warehouse columns — see
     ``_finished_goods_warehouses`` — and every active size gets a row whether or
     not it has stock, because "we are out of Carrot cake" is the line a stock
     count exists to show and the old "skip items with no Bin row" rule hid it.
@@ -128,6 +128,7 @@ def get_final_products_report() -> Dict[str, Any]:
     _ensure_jarz_manager()
 
     group_aliases = {
+        "Small": {"Small"},
         "Medium": {"Medium", "Meduim"},
         "Large": {"Large"},
     }
@@ -162,8 +163,8 @@ def get_final_products_report() -> Dict[str, Any]:
         item_wh_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
 
     # One column set for the whole report. What this guarantees is that the
-    # Company's FG warehouse is ALWAYS a column, and that Medium and Large
-    # always carry identical columns so the two tables line up.
+    # Company's FG warehouse is ALWAYS a column, and that Small, Medium and
+    # Large always carry identical columns so the tables line up.
     #
     # It does NOT freeze the column list: warehouse_set is the union of the
     # pinned FG warehouse and every warehouse holding a non-zero bin, so a
@@ -176,8 +177,8 @@ def get_final_products_report() -> Dict[str, Any]:
         warehouse_set.update(wh_qty.keys())
     warehouses = sorted(warehouse_set)
 
-    # Build separate tables per group, Medium first.
-    groups_order = ["Medium", "Large"]
+    # Build separate tables per group, smallest jar first.
+    groups_order = ["Small", "Medium", "Large"]
     result_groups = []
 
     for group_name in groups_order:

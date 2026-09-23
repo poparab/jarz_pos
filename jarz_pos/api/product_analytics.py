@@ -6,6 +6,7 @@ Data source: tabSales Invoice (is_pos=1 individual invoices, docstatus=1 = submi
 
 Product types:
   - Bundle  : invoices that contain a Jarz Bundle erpnext_item header row
+  - Small   : item_group = "Small"
   - Medium  : item_group in {"Medium", "Meduim"}  (typo alias exists in data)
   - Large   : item_group = "Large"
 
@@ -26,10 +27,12 @@ from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label
 
 # ── Item group sets ──────────────────────────────────────────────────────
+_SMALL_GROUPS: Set[str] = {"Small"}
 _MEDIUM_GROUPS: Set[str] = {"Medium", "Meduim"}
 _LARGE_GROUPS: Set[str] = {"Large"}
 
 _TYPE_BUNDLE = "Bundle"
+_TYPE_SMALL = "Small"
 _TYPE_MEDIUM = "Medium"
 _TYPE_LARGE = "Large"
 
@@ -155,6 +158,7 @@ def get_product_analytics(
     # ── Aggregation accumulators ─────────────────────────────────────────
     type_agg: Dict[str, Dict[str, Any]] = {
         _TYPE_BUNDLE: {"units": 0.0, "revenue": 0.0, "cost": 0.0},
+        _TYPE_SMALL:  {"units": 0.0, "revenue": 0.0, "cost": 0.0},
         _TYPE_MEDIUM: {"units": 0.0, "revenue": 0.0, "cost": 0.0},
         _TYPE_LARGE:  {"units": 0.0, "revenue": 0.0, "cost": 0.0},
     }
@@ -179,7 +183,9 @@ def get_product_analytics(
         # ── Intrinsic type: derived from item_group, never changes ────────
         # Used for the per-product table so an item isn't mis-labelled as
         # "Bundle" just because it happened to be sold inside a bundle once.
-        if item_group in _MEDIUM_GROUPS:
+        if item_group in _SMALL_GROUPS:
+            intrinsic_type = _TYPE_SMALL
+        elif item_group in _MEDIUM_GROUPS:
             intrinsic_type = _TYPE_MEDIUM
         elif item_group in _LARGE_GROUPS:
             intrinsic_type = _TYPE_LARGE
@@ -262,7 +268,7 @@ def get_product_analytics(
 
     # ── Build output: by_product_type ────────────────────────────────────
     by_product_type = []
-    for ptype in [_TYPE_BUNDLE, _TYPE_MEDIUM, _TYPE_LARGE]:
+    for ptype in [_TYPE_BUNDLE, _TYPE_SMALL, _TYPE_MEDIUM, _TYPE_LARGE]:
         agg = type_agg[ptype]
         revenue = agg["revenue"]
         cost = agg["cost"]

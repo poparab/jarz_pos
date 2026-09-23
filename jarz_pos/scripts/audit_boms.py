@@ -30,11 +30,20 @@ import frappe
 from frappe.utils import flt
 
 # Groups that hold a sellable jar, as opposed to a component.
-FINISHED_GROUPS = ("Medium", "Large")
+FINISHED_GROUPS = ("Small", "Medium", "Large")
 
 # Packaging that belongs to the large jar.  A Medium BOM listing one of these
 # is filling a 212 product from 330 stock.
 LARGE_PACKAGING_MARKER = "330"
+
+# Small (147 ml) jar packaging.  A Small BOM must list both of these and every
+# label on it must end in the marker.  The Medium (212 ml) jar and lid are
+# literally named "Glass Jar" / "Jar Lid" with no size suffix, so they are
+# matched by exact name; anything carrying "212" or "330" is the wrong size.
+SMALL_PACKAGING_MARKER = "147"
+SMALL_REQUIRED_PACKAGING = ("Glass Jar 147", "Jar Lid 147")
+MEDIUM_UNSUFFIXED_PACKAGING = ("Glass Jar", "Jar Lid")
+OTHER_SIZE_PACKAGING_MARKERS = ("212", LARGE_PACKAGING_MARKER)
 
 SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 
@@ -263,6 +272,77 @@ def rule_wrong_size_packaging() -> List[Dict[str, Any]]:
         )
         for (item, bom), codes in sorted(grouped.items())
     ]
+
+
+def small_packaging_problems(codes: Sequence[str]) -> Tuple[List[str], List[str]]:
+    """``(wrong, missing)`` packaging for one Small BOM's component codes.
+
+    *wrong*: a 212/330 jar or lid, or a label that does not end in ``147``.
+    *missing*: whichever of ``Glass Jar 147`` / ``Jar Lid 147`` is not listed.
+    Pure, so it is testable without a site.
+    """
+    listed = [str(code or "").strip() for code in codes or [] if str(code or "").strip()]
+    wrong: List[str] = []
+    for code in listed:
+        if code in MEDIUM_UNSUFFIXED_PACKAGING:
+            wrong.append(code)
+        elif any(marker in code for marker in OTHER_SIZE_PACKAGING_MARKERS):
+            wrong.append(code)
+        elif "label" in code.lower() and not code.endswith(SMALL_PACKAGING_MARKER):
+            wrong.append(code)
+    missing = [code for code in SMALL_REQUIRED_PACKAGING if code not in listed]
+    return wrong, missing
+
+
+def rule_small_jar_packaging() -> List[Dict[str, Any]]:
+    """A Small BOM that is not packed in 147 ml packaging.
+
+    Must list ``Glass Jar 147`` and ``Jar Lid 147``, every label must end in
+    ``147``, and nothing sized for the 212 or 330 jar may appear.
+    """
+    rows = frappe.db.sql(
+        """
+        SELECT b.name, b.item, bi.item_code
+        FROM `tabBOM` b
+        INNER JOIN `tabItem` i ON i.name = b.item
+        INNER JOIN `tabBOM Item` bi ON bi.parent = b.name
+        WHERE b.docstatus = 1 AND b.is_default = 1
+          AND i.item_group = 'Small'
+        ORDER BY b.item, bi.idx
+        """,
+        as_dict=True,
+    )
+
+    grouped: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    for row in rows:
+        grouped[(row["item"], row["name"])].append(row["item_code"])
+
+    out: List[Dict[str, Any]] = []
+    for (item, bom), codes in sorted(grouped.items()):
+        wrong, missing = small_packaging_problems(codes)
+        if wrong:
+            out.append(
+                _finding(
+                    "error",
+                    "wrong_size_packaging",
+                    item,
+                    f"Small jar BOM consumes packaging of another size: {', '.join(wrong)}. "
+                    f"It will draw down 212/330 stock and never reserve the 147 equivalents.",
+                    bom=bom,
+                )
+            )
+        if missing:
+            out.append(
+                _finding(
+                    "error",
+                    "small_packaging_missing",
+                    item,
+                    f"Small jar BOM does not list {', '.join(missing)}; the 147 ml "
+                    f"packaging is never consumed or planned for.",
+                    bom=bom,
+                )
+            )
+    return out
 
 
 def rule_suspicious_uom() -> List[Dict[str, Any]]:
@@ -588,6 +668,7 @@ def collect_findings() -> List[Dict[str, Any]]:
     findings += rule_implausible_bom_quantity()
     findings += rule_mix_double_counted(mix_item, mix_components)
     findings += rule_wrong_size_packaging()
+    findings += rule_small_jar_packaging()
     findings += rule_suspicious_uom()
     findings += rule_component_qty_outlier()
     findings += rule_mix_not_migrated(mix_item, mix_components)

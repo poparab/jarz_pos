@@ -190,7 +190,7 @@
    "label": "Notes"
   },
   {
-   "description": "The flavour this label is printed for — one label design per flavour per size. The item already encodes the size through its Item Group (Medium / Large).",
+   "description": "The flavour this label is printed for — one label design per flavour per size. The item already encodes the size through its Item Group (Small / Medium / Large).",
    "fieldname": "item",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -217,7 +217,7 @@
    "options": "Warehouse"
   },
   {
-   "description": "Labels on one printed sheet for THIS design. Leave 0 to use the size default from Jarz POS Settings (21 Medium / 18 Large).",
+   "description": "Labels on one printed sheet for THIS design. Leave 0 to use the size default from Jarz POS Settings (21 Small / 21 Medium / 18 Large).",
    "fieldname": "labels_per_sheet",
    "fieldtype": "Int",
    "label": "Labels Per Sheet (Override)",
@@ -259,7 +259,7 @@
  "is_submittable": 0,
  "istable": 0,
  "links": [],
- "modified": "2026-08-17 00:00:00.000000",
+ "modified": "2026-09-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Customer Label",

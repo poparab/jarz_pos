@@ -1,7 +1,7 @@
 """Whitelisted API for B2B customer label stock (mobile app + Desk buttons).
 
-v2: one label per (customer, flavour item); ordering in sheets (21 Medium / 18
-Large per sheet); a home storage location per label; and real money -- print
+v2: one label per (customer, flavour item); ordering in sheets (21 Small / 21
+Medium / 18 Large per sheet); a home storage location per label; and real money -- print
 batches are billed on supplier Purchase Invoices into a Labels Inventory asset,
 and consumption drains that value into Label Cost (COGS) via Journal Entries
 posted by ``services.label_stock``.
@@ -147,6 +147,7 @@ def _settings_payload(settings: Dict[str, Any]) -> Dict[str, Any]:
         "buffer_days": settings["buffer_days"],
         "auto_consume": settings["auto_consume"],
         "alerts_enabled": settings["alerts_enabled"],
+        "sheet_small": settings["sheet_small"],
         "sheet_medium": settings["sheet_medium"],
         "sheet_large": settings["sheet_large"],
         "default_print_sheets": settings["default_print_sheets"],
@@ -405,7 +406,13 @@ def get_flavour_options(customer):
     except Exception:
         pass
 
-    grouped = sorted(options.values(), key=lambda o: (o["size"], o["item_name"].lower()))
+    # Smallest jar first. Sorting on the group name alone put Large before Medium
+    # and would have put Small last.
+    size_rank = {"Small": 0, "Medium": 1, "Meduim": 1, "Large": 2}
+    grouped = sorted(
+        options.values(),
+        key=lambda o: (size_rank.get(o["size"], 9), o["size"], o["item_name"].lower()),
+    )
     return {
         "customer": name,
         "price_list": price_list or None,

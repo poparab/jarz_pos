@@ -83,11 +83,14 @@ DEFAULT_REST_DAY = "Friday"
 DEFAULT_BUFFER_DAYS = 3
 DEFAULT_USAGE_WINDOW_DAYS = 60
 #: Sheet geometry: what the print house fits on one sheet, by jar size.
+DEFAULT_SHEET_SMALL = 21
 DEFAULT_SHEET_MEDIUM = 21
 DEFAULT_SHEET_LARGE = 18
 DEFAULT_PRINT_SHEETS = 2
-#: Item groups that read as "Large" for sheet-size purposes; everything else
-#: (including the known "Meduim" typo group) uses the Medium sheet.
+#: Item groups that read as "Small" / "Large" for sheet-size purposes;
+#: everything else (including the known "Meduim" typo group) uses the Medium
+#: sheet.
+_SMALL_GROUPS = {"Small"}
 _LARGE_GROUPS = {"Large"}
 #: Never divide the usage window by fewer days than this -- a label created
 #: yesterday that shipped 400 units would otherwise forecast 400/day.
@@ -207,6 +210,8 @@ def get_label_settings() -> Dict[str, Any]:
         "auto_consume": True if auto_raw in (None, "") else bool(_int(auto_raw, 1)),
         "alerts_enabled": True if alerts_raw in (None, "") else bool(_int(alerts_raw, 1)),
         "usage_window_days": DEFAULT_USAGE_WINDOW_DAYS,
+        "sheet_small": _int(_single_value("labels_per_sheet_small"), DEFAULT_SHEET_SMALL)
+        or DEFAULT_SHEET_SMALL,
         "sheet_medium": _int(_single_value("labels_per_sheet_medium"), DEFAULT_SHEET_MEDIUM)
         or DEFAULT_SHEET_MEDIUM,
         "sheet_large": _int(_single_value("labels_per_sheet_large"), DEFAULT_SHEET_LARGE)
@@ -230,15 +235,18 @@ def labels_per_sheet_for(label_row: Dict[str, Any], *, settings: Optional[Dict[s
     """Labels on one printed sheet for this design.
 
     The per-label override wins; otherwise the size decides — the print house
-    fits 21 Medium labels or 18 Large ones on a sheet. Size comes from the
-    flavour item's group, with anything that is not explicitly Large treated as
-    Medium (which also covers the known "Meduim" typo group).
+    fits 21 Small, 21 Medium or 18 Large labels on a sheet. Size comes from the
+    flavour item's group; Small and Large use their own sheet counts, and
+    anything that is neither is treated as Medium (which also covers the known
+    "Meduim" typo group).
     """
     settings = settings or get_label_settings()
     override = _int(label_row.get("labels_per_sheet"))
     if override > 0:
         return override
     size = str(label_row.get("size") or "").strip()
+    if size in _SMALL_GROUPS:
+        return _int(settings.get("sheet_small"), DEFAULT_SHEET_SMALL) or DEFAULT_SHEET_SMALL
     if size in _LARGE_GROUPS:
         return _int(settings.get("sheet_large"), DEFAULT_SHEET_LARGE) or DEFAULT_SHEET_LARGE
     return _int(settings.get("sheet_medium"), DEFAULT_SHEET_MEDIUM) or DEFAULT_SHEET_MEDIUM
@@ -1141,7 +1149,7 @@ def labels_for_customer(customer: str) -> List[Dict[str, Any]]:
 
 #: Item groups whose lines are physical jars that carry a customer label.
 #: Mirrors api/daily_plan.FINISHED_GOODS_GROUPS plus the known data typo.
-LABEL_BEARING_GROUPS = {"Medium", "Meduim", "Large"}
+LABEL_BEARING_GROUPS = {"Small", "Medium", "Meduim", "Large"}
 
 
 def invoice_label_usage(
@@ -1153,7 +1161,7 @@ def invoice_label_usage(
     qty, and *unmatched* lists jar lines the customer has NO label for yet:
     ``[{"item_code", "item_name", "item_group", "labels"}]``. Every flavour has
     its own label, so matching is by exact ``item_code`` — the Item already
-    encodes both the flavour and the size (Item Group = Medium/Large).
+    encodes both the flavour and the size (Item Group = Small/Medium/Large).
 
     Bundle *parent* rows are skipped: they carry the bundle SKU at a 100%
     discount while the physical jars are the child rows underneath, so counting

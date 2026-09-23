@@ -24,9 +24,20 @@ class TestParameters(unittest.TestCase):
                 "sales_weeks": 8,
                 "batch_medium": 120,
                 "batch_large": 77,
+                "batch_small": 180,
             },
             rp.coerce_parameters(),
         )
+
+    def test_small_batch_is_coerced_and_clamped(self):
+        self.assertEqual(180, rp.coerce_parameters(batch_small="junk")["batch_small"])
+        self.assertEqual(150, rp.coerce_parameters(batch_small="150")["batch_small"])
+        self.assertEqual(10000, rp.coerce_parameters(batch_small=99999)["batch_small"])
+
+    def test_small_batch_is_two_thirds_of_a_medium_fill(self):
+        # A Small jar holds 2/3 of a Medium's filling: 120 * 3/2 = 180.
+        self.assertEqual(rp.DEFAULT_BATCH_MEDIUM * 3 // 2, rp.DEFAULT_BATCH_SMALL)
+        self.assertEqual(("Small", "Medium", "Large"), rp.SIZE_ORDER)
 
     def test_backup_zero_is_a_real_answer(self):
         self.assertEqual(0, rp.coerce_parameters(backup_days="0")["backup_days"])
@@ -131,8 +142,32 @@ class TestBatchRounding(unittest.TestCase):
         self.assertEqual((1.5, 115), rp.round_to_batches(105, 77))
         self.assertEqual((0.25, 19), rp.round_to_batches(23, 77))
 
+    def test_small_180(self):
+        self.assertEqual(12, rp.batch_tolerance(180))
+        self.assertEqual((0.0, 0), rp.round_to_batches(12, 180))
+        self.assertEqual((0.25, 45), rp.round_to_batches(13, 180))
+        self.assertEqual((1.0, 180), rp.round_to_batches(180, 180))
+
     def test_nothing_needed(self):
         self.assertEqual((0.0, 0), rp.round_to_batches(0, 120))
+
+
+class TestBatchSizeFor(unittest.TestCase):
+    def test_configured_size_wins(self):
+        self.assertEqual(150, rp.batch_size_for("Small", {"Small": 150, "Medium": 120}))
+        self.assertEqual(100, rp.batch_size_for("Medium", {"Medium": 100}))
+        self.assertEqual(60, rp.batch_size_for("Large", {"Large": 60}))
+
+    def test_unconfigured_size_uses_its_own_default_not_another_sizes(self):
+        # The old fallback borrowed SIZE_ORDER[0]'s batch; with Small first that
+        # would have planned Large on 180.
+        self.assertEqual(180, rp.batch_size_for("Small", {"Medium": 100, "Large": 60}))
+        self.assertEqual(77, rp.batch_size_for("Large", {"Small": 180, "Medium": 120}))
+        self.assertEqual(120, rp.batch_size_for("Medium", {}))
+
+    def test_unknown_size_gets_no_batch(self):
+        self.assertEqual(0, rp.batch_size_for("Jumbo", {"Small": 180, "Medium": 120, "Large": 77}))
+        self.assertEqual(0, rp.batch_size_for("", {}))
 
 
 class TestStatusAndFlavour(unittest.TestCase):
@@ -146,6 +181,14 @@ class TestStatusAndFlavour(unittest.TestCase):
         self.assertEqual("Blueberry", rp.flavour_of("Blueberry Large"))
         self.assertEqual("Chocolate Hazelnut", rp.flavour_of("Chocolate Hazelnut Medium"))
         self.assertEqual("Large", rp.flavour_of("Large"))
+        self.assertEqual("Molten", rp.flavour_of("Molten Small"))
+        self.assertEqual("Small", rp.flavour_of("Small"))
+
+    def test_size_rank(self):
+        self.assertEqual(
+            ["Small", "Medium", "Large", "Jumbo"],
+            sorted(["Large", "Jumbo", "Medium", "Small"], key=rp._size_rank),
+        )
 
 
 class TestBomHelpers(unittest.TestCase):
@@ -515,6 +558,71 @@ class TestBuildProductionRound(unittest.TestCase):
         self.assertTrue(any("Blueberry Large" in n and "BOM" in n for n in payload["notices"]))
         self.assertEqual([], payload["materials"])
         self.assertEqual(77, self._item(payload, "BLU-L")["jars"])
+
+    SMALL = {"item_code": "MOL-S", "item_name": "Molten Small", "item_group": "Small"}
+
+    def _round_with_small(self, **overrides):
+        weekly = {
+            (self.NASR, "BLU-L"): {i: 35.8 for i in range(8)},
+            (self.DOKKI, "BLU-L"): {i: 20 for i in range(8)},
+            (self.NASR, "TIRA-M"): {i: 10 for i in range(8)},
+            # 20/week, steady: par 60 at Nasr, nothing on the shelf.
+            (self.NASR, "MOL-S"): {i: 20 for i in range(8)},
+        }
+        params = dict(
+            items=self.ITEMS + [self.SMALL],
+            weekly_sales=weekly,
+            batch_sizes={"Small": 180, "Medium": 120, "Large": 77},
+        )
+        params.update(overrides)
+        return self._round(**params)
+
+    def test_small_is_listed_first_on_its_own_batch(self):
+        payload = self._round_with_small()
+        self.assertEqual(
+            ["MOL-S", "OLD-M", "TIRA-M", "BLU-L"], [i["item_code"] for i in payload["items"]]
+        )
+        mol = self._item(payload, "MOL-S")
+        self.assertEqual("Molten", mol["flavour"])
+        self.assertEqual("Small", mol["size"])
+        self.assertEqual(180, mol["batch_size"])
+        self.assertEqual(60, mol["net_need"])
+        # need 60 - tolerance 12 = 48 -> two quarters of 45.
+        self.assertEqual(0.5, mol["batches"])
+        self.assertEqual(90, mol["jars"])
+
+    def test_small_counts_in_the_summary(self):
+        summary = self._round_with_small()["summary"]
+        self.assertEqual({"Small": 0.5, "Medium": 0.0, "Large": 1.0}, summary["batches"])
+        self.assertEqual({"Small": 90, "Medium": 0, "Large": 77}, summary["jars"])
+        self.assertEqual(167, summary["jars_total"])
+        self.assertEqual(["Small", "Medium", "Large"], list(summary["batches"]))
+
+    def test_small_without_a_configured_batch_uses_its_own_default(self):
+        # A caller that only knows Medium/Large must not plan Small on either.
+        payload = self._round_with_small(batch_sizes={"Medium": 120, "Large": 77})
+        mol = self._item(payload, "MOL-S")
+        self.assertEqual(180, mol["batch_size"])
+        self.assertEqual(90, mol["jars"])
+        self.assertEqual(90, payload["summary"]["jars"]["Small"])
+        # Medium and Large are unchanged by Small being first in SIZE_ORDER.
+        self.assertEqual(77, self._item(payload, "BLU-L")["batch_size"])
+        self.assertEqual(120, self._item(payload, "TIRA-M")["batch_size"])
+
+    def test_an_unknown_size_is_not_planned_and_is_named(self):
+        odd = {"item_code": "ODD-J", "item_name": "Odd Jumbo", "item_group": "Jumbo"}
+        payload = self._round(
+            items=self.ITEMS + [odd],
+            weekly_sales={(self.NASR, "ODD-J"): {i: 50 for i in range(8)}},
+        )
+        row = self._item(payload, "ODD-J")
+        self.assertEqual(0, row["batch_size"])
+        self.assertEqual(0, row["jars"])
+        self.assertEqual("ODD-J", payload["items"][-1]["item_code"])
+        self.assertTrue(
+            any("Odd Jumbo" in n and "no batch size" in n for n in payload["notices"]),
+            payload["notices"],
+        )
 
     def test_empty_inputs_are_well_formed(self):
         payload = self._round(items=[], branches=[], weekly_sales={}, branch_stock={})

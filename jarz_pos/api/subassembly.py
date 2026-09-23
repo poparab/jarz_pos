@@ -589,7 +589,8 @@ def _resolve_jar_consumers(base_item_codes: Set[str]) -> Dict[str, List[Dict[str
             }
             for entry in bucket.values()
         ]
-        # Ascending rate, then code: Medium lands before Large on the card, and
+        # Ascending rate, then code: Small lands before Medium before Large on
+        # the card, and
         # two requests cannot order the same jars differently.
         shaped.sort(key=lambda entry: (entry["qty_per_jar"], entry["item_code"]))
         consumers[base_code] = shaped

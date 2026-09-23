@@ -131,7 +131,7 @@ def _resolve_company(company: Optional[str]) -> Optional[str]:
 
 
 def _resolve_jar_items() -> List[Dict[str, Any]]:
-    """Every finished jar: the ``Medium`` and ``Large`` item groups.
+    """Every finished jar: the ``Small``, ``Medium`` and ``Large`` item groups.
 
     Restricted to the jars on purpose — a replenishment plan that also offered
     to ship flour and cream to a shop would bury the jars nobody can sell
@@ -157,7 +157,7 @@ def _resolve_jar_items() -> List[Dict[str, Any]]:
             "item_code": str(row.get("item_code")),
             "item_name": str(row.get("item_name") or row.get("item_code")),
             "stock_uom": str(row.get("stock_uom") or ""),
-            # The jar size (``Medium`` / ``Large``); the production round
+            # The jar size (``Small`` / ``Medium`` / ``Large``); the production round
             # picks the batch size from it.
             "item_group": str(row.get("item_group") or ""),
         }
@@ -432,7 +432,7 @@ def get_branch_replenishment(
         # read the catalogue" look identical otherwise, and the second one is
         # the failure this endpoint is most likely to hit.
         if not items:
-            notice = "No finished jars found in the Medium or Large item groups."
+            notice = "No finished jars found in the Small, Medium or Large item groups."
         else:
             notice = (
                 f"No selling branch warehouses were found besides {source}. "
@@ -727,6 +727,9 @@ def get_production_round(
     sales_weeks: Any = round_plan.DEFAULT_SALES_WEEKS,
     batch_medium: Any = round_plan.DEFAULT_BATCH_MEDIUM,
     batch_large: Any = round_plan.DEFAULT_BATCH_LARGE,
+    # Last, not first, so a caller passing the older arguments positionally
+    # still lands them on the right parameter.
+    batch_small: Any = round_plan.DEFAULT_BATCH_SMALL,
 ) -> Dict[str, Any]:
     """How many batches of every jar to make now, and what that needs.
 
@@ -747,6 +750,7 @@ def get_production_round(
         sales_weeks=sales_weeks,
         batch_medium=batch_medium,
         batch_large=batch_large,
+        batch_small=batch_small,
     )
     notices: List[str] = []
 
@@ -767,7 +771,7 @@ def get_production_round(
     )
     items = _resolve_jar_items()
     if not items:
-        notices.append("No finished jars found in the Medium or Large item groups.")
+        notices.append("No finished jars found in the Small, Medium or Large item groups.")
     if not branches:
         notices.append("No selling branch warehouses were found; nothing sells, so nothing is made.")
 
@@ -812,7 +816,11 @@ def get_production_round(
         sales_weeks=params["sales_weeks"],
         sales_from=sales_from.isoformat(),
         sales_to=sales_to.isoformat(),
-        batch_sizes={"Medium": params["batch_medium"], "Large": params["batch_large"]},
+        batch_sizes={
+            "Small": params["batch_small"],
+            "Medium": params["batch_medium"],
+            "Large": params["batch_large"],
+        },
         items=items,
         branches=branches,
         weekly_sales=weekly,

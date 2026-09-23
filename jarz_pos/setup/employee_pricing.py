@@ -61,6 +61,8 @@ MEDIUM_RATE = 77.0
 
 #: Item Groups per size. Mirrors ``services/consumable_deduction.py`` — "Meduim"
 #: is a known data typo that holds real items, so both spellings are enumerated.
+#: "Small" (147 ml) is deliberately absent: the owner has set no staff price
+#: for Small jars yet. Add a rate and a group here when one is agreed.
 _LARGE_GROUPS = ("Large",)
 _MEDIUM_GROUPS = ("Medium", "Meduim")
 
