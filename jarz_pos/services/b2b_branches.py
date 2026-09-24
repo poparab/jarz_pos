@@ -388,8 +388,10 @@ def _maps_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         "area": row.get("area"),
         "region": row.get("region"),
         "governorate": row.get("governorate"),
-        "rating": _float_or_none(row.get("rating")),
-        "reviews": _int_or_none(row.get("reviews")),
+        # Float/Int columns are NOT NULL: an unrated door is stored as 0, and
+        # the app would show "★0.0" for a place nobody has rated.
+        "rating": _float_or_none(row.get("rating")) or None,
+        "reviews": _int_or_none(row.get("reviews")) or None,
         "maps_url": row.get("maps_url"),
         "phone": row.get("phone"),
         "address": row.get("address"),

@@ -537,5 +537,15 @@ class TestCarryBranchLinks(unittest.TestCase):
         self.assertEqual(rows[0]["match_dismissed"], 0)
 
 
+class TestMapsPayload(unittest.TestCase):
+    def test_unrated_door_has_no_rating(self):
+        # Float/Int columns store "no rating" as 0; the app must not show 0.0 stars.
+        out = bb._maps_payload({"name": "r1", "rating": 0, "reviews": 0})
+        self.assertIsNone(out["rating"])
+        self.assertIsNone(out["reviews"])
+        out = bb._maps_payload({"name": "r1", "rating": 4.5, "reviews": 195})
+        self.assertEqual((out["rating"], out["reviews"]), (4.5, 195))
+
+
 if __name__ == "__main__":
     unittest.main()
