@@ -131,15 +131,29 @@ def _ensure_credit_payment_access() -> None:
         frappe.throw(_("Not permitted: Manager access required"), frappe.PermissionError)
 
 
+#: Who may GRANT credit. Narrower than the payment gate on purpose: taking a
+#: shop's money is floor work a line manager does, but extending exposure —
+#: often with no limit — is a management decision, and a line manager has no
+#: B2B remit. Same idea as ``ROLES.TASK_MANAGER``, plus the accounts owners.
+CREDIT_SETTINGS_ROLES = frozenset(
+    {
+        ROLES.JARZ_MANAGER,
+        ROLES.SYSTEM_MANAGER,
+        ROLES.ADMINISTRATOR,
+        "Accounts Manager",
+        "POS Manager",
+    }
+)
+
+
 def _can_manage_credit_settings() -> bool:
     """May the caller switch a shop's credit on/off and set its days / limit?
 
-    The same set as :func:`_ensure_credit_payment_access`, non-throwing, so the
-    profile can tell the app whether to show the edit button. Granting credit
-    with no limit is a money decision; a rep or cashier sees, never sets.
+    Non-throwing, so the profile can tell the app whether to show the edit
+    button. A rep, cashier or line manager sees the settings, never sets them.
     """
     roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
-    return bool(roles.intersection(ROLES.ADMIN | ROLES.LINE_MANAGER_TIER))
+    return bool(roles.intersection(CREDIT_SETTINGS_ROLES))
 
 
 def _allowed_profiles() -> List[str]:
@@ -639,6 +653,9 @@ def get_customer_credit_profile(customer: str) -> Dict[str, Any]:
         "oldest_invoice_date": oldest or None,
         "currency": _credit_currency(),
         "can_edit_settings": _can_manage_credit_settings(),
+        # What is STORED (0 = use the default), so an editor can round-trip it
+        # without turning "default" into a pinned 30.
+        "credit_days_setting": int(settings["days"] or 0),
     }
 
 
@@ -664,8 +681,9 @@ def update_customer_credit_settings(
       and the profile use.
     * ``credit_days`` 0 falls back to ``DEFAULT_CREDIT_DAYS`` at order time.
     * Turning credit OFF blocks new credit orders only. What the shop already
-      owes stays open and collectable; the response carries the balance so the
-      app can say so.
+      owes stays open and collectable, and an open credit order can still be
+      amended (``invoice_creation._apply_credit_terms``); the response carries
+      the balance so the app can say so.
 
     Written with ``db.set_value`` rather than ``doc.save`` so an unrelated
     validation on the Customer (a dangling link, a v16 default) cannot block a
@@ -680,6 +698,9 @@ def update_customer_credit_settings(
         frappe.throw(_("customer is required"))
     if not frappe.db.exists("Customer", name):
         frappe.throw(_("Customer {0} was not found").format(name))
+    # db.set_value below bypasses DocPerm and User Permissions, so the doc-level
+    # check has to happen here, before the write, not after it.
+    frappe.has_permission("Customer", "write", doc=name, throw=True)
     for column in ("custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"):
         if not frappe.db.has_column("Customer", column):
             frappe.throw(_("Credit fields are not installed on this site. Run bench migrate."))
@@ -688,8 +709,11 @@ def update_customer_credit_settings(
     updates: Dict[str, Any] = {"custom_credit_allowed": 1 if allowed else 0}
 
     if credit_days not in (None, ""):
+        # int()/float() directly, never flt(): flt("abc") is 0, and 0 here
+        # means "the default" — a typo must be refused, not quietly accepted.
         try:
-            days = int(flt(credit_days))
+            days_value = float(str(credit_days).strip())
+            days = int(days_value) if days_value == int(days_value) else -1
         except Exception:
             days = -1
         if days < 0 or days > MAX_CREDIT_DAYS:
@@ -697,10 +721,17 @@ def update_customer_credit_settings(
         updates["custom_credit_days"] = days
 
     if credit_limit not in (None, ""):
+        # Same reason, and it matters more: flt("abc") is 0 and a limit of 0 is
+        # NO LIMIT. nan / inf are refused too (they would 500 in MariaDB).
+        import math
+
         try:
-            limit = flt(credit_limit, 2)
+            limit = float(str(credit_limit).strip())
         except Exception:
             limit = -1.0
+        if not math.isfinite(limit):
+            limit = -1.0
+        limit = round(limit, 2)
         if limit < 0:
             frappe.throw(_("Credit limit cannot be negative. Use 0 for no limit."))
         updates["custom_credit_limit_amount"] = limit

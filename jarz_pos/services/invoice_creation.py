@@ -1536,6 +1536,39 @@ def get_open_credit_balance(customer_name: str, exclude_invoice: str | None = No
     return round(total, 2)
 
 
+def _is_credit_debt_invoice(name: str | None) -> bool:
+    """Was ``name`` taken on account? Method OR the frozen terms stamp.
+
+    Never the mutable ``custom_payment_method`` alone — see ``utils/credit_utils``.
+    """
+    if not name:
+        return False
+    try:
+        row = frappe.db.get_value(
+            "Sales Invoice",
+            name,
+            ["custom_payment_method", "custom_credit_terms_days"],
+            as_dict=True,
+        )
+    except Exception:
+        try:
+            row = frappe.db.get_value(
+                "Sales Invoice", name, ["custom_payment_method"], as_dict=True
+            )
+        except Exception:
+            return False
+    if not row:
+        return False
+    from jarz_pos.utils.credit_utils import is_credit_payment_method
+
+    if is_credit_payment_method(row.get("custom_payment_method")):
+        return True
+    try:
+        return int(row.get("custom_credit_terms_days") or 0) > 0
+    except Exception:
+        return False
+
+
 def _apply_credit_terms(invoice_doc, customer_doc, logger, amended_from: str | None = None) -> None:
     """Gate a Credit order and freeze its terms onto the invoice.
 
@@ -1565,7 +1598,10 @@ def _apply_credit_terms(invoice_doc, customer_doc, logger, amended_from: str | N
 
     settings = _customer_credit_settings(customer_name)
 
-    if not settings["allowed"]:
+    # Switching a shop's credit off stops NEW credit orders. Amending one that
+    # is already on account is not a new grant, so it is not refused here —
+    # the limit and terms below still apply to the replacement.
+    if not settings["allowed"] and not _is_credit_debt_invoice(amended_from):
         message = (
             f"{display_name} is not set up for credit orders. "
             "Open the Customer record and tick 'Allow orders on credit' "

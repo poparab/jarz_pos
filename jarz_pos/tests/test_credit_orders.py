@@ -494,7 +494,7 @@ class CreditCreationGateTests(unittest.TestCase):
     def _customer(self):
         return SimpleNamespace(name="CUST-1", customer_name="Blue Bottle Coffee")
 
-    def _apply(self, settings, balance, grand_total=100.0):
+    def _apply(self, settings, balance, grand_total=100.0, amended_from=None, source=None):
         """Run the gate with a mocked frappe whose ``throw`` really throws."""
         from jarz_pos.services import invoice_creation
 
@@ -513,10 +513,31 @@ class CreditCreationGateTests(unittest.TestCase):
             mock_frappe.utils.add_days.side_effect = (
                 lambda date, days: f"{date}+{days}d"
             )
+            mock_frappe.db.get_value.return_value = source
             invoice_creation._apply_credit_terms(
-                inv, self._customer(), MagicMock()
+                inv, self._customer(), MagicMock(), amended_from=amended_from
             )
         return inv
+
+    def test_amending_an_open_credit_order_survives_credit_being_switched_off(self):
+        # Credit off stops NEW credit orders; editing one already on account
+        # is not a new grant (review of 47dab4d, W4).
+        inv = self._apply(
+            {"allowed": False, "days": 30, "limit": 0.0},
+            0.0,
+            amended_from="ACC-SINV-OLD",
+            source={"custom_payment_method": "Cash", "custom_credit_terms_days": 30},
+        )
+        self.assertEqual(inv.custom_credit_terms_days, 30)
+
+    def test_amending_a_non_credit_order_onto_credit_is_still_refused(self):
+        with self.assertRaises(RuntimeError):
+            self._apply(
+                {"allowed": False, "days": 30, "limit": 0.0},
+                0.0,
+                amended_from="ACC-SINV-OLD",
+                source={"custom_payment_method": "Cash", "custom_credit_terms_days": 0},
+            )
 
     def test_refuses_a_customer_not_set_up_for_credit(self):
         with self.assertRaises(RuntimeError) as ctx:
@@ -1351,6 +1372,26 @@ class CreditSettingsFromAppTests(unittest.TestCase):
     def test_a_cashier_cannot_grant_credit(self):
         with self.assertRaises(RuntimeError):
             self._call(roles=("POS User",))
+
+    def test_a_line_manager_cannot_grant_credit(self):
+        # Taking money is their job; extending exposure is not (review W3).
+        with self.assertRaises(RuntimeError):
+            self._call(roles=("jarz line manager",))
+
+    def test_the_customer_write_permission_is_checked_before_writing(self):
+        _result, mock_frappe = self._call()
+        mock_frappe.has_permission.assert_called_once_with(
+            "Customer", "write", doc="Shop", throw=True
+        )
+
+    def test_garbage_is_refused_never_read_as_zero(self):
+        # flt("abc") is 0 and a limit of 0 is NO LIMIT: must fail closed.
+        for bad in ("abc", "5,000 EGP", "nan", "inf"):
+            with self.assertRaises(RuntimeError, msg=bad):
+                self._call(credit_limit=bad)
+        for bad in ("abc", "7.5"):
+            with self.assertRaises(RuntimeError, msg=bad):
+                self._call(credit_days=bad)
 
     def test_a_plain_toggle_leaves_days_and_limit_alone(self):
         _result, mock_frappe = self._call(credit_allowed="1")
