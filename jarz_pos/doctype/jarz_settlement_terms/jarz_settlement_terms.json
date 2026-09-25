@@ -1,0 +1,232 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:customer",
+ "creation": "2026-09-25 00:00:00.000000",
+ "description": "How and when a B2B customer settles its credit (on-account) balance. Reminders and a collections list only: nothing here blocks an order. See jarz_pos.services.settlement_schedule.",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "customer",
+  "customer_name",
+  "enabled",
+  "column_break_identity",
+  "cycle",
+  "responsible_user",
+  "schedule_section",
+  "weekdays",
+  "week_interval",
+  "month_days",
+  "column_break_schedule",
+  "interval_days",
+  "anchor_date",
+  "reminders_section",
+  "remind_days_before",
+  "column_break_reminders",
+  "overdue_repeat_days",
+  "notes_section",
+  "notes",
+  "last_reminder_on",
+  "last_reminder_kind"
+ ],
+ "fields": [
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1,
+   "set_only_once": 1,
+   "unique": 1
+  },
+  {
+   "fetch_from": "customer.customer_name",
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Customer Name",
+   "read_only": 1
+  },
+  {
+   "default": "1",
+   "description": "Untick to stop reminders for this customer. The schedule still shows in the collections list.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "cycle",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Settlement Cycle",
+   "options": "On Delivery\nInvoice after Invoice\nWeekly\nDays of Month\nEvery N Days",
+   "reqd": 1
+  },
+  {
+   "description": "Who is reminded. Leave empty to remind every JARZ Manager.",
+   "fieldname": "responsible_user",
+   "fieldtype": "Link",
+   "label": "Responsible User",
+   "options": "User"
+  },
+  {
+   "fieldname": "schedule_section",
+   "fieldtype": "Section Break",
+   "label": "Schedule"
+  },
+  {
+   "depends_on": "eval:doc.cycle=='Weekly'",
+   "description": "Comma list of Mon,Tue,Wed,Thu,Fri,Sat,Sun (e.g. Thu).",
+   "fieldname": "weekdays",
+   "fieldtype": "Small Text",
+   "label": "Weekdays"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.cycle=='Weekly'",
+   "description": "Every N weeks (2 = fortnightly), counted from the anchor date.",
+   "fieldname": "week_interval",
+   "fieldtype": "Int",
+   "label": "Every N Weeks"
+  },
+  {
+   "depends_on": "eval:doc.cycle=='Days of Month'",
+   "description": "Comma list of 1-31 and/or 'last' (e.g. 15,last). A day past the month's length means its last day.",
+   "fieldname": "month_days",
+   "fieldtype": "Small Text",
+   "label": "Days of Month"
+  },
+  {
+   "fieldname": "column_break_schedule",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.cycle=='Every N Days'",
+   "fieldname": "interval_days",
+   "fieldtype": "Int",
+   "label": "Every N Days"
+  },
+  {
+   "depends_on": "eval:doc.cycle=='Every N Days' || (doc.cycle=='Weekly' && cint(doc.week_interval) > 1)",
+   "description": "Start of the count for Every N Days and for weekly schedules repeating every 2+ weeks. Defaults to the day the terms were saved.",
+   "fieldname": "anchor_date",
+   "fieldtype": "Date",
+   "label": "Anchor Date"
+  },
+  {
+   "fieldname": "reminders_section",
+   "fieldtype": "Section Break",
+   "label": "Reminders"
+  },
+  {
+   "default": "1",
+   "description": "Send a 'due soon' reminder this many days ahead (0 = only on the day).",
+   "fieldname": "remind_days_before",
+   "fieldtype": "Int",
+   "label": "Remind Days Before",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_reminders",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "2",
+   "description": "Repeat the overdue reminder every N days while unpaid.",
+   "fieldname": "overdue_repeat_days",
+   "fieldtype": "Int",
+   "label": "Repeat Overdue Every (Days)",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "notes_section",
+   "fieldtype": "Section Break",
+   "label": "Agreed Terms"
+  },
+  {
+   "description": "Free text: returns, discounts, anything agreed with the customer.",
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "last_reminder_on",
+   "fieldtype": "Date",
+   "hidden": 1,
+   "label": "Last Reminder On",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_reminder_kind",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Reminder Kind",
+   "no_copy": 1,
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-09-25 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Settlement Terms",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "jarz line manager"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ line manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "customer_name",
+ "track_changes": 1
+}

@@ -467,6 +467,11 @@ doc_events = {
         # the WooCommerce inbound lane too, which never goes through that module.
         # Never raises, never touches the invoice, idempotent per (invoice, type).
         "jarz_pos.services.territory_exceptions.record_territory_exception_on_submit",
+        # B2B settlement terms: a credit order for an "Invoice after Invoice"
+        # shop with older open credit invoices pushes "collect the previous
+        # invoice(s) with this delivery". Credit-only fast exit, queued after
+        # commit, never raises, suppressed in test runs.
+        "jarz_pos.services.settlement_reminders.on_sales_invoice_submit",
     ],
     # Emit state-change events for already-submitted invoices edited elsewhere
     "on_update_after_submit": [
@@ -572,6 +577,10 @@ scheduler_events = {
         # raises; bookkeeping on the rows makes a same-day re-run a no-op.
         "0 9 * * *": [
             "jarz_pos.services.task_reminders.run_task_reminders",
+            # B2B settlement reminders (due soon / due today / overdue) and the
+            # tagged [jarz:settlement] ToDo per customer. Bookkeeping on the
+            # terms record makes a same-day re-run a no-op. Never raises.
+            "jarz_pos.services.settlement_reminders.run_settlement_reminders",
         ],
     },
 }

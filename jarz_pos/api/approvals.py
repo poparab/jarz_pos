@@ -36,6 +36,8 @@ Q_CUSTOM_SHIPPING = "custom_shipping"
 #: Task Board (``api.tasks``): open work on my plate, and cards waiting on my review.
 Q_TASKS_ASSIGNED = "tasks_assigned"
 Q_TASKS_REVIEW = "tasks_review"
+#: B2B credit collections (``api.settlement_terms``): shops overdue or due today.
+Q_CREDIT_COLLECTIONS = "credit_collections"
 
 
 #: One Error Log row per broken queue per this many seconds. The endpoint is
@@ -201,6 +203,20 @@ def _tasks_review_queue() -> Optional[Dict[str, Any]]:
     return {"count": task_board.count_review_waiting(viewer)}
 
 
+def _credit_collections_queue() -> Optional[Dict[str, Any]]:
+    from jarz_pos.api.manager import _has_manager_dashboard_access
+    from jarz_pos.api.settlement_terms import count_collections_needing_attention
+
+    # The credit-ledger read gate (credit._ensure_credit_ledger_access is this
+    # predicate plus a throw), so the badge never leads to a 403.
+    if not _has_manager_dashboard_access():
+        return None
+    # Customers whose settlement is overdue or due today, in the caller's
+    # branches -- the top of get_collections_due. Cached per user (the badge is
+    # polled every minute and this walks every open credit invoice).
+    return {"count": int(count_collections_needing_attention() or 0)}
+
+
 _QUEUES: List[tuple] = [
     (Q_EXPENSES, _expenses_queue),
     (Q_EMPLOYEE_ADVANCES, _employee_advances_queue),
@@ -209,6 +225,7 @@ _QUEUES: List[tuple] = [
     (Q_CUSTOM_SHIPPING, _custom_shipping_queue),
     (Q_TASKS_ASSIGNED, _tasks_assigned_queue),
     (Q_TASKS_REVIEW, _tasks_review_queue),
+    (Q_CREDIT_COLLECTIONS, _credit_collections_queue),
 ]
 
 

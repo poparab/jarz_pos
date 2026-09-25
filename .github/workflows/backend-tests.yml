@@ -640,6 +640,19 @@ jobs:
             # a line manager can only assign subtasks to themselves, and that
             # the actor is never pushed about their own action.
             test_task_board
+            # B2B settlement terms (Jarz Settlement Terms). Both modules are
+            # pure / mocked, so they are meaningful on the pre-migrate first
+            # run. test_settlement_schedule pins the date arithmetic -- an
+            # invoice is due at the first schedule date STRICTLY after it was
+            # posted, a fortnight is counted from the anchor week, the 31st
+            # clamps onto 30-day months and February -- because a wrong rule
+            # never errors, it just tells a manager to chase a shop that owes
+            # nothing yet (or stay quiet about one that is weeks late).
+            # test_settlement_terms_api pins save validation before any write,
+            # the collections order, bookkeeping-before-push, the tagged-ToDo
+            # handling, and that no reminder leaves a test run.
+            test_settlement_schedule
+            test_settlement_terms_api
           )
           rc=0
           for m in "${MODULES[@]}"; do
