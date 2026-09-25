@@ -751,6 +751,34 @@ class CreditPaymentFifoTests(unittest.TestCase):
         self.assertEqual(pe.party, "CUST-1")
         pe.submit.assert_called_once()
 
+    def test_a_same_figure_payment_for_another_order_is_not_a_replay(self):
+        """Paying order A then order B for the same figure is two payments."""
+        from jarz_pos.api import credit as credit_api
+
+        with patch.object(credit_api, "frappe") as mock_frappe:
+            # Recent same-amount PE exists, but it paid a different invoice.
+            mock_frappe.get_all.side_effect = [["PE-PAID-A"], []]
+            self.assertIsNone(
+                credit_api._existing_credit_payment(
+                    customer="CUST-1",
+                    reference_no=None,
+                    amount=500.0,
+                    paid_to="Cash - T",
+                    invoice="INV-B",
+                )
+            )
+            # Without a named invoice the old heuristic still catches it.
+            mock_frappe.get_all.side_effect = [["PE-PAID-A"]]
+            self.assertEqual(
+                credit_api._existing_credit_payment(
+                    customer="CUST-1",
+                    reference_no=None,
+                    amount=500.0,
+                    paid_to="Cash - T",
+                ),
+                "PE-PAID-A",
+            )
+
     def test_a_replayed_payment_is_not_taken_twice(self):
         from jarz_pos.api import credit as credit_api
 

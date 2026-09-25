@@ -631,7 +631,12 @@ def get_customer_credit_profile(customer: str) -> Dict[str, Any]:
 
 
 def _existing_credit_payment(
-    *, customer: str, reference_no: Optional[str], amount: float, paid_to: str
+    *,
+    customer: str,
+    reference_no: Optional[str],
+    amount: float,
+    paid_to: str,
+    invoice: Optional[str] = None,
 ) -> Optional[str]:
     """A Payment Entry that already recorded THIS handover, or ``None``.
 
@@ -648,7 +653,9 @@ def _existing_credit_payment(
       submitted in the last two minutes. Deliberately narrow: a shop paying the
       same round figure twice in one minute is possible, so this window is short
       enough that a genuine second handover is not swallowed, and the caller is
-      told which PE was reused either way.
+      told which PE was reused either way. When the handover names an
+      ``invoice``, only a recent PE that paid THAT invoice counts: paying order
+      A then order B for the same figure is two payments, not one.
     """
     try:
         if reference_no:
@@ -679,8 +686,20 @@ def _existing_credit_payment(
                 "creation": [">=", cutoff],
             },
             pluck="name",
-            limit_page_length=1,
+            limit_page_length=20 if invoice else 1,
         )
+        if recent and invoice:
+            recent = frappe.get_all(
+                "Payment Entry Reference",
+                filters={
+                    "parenttype": "Payment Entry",
+                    "parent": ["in", recent],
+                    "reference_doctype": "Sales Invoice",
+                    "reference_name": invoice,
+                },
+                pluck="parent",
+                limit_page_length=1,
+            )
         if recent:
             return str(recent[0])
     except Exception:
@@ -703,10 +722,10 @@ def record_credit_payment(
 ) -> Dict[str, Any]:
     """Take one payment against a shop's credit balance, allocated FIFO.
 
-    THIS IS THE OWNER'S ACTUAL PATTERN, and it is why there is no
-    ``invoice`` argument: "a lot of cases it is an invoice after invoice, so when
-    I send them the second invoice they pay the first invoice." The shop hands
-    over money that clears the previous invoice(s). They do not name one, and an
+    THIS IS THE OWNER'S USUAL PATTERN, and it is why ``invoice`` is optional:
+    "a lot of cases it is an invoice after invoice, so when I send them the
+    second invoice they pay the first invoice." The shop hands over money that
+    clears the previous invoice(s). Usually they do not name one, and an
     endpoint that made them name one would be recording a fiction.
 
     So: ONE Receive Payment Entry, allocated oldest-invoice-first across every
@@ -830,6 +849,7 @@ def record_credit_payment(
         reference_no=idempotency_token,
         amount=amount,
         paid_to=paid_to,
+        invoice=invoice,
     )
     if replay:
         return {
