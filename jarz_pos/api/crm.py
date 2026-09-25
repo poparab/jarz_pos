@@ -1743,6 +1743,19 @@ def link_existing_customer(
                 "Only Opportunities originating from a Lead or Customer can be linked."
             )
 
+    if changed and linked_via == "Lead":
+        # Settlement terms the rep agreed on the Lead follow it onto the linked
+        # Customer (no Customer insert happens here, so the after_insert doc
+        # event never fires). Only when the Customer has none. safe_carry_over
+        # swallows everything except a deadlock / lock-wait timeout, which has
+        # already rolled back this whole request and must propagate.
+        from jarz_pos.services.settlement_lead_terms import safe_carry_over
+
+        safe_carry_over(
+            party_name if party_doctype == "Lead" else current_party,
+            customer,
+        )
+
     return {
         "success": True,
         "party_doctype": party_doctype,

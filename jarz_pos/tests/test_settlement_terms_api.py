@@ -189,6 +189,7 @@ class TestGetSettlementTerms(unittest.TestCase):
         }
         with patch.object(st, "_ensure_credit_ledger_access"), \
                 patch.object(st, "_require_customer", return_value="C1"), \
+                patch.object(st, "_carry_lead_terms_to", return_value=None), \
                 patch.object(st, "_load_terms_row", return_value=row), \
                 patch.object(st, "_open_credit_invoices", return_value=[_inv("S1", D(2026, 9, 10), 100)]), \
                 patch.object(st, "_credit_currency", return_value="EGP"), \
@@ -214,6 +215,7 @@ class TestGetSettlementTerms(unittest.TestCase):
         fr.db.get_value.return_value = "Cafe One"
         with patch.object(st, "frappe", fr), patch.object(st, "_ensure_credit_ledger_access"), \
                 patch.object(st, "_require_customer", return_value="C1"), \
+                patch.object(st, "_carry_lead_terms_to", return_value=None), \
                 patch.object(st, "_load_terms_row", return_value=None), \
                 patch.object(st, "_open_credit_invoices", return_value=[_inv("S1", D(2026, 9, 10), 100)]), \
                 patch.object(st, "_credit_currency", return_value="EGP"), \

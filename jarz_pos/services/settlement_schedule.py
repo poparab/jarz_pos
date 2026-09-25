@@ -99,6 +99,9 @@ UPCOMING_COUNT = 3
 #: Hard ceiling on a day-by-day scan, so a malformed range cannot spin.
 _MAX_SCAN_DAYS = 3700
 
+#: Longest free-text ``notes`` the validator accepts (API, Desk and Lead JSON).
+NOTES_MAX_LENGTH = 2000
+
 
 class SettlementTermsError(ValueError):
     """A terms value that cannot be stored. The message is user-facing."""
@@ -327,6 +330,11 @@ def normalize_terms_input(values: Dict[str, Any]) -> Dict[str, Any]:
         "responsible_user": (str(values.get("responsible_user") or "").strip() or None),
         "notes": (str(values.get("notes") or "").strip() or None),
     }
+
+    if out["notes"] and len(out["notes"]) > NOTES_MAX_LENGTH:
+        raise SettlementTermsError(
+            f"Notes are too long ({len(out['notes'])} characters; at most {NOTES_MAX_LENGTH})."
+        )
 
     if cycle == CYCLE_WEEKLY:
         days = parse_weekdays(values.get("weekdays"), strict=True)

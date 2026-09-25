@@ -159,6 +159,11 @@ after_migrate = [
     # is already serving, and the invoice-creation gate reads these columns on
     # the first credit order placed after a deploy. Never raises.
     "jarz_pos.setup.credit_terms.ensure_credit_terms_fields",
+    # Lead.custom_settlement_terms (JSON): payment terms a rep agrees with a
+    # Lead before the first order; copied to Jarz Settlement Terms when the
+    # Lead becomes a Customer (services/settlement_lead_terms). Seeder rather
+    # than fixture for the same reason as the line above. Never raises.
+    "jarz_pos.setup.settlement_terms_leads.ensure_lead_settlement_terms_field",
     # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
     "jarz_pos.setup.crm_setup.ensure_crm_setup",
     # Create the Production Operator role + role profile + doc perms (idempotent)
@@ -378,6 +383,13 @@ doc_events = {
     "Employee": {
         "after_insert": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
         "on_update": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
+    },
+    # B2B settlement terms agreed on a Lead follow it onto the Customer created
+    # from it (Customer.lead_name). Zero queries for a Customer without
+    # lead_name (POS walk-ins, the WooCommerce bulk sync); savepoint-fenced,
+    # NEVER raises, never blocks the Customer insert.
+    "Customer": {
+        "after_insert": "jarz_pos.services.settlement_lead_terms.on_customer_after_insert",
     },
     # Keep Address.custom_geo_confidence in step with custom_geo_source. This
     # fires on EVERY Address save site-wide, including the WooCommerce bulk

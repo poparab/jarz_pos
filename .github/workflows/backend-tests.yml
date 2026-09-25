@@ -653,6 +653,14 @@ jobs:
             # handling, and that no reminder leaves a test run.
             test_settlement_schedule
             test_settlement_terms_api
+            # Settlement terms on a Lead (JSON on Lead.custom_settlement_terms)
+            # and their carry-over to the Customer. Mocked. Pins the same
+            # validator for both parties, the converted-lead redirect, that the
+            # Customer after_insert copy happens once, never overwrites existing
+            # terms, never raises (a deadlock is re-raised), that every decision
+            # after the Lead lock is a locking read, and the gate (B2B Sales Rep
+            # on Leads + Company customers only and never delete, cashier out).
+            test_settlement_terms_leads
           )
           rc=0
           for m in "${MODULES[@]}"; do
