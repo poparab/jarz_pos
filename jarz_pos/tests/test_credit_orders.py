@@ -612,7 +612,7 @@ class CreditPaymentFifoTests(unittest.TestCase):
             },
         ]
 
-    def _record(self, amount):
+    def _record(self, amount, invoice=None):
         from jarz_pos.api import credit as credit_api
 
         pe = MagicMock()
@@ -654,6 +654,7 @@ class CreditPaymentFifoTests(unittest.TestCase):
             mock_frappe.db.get_value.return_value = "Test Company"
             mock_frappe.new_doc.return_value = pe
             mock_frappe.get_meta.return_value.get_field.return_value = None
+            mock_frappe.throw.side_effect = _throwing
 
             result = credit_api.record_credit_payment(
                 customer="CUST-1",
@@ -661,6 +662,7 @@ class CreditPaymentFifoTests(unittest.TestCase):
                 pos_profile="POS-001",
                 payment_method="Cash",
                 posting_date="2026-09-10",
+                invoice=invoice,
             )
         return result, pe
 
@@ -707,6 +709,35 @@ class CreditPaymentFifoTests(unittest.TestCase):
         # the shop walks away.
         self.assertEqual(result["notice_code"], "recorded_as_advance")
         self.assertTrue(result["notice"])
+
+    def test_a_named_invoice_is_paid_and_the_older_ones_are_left_open(self):
+        """The shop pays for the new order, not the old one (owner, 2026-09-25)."""
+        result, pe = self._record(500.0, invoice="INV-C")
+
+        allocations = result["allocations"]
+        self.assertEqual([a["invoice"] for a in allocations], ["INV-C"])
+        self.assertTrue(allocations[0]["fully_settled"])
+        self.assertEqual(result["target_invoice"], "INV-C")
+        self.assertEqual(result["remaining_balance"], 500.0)
+        reference_calls = [
+            call for call in pe.append.call_args_list if call.args[0] == "references"
+        ]
+        self.assertEqual(
+            [call.args[1]["reference_name"] for call in reference_calls], ["INV-C"]
+        )
+
+    def test_a_named_invoice_overpaid_spills_oldest_first(self):
+        # 500 clears C, the remaining 100 goes to the oldest (A), never stranded.
+        result, _pe = self._record(600.0, invoice="INV-C")
+
+        allocations = result["allocations"]
+        self.assertEqual([a["invoice"] for a in allocations], ["INV-C", "INV-A"])
+        self.assertEqual([a["allocated_amount"] for a in allocations], [500.0, 100.0])
+        self.assertEqual(result["unallocated_amount"], 0.0)
+
+    def test_a_named_invoice_that_is_not_open_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            self._record(100.0, invoice="INV-ELSEWHERE")
 
     def test_cash_lands_in_the_branch_drawer(self):
         """Shift close counts this money, so it must be the profile's own account."""

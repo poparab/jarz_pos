@@ -699,6 +699,7 @@ def record_credit_payment(
     posting_date: Optional[str] = None,
     remarks: Optional[str] = None,
     idempotency_token: Optional[str] = None,
+    invoice: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Take one payment against a shop's credit balance, allocated FIFO.
 
@@ -710,6 +711,12 @@ def record_credit_payment(
 
     So: ONE Receive Payment Entry, allocated oldest-invoice-first across every
     open credit invoice of that customer.
+
+    **Unless they DO name one.** Sometimes the shop pays for the order that just
+    arrived and leaves the older one open (owner, 2026-09-25). ``invoice`` then
+    goes to the front of the queue: it is filled first, and anything left over
+    falls back to oldest-first across the rest, so an over-payment still clears
+    real debt instead of being stranded as an advance.
 
     * **Partial payment** part-allocates the oldest invoice and stops. The rest
       of that invoice stays outstanding and keeps its place at the front of the
@@ -743,6 +750,8 @@ def record_credit_payment(
         idempotency_token: Optional client-supplied replay key. Stored as the
             PE's ``reference_no``; resending the same token returns the original
             entry instead of taking the money twice.
+        invoice: Optional Sales Invoice to pay first. Must be one of this
+            customer's open credit invoices, or the call is refused.
 
     Returns:
         ``success``, ``payment_entry``, ``amount``, ``allocated_amount``,
@@ -765,6 +774,7 @@ def record_credit_payment(
     pos_profile = str(pos_profile or "").strip()
     remarks = (remarks or "").strip() or None
     idempotency_token = (idempotency_token or "").strip() or None
+    invoice = str(invoice or "").strip() or None
 
     if not customer:
         frappe.throw(_("customer is required"))
@@ -836,6 +846,17 @@ def record_credit_payment(
         }
 
     open_rows = _open_credit_invoices(customers=[customer])
+
+    if invoice:
+        # Refused rather than silently falling back to FIFO: the operator was
+        # told this order would be cleared, and quietly clearing another one is
+        # exactly the surprise the targeted payment exists to prevent.
+        target = [r for r in open_rows if r.get("name") == invoice]
+        if not target or flt(target[0].get("outstanding_amount")) <= 0.005:
+            frappe.throw(
+                _("Invoice {0} is not an open credit invoice of {1}.").format(invoice, customer)
+            )
+        open_rows = target + [r for r in open_rows if r.get("name") != invoice]
 
     posting = getdate(posting_date) if posting_date else getdate(nowdate())
 
@@ -936,6 +957,7 @@ def record_credit_payment(
         "unallocated_amount": unallocated,
         "allocations": allocations,
         "remaining_balance": remaining_balance,
+        "target_invoice": invoice,
         "cash_account": paid_to,
         "currency": _credit_currency(),
     }
