@@ -131,6 +131,17 @@ def _ensure_credit_payment_access() -> None:
         frappe.throw(_("Not permitted: Manager access required"), frappe.PermissionError)
 
 
+def _can_manage_credit_settings() -> bool:
+    """May the caller switch a shop's credit on/off and set its days / limit?
+
+    The same set as :func:`_ensure_credit_payment_access`, non-throwing, so the
+    profile can tell the app whether to show the edit button. Granting credit
+    with no limit is a money decision; a rep or cashier sees, never sets.
+    """
+    roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
+    return bool(roles.intersection(ROLES.ADMIN | ROLES.LINE_MANAGER_TIER))
+
+
 def _allowed_profiles() -> List[str]:
     from jarz_pos.api.manager import _current_user_allowed_profiles
 
@@ -627,7 +638,99 @@ def get_customer_credit_profile(customer: str) -> Dict[str, Any]:
         "open_invoice_count": len(open_rows),
         "oldest_invoice_date": oldest or None,
         "currency": _credit_currency(),
+        "can_edit_settings": _can_manage_credit_settings(),
     }
+
+
+#: Upper bound on credit days. Anything past a year is a typo, not a term.
+MAX_CREDIT_DAYS = 365
+
+
+@frappe.whitelist(allow_guest=False)
+def update_customer_credit_settings(
+    customer: str,
+    credit_allowed: Union[int, str, bool],
+    credit_days: Optional[Union[int, str]] = None,
+    credit_limit: Optional[Union[float, str]] = None,
+) -> Dict[str, Any]:
+    """Switch a shop's credit on or off and set its days / limit, from the app.
+
+    The same three Customer columns Desk edits (``custom_credit_allowed`` /
+    ``custom_credit_days`` / ``custom_credit_limit_amount``). ``None`` for days
+    or limit leaves that column as it is, so a plain on/off toggle cannot
+    silently wipe a limit.
+
+    * ``credit_limit`` 0 means NO LIMIT — the same convention the invoice gate
+      and the profile use.
+    * ``credit_days`` 0 falls back to ``DEFAULT_CREDIT_DAYS`` at order time.
+    * Turning credit OFF blocks new credit orders only. What the shop already
+      owes stays open and collectable; the response carries the balance so the
+      app can say so.
+
+    Written with ``db.set_value`` rather than ``doc.save`` so an unrelated
+    validation on the Customer (a dangling link, a v16 default) cannot block a
+    credit decision; the change is recorded as a Comment on the Customer so the
+    audit trail survives.
+    """
+    if not _can_manage_credit_settings():
+        frappe.throw(_("Not permitted: Manager access required"), frappe.PermissionError)
+
+    name = str(customer or "").strip()
+    if not name:
+        frappe.throw(_("customer is required"))
+    if not frappe.db.exists("Customer", name):
+        frappe.throw(_("Customer {0} was not found").format(name))
+    for column in ("custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"):
+        if not frappe.db.has_column("Customer", column):
+            frappe.throw(_("Credit fields are not installed on this site. Run bench migrate."))
+
+    allowed = str(credit_allowed).strip().lower() in {"1", "true", "yes", "on"}
+    updates: Dict[str, Any] = {"custom_credit_allowed": 1 if allowed else 0}
+
+    if credit_days not in (None, ""):
+        try:
+            days = int(flt(credit_days))
+        except Exception:
+            days = -1
+        if days < 0 or days > MAX_CREDIT_DAYS:
+            frappe.throw(_("Credit days must be between 0 and {0}.").format(MAX_CREDIT_DAYS))
+        updates["custom_credit_days"] = days
+
+    if credit_limit not in (None, ""):
+        try:
+            limit = flt(credit_limit, 2)
+        except Exception:
+            limit = -1.0
+        if limit < 0:
+            frappe.throw(_("Credit limit cannot be negative. Use 0 for no limit."))
+        updates["custom_credit_limit_amount"] = limit
+
+    before = _customer_credit_settings(name)
+    frappe.db.set_value("Customer", name, updates, update_modified=True)
+
+    after = _customer_credit_settings(name)
+    changes = []
+    if before["allowed"] != after["allowed"]:
+        changes.append(_("credit {0}").format(_("enabled") if after["allowed"] else _("disabled")))
+    if before["days"] != after["days"]:
+        changes.append(_("days {0} → {1}").format(before["days"], after["days"]))
+    if flt(before["limit"], 2) != flt(after["limit"], 2):
+        changes.append(
+            _("limit {0} → {1}").format(
+                flt(before["limit"], 2) or _("none"), flt(after["limit"], 2) or _("none")
+            )
+        )
+    if changes:
+        try:
+            frappe.get_doc("Customer", name).add_comment(
+                "Info", _("Credit settings changed from the app: {0}").format(", ".join(changes))
+            )
+        except Exception:
+            _log_credit_error(f"update_customer_credit_settings: audit comment failed for {name}")
+
+    profile = get_customer_credit_profile(name)
+    profile["changed"] = bool(changes)
+    return profile
 
 
 def _existing_credit_payment(

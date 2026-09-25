@@ -1324,3 +1324,78 @@ class CreditCreationGateNormalisationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CreditSettingsFromAppTests(unittest.TestCase):
+    """update_customer_credit_settings: the in-app credit switch (2026-09-26)."""
+
+    def _call(self, roles=("POS Manager",), before=None, after=None, **kwargs):
+        from jarz_pos.api import credit as credit_api
+
+        before = before or {"allowed": False, "days": 0, "limit": 0.0}
+        after = after or {"allowed": True, "days": 30, "limit": 0.0}
+        with patch.object(credit_api, "frappe") as mock_frappe, patch.object(
+            credit_api, "_customer_credit_settings", side_effect=[before, after]
+        ), patch.object(
+            credit_api, "get_customer_credit_profile", return_value={"success": True}
+        ):
+            mock_frappe.get_roles.return_value = list(roles)
+            mock_frappe.throw.side_effect = _throwing
+            mock_frappe.db.exists.return_value = True
+            mock_frappe.db.has_column.return_value = True
+            args = {"customer": "Shop", "credit_allowed": 1}
+            args.update(kwargs)
+            result = credit_api.update_customer_credit_settings(**args)
+        return result, mock_frappe
+
+    def test_a_cashier_cannot_grant_credit(self):
+        with self.assertRaises(RuntimeError):
+            self._call(roles=("POS User",))
+
+    def test_a_plain_toggle_leaves_days_and_limit_alone(self):
+        _result, mock_frappe = self._call(credit_allowed="1")
+        mock_frappe.db.set_value.assert_called_once_with(
+            "Customer", "Shop", {"custom_credit_allowed": 1}, update_modified=True
+        )
+
+    def test_days_and_limit_are_written_when_given(self):
+        _result, mock_frappe = self._call(
+            credit_allowed="true", credit_days="15", credit_limit="5000"
+        )
+        mock_frappe.db.set_value.assert_called_once_with(
+            "Customer",
+            "Shop",
+            {
+                "custom_credit_allowed": 1,
+                "custom_credit_days": 15,
+                "custom_credit_limit_amount": 5000.0,
+            },
+            update_modified=True,
+        )
+
+    def test_switching_off_is_a_write_of_zero(self):
+        _result, mock_frappe = self._call(
+            credit_allowed="0",
+            before={"allowed": True, "days": 30, "limit": 0.0},
+            after={"allowed": False, "days": 30, "limit": 0.0},
+        )
+        self.assertEqual(
+            mock_frappe.db.set_value.call_args.args[2], {"custom_credit_allowed": 0}
+        )
+
+    def test_a_negative_limit_or_absurd_days_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            self._call(credit_limit="-1")
+        with self.assertRaises(RuntimeError):
+            self._call(credit_days="400")
+
+    def test_a_change_leaves_an_audit_comment(self):
+        result, mock_frappe = self._call()
+        mock_frappe.get_doc.return_value.add_comment.assert_called_once()
+        self.assertTrue(result["changed"])
+
+    def test_no_change_leaves_no_comment(self):
+        same = {"allowed": True, "days": 30, "limit": 0.0}
+        result, mock_frappe = self._call(before=dict(same), after=dict(same))
+        mock_frappe.get_doc.return_value.add_comment.assert_not_called()
+        self.assertFalse(result["changed"])
