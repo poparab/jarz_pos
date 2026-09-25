@@ -322,6 +322,14 @@ def delete_settlement_terms(customer: str) -> Dict[str, Any]:
         existing = frappe.db.get_value(TERMS_DOCTYPE, {"customer": name}, "name")
         if existing:
             frappe.delete_doc(TERMS_DOCTYPE, existing, ignore_permissions=True)
+            # The daily pass only walks existing terms, so close our tagged
+            # ToDos now or they stay open forever.
+            from jarz_pos.services.settlement_reminders import sync_settlement_todo
+
+            try:
+                sync_settlement_todo(name, None, [], "")
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), f"settlement_todo_close_failed:{name}"[:140])
     invalidate_collections_count_cache()
     return _terms_payload(name)
 

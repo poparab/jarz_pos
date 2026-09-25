@@ -1901,6 +1901,9 @@ def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[s
         "invoice_id": data_payload.get("invoice_id", ""),
         "notification_id": data_payload.get("notification_id", ""),
         "pos_profile": data_payload.get("pos_profile", ""),
+        # Settlement reminders: the service worker tags and links by shop.
+        "customer": data_payload.get("customer", ""),
+        "kind": data_payload.get("kind", ""),
         "url": _get_webpush_link(),
     })
 

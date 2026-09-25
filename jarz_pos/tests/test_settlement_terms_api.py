@@ -492,6 +492,11 @@ class TestInvoiceAfterInvoiceTrigger(unittest.TestCase):
         self.assertEqual(args[3], 100.0)
         self.assertEqual(kwargs["invoice"], "SINV-2")
 
+    def test_amendment_does_not_ask_again(self):
+        rows = [{"name": "SINV-1", "outstanding_amount": 100}]
+        _fr, push = self._run(self._doc(amended_from="SINV-0"), open_rows=rows)
+        push.assert_not_called()
+
     def test_stamp_alone_counts_as_credit(self):
         rows = [{"name": "SINV-1", "outstanding_amount": 100}]
         _fr, push = self._run(self._doc(method="Instapay", stamp=30), open_rows=rows)

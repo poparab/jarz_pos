@@ -401,6 +401,15 @@ class TestPlanReminder(unittest.TestCase):
         t = weekly("Thu")
         self.assertIsNone(ss.plan_reminder(t, ss.compute_status(t, [], FRI), FRI))
 
+    def test_due_today_not_throttled_by_overdue_repeat(self):
+        # Mon+Tue shop, repeat 2: Monday's due-today went out and was paid;
+        # Tuesday's new money must still be announced on Tuesday.
+        t = weekly("Mon,Tue", overdue_repeat_days=2,
+                   last_reminder_on="2026-09-21", last_reminder_kind="due_today")
+        tue = D(2026, 9, 22)
+        status = ss.compute_status(t, [inv("A", "2026-09-21", 60)], tue)
+        self.assertEqual(ss.plan_reminder(t, status, tue), ss.KIND_DUE_TODAY)
+
     def test_invoice_after_invoice_due_today_repeats_on_cadence(self):
         t = terms(cycle="Invoice after Invoice", overdue_repeat_days=3,
                   last_reminder_on="2026-09-24", last_reminder_kind="due_today")

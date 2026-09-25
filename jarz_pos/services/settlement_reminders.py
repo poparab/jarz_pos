@@ -389,13 +389,19 @@ def _process_terms_row(
 
     todo_on = ss.todo_date(status, today)
     todo_amount = status["due_now_amount"] if status["due_now_amount"] > ss.MONEY_EPSILON else status["next_due_amount"]
-    sync_settlement_todo(
-        customer,
-        todo_on,
-        recipients,
-        f"Collect {todo_amount:,.2f} {currency} from {customer_name} ({description})",
-        summary,
-    )
+    try:
+        sync_settlement_todo(
+            customer,
+            todo_on,
+            recipients,
+            f"Collect {todo_amount:,.2f} {currency} from {customer_name} ({description})",
+            summary,
+        )
+    except Exception:
+        # The ToDo is a convenience; the push is the reminder. A ToDo failure
+        # must not cost this customer their reminder.
+        summary["errors"] = summary.get("errors", 0) + 1
+        _safe_log(f"settlement_todo_sync_failed:{customer}")
 
     kind = ss.plan_reminder(terms, status, today)
     if not kind:
@@ -498,6 +504,10 @@ def on_sales_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
         if not doc or not getattr(doc, "name", None):
             return
         if int(getattr(doc, "is_return", 0) or 0):
+            return
+        if getattr(doc, "amended_from", None):
+            # An amendment replaces an order already announced; the same
+            # delivery must not ask for the previous invoice(s) twice.
             return
         if not _is_credit_invoice(doc):
             return  # the overwhelmingly common case: no DB work at all

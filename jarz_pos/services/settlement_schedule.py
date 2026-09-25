@@ -826,7 +826,13 @@ def plan_reminder(terms: Optional[Dict[str, Any]], status: Dict[str, Any], today
     due_now = _money(status.get("due_now_amount"))
     if overdue > MONEY_EPSILON and _repeat_ok(KIND_OVERDUE):
         return KIND_OVERDUE
-    if due_now - overdue > MONEY_EPSILON and _repeat_ok(KIND_DUE_TODAY):
+    # A due date is announced once, on its day (``last_on == day`` above). The
+    # overdue repeat must not throttle it: on a cycle shorter than the repeat
+    # (Mon+Tue, every day) it would silence every other real due date. The one
+    # exception is Invoice after Invoice, whose "due today" is the same unpaid
+    # set carried day after day -- that one repeats like an overdue.
+    carried = canonical_cycle(terms.get("cycle")) == CYCLE_INVOICE_AFTER_INVOICE
+    if due_now - overdue > MONEY_EPSILON and (not carried or _repeat_ok(KIND_DUE_TODAY)):
         return KIND_DUE_TODAY
     ahead = int(terms.get("remind_days_before") or 0)
     upcoming = _to_date_lenient(status.get("next_due_date"))
