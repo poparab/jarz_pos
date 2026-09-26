@@ -7,9 +7,10 @@ that overwrite the source's method, and the replacement ``ACC-SINV-2026-18471-1`
 went Out for Delivery stamped Cash. The Woo outbound sync then pushed that label to
 the website order as ``cod``.
 
-The money and the label have to agree: when a submitted Payment Entry is carried
-onto the replacement, the source's method is carried with it, whatever the client
-sends. Unpaid, Employee and credit orders are unchanged.
+The money and the label have to agree: when the carried Payment Entry settles the
+replacement in full, the source's method is kept whatever the client sends. When
+the edit leaves a balance, the cashier's chosen method stands — it says how the
+extra will be collected. Unpaid, Employee and credit orders are unchanged.
 
 Pure-Python unit tests in the style of ``test_amendment_shipping_request``.
 """
@@ -77,15 +78,19 @@ class TestEligibilityTellsThePosTheMethod(unittest.TestCase):
 
             return get_invoice_amendment_eligibility(_source(**extra))
 
-    def test_a_paid_order_reports_its_locked_method(self):
-        out = self._eligibility({"return_value": {"can_migrate": True, "has_payment": True}})
+    def test_a_paid_order_reports_its_method_and_paid_amount(self):
+        out = self._eligibility(
+            {"return_value": {"can_migrate": True, "has_payment": True, "allocated_total": 480.0}}
+        )
         self.assertTrue(out["can_amend"])
         self.assertEqual(out["amendment_payment_method"], "Kashier Card")
+        self.assertEqual(out["amendment_paid_amount"], 480.0)
 
     def test_an_unpaid_order_reports_none(self):
         out = self._eligibility({"return_value": {"can_migrate": True, "has_payment": False}})
         self.assertTrue(out["can_amend"])
         self.assertIsNone(out["amendment_payment_method"])
+        self.assertIsNone(out["amendment_paid_amount"])
 
     def test_a_failed_lookup_reports_none_and_stays_amendable(self):
         with patch("jarz_pos.api.manager.frappe.log_error"):
@@ -98,7 +103,7 @@ class TestJobKeepsThePaidMethod(unittest.TestCase):
     """End to end through ``_run_invoice_amendment_job`` with every lookup mocked."""
 
     def _run(self, *, client_method, source_method="Kashier Card", payment_entries=("ACC-PAY-1",),
-             payment_type="Receive", order_purpose=None):
+             payment_type="Receive", order_purpose=None, outstanding_before=480.0, allocated=480.0):
         created = {}
 
         class FakeInvoice:
@@ -168,6 +173,10 @@ class TestJobKeepsThePaidMethod(unittest.TestCase):
         mf.local.site = "frontend"
         mf.logger.return_value = MagicMock()
         mf.get_doc.side_effect = _get_doc
+        # What creation stamped on the replacement: the method it was created with.
+        mf.db.get_value.side_effect = lambda doctype, name, field, *a, **k: (
+            created.get("payment_method") if field == "custom_payment_method" else None
+        )
 
         with (
             patch("jarz_pos.api.manager.frappe", mf),
@@ -188,8 +197,8 @@ class TestJobKeepsThePaidMethod(unittest.TestCase):
             patch("jarz_pos.api.manager._attach_custom_shipping_requests", return_value={}),
             patch(
                 "jarz_pos.api.manager._rebook_amendment_payment",
-                return_value={"payment_entries": ["ACC-PAY-2"], "outstanding_before": 480.0,
-                              "allocated": 480.0, "unallocated": 0.0},
+                return_value={"payment_entries": ["ACC-PAY-2"], "outstanding_before": outstanding_before,
+                              "allocated": allocated, "unallocated": 0.0},
             ),
         ):
             from jarz_pos.api.manager import _run_invoice_amendment_job
@@ -201,30 +210,51 @@ class TestJobKeepsThePaidMethod(unittest.TestCase):
                 pos_profile_name="Nasr city",
                 payment_method=client_method,
             )
+        relabels = [
+            c.args[3] for c in mf.db.set_value.call_args_list
+            if len(c.args) >= 4 and c.args[2] == "custom_payment_method"
+        ]
+        created["final_method"] = relabels[-1] if relabels else created.get("payment_method")
         return result, created
 
     def test_order_17612_keeps_kashier_when_the_pos_sends_cash(self):
+        """Equal value: the carried 480 settles it, so the label follows the money."""
         result, created = self._run(client_method="Cash")
         self.assertTrue(result.get("success"), result)
-        self.assertEqual(created["payment_method"], "Kashier Card")
+        self.assertEqual(created["final_method"], "Kashier Card")
+
+    def test_a_cheaper_edit_also_keeps_kashier(self):
+        result, created = self._run(client_method="Cash", outstanding_before=400.0, allocated=400.0)
+        self.assertEqual(created["final_method"], "Kashier Card")
+
+    def test_a_dearer_edit_takes_the_cashiers_method_for_the_balance(self):
+        """480 carried against 640: 160 is still owed, and the cashier chose Cash."""
+        result, created = self._run(client_method="Cash", outstanding_before=640.0, allocated=480.0)
+        self.assertTrue(result.get("success"), result)
+        self.assertEqual(created["final_method"], "Cash")
+
+    def test_a_dearer_edit_can_stay_on_the_same_method(self):
+        result, created = self._run(client_method="Instapay", source_method="Instapay",
+                                    outstanding_before=640.0, allocated=480.0)
+        self.assertEqual(created["final_method"], "Instapay")
 
     def test_a_paid_order_with_no_client_method_keeps_its_own(self):
         result, created = self._run(client_method=None)
         self.assertTrue(result.get("success"), result)
-        self.assertEqual(created["payment_method"], "Kashier Card")
+        self.assertEqual(created["final_method"], "Kashier Card")
 
     def test_an_unpaid_order_still_takes_the_client_method(self):
         result, created = self._run(client_method="Instapay", source_method="Cash", payment_entries=())
         self.assertTrue(result.get("success"), result)
-        self.assertEqual(created["payment_method"], "Instapay")
+        self.assertEqual(created["final_method"], "Instapay")
 
     def test_a_refund_entry_is_not_evidence_of_payment(self):
         result, created = self._run(client_method="Instapay", source_method="Cash", payment_type="Pay")
-        self.assertEqual(created["payment_method"], "Instapay")
+        self.assertEqual(created["final_method"], "Instapay")
 
     def test_an_employee_order_is_left_to_its_own_resolver(self):
         result, created = self._run(client_method="Instapay", source_method="Cash", order_purpose="Employee")
-        self.assertEqual(created["payment_method"], "Cash")
+        self.assertEqual(created["final_method"], "Cash")
 
 
 if __name__ == "__main__":

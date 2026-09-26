@@ -1379,8 +1379,10 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
             payment_entries=payment_migration.get("payment_entries") or [],
         )
 
-    # Tells the POS the order is already paid and by what, so it skips its
-    # payment-method dialog. Advisory: the job enforces the same rule regardless.
+    # Tells the POS the order is already paid, by what and how much, so it can skip
+    # its payment-method dialog when the edited cart costs no more than that. A
+    # dearer cart leaves a balance, and the cashier chooses how it is collected.
+    # Advisory: the job applies the same rule to the replacement it creates.
     try:
         locked_payment_method = _prepaid_amendment_payment_method(
             inv, has_payment=bool(payment_migration and payment_migration.get("has_payment"))
@@ -1393,6 +1395,9 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
         "amendment_block_code": None,
         "amendment_block_reason": None,
         "amendment_payment_method": locked_payment_method,
+        "amendment_paid_amount": (
+            flt((payment_migration or {}).get("allocated_total")) if locked_payment_method else None
+        ),
     }
 
 
@@ -2041,12 +2046,14 @@ def _resolve_employee_amendment_payment_method(
 
 
 def _prepaid_amendment_payment_method(source_invoice: Any, has_payment: bool) -> Optional[str]:
-    """The payment method a PAID order's replacement must keep, or ``None``.
+    """The payment method a PAID order's replacement keeps, or ``None``.
 
     When the source has a submitted Payment Entry, the job carries that money onto
     the replacement unchanged — same account, same amount. The method stamped on
-    the source is the record of HOW that money arrived, so the replacement keeps it
-    whatever the client sends. The POS shows its payment-method dialog on every
+    the source is the record of HOW that money arrived, so a replacement that
+    payment settles in full keeps it whatever the client sends. A replacement left
+    with a balance takes the client's method: the cashier decides how the extra is
+    collected. The POS shows its payment-method dialog on every
     checkout, amendments included, and has no "Kashier" option: order 17612
     (Kashier Card, paid into ``kashier - J``) came back stamped ``Cash`` while its
     money still sat in the gateway account, and the Woo outbound sync then pushed
@@ -2733,8 +2740,10 @@ def _run_invoice_amendment_job(
                 f"entry/entries: {'; '.join(pe_cancel_errors)}"
             )
 
-        # The money is carried across unchanged, so the method that recorded how it
-        # arrived is carried with it (order 17612: Kashier Card came back "Cash").
+        # Decided here, while the source is still intact; applied after the payment
+        # is re-booked, and only when that payment covers the replacement in full
+        # (see below). A dearer edit leaves a balance, and how THAT is collected is
+        # the cashier's choice, so the client's method stands.
         prepaid_payment_method = _prepaid_amendment_payment_method(
             source_invoice,
             has_payment=any(
@@ -2742,22 +2751,6 @@ def _run_invoice_amendment_job(
                 for row in source_payment_rows
             ),
         )
-        if prepaid_payment_method and prepaid_payment_method != effective_payment_method:
-            try:
-                import logging
-
-                # Explicit level: servers default every logger to ERROR.
-                logger.setLevel(logging.WARNING)
-                logger.warning(
-                    "amendment_prepaid_payment_method: kept %r on paid order %s; "
-                    "ignored requested %r.",
-                    prepaid_payment_method,
-                    invoice_id,
-                    effective_payment_method,
-                )
-            except Exception:
-                pass
-            effective_payment_method = prepaid_payment_method
 
         if cancelled_payment_entries:
             # Cancelling a Payment Entry writes back to the invoice it paid --
@@ -2853,6 +2846,44 @@ def _run_invoice_amendment_job(
                         "so the order was not changed."
                     ).format(invoice_id, replacement_invoice_name)
                 )
+            # A replacement the carried payment settles in full keeps the source's
+            # method: nothing is left to collect, so the method is only the record
+            # of how the money arrived. Order 17612 (Kashier Card, 480 carried into
+            # `kashier - J`) came back stamped "Cash" from the POS dialog and Woo
+            # outbound pushed `cod`. Woo's sync is enqueued by name after commit, so
+            # it reads this corrected value. Not wrapped in a try: the savepoint
+            # rolls the whole amendment back rather than leave the label wrong.
+            fully_covered = (
+                flt(rebooked_payment.get("outstanding_before"))
+                - flt(rebooked_payment.get("allocated"))
+            ) <= _PAYMENT_TOLERANCE
+            if prepaid_payment_method and fully_covered:
+                stamped_method = frappe.db.get_value(
+                    "Sales Invoice", replacement_invoice_name, "custom_payment_method"
+                )
+                if str(stamped_method or "").strip() != prepaid_payment_method:
+                    frappe.db.set_value(
+                        "Sales Invoice",
+                        replacement_invoice_name,
+                        "custom_payment_method",
+                        prepaid_payment_method,
+                        update_modified=False,
+                    )
+                    try:
+                        import logging
+
+                        # Explicit level: servers default every logger to ERROR.
+                        logger.setLevel(logging.WARNING)
+                        logger.warning(
+                            "amendment_prepaid_payment_method: %s kept %r from %s "
+                            "(requested %r); the carried payment covers it in full.",
+                            replacement_invoice_name,
+                            prepaid_payment_method,
+                            invoice_id,
+                            stamped_method,
+                        )
+                    except Exception:
+                        pass
             if rebooked_payment_entries:
                 # Cosmetic, so it must never be able to undo the transfer it
                 # describes: this sits inside the savepoint, and an exception
