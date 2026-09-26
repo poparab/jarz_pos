@@ -451,6 +451,11 @@ jobs:
             # never remove theirs) -- and the open-shift refusal is the only
             # thing stopping a mid-shift membership change.
             test_branch_access
+            # User administration from the app. Real-site test (every case
+            # rolls back): it pins that a JARZ Manager cannot reset a System
+            # Manager's password or hand out a System Manager profile -- the
+            # hole that would let the screen sign someone in as the owner.
+            test_user_admin
             # Attendance reporting. Three reasons this must be in CI: the whole
             # feature is derived on read from raw check-ins, so a wrong rule
             # never errors -- it reports a person who was at work as absent; the
