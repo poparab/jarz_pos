@@ -16,6 +16,22 @@ from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label, get_woo_order_ids
 
 
+# What the customer was actually billed for delivery on invoice ``si``: its
+# ``Shipping Income (...)`` tax row. No row means the order billed nothing.
+# Never ``custom_delivery_income`` (NOT NULL DEFAULT 0, so "never overridden"
+# and "free" look alike) and never the Territory rate: falling back to the
+# territory invented income for orders that billed zero, overstating
+# September 2026 on production by 10,555 (23,310 shown vs 12,755 billed).
+# Returns are excluded throughout, so every figure here is per order placed.
+_BILLED_SHIPPING_INCOME = """(
+    SELECT COALESCE(SUM(stc.base_tax_amount), 0)
+    FROM `tabSales Taxes and Charges` stc
+    WHERE stc.parent = si.name
+      AND stc.parenttype = 'Sales Invoice'
+      AND (stc.description LIKE 'Shipping Income%%' OR stc.account_head LIKE 'Shipping Income%%')
+)"""
+
+
 def _ensure_jarz_manager():
     roles = set(frappe.get_roles(frappe.session.user))
     if ROLES.JARZ_MANAGER not in roles and ROLES.ADMINISTRATOR not in roles:
@@ -103,25 +119,19 @@ def get_summary_kpis(from_date=None, to_date=None):
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
 
-    row = frappe.db.sql("""
+    row = frappe.db.sql(f"""
         SELECT
             COUNT(*)                                                                    AS total_orders,
             SUM(CASE WHEN si.custom_is_pickup = 0 THEN 1 ELSE 0 END)                   AS delivery_orders,
             SUM(CASE WHEN si.custom_is_pickup = 1 THEN 1 ELSE 0 END)                   AS pickup_orders,
             COALESCE(SUM(si.custom_shipping_expense), 0)                                AS total_expense,
-            COALESCE(SUM(
-                CASE
-                    WHEN si.custom_is_pickup = 1 THEN 0
-                    WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
-                    ELSE COALESCE(t.delivery_income, 0)
-                END
-            ), 0)                                                                       AS total_income,
+            COALESCE(SUM({_BILLED_SHIPPING_INCOME}), 0)                                  AS total_income,
             COALESCE(AVG(CASE WHEN si.custom_is_pickup = 0
                                AND si.custom_shipping_expense > 0
                               THEN si.custom_shipping_expense END), 0)                  AS avg_cost_per_order
         FROM `tabSales Invoice` si
-        LEFT JOIN `tabTerritory` t ON t.name = si.territory
         WHERE si.docstatus = 1
+          AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
     """, {"fd": fd, "td": td}, as_dict=True)[0]
 
@@ -152,23 +162,17 @@ def get_cost_by_territory(from_date=None, to_date=None):
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
             si.territory,
             COUNT(*)                                                                    AS order_count,
             COALESCE(SUM(si.custom_shipping_expense), 0)                                AS total_expense,
-            COALESCE(SUM(
-                CASE
-                    WHEN si.custom_is_pickup = 1 THEN 0
-                    WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
-                    ELSE COALESCE(t.delivery_income, 0)
-                END
-            ), 0)                                                                       AS total_income,
+            COALESCE(SUM({_BILLED_SHIPPING_INCOME}), 0)                                  AS total_income,
             COALESCE(AVG(CASE WHEN si.custom_shipping_expense > 0
                               THEN si.custom_shipping_expense END), 0)                  AS avg_cost
         FROM `tabSales Invoice` si
-        LEFT JOIN `tabTerritory` t ON t.name = si.territory
         WHERE si.docstatus = 1
+          AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           AND si.territory IS NOT NULL
           AND si.territory != ''
@@ -205,6 +209,7 @@ def get_cost_by_sub_territory(from_date=None, to_date=None):
                               THEN custom_shipping_expense END), 0)                     AS avg_cost
         FROM `tabSales Invoice`
         WHERE docstatus = 1
+          AND is_return = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY custom_sub_territory
         ORDER BY total_expense DESC
@@ -225,23 +230,17 @@ def get_cost_by_pos_profile(from_date=None, to_date=None):
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
             COALESCE(si.pos_profile, '(No Profile)')                                    AS branch,
             COUNT(*)                                                                    AS order_count,
             COALESCE(SUM(si.custom_shipping_expense), 0)                                AS total_expense,
-            COALESCE(SUM(
-                CASE
-                    WHEN si.custom_is_pickup = 1 THEN 0
-                    WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
-                    ELSE COALESCE(t.delivery_income, 0)
-                END
-            ), 0)                                                                       AS total_income,
+            COALESCE(SUM({_BILLED_SHIPPING_INCOME}), 0)                                  AS total_income,
             COALESCE(AVG(CASE WHEN si.custom_shipping_expense > 0
                               THEN si.custom_shipping_expense END), 0)                  AS avg_cost
         FROM `tabSales Invoice` si
-        LEFT JOIN `tabTerritory` t ON t.name = si.territory
         WHERE si.docstatus = 1
+          AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY si.pos_profile
         ORDER BY SUM(si.custom_shipping_expense) DESC
@@ -397,17 +396,18 @@ def get_daily_trend(from_date=None, to_date=None):
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
-            posting_date,
-            COUNT(*)                                    AS order_count,
-            COALESCE(SUM(custom_shipping_expense), 0)   AS total_expense,
-            COALESCE(SUM(custom_delivery_income), 0)    AS total_income
-        FROM `tabSales Invoice`
-        WHERE docstatus = 1
-          AND posting_date BETWEEN %(fd)s AND %(td)s
-        GROUP BY posting_date
-        ORDER BY posting_date ASC
+            si.posting_date,
+            COUNT(*)                                        AS order_count,
+            COALESCE(SUM(si.custom_shipping_expense), 0)    AS total_expense,
+            COALESCE(SUM({_BILLED_SHIPPING_INCOME}), 0)     AS total_income
+        FROM `tabSales Invoice` si
+        WHERE si.docstatus = 1
+          AND si.is_return = 0
+          AND si.posting_date BETWEEN %(fd)s AND %(td)s
+        GROUP BY si.posting_date
+        ORDER BY si.posting_date ASC
     """, {"fd": fd, "td": td}, as_dict=True)
 
     for r in rows:
@@ -431,6 +431,7 @@ def get_pickup_vs_delivery_split(from_date=None, to_date=None):
             COUNT(*) AS order_count
         FROM `tabSales Invoice`
         WHERE docstatus = 1
+          AND is_return = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY custom_is_pickup
     """, {"fd": fd, "td": td}, as_dict=True)
@@ -486,21 +487,15 @@ def get_alerts_data(from_date=None, to_date=None):
     # 1. Territories where delivery expense exceeds income (losing money)
     # Use subquery so the outer WHERE can reference aliases without the
     # MySQL 1247 "reference to group function" error.
-    losing = frappe.db.sql("""
+    losing = frappe.db.sql(f"""
         SELECT territory, expense, income
         FROM (
             SELECT si.territory,
                    COALESCE(SUM(si.custom_shipping_expense), 0) AS expense,
-                   COALESCE(SUM(
-                       CASE
-                           WHEN si.custom_is_pickup = 1 THEN 0
-                           WHEN si.custom_delivery_income > 0 THEN si.custom_delivery_income
-                           ELSE COALESCE(t.delivery_income, 0)
-                       END
-                   ), 0) AS income
+                   COALESCE(SUM({_BILLED_SHIPPING_INCOME}), 0) AS income
             FROM `tabSales Invoice` si
-            LEFT JOIN `tabTerritory` t ON t.name = si.territory
             WHERE si.docstatus = 1
+              AND si.is_return = 0
               AND si.posting_date BETWEEN %(fd)s AND %(td)s
               AND si.territory IS NOT NULL AND si.territory != ''
             GROUP BY si.territory
@@ -622,6 +617,7 @@ def get_pickup_delivery_trend(from_date=None, to_date=None):
             SUM(CASE WHEN custom_is_pickup = 0 THEN 1 ELSE 0 END) AS delivery
         FROM `tabSales Invoice`
         WHERE docstatus = 1
+          AND is_return = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY posting_date
         ORDER BY posting_date ASC

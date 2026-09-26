@@ -556,6 +556,15 @@ jobs:
             # shipped in 985d01f with 29 tests and was never added to this
             # array, so it has never run in CI once.
             test_api_recurring_expenses
+            # The mobile Profit & Loss report. Pure (rows in, payload out), so it
+            # is meaningful pre-migrate. Pins that net profit equals the ledger's
+            # to the piastre, that B2B is the order purpose (not the customer
+            # group), that shipping income is the billed tax row with pre-split
+            # income grossed back out of Freight, and that unposted COGS or
+            # courier cost is flagged instead of reading as profit. Also
+            # source-scans shipping_analytics for the territory-rate fallback
+            # that overstated September 2026 delivery income by 82%.
+            test_api_financial_report
             # The posting TIME a POS user picks. It must be in CI because the
             # failure it guards is invisible at runtime: Journal Entry, Payment
             # Entry and GL Entry have no posting_time field, so the old

@@ -64,11 +64,32 @@ def get_executive_overview(
     product_mix = product.get("by_product_type", []) if isinstance(product, dict) else []
     top_territories = (product.get("by_territory", []) if isinstance(product, dict) else [])[:5]
 
-    total_revenue = float(p_summary.get("total_revenue") or 0)
-    gross_profit = float(p_summary.get("total_gross_profit") or 0)
-    gross_margin = round(gross_profit / total_revenue * 100, 1) if total_revenue else 0.0
+    # ── Ledger P&L (revenue, gross profit, shipping, net profit) ─────────
+    # The headline money comes from the ledger-reconciled P&L, not from the
+    # product breakdown: product analytics counts only classified jar/bundle
+    # lines, before invoice discounts and without returns, which overstated
+    # September 2026 on production by 3,844 (270,945 vs the ledger's 267,101).
+    def _load_pnl():
+        from jarz_pos.api.financial_report import get_profit_and_loss
+        return get_profit_and_loss(date_from=date_from, date_to=date_to)
 
-    # ── Shipping P&L ─────────────────────────────────────────────────────
+    pnl = _safe("pnl", _load_pnl, {})
+    pnl_summary = pnl.get("summary", {}) if isinstance(pnl, dict) else {}
+    pnl_shipping = pnl.get("shipping", {}) if isinstance(pnl, dict) else {}
+    pnl_quality = pnl.get("data_quality", {}) if isinstance(pnl, dict) else {}
+
+    if pnl_summary:
+        total_revenue = float(pnl_summary.get("sales") or 0)
+        gross_profit = float(pnl_summary.get("gross_profit") or 0)
+        orders = int(pnl_summary.get("orders") or 0)
+    else:
+        total_revenue = float(p_summary.get("total_revenue") or 0)
+        gross_profit = float(p_summary.get("total_gross_profit") or 0)
+        orders = int(p_summary.get("total_orders") or 0)
+    gross_margin = round(gross_profit / total_revenue * 100, 1) if total_revenue else 0.0
+    avg_order_value = round(total_revenue / orders, 2) if orders else 0.0
+
+    # ── Shipping (courier-side KPIs: unsettled balances, pending overrides) ──
     def _load_shipping():
         from jarz_pos.api.shipping_analytics import get_summary_kpis
         return get_summary_kpis(from_date=date_from, to_date=date_to)
@@ -97,7 +118,26 @@ def get_executive_overview(
         from jarz_pos.api.shipping_analytics import get_alerts_data
         return get_alerts_data(from_date=date_from, to_date=date_to)
 
-    alerts: List[Dict[str, str]] = list(_safe("ship_alerts", _load_ship_alerts, []) or [])
+    # Incomplete books first: they qualify every number below them.
+    alerts: List[Dict[str, str]] = []
+    warnings = pnl_quality.get("warnings") or []
+    if "cogs_incomplete" in warnings:
+        alerts.append({
+            "type": "warning",
+            "message": (
+                f"Cost of goods is posted for only <b>{pnl_quality.get('cogs_coverage_pct', 0)}%</b> "
+                f"of orders in this period, so gross profit is overstated."
+            ),
+        })
+    if "shipping_expense_incomplete" in warnings:
+        alerts.append({
+            "type": "warning",
+            "message": (
+                f"Only <b>{pnl_quality.get('shipping_expense_coverage_pct', 0)}%</b> of the courier "
+                f"cost recorded on orders has reached the ledger in this period."
+            ),
+        })
+    alerts.extend(_safe("ship_alerts", _load_ship_alerts, []) or [])
 
     for item in critical_items[:8]:
         days = item.get("days_remaining")
@@ -113,13 +153,17 @@ def get_executive_overview(
     # ── Headline KPIs ────────────────────────────────────────────────────
     kpis = {
         "total_revenue": round(total_revenue, 2),
-        "total_orders": int(p_summary.get("total_orders") or 0),
+        "total_orders": orders,
         "gross_profit": round(gross_profit, 2),
         "gross_margin": gross_margin,
-        "avg_order_value": float(p_summary.get("avg_order_value") or 0),
-        "shipping_expense": float(shipping.get("total_expense") or 0),
-        "delivery_income": float(shipping.get("total_income") or 0),
-        "net_shipping_pl": float(shipping.get("net_pl") or 0),
+        "avg_order_value": avg_order_value,
+        "shipping_expense": float(pnl_shipping.get("expense", shipping.get("total_expense")) or 0),
+        "delivery_income": float(pnl_shipping.get("income", shipping.get("total_income")) or 0),
+        "net_shipping_pl": float(pnl_shipping.get("net", shipping.get("net_pl")) or 0),
+        "net_profit": float(pnl_summary.get("net_profit") or 0),
+        "net_margin": float(pnl_summary.get("net_margin_pct") or 0),
+        "b2b_revenue": float(pnl_summary.get("b2b_revenue") or 0),
+        "b2c_revenue": float(pnl_summary.get("b2c_revenue") or 0),
         "avg_cost_per_order": float(shipping.get("avg_cost_per_order") or 0),
         "unsettled_courier_total": float(shipping.get("unsettled_courier_total") or 0),
         "pending_overrides": int(shipping.get("pending_csr_count") or 0),
