@@ -147,7 +147,7 @@ class TestOnSubmitSplitsThePayment(unittest.TestCase):
 
         mock_frappe = MagicMock()
         mock_frappe.new_doc.side_effect = new_doc
-        mock_frappe.db.get_value.return_value = ACCRUED
+        mock_frappe.db.get_value.side_effect = lambda doctype, *args, **kwargs: "J" if doctype == "Company" else ACCRUED
 
         stub = MagicMock()
         stub._strip_je_tag_lookalikes.side_effect = lambda value: value
@@ -205,6 +205,64 @@ class TestOnSubmitSplitsThePayment(unittest.TestCase):
             [(r["account"], r["debit_in_account_currency"]) for r in payment.accounts],
             [(ADS, 1100.0), ("Bank - J", 0)],
         )
+
+
+class _Thrown(Exception):
+    pass
+
+
+def _validate(kind, period_from=None, period_to=None, flagged=False):
+    doc = SimpleNamespace(
+        expense_kind=kind, period_from=period_from, period_to=period_to,
+        expense_date="2026-10-05", reason_account=ADS, reason_label="Paid Ads",
+    )
+    mock_frappe = MagicMock()
+    mock_frappe.throw.side_effect = _Thrown
+    mock_frappe.db.has_column.return_value = True
+    mock_frappe.db.get_value.return_value = 1 if flagged else 0
+    with patch(f"{MODULE}.frappe", mock_frappe), patch(f"{MODULE}._", side_effect=lambda text: text):
+        JarzExpenseRequest._validate_service_period(doc)
+
+
+class TestPeriodIsForAdHocOnly(unittest.TestCase):
+    """Monthly Expenses pays Recurring/Salary rows with no period input."""
+
+    def test_flagged_ledger_does_not_block_a_recurring_payment(self):
+        _validate("Recurring", flagged=True)  # no raise
+
+    def test_a_period_on_a_salary_row_is_refused(self):
+        with self.assertRaises(_Thrown):
+            _validate("Salary", "2026-09-25", "2026-10-05")
+
+    def test_flagged_ad_hoc_without_period_is_refused(self):
+        with self.assertRaises(_Thrown):
+            _validate("Ad-hoc", flagged=True)
+
+    def test_blank_kind_counts_as_ad_hoc(self):
+        with self.assertRaises(_Thrown):
+            _validate(None, flagged=True)
+
+    def test_valid_ad_hoc_period_passes(self):
+        _validate("Ad-hoc", "2026-09-25", "2026-10-05", flagged=True)
+
+
+class TestSchemaReviewFixes(unittest.TestCase):
+    def setUp(self):
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(jarz_pos.__file__)),
+            "doctype", "jarz_expense_request", "jarz_expense_request.json",
+        )
+        with open(path, encoding="utf-8") as handle:
+            self.fields = {f["fieldname"]: f for f in json.load(handle)["fields"]}
+
+    def test_amended_copy_does_not_inherit_the_journal_entry(self):
+        # on_submit returns early when journal_entry is set, so an inherited
+        # name meant an amended expense posted nothing and read "Approved".
+        self.assertEqual(self.fields["journal_entry"].get("no_copy"), 1)
+
+    def test_desk_shows_the_period_section_for_ad_hoc_expenses(self):
+        self.assertIn("Ad-hoc", self.fields["section_break_period"]["depends_on"])
+        self.assertNotIn("period_from", self.fields["section_break_period"]["depends_on"])
 
 
 class TestOnCancelReversesEveryEntry(unittest.TestCase):

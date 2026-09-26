@@ -7,7 +7,7 @@
  "editable_grid": 0,
  "track_changes": 1,
  "track_seen": 1,
- "modified": "2026-09-27 00:00:00.000000",
+ "modified": "2026-09-27 01:00:00.000000",
  "sort_field": "modified",
  "sort_order": "DESC",
  "naming_rule": "Naming Series",
@@ -192,7 +192,7 @@
    "fieldtype": "Section Break",
    "label": "Service Period",
    "collapsible": 1,
-   "depends_on": "eval:doc.period_from || doc.period_to"
+   "depends_on": "eval:!doc.expense_kind || doc.expense_kind=='Ad-hoc'"
   },
   {
    "fieldname": "period_from",
@@ -291,7 +291,8 @@
    "label": "Journal Entry",
    "options": "Journal Entry",
    "read_only": 1,
-   "in_list_view": 1
+   "in_list_view": 1,
+   "no_copy": 1
   }
  ],
  "permissions": [

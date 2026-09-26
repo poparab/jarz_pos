@@ -68,6 +68,13 @@ def _account_requires_period(account: Optional[str]) -> bool:
 def _accrued_expenses_account(company: str) -> str:
     from jarz_pos.constants import ACCOUNTS
 
+    # The ledger the patch creates, by its exact name first: a hand-made
+    # numbered "NNNN - Accrued Expenses" would otherwise match the name lookup
+    # just as well, and which one won would be up to the database.
+    abbr = frappe.db.get_value("Company", company, "abbr")
+    exact = f"{ACCOUNTS.ACCRUED_EXPENSES} - {abbr}" if abbr else None
+    if exact and frappe.db.get_value("Account", {"name": exact, "company": company, "is_group": 0}, "name"):
+        return exact
     account = frappe.db.get_value(
         "Account",
         {"company": company, "account_name": ACCOUNTS.ACCRUED_EXPENSES, "is_group": 0},
@@ -109,6 +116,10 @@ def _post_earlier_month_shares(doc, company: str) -> Tuple[float, Optional[str]]
     accrued = _accrued_expenses_account(company)
     label = _strip_je_tag_lookalikes(doc.reason_label) or doc.reason_account
     names = []
+    # A share that rounds to 0.00 (a few piastres over a long period) cannot be
+    # posted -- ERPNext refuses an all-zero entry -- and the payment month then
+    # simply keeps it, because the payment only clears what was accrued.
+    shares = [s for s in shares if s.amount > 0]
     for share in shares:
         je = frappe.new_doc("Journal Entry")
         je.voucher_type = "Journal Entry"
@@ -136,8 +147,18 @@ def _post_earlier_month_shares(doc, company: str) -> Tuple[float, Optional[str]]
             },
         )
         je.flags.ignore_permissions = True
-        je.insert()
-        je.submit()
+        try:
+            je.insert()
+            je.submit()
+        except frappe.ValidationError as exc:
+            # Almost always a closed month (Accounting Period, Accounts Frozen
+            # Till, a year-end closing). Say which month and why, instead of a
+            # bare ERPNext error about a Journal Entry the user never made.
+            frappe.throw(
+                _("Could not book {0} of this payment to {1}, dated {2}: {3}. Reopen that month or shorten the period to start in an open month.").format(
+                    share.amount, share.month, share.month_end, exc
+                )
+            )
         names.append(je.name)
 
     doc.db_set("period_journal_entries", "\n".join(names))
@@ -245,6 +266,15 @@ class JarzExpenseRequest(Document):
 
         period_from = getattr(self, "period_from", None)
         period_to = getattr(self, "period_to", None)
+        # Ad-hoc payments only. Recurring and Salary rows are paid from the
+        # Monthly Expenses screen, which has no period input and reconciles each
+        # payment against its own month's ledger: a split would move part of the
+        # money into another month behind that reconciliation's back, and a
+        # flagged registry ledger would make those rows impossible to pay.
+        if (self.expense_kind or "Ad-hoc") != "Ad-hoc":
+            if period_from or period_to:
+                frappe.throw(_("A service period can only be set on an ad-hoc expense."))
+            return
         if not period_from and not period_to:
             if _account_requires_period(self.reason_account):
                 frappe.throw(
