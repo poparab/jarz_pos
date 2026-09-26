@@ -131,6 +131,12 @@ def bucket_keys(fd: date, td: date, granularity: str) -> List[str]:
     return keys
 
 
+def covers_whole_months(fd: date, td: date) -> bool:
+    """True when the range starts on a 1st and ends on a month's last day."""
+    last = calendar.monthrange(td.year, td.month)[1]
+    return fd.day == 1 and td.day == last
+
+
 def months_in_range(fd: date, td: date) -> List[Tuple[date, date]]:
     """(first, last) day of every calendar month the range touches."""
     out: List[Tuple[date, date]] = []
@@ -237,8 +243,19 @@ def _recurring_accounts(company: Optional[str]) -> Dict[str, Dict[str, Any]]:
     try:
         from jarz_pos.api.recurring_expenses import _payroll_expense_accounts
 
-        for acct in _payroll_expense_accounts(company):
-            out.setdefault(acct, {"category": "Payroll", "items": []})["payroll"] = True
+        # Salary Component Accounts also list deduction and payable ledgers;
+        # only an Expense account can carry payroll cost.
+        candidates = _payroll_expense_accounts(company)
+        expense_accounts = set(
+            frappe.get_all(
+                "Account",
+                filters={"name": ["in", candidates or [""]], "root_type": "Expense"},
+                pluck="name",
+            )
+        )
+        for acct in candidates:
+            if acct in expense_accounts:
+                out.setdefault(acct, {"category": "Payroll", "items": []})["payroll"] = True
     except Exception:
         frappe.log_error(frappe.get_traceback(), "financial_report: payroll accounts")
     return out
@@ -286,6 +303,9 @@ def _gl_rows(fd: date, td: date, company: Optional[str]) -> List[Dict[str, Any]]
         WHERE gle.is_cancelled = 0
           AND gle.posting_date BETWEEN %(fd)s AND %(td)s
           AND acc.root_type IN ('Income', 'Expense')
+          -- A Period Closing Voucher zeroes every P&L account on the closing
+          -- date; counting it would report a closed year as ~0 profit.
+          AND gle.voucher_type != 'Period Closing Voucher'
           {cond}
         GROUP BY gle.account, gle.posting_date, acc.root_type, acc.account_type
         """,
@@ -588,7 +608,14 @@ def build_report(
         warnings.append("cogs_incomplete")
     if shipping_coverage < COVERAGE_WARN_PCT:
         warnings.append("shipping_expense_incomplete")
-    if recurring_due and recurring_total < recurring_due - TOLERANCE:
+    # "Due" is whole months (a bill is due or it is not), so it only compares
+    # fairly with what was posted when the range is itself whole months. On a
+    # partial range (e.g. the last 30 days) the shortfall is expected, not a gap.
+    if (
+        covers_whole_months(fd, td)
+        and recurring_due
+        and recurring_total < recurring_due - TOLERANCE
+    ):
         warnings.append("recurring_not_fully_posted")
 
     delivery_orders = int(order_basis.get("delivery_orders") or 0)

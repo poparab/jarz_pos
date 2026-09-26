@@ -193,7 +193,20 @@ class TestExpenseSections(unittest.TestCase):
         # Due but never posted still appears, with nothing posted.
         self.assertEqual(rows["Pest Control - J"]["posted"], 0.0)
         self.assertEqual(r["recurring"]["due"], 1250.0)
+        # 1-3 September is a partial month: a shortfall there is expected.
+        self.assertNotIn("recurring_not_fully_posted", r["data_quality"]["warnings"])
+
+    def test_shortfall_is_a_warning_only_over_whole_months(self):
+        gl_rows, invoice_rows, shipping_rows = september()
+        r = build(gl_rows, invoice_rows, shipping_rows, td=date(2026, 9, 30),
+                  due={"Salary - J": 1000.0})
         self.assertIn("recurring_not_fully_posted", r["data_quality"]["warnings"])
+
+    def test_covers_whole_months(self):
+        self.assertTrue(fr.covers_whole_months(date(2026, 8, 1), date(2026, 9, 30)))
+        self.assertTrue(fr.covers_whole_months(date(2026, 2, 1), date(2026, 2, 28)))
+        self.assertFalse(fr.covers_whole_months(date(2026, 9, 1), date(2026, 9, 26)))
+        self.assertFalse(fr.covers_whole_months(date(2026, 8, 28), date(2026, 9, 30)))
 
     def test_other_expenses_keep_their_net(self):
         other = build(*september())["other_expenses"]
@@ -238,6 +251,15 @@ class TestBuckets(unittest.TestCase):
             fr.months_in_range(date(2026, 8, 15), date(2026, 9, 3)),
             [(date(2026, 8, 1), date(2026, 8, 31)), (date(2026, 9, 1), date(2026, 9, 30))],
         )
+
+
+class TestLedgerQuery(unittest.TestCase):
+    def test_period_closing_vouchers_are_excluded(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(here, "api", "financial_report.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        gl_query = src[src.index("def _gl_rows"):src.index("def _invoice_rows")]
+        self.assertIn("voucher_type != 'Period Closing Voucher'", gl_query)
 
 
 class TestShippingAnalyticsSource(unittest.TestCase):
