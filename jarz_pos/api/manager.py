@@ -1379,10 +1379,20 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
             payment_entries=payment_migration.get("payment_entries") or [],
         )
 
+    # Tells the POS the order is already paid and by what, so it skips its
+    # payment-method dialog. Advisory: the job enforces the same rule regardless.
+    try:
+        locked_payment_method = _prepaid_amendment_payment_method(
+            inv, has_payment=bool(payment_migration and payment_migration.get("has_payment"))
+        )
+    except Exception:
+        locked_payment_method = None
+
     return {
         "can_amend": True,
         "amendment_block_code": None,
         "amendment_block_reason": None,
+        "amendment_payment_method": locked_payment_method,
     }
 
 
@@ -2028,6 +2038,43 @@ def _resolve_employee_amendment_payment_method(
     if stamped.lower() == "cash":
         return "Cash"
     return None
+
+
+def _prepaid_amendment_payment_method(source_invoice: Any, has_payment: bool) -> Optional[str]:
+    """The payment method a PAID order's replacement must keep, or ``None``.
+
+    When the source has a submitted Payment Entry, the job carries that money onto
+    the replacement unchanged — same account, same amount. The method stamped on
+    the source is the record of HOW that money arrived, so the replacement keeps it
+    whatever the client sends. The POS shows its payment-method dialog on every
+    checkout, amendments included, and has no "Kashier" option: order 17612
+    (Kashier Card, paid into ``kashier - J``) came back stamped ``Cash`` while its
+    money still sat in the gateway account, and the Woo outbound sync then pushed
+    that label to the website order as ``cod``.
+
+    ``None`` — the client's method, or the source's when the client sent none,
+    applies exactly as before — when:
+
+    * nothing was paid (``has_payment`` False): a cash-on-delivery order is still
+      free to change how it will be collected;
+    * the source is an Employee order: :func:`_resolve_employee_amendment_payment_method`
+      owns that choice;
+    * the source carries no stamped method, so there is nothing to keep;
+    * the source is on credit: a part-paid on-account order stays on its own path
+      through ``_apply_credit_terms`` rather than gaining a new one here.
+    """
+    if not has_payment:
+        return None
+    if str(source_invoice.get("custom_order_purpose") or "").strip() == _EMPLOYEE_ORDER_PURPOSE:
+        return None
+    stamped = str(source_invoice.get("custom_payment_method") or "").strip()
+    if not stamped:
+        return None
+    from jarz_pos.utils.credit_utils import is_credit_payment_method
+
+    if is_credit_payment_method(stamped):
+        return None
+    return stamped
 
 
 def _resolve_amendment_employee_payment(source_invoice: Any, requested: Optional[str]) -> Optional[str]:
@@ -2685,6 +2732,32 @@ def _run_invoice_amendment_job(
                 f"Failed to cancel {len(pe_cancel_errors)} payment "
                 f"entry/entries: {'; '.join(pe_cancel_errors)}"
             )
+
+        # The money is carried across unchanged, so the method that recorded how it
+        # arrived is carried with it (order 17612: Kashier Card came back "Cash").
+        prepaid_payment_method = _prepaid_amendment_payment_method(
+            source_invoice,
+            has_payment=any(
+                str(row.get("payment_type") or "Receive") == "Receive"
+                for row in source_payment_rows
+            ),
+        )
+        if prepaid_payment_method and prepaid_payment_method != effective_payment_method:
+            try:
+                import logging
+
+                # Explicit level: servers default every logger to ERROR.
+                logger.setLevel(logging.WARNING)
+                logger.warning(
+                    "amendment_prepaid_payment_method: kept %r on paid order %s; "
+                    "ignored requested %r.",
+                    prepaid_payment_method,
+                    invoice_id,
+                    effective_payment_method,
+                )
+            except Exception:
+                pass
+            effective_payment_method = prepaid_payment_method
 
         if cancelled_payment_entries:
             # Cancelling a Payment Entry writes back to the invoice it paid --

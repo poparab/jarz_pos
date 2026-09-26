@@ -250,6 +250,11 @@ jobs:
             # when the edit starts in WooCommerce — the POS button reached none
             # of it, which is why no other module here covers this.
             test_amendment_paid_payment
+            # A paid order keeps its payment method across an amendment (Woo
+            # 17612 / ACC-SINV-2026-18471). The payment was carried into
+            # `kashier - J`, but the POS dialog's "Cash" overwrote "Kashier Card"
+            # and Woo outbound then pushed `cod` to the website order.
+            test_amendment_prepaid_method
             # Custom Shipping Request survival across an amendment (Woo 17575 /
             # ACC-SINV-2026-18433). An approved courier-cost override (65 -> 160
             # for a 31 kg order) made a Received, unpaid order uneditable: any
