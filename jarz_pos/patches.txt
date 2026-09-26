@@ -44,3 +44,6 @@ jarz_pos.Patches.v1_9.reconcile_awaiting_online_payments
 # Freight), Purchase Delivery Charges, and a Vehicle Expenses group for the
 # owner's car. Creates ledgers only; history is reclassified separately.
 jarz_pos.Patches.v1_9.create_expense_classification_accounts
+# Accrued Expenses ledger for bills paid after the days they cover (Meta ads
+# billed in arrears), and the requires-period flag on the paid-ads ledger.
+jarz_pos.Patches.v1_9.create_accrued_expenses_account

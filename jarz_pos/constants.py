@@ -35,6 +35,12 @@ class ACCOUNTS:
     MOBILE_WALLET = "Mobile Wallet"
     INSTAPAY = "Instapay"
     PAYMENT_GATEWAY = "Payment Gateway"
+    # Liability that holds an earlier month's share of a bill paid later (the
+    # ad spend Meta charges on the 5th covers the last days of the previous
+    # month). Booked at that month's end, released by the payment itself.
+    ACCRUED_EXPENSES = "Accrued Expenses"
+    CURRENT_LIABILITIES = "Current Liabilities"
+    PAID_ADS = "Paid Ads - Media Buying"
 
 
 # ── Role name sets ──────────────────────────────────────────────────────

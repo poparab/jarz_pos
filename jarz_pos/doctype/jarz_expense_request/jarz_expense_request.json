@@ -7,7 +7,7 @@
  "editable_grid": 0,
  "track_changes": 1,
  "track_seen": 1,
- "modified": "2026-09-23 00:00:00.000000",
+ "modified": "2026-09-27 00:00:00.000000",
  "sort_field": "modified",
  "sort_order": "DESC",
  "naming_rule": "Naming Series",
@@ -37,8 +37,12 @@
   "payment_source_label",
   "pos_profile",
   "requires_approval",
-    "status",
+  "status",
   "remarks",
+  "section_break_period",
+  "period_from",
+  "period_to",
+  "period_journal_entries",
   "section_break_meta",
   "requested_by",
   "company",
@@ -170,18 +174,45 @@
    "label": "Requires Approval",
    "read_only": 1
   },
-    {
-     "fieldname": "status",
-     "fieldtype": "Data",
-     "label": "Status",
-     "read_only": 1,
-     "in_list_view": 1,
-     "in_standard_filter": 1
-    },
+  {
+   "fieldname": "status",
+   "fieldtype": "Data",
+   "label": "Status",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
   {
    "fieldname": "remarks",
    "fieldtype": "Small Text",
    "label": "Remarks"
+  },
+  {
+   "fieldname": "section_break_period",
+   "fieldtype": "Section Break",
+   "label": "Service Period",
+   "collapsible": 1,
+   "depends_on": "eval:doc.period_from || doc.period_to"
+  },
+  {
+   "fieldname": "period_from",
+   "fieldtype": "Date",
+   "label": "Period From",
+   "description": "First day of the service this payment covers (e.g. the ad spend Meta is billing). Leave blank for a one-off expense."
+  },
+  {
+   "fieldname": "period_to",
+   "fieldtype": "Date",
+   "label": "Period To",
+   "description": "Last day of the service this payment covers. Must not be after the expense date: bills are paid after the service. Days that fall in earlier months are booked to those months through Accrued Expenses."
+  },
+  {
+   "fieldname": "period_journal_entries",
+   "fieldtype": "Small Text",
+   "label": "Period Journal Entries",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The month-end Journal Entries that booked the earlier months' share of this payment, one name per line. Cancelled together with the expense."
   },
   {
    "fieldname": "section_break_meta",

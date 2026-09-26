@@ -81,6 +81,9 @@ before_migrate = [
     # Field whose name differs from the fixture's, so seeding first would only
     # hand it something to delete.
     "jarz_pos.utils.cleanup.ensure_posting_time_fields",
+    # Account flag that makes the Expenses screen ask which period a bill
+    # covers (paid ads). Before fixtures for the same reason as the line above.
+    "jarz_pos.utils.cleanup.ensure_account_requires_period_field",
     # Ensure Territory has delivery_income and delivery_expense fields
     "jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
     # Ensure new delivery slot fields exist before fixtures import / migrations

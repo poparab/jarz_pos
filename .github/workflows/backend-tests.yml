@@ -574,6 +574,9 @@ jobs:
             # that field still posts the expense, and that expense_month stays
             # derived from the date alone.
             test_expense_posting_time
+            # Paid ads billed in arrears: the earlier month's days are booked at
+            # that month's end against Accrued Expenses (pure; no site needed).
+            test_expense_periods
             # Cash custody (عهدة). The ledger guard is the load-bearing part: it
             # runs on EVERY Journal Entry / Payment Entry / Purchase Invoice
             # submit, so the cases pin both that it refuses an overdraw (under a

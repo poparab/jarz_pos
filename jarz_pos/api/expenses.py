@@ -217,8 +217,15 @@ def _indirect_expense_accounts(company: str) -> List[Dict[str, Any]]:
         return []
     clauses = ["(lft > {0} and rgt < {1})".format(lft, rgt) for lft, rgt in bounds]
     condition = " or ".join(clauses)
+    from jarz_pos.utils.cleanup import ACCOUNT_REQUIRES_PERIOD_FIELD
+
+    period_column = (
+        f", `{ACCOUNT_REQUIRES_PERIOD_FIELD}` as requires_period"
+        if frappe.db.has_column("Account", ACCOUNT_REQUIRES_PERIOD_FIELD)
+        else ""
+    )
     sql = f"""
-        select name, account_name
+        select name, account_name{period_column}
         from `tabAccount`
         where company = %s and is_group = 0 and ({condition})
         order by account_name asc
@@ -235,6 +242,8 @@ def _indirect_expense_accounts(company: str) -> List[Dict[str, Any]]:
             "label": fallback_labels[r["name"]],
             "label_en": account_labels.get(r["name"], {}).get("label_en") or fallback_labels[r["name"]],
             "label_ar": account_labels.get(r["name"], {}).get("label_ar") or fallback_labels[r["name"]],
+            # The client asks for the days a bill covers only when this is set.
+            "requires_period": bool(r.get("requires_period")),
         }
         for r in rows
     ]
@@ -488,6 +497,11 @@ def _serialize_expense(
         "rejection_reason": doc.get("rejection_reason"),
         "is_rejected": is_rejected,
         "remarks": doc.get("remarks"),
+        "period_from": doc.get("period_from"),
+        "period_to": doc.get("period_to"),
+        "period_journal_entries": [
+            n.strip() for n in (doc.get("period_journal_entries") or "").splitlines() if n.strip()
+        ],
         "journal_entry": doc.get("journal_entry"),
         "company": doc.get("company"),
         "creation": doc.get("creation"),
@@ -510,6 +524,13 @@ def _serialize_expenses(expenses: Sequence[Dict[str, Any]]) -> List[Dict[str, An
 
     account_labels = _account_label_map(list(fallback_labels), fallback_labels)
     return [_serialize_expense(expense, account_labels=account_labels) for expense in expenses]
+
+
+def _period_fields() -> List[str]:
+    # Only once the DocType has synced; a site mid-migrate still lists expenses.
+    if frappe.db.has_column("Jarz Expense Request", "period_from"):
+        return ["period_from", "period_to", "period_journal_entries"]
+    return []
 
 
 def _collect_expenses(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -538,6 +559,7 @@ def _collect_expenses(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
             "rejected_on",
             "rejection_reason",
             "remarks",
+            *_period_fields(),
             "journal_entry",
             "company",
             "creation",
@@ -685,6 +707,10 @@ def create_expense(payload: Optional[str] = None, **kwargs):
         data.get("expense_date") or formatdate(getdate(), "yyyy-MM-dd")
     )
     remarks = data.get("remarks")
+    # The days the bill covers (paid ads). Validated by the DocType, which also
+    # requires them for a reason account flagged as billed for a period.
+    period_from = (data.get("period_from") or "").strip() or None
+    period_to = (data.get("period_to") or "").strip() or None
 
     is_manager = _is_manager()
     company = _default_company()
@@ -763,6 +789,8 @@ def create_expense(payload: Optional[str] = None, **kwargs):
             "pos_profile": pos_profile,
             "requires_approval": 0 if is_manager else 1,
             "remarks": remarks,
+            "period_from": period_from,
+            "period_to": period_to,
             "requested_by": frappe.session.user,
         }
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import frappe
 from frappe import _
@@ -55,6 +55,93 @@ def _validate_indirect_expense(account_info: _AccountInfo) -> None:
             return
         parent = frappe.db.get_value("Account", parent, "parent_account")
     frappe.throw(_("Selected expense reason must belong under the Indirect Expenses group."))
+
+
+def _account_requires_period(account: Optional[str]) -> bool:
+    from jarz_pos.utils.cleanup import ACCOUNT_REQUIRES_PERIOD_FIELD
+
+    if not account or not frappe.db.has_column("Account", ACCOUNT_REQUIRES_PERIOD_FIELD):
+        return False
+    return bool(frappe.db.get_value("Account", account, ACCOUNT_REQUIRES_PERIOD_FIELD))
+
+
+def _accrued_expenses_account(company: str) -> str:
+    from jarz_pos.constants import ACCOUNTS
+
+    account = frappe.db.get_value(
+        "Account",
+        {"company": company, "account_name": ACCOUNTS.ACCRUED_EXPENSES, "is_group": 0},
+        "name",
+    )
+    if not account:
+        frappe.throw(
+            _("Account '{0}' is missing for {1}. Run bench migrate to create it.").format(
+                ACCOUNTS.ACCRUED_EXPENSES, company
+            )
+        )
+    return account
+
+
+def _post_earlier_month_shares(doc, company: str) -> Tuple[float, Optional[str]]:
+    """Book the earlier months' share of this payment at each month's end.
+
+    Returns the total booked and the Accrued Expenses account. The payment's
+    own Journal Entry debits that total to Accrued Expenses instead of to the
+    expense, clearing the liability. ``(0.0, None)`` -- and nothing posted --
+    when the whole period falls in the payment's month, or when no period was
+    given. A module function rather than a method so ``on_submit`` still runs
+    against the plain stand-ins the posting-time tests drive it with.
+    """
+    from jarz_pos.services.delivery_handling import _strip_je_tag_lookalikes
+    from jarz_pos.services.expense_periods import earlier_month_shares
+
+    period_from = getattr(doc, "period_from", None)
+    period_to = getattr(doc, "period_to", None)
+    if not (period_from and period_to):
+        return 0.0, None
+
+    shares = earlier_month_shares(
+        flt(doc.amount), getdate(period_from), getdate(period_to), getdate(doc.expense_date or today())
+    )
+    if not shares:
+        return 0.0, None
+
+    accrued = _accrued_expenses_account(company)
+    label = _strip_je_tag_lookalikes(doc.reason_label) or doc.reason_account
+    names = []
+    for share in shares:
+        je = frappe.new_doc("Journal Entry")
+        je.voucher_type = "Journal Entry"
+        je.company = company
+        je.posting_date = share.month_end
+        je.user_remark = _("{0}: {1} day(s) of {2} to {3} belong to {4}; paid on {5} by expense {6}").format(
+            label, share.days, period_from, period_to, share.month, doc.expense_date, doc.name
+        )
+        je.append(
+            "accounts",
+            {
+                "account": doc.reason_account,
+                "debit_in_account_currency": share.amount,
+                "credit_in_account_currency": 0,
+                "user_remark": _("Accrued, paid later"),
+            },
+        )
+        je.append(
+            "accounts",
+            {
+                "account": accrued,
+                "credit_in_account_currency": share.amount,
+                "debit_in_account_currency": 0,
+                "user_remark": label,
+            },
+        )
+        je.flags.ignore_permissions = True
+        je.insert()
+        je.submit()
+        names.append(je.name)
+
+    doc.db_set("period_journal_entries", "\n".join(names))
+    return round(sum(s.amount for s in shares), 2), accrued
 
 
 class JarzExpenseRequest(Document):
@@ -120,6 +207,8 @@ class JarzExpenseRequest(Document):
         if not self.period_month:
             self.period_month = self.expense_month
 
+        self._validate_service_period()
+
         if self.approved_on:
             try:
                 self.approved_on = get_datetime(self.approved_on)
@@ -144,6 +233,32 @@ class JarzExpenseRequest(Document):
             self.status = "Approved"
         elif self.docstatus == 2:
             self.status = "Cancelled"
+
+    def _validate_service_period(self) -> None:
+        """The days a bill covers, when it covers days rather than a moment.
+
+        Required when the reason account is flagged ``custom_jarz_requires_period``
+        (paid ads), optional otherwise. ``getattr`` because the fields only exist
+        once the DocType has synced; a site mid-migrate must still save expenses.
+        """
+        from jarz_pos.services.expense_periods import PeriodError, validate_period
+
+        period_from = getattr(self, "period_from", None)
+        period_to = getattr(self, "period_to", None)
+        if not period_from and not period_to:
+            if _account_requires_period(self.reason_account):
+                frappe.throw(
+                    _("{0} is billed for a period. Enter the first and last day this payment covers.").format(
+                        self.reason_label or self.reason_account
+                    )
+                )
+            return
+        if not (period_from and period_to):
+            frappe.throw(_("Enter both the first and the last day of the period."))
+        try:
+            validate_period(getdate(period_from), getdate(period_to), getdate(self.expense_date or today()))
+        except PeriodError as exc:
+            frappe.throw(_(str(exc)))
 
     def after_insert(self):
         """Tell the managers who can answer this that it is waiting.
@@ -286,15 +401,33 @@ class JarzExpenseRequest(Document):
         )
 
         amount = flt(self.amount)
-        je.append(
-            "accounts",
-            {
-                "account": self.reason_account,
-                "debit_in_account_currency": amount,
-                "credit_in_account_currency": 0,
-                "user_remark": self.payment_source_label,
-            },
-        )
+        # A payment for days in earlier months: those months were just booked
+        # against Accrued Expenses, and this payment clears that liability. Only
+        # the payment month's own days reach the expense account here.
+        accrued_total, accrued_account = _post_earlier_month_shares(self, company)
+        own_share = round(amount - accrued_total, 2)
+        if own_share > 0:
+            je.append(
+                "accounts",
+                {
+                    "account": self.reason_account,
+                    "debit_in_account_currency": own_share,
+                    "credit_in_account_currency": 0,
+                    "user_remark": self.payment_source_label,
+                },
+            )
+        if accrued_total > 0:
+            je.append(
+                "accounts",
+                {
+                    "account": accrued_account,
+                    "debit_in_account_currency": accrued_total,
+                    "credit_in_account_currency": 0,
+                    "user_remark": _("Clears the accrual for {0} to {1}").format(
+                        getattr(self, "period_from", None), getattr(self, "period_to", None)
+                    ),
+                },
+            )
         je.append(
             "accounts",
             {
@@ -320,16 +453,19 @@ class JarzExpenseRequest(Document):
         "Cancelled". If the reversal cannot be posted the whole cancel must fail
         so the caller is told, and Frappe rolls the transaction back.
         """
-        if not self.journal_entry:
-            return
-        if not frappe.db.exists("Journal Entry", self.journal_entry):
-            return
-
-        je = frappe.get_doc("Journal Entry", self.journal_entry)
-        if je.docstatus != 1:
-            return
-        je.flags.ignore_permissions = True
-        je.cancel()
+        # The payment first, then the month-end accruals it cleared. Cancelling
+        # only the payment would leave earlier months carrying an expense and
+        # Accrued Expenses a liability for a bill that was never paid.
+        names = [self.journal_entry] if self.journal_entry else []
+        names += [n.strip() for n in (getattr(self, "period_journal_entries", None) or "").splitlines() if n.strip()]
+        for name in names:
+            if not frappe.db.exists("Journal Entry", name):
+                continue
+            je = frappe.get_doc("Journal Entry", name)
+            if je.docstatus != 1:
+                continue
+            je.flags.ignore_permissions = True
+            je.cancel()
 
     def before_cancel(self):
         """Move the textual status to Cancelled.

@@ -436,6 +436,41 @@ _POSTING_TIME_DESCRIPTION = (
 )
 
 
+#: Set on an expense ledger whose bills cover a stretch of days rather than a
+#: moment -- paid ads today. The Expenses screen then asks for the period, and
+#: the part of it that falls in an earlier month is booked to that month.
+ACCOUNT_REQUIRES_PERIOD_FIELD = "custom_jarz_requires_period"
+
+
+def ensure_account_requires_period_field() -> None:
+    """Ensure ``custom_jarz_requires_period`` exists on Account.
+
+    Seeded in ``before_migrate`` rather than by a fixture for the same reason as
+    :func:`ensure_posting_time_fields`: fixtures sync at the END of a migrate,
+    while the code that reads the flag is already serving. The flag is data the
+    owner can switch on in Desk for any other ledger billed in arrears
+    (internet, electricity) without a code change.
+    """
+    try:
+        if not frappe:
+            return
+        _ensure_custom_field(
+            dt="Account",
+            fieldname=ACCOUNT_REQUIRES_PERIOD_FIELD,
+            label="Billed for a Period",
+            fieldtype="Check",
+            insert_after="account_type",
+            default="0",
+            description=(
+                "Expenses booked to this account must name the period they pay for. "
+                "Days falling in an earlier month are booked to that month via Accrued Expenses."
+            ),
+            translatable=0,
+        )
+    except Exception as e:  # pragma: no cover - defensive, matches siblings
+        _log(f"ensure_account_requires_period_field failed: {e}")
+
+
 def ensure_posting_time_fields() -> None:
     """Ensure ``custom_jarz_posting_time`` exists on Journal Entry and Payment Entry.
 
