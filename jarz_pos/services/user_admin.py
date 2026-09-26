@@ -94,11 +94,52 @@ def is_privileged_caller(user: Optional[str] = None) -> bool:
     return user == ROLES.ADMINISTRATOR or bool(_roles(user) & PRIVILEGED_ROLES)
 
 
-def is_privileged_target(user: str, roles: Optional[Iterable[str]] = None) -> bool:
+def _effective_roles(
+    user: str,
+    roles: Optional[Iterable[str]] = None,
+    profiles: Optional[Iterable[str]] = None,
+    definitions: Optional[Dict[str, List[str]]] = None,
+) -> set:
+    """What *user* holds now, plus what their Role Profiles grant now.
+
+    ``Has Role`` alone can be stale: when a profile gains a role, Frappe pushes
+    it to members from a background job. Every save here rebuilds roles from the
+    profile, so judging a target by ``Has Role`` alone would let a manager take
+    over an account that the very next save makes a System Manager.
+    """
+    held = set(roles) if roles is not None else _roles(user)
+    if profiles is None:
+        profiles = _profiles_by_user([user]).get(user, [])
+    if definitions is None:
+        definitions = _profile_roles()
+    for profile in profiles:
+        held |= set(definitions.get(profile, []))
+    return held
+
+
+def is_privileged_target(user: str, roles: Optional[Iterable[str]] = None, **kw) -> bool:
     if user in STANDARD_USERS:
         return True
-    held = set(roles) if roles is not None else _roles(user)
-    return bool(held & PRIVILEGED_ROLES)
+    return bool(_effective_roles(user, roles, **kw) & PRIVILEGED_ROLES)
+
+
+def can_modify(user: str, roles: Optional[Iterable[str]] = None, **kw) -> bool:
+    """A System Manager may change anyone but the built-in accounts. A JARZ
+    Manager may change anyone below the manager tier, plus their own name and
+    mobile -- never a System Manager and never another JARZ Manager: one stolen
+    manager session must not be able to reset every peer's password or lock
+    them all out."""
+    caller = _session_user()
+    if user in STANDARD_USERS:
+        return False
+    if is_privileged_caller(caller):
+        return True
+    effective = _effective_roles(user, roles, **kw)
+    if effective & PRIVILEGED_ROLES:
+        return False
+    if user != caller and ROLES.JARZ_MANAGER in effective:
+        return False
+    return True
 
 
 def _ensure_can_modify(user: str) -> Dict[str, Any]:
@@ -107,17 +148,26 @@ def _ensure_can_modify(user: str) -> Dict[str, Any]:
     user = cstr(user).strip()
     if not user:
         frappe.throw(_("User is required."))
-    if user in STANDARD_USERS:
-        frappe.throw(_("{0} is a built-in account and cannot be changed here.").format(user))
     row = frappe.db.get_value(
         "User", user, ["name", "full_name", "enabled", "user_type"], as_dict=True
     )
     if not row:
         frappe.throw(_("No such user: {0}").format(user), frappe.DoesNotExistError)
-    if is_privileged_target(user) and not is_privileged_caller():
+    # The lookup is case-insensitive ("guest" finds Guest), so every check
+    # below runs on the canonical name, never on what the client sent.
+    if row.name in STANDARD_USERS:
+        frappe.throw(_("{0} is a built-in account and cannot be changed here.").format(row.name))
+    if is_privileged_target(row.name) and not is_privileged_caller():
         frappe.throw(
             _("{0} is a system administrator account. Only a System Manager can change it.").format(
-                row.full_name or user
+                row.full_name or row.name
+            ),
+            frappe.PermissionError,
+        )
+    if not can_modify(row.name):
+        frappe.throw(
+            _("{0} is a JARZ Manager. Only a System Manager can change another manager's account.").format(
+                row.full_name or row.name
             ),
             frappe.PermissionError,
         )
@@ -184,6 +234,8 @@ def _parse_profiles(value: Any) -> List[str]:
             value = [part for part in text.split(",")]
     if isinstance(value, str):
         value = [value]
+    if not isinstance(value, (list, tuple)):
+        frappe.throw(_("Role profiles must be a list of names."))
     seen: List[str] = []
     for item in value or []:
         name = cstr(item.get("role_profile") if isinstance(item, dict) else item).strip()
@@ -299,9 +351,10 @@ def _employees_by_user(users: List[str]) -> Dict[str, Dict[str, Any]]:
     return {r.user_id: r for r in rows}
 
 
-def _shape(row: Dict[str, Any], roles, profiles, branches, employee) -> Dict[str, Any]:
+def _shape(row: Dict[str, Any], roles, profiles, branches, employee, definitions=None) -> Dict[str, Any]:
     caller = _session_user()
-    privileged = is_privileged_target(row["name"], roles)
+    definitions = definitions if definitions is not None else _profile_roles()
+    privileged = is_privileged_target(row["name"], roles, profiles=profiles, definitions=definitions)
     return {
         "name": row["name"],
         "email": row.get("email") or row["name"],
@@ -323,7 +376,7 @@ def _shape(row: Dict[str, Any], roles, profiles, branches, employee) -> Dict[str
         "employee_branch": employee.get("branch") if employee else None,
         "is_privileged": privileged,
         "is_self": row["name"] == caller,
-        "can_edit": not privileged or is_privileged_caller(),
+        "can_edit": can_modify(row["name"], roles, profiles=profiles, definitions=definitions),
     }
 
 
@@ -373,8 +426,16 @@ def list_users(search: Optional[str] = None, include_disabled: Any = 1) -> List[
     profiles = _profiles_by_user(users)
     branches = _branches_by_user(users)
     employees = _employees_by_user(users)
+    definitions = _profile_roles()
     return [
-        _shape(r, roles.get(r.name, []), profiles.get(r.name, []), branches.get(r.name, []), employees.get(r.name))
+        _shape(
+            r,
+            roles.get(r.name, []),
+            profiles.get(r.name, []),
+            branches.get(r.name, []),
+            employees.get(r.name),
+            definitions,
+        )
         for r in rows
     ]
 
@@ -383,8 +444,9 @@ def get_user(user: str) -> Dict[str, Any]:
     ensure_access()
     user = cstr(user).strip()
     row = frappe.db.get_value("User", user, _user_fields(), as_dict=True) if user else None
-    if not row or user in STANDARD_USERS:
+    if not row or row.name in STANDARD_USERS:
         frappe.throw(_("No such user: {0}").format(user), frappe.DoesNotExistError)
+    user = row.name
     return _shape(
         row,
         _roles_by_user([user]).get(user, []),
@@ -463,9 +525,25 @@ def _link_employee(user: str, employee: Optional[str]) -> None:
             )
     for name in current:
         if name != employee:
-            frappe.db.set_value("Employee", name, "user_id", None, update_modified=False)
+            frappe.db.set_value("Employee", name, "user_id", None)
+            _audit_employee(name, _("Unlinked from user {0} by {1} (Users screen).").format(user, _session_user()))
     if employee and employee not in current:
         frappe.db.set_value("Employee", employee, "user_id", user)
+        _audit_employee(employee, _("Linked to user {0} by {1} (Users screen).").format(user, _session_user()))
+
+
+def _audit_employee(employee: str, text: str) -> None:
+    # db.set_value writes no Version row, so the move is recorded here instead:
+    # who an Employee resolves to decides branch, custody and courier identity.
+    frappe.get_doc(
+        {
+            "doctype": "Comment",
+            "comment_type": "Info",
+            "reference_doctype": "Employee",
+            "reference_name": employee,
+            "content": text,
+        }
+    ).insert(ignore_permissions=True)
 
 
 def _sign_out_everywhere(user: str) -> None:
@@ -542,6 +620,8 @@ def update_user(
     if mobile_no is not None:
         doc.mobile_no = _clean_mobile(mobile_no)
     if require_pos_shift is not None and doc.meta.has_field("custom_require_pos_shift"):
+        if cint(require_pos_shift) != cint(doc.get("custom_require_pos_shift")):
+            _ensure_not_self(doc.name, _("change the shift requirement of"))
         doc.custom_require_pos_shift = cint(require_pos_shift)
     if role_profiles is not None:
         names = _parse_profiles(role_profiles)
@@ -552,6 +632,10 @@ def update_user(
     doc.flags.ignore_permissions = True
     doc.save(ignore_permissions=True)
 
+    if cint(clear_employee) or (employee is not None and cstr(employee).strip()):
+        # Taking a cashier's Employee record would take their branch, custody
+        # and courier identity with it.
+        _ensure_not_self(doc.name, _("change the employee link of"))
     if cint(clear_employee):
         _link_employee(doc.name, None)
     elif employee is not None and cstr(employee).strip():
@@ -575,13 +659,16 @@ def set_enabled(user: str, enabled: Any) -> Dict[str, Any]:
 
 
 def reset_password(user: str, new_password: str, sign_out: Any = 1) -> Dict[str, Any]:
+    """Set a new password. Anyone else is ALWAYS signed out everywhere: a reset
+    usually means the old password leaked, and a live session is exactly what
+    the thief holds. ``sign_out`` is accepted for old clients and ignored."""
     row = _ensure_can_modify(user)
     password = _validate_password(new_password)
     doc = frappe.get_doc("User", row.name)
     doc.new_password = password
     doc.flags.ignore_permissions = True
     doc.save(ignore_permissions=True)
-    if cint(sign_out) and row.name != _session_user():
+    if row.name != _session_user():
         _sign_out_everywhere(row.name)
     return {"ok": True, "user": row.name}
 

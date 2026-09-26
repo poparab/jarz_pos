@@ -160,6 +160,42 @@ class TestUserAdmin(unittest.TestCase):
         with self.assertRaises(frappe.PermissionError):
             svc.update_user(SYSADMIN, first_name="Hijacked")
 
+    def test_manager_cannot_touch_another_manager(self):
+        _user("ua.peer@jarz.test", [P_MANAGER])
+        self._as(MANAGER)
+        with self.assertRaises(frappe.PermissionError):
+            svc.reset_password("ua.peer@jarz.test", PW + "x")
+        with self.assertRaises(frappe.PermissionError):
+            svc.set_enabled("ua.peer@jarz.test", 0)
+        rows = {r["name"]: r for r in svc.list_users()}
+        self.assertFalse(rows["ua.peer@jarz.test"]["can_edit"])
+        self.assertTrue(rows[MANAGER]["can_edit"])
+
+    def test_profile_that_now_grants_system_manager_protects_its_members(self):
+        # The profile gains System Manager, but the members' Has Role rows have
+        # not caught up yet (Frappe pushes that from a background job).
+        frappe.get_doc(
+            {"doctype": "Has Role", "parent": P_STAFF, "parenttype": "Role Profile",
+             "parentfield": "roles", "role": "System Manager"}
+        ).db_insert()
+        self.assertNotIn("System Manager", frappe.get_roles(CASHIER))
+        self._as(MANAGER)
+        with self.assertRaises(frappe.PermissionError):
+            svc.reset_password(CASHIER, PW + "x")
+
+    def test_builtin_accounts_are_refused_in_any_case(self):
+        self._as(MANAGER)
+        for name in ("guest", "GUEST", "administrator"):
+            with self.assertRaises(frappe.ValidationError):
+                svc.reset_password(name, PW + "x")
+
+    def test_cannot_take_an_employee_or_drop_own_shift_rule(self):
+        self._as(MANAGER)
+        with self.assertRaises(frappe.PermissionError):
+            svc.update_user(MANAGER, clear_employee=1)
+        with self.assertRaises(frappe.PermissionError):
+            svc.update_user(MANAGER, require_pos_shift=1)
+
     def test_system_manager_can_touch_a_system_manager(self):
         self._as(SYSADMIN)
         svc.reset_password(MANAGER, PW + "x", sign_out=0)
