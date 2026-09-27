@@ -63,5 +63,23 @@ class TestB2bClientsAreWhoOrdersB2b(unittest.TestCase):
         self.assertNotIn("customer_group IN %(groups)s", rev)
 
 
+class TestShippingAlertsAreSummaries(unittest.TestCase):
+    """The shipping dashboard listed one alert per losing area and one per
+    large override (22 alerts for September 2026). Each is now one line."""
+
+    def setUp(self):
+        self.body = _function(_src("shipping_analytics"), "get_alerts_data")
+
+    def test_no_per_area_or_per_invoice_alert_lines(self):
+        self.assertNotIn("for t in losing:", self.body)
+        self.assertNotIn("for lr in large:", self.body)
+        self.assertNotIn("Large override approved on", self.body)
+
+    def test_override_breakdown_reports_money(self):
+        body = _function(_src("shipping_analytics"), "get_custom_shipping_breakdown")
+        for key in ("approved_extra", "approved_saved", "net_effect", "exception_rate_pct", "by_area"):
+            self.assertIn(f'"{key}"', body, key)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,21 @@ _BILLED_SHIPPING_INCOME = """(
 )"""
 
 
+def _party_label(party_type, party):
+    """A courier's name for display. Couriers are Employees (or Suppliers), and
+    the raw link value is an id: the dashboard showed "HR-EMP-000002" beside a
+    colleague shown by name."""
+    if not party:
+        return party
+    field = {"Employee": "employee_name", "Supplier": "supplier_name"}.get(party_type or "")
+    if not field:
+        return party
+    try:
+        return frappe.db.get_value(party_type, party, field) or party
+    except Exception:
+        return party
+
+
 def _ensure_jarz_manager():
     roles = set(frappe.get_roles(frappe.session.user))
     if ROLES.JARZ_MANAGER not in roles and ROLES.ADMINISTRATOR not in roles:
@@ -280,7 +295,7 @@ def get_cost_by_courier(from_date=None, to_date=None):
         if key not in couriers:
             couriers[key] = {
                 "party_type": r["party_type"],
-                "party": r["party"],
+                "party": _party_label(r["party_type"], r["party"]),
                 "settled": 0.0,
                 "unsettled": 0.0,
                 "order_count": 0,
@@ -324,6 +339,74 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None):
     rejected = sum(1 for r in rows if r["status"] == "Rejected")
     pending = sum(1 for r in rows if r["status"] == "Pending")
 
+    # Money view of the overrides. A request replaces the order's courier cost
+    # (the area's standard rate, `original_amount`) with `requested_amount`;
+    # only APPROVED ones changed what was paid. An increase is extra cost, a
+    # decrease a saving. Computed over every request in range, not the 200
+    # rows returned for listing.
+    money = frappe.db.sql("""
+        SELECT
+            COUNT(*)                                                           AS n,
+            COALESCE(SUM(GREATEST(requested_amount - original_amount, 0)), 0)  AS extra,
+            COALESCE(SUM(GREATEST(original_amount - requested_amount, 0)), 0)  AS saved,
+            COALESCE(SUM(original_amount), 0)                                  AS standard,
+            SUM(requested_amount > original_amount)                            AS increases,
+            SUM(requested_amount < original_amount)                            AS decreases,
+            MAX(CASE WHEN original_amount > 0
+                     THEN (requested_amount - original_amount) / original_amount END) AS max_pct
+        FROM `tabCustom Shipping Request`
+        WHERE status = 'Approved'
+          AND DATE(creation) BETWEEN %(fd)s AND %(td)s
+    """, {"fd": fd, "td": td}, as_dict=True)[0]
+    pending_extra = frappe.db.sql("""
+        SELECT COALESCE(SUM(requested_amount - original_amount), 0) AS x
+        FROM `tabCustom Shipping Request`
+        WHERE status = 'Pending' AND DATE(creation) BETWEEN %(fd)s AND %(td)s
+    """, {"fd": fd, "td": td}, as_dict=True)[0]["x"]
+    delivery_orders = frappe.db.sql("""
+        SELECT COUNT(*) AS n FROM `tabSales Invoice`
+        WHERE docstatus = 1 AND is_return = 0 AND IFNULL(custom_is_pickup, 0) = 0
+          AND posting_date BETWEEN %(fd)s AND %(td)s
+    """, {"fd": fd, "td": td}, as_dict=True)[0]["n"]
+    area_rows = frappe.db.sql("""
+        SELECT territory,
+               COUNT(*)                                                     AS count,
+               COALESCE(SUM(requested_amount - original_amount), 0)         AS net,
+               COALESCE(SUM(GREATEST(requested_amount - original_amount, 0)), 0) AS extra
+        FROM `tabCustom Shipping Request`
+        WHERE status = 'Approved' AND DATE(creation) BETWEEN %(fd)s AND %(td)s
+        GROUP BY territory
+        ORDER BY net DESC
+        LIMIT 5
+    """, {"fd": fd, "td": td}, as_dict=True)
+    extra = float(money.get("extra") or 0)
+    saved = float(money.get("saved") or 0)
+    standard = float(money.get("standard") or 0)
+    increases = int(money.get("increases") or 0)
+    money_summary = {
+        "approved_extra": round(extra, 2),
+        "approved_saved": round(saved, 2),
+        "net_effect": round(extra - saved, 2),
+        "net_effect_pct": round((extra - saved) / standard * 100, 1) if standard else 0.0,
+        "increases": increases,
+        "decreases": int(money.get("decreases") or 0),
+        "avg_increase": round(extra / increases, 2) if increases else 0.0,
+        "max_increase_pct": round(float(money.get("max_pct") or 0) * 100, 1),
+        "pending_extra": round(float(pending_extra or 0), 2),
+        "delivery_orders": int(delivery_orders or 0),
+        "exception_rate_pct": round(int(money.get("n") or 0) / delivery_orders * 100, 1) if delivery_orders else 0.0,
+        "large_overrides": sum(1 for r in rows if r["status"] == "Approved" and r["original_amount"] and (float(r["requested_amount"] or 0) - float(r["original_amount"] or 0)) > float(r["original_amount"]) * 0.5),
+    }
+    by_area = [
+        {
+            "territory": get_area_label(r["territory"]),
+            "count": int(r["count"] or 0),
+            "net": round(float(r["net"] or 0), 2),
+            "extra": round(float(r["extra"] or 0), 2),
+        }
+        for r in area_rows
+    ]
+
     woo_ids = get_woo_order_ids([r.get("invoice") for r in rows])
 
     for r in rows:
@@ -346,7 +429,9 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None):
             "rejected": rejected,
             "pending": pending,
             "approval_rate": round(approved / total * 100, 1) if total > 0 else 0,
+            **money_summary,
         },
+        "by_area": by_area,
     }
 
 
@@ -465,6 +550,7 @@ def get_unsettled_courier_balances():
 
     today = getdate(nowdate())
     for r in rows:
+        r["party"] = _party_label(r["party_type"], r["party"])
         r["total_owed"] = float(r["total_owed"] or 0)
         r["order_count"] = int(r["order_count"] or 0)
         r["oldest_date"] = str(r["oldest_date"]) if r["oldest_date"] else None
@@ -504,13 +590,19 @@ def get_alerts_data(from_date=None, to_date=None):
         ORDER BY (expense - income) DESC
     """, {"fd": fd, "td": td}, as_dict=True)
 
-    for t in losing:
-        loss = float(t["expense"] or 0) - float(t["income"] or 0)
+    # One alert for all of them: a line per area buried the page (13 alerts
+    # for September 2026) and repeated the territory chart right below it.
+    if losing:
+        losses = [
+            (get_area_label(t["territory"]), float(t["expense"] or 0) - float(t["income"] or 0))
+            for t in losing
+        ]
+        worst = ", ".join(f"{name} ({loss:,.0f})" for name, loss in losses[:3])
         alerts.append({
             "type": "danger",
             "message": (
-                f"Territory <b>{get_area_label(t['territory'])}</b> lost "
-                f"<b>EGP {loss:,.0f}</b> on shipping (cost exceeds income charged)"
+                f"<b>{len(losses)}</b> areas cost more to deliver than customers paid: "
+                f"<b>EGP {sum(l for _, l in losses):,.0f}</b> lost. Worst: {worst}"
             ),
         })
 
@@ -536,7 +628,7 @@ def get_alerts_data(from_date=None, to_date=None):
         alerts.append({
             "type": "warning",
             "message": (
-                f"Courier <b>{c['party']}</b> has "
+                f"Courier <b>{_party_label(c['party_type'], c['party'])}</b> has "
                 f"<b>EGP {float(c['total'] or 0):,.0f}</b> unsettled for <b>{days} days</b>"
             ),
         })
@@ -561,29 +653,27 @@ def get_alerts_data(from_date=None, to_date=None):
             ),
         })
 
-    # 4. Large approved overrides in range (delta > 50% of original)
+    # 4. Large approved overrides in range (delta > 50% of original), as ONE
+    # alert: a line per invoice listed ten near-identical rows (Sep 2026: 63
+    # such overrides). The overrides card below breaks them down by area.
     large = frappe.db.sql("""
-        SELECT name, invoice, territory,
-               original_amount, requested_amount,
-               (requested_amount - original_amount) AS delta
+        SELECT COUNT(*) AS n,
+               COALESCE(SUM(requested_amount - original_amount), 0) AS extra,
+               MAX((requested_amount - original_amount) / original_amount) AS max_pct
         FROM `tabCustom Shipping Request`
         WHERE status = 'Approved'
           AND DATE(creation) BETWEEN %(fd)s AND %(td)s
           AND original_amount > 0
           AND (requested_amount - original_amount) > original_amount * 0.5
-        ORDER BY delta DESC
-        LIMIT 10
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td}, as_dict=True)[0]
 
-    for lr in large:
-        orig = float(lr["original_amount"] or 0)
-        req = float(lr["requested_amount"] or 0)
-        pct = round((req - orig) / orig * 100) if orig else 0
+    if int(large.get("n") or 0):
         alerts.append({
             "type": "info",
             "message": (
-                f"Large override approved on <b>{lr['invoice']}</b> ({get_area_label(lr['territory'])}): "
-                f"EGP {orig:,.0f} → EGP {req:,.0f} (<b>+{pct}%</b> above territory rate)"
+                f"<b>{int(large['n'])}</b> approved overrides raised the courier cost more than 50% "
+                f"above the area rate: <b>EGP {float(large['extra'] or 0):,.0f}</b> extra "
+                f"(largest +{float(large['max_pct'] or 0) * 100:,.0f}%)"
             ),
         })
 
