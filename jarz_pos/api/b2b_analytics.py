@@ -35,6 +35,22 @@ from jarz_pos.utils.invoice_utils import get_area_label
 # ── Customer groups that count as B2B clients ────────────────────────────
 _B2B_GROUPS = ("B2B", "Distributor")
 
+# Who counts as a B2B client: a customer in a B2B group, OR anyone who has ever
+# placed a B2B Supply order. Group membership alone missed most real buyers:
+# in September 2026 on production, B2B Supply revenue was 54,808 but customers
+# in the B2B groups accounted for 13,340 of it; the rest went to customers left
+# in "Individual" or with no group. Needs %(groups)s and %(purpose)s bound.
+_B2B_CLIENT_COND = """(
+    c.customer_group IN %(groups)s
+    OR EXISTS (
+        SELECT 1 FROM `tabSales Invoice` b2b_si
+        WHERE b2b_si.customer = c.name
+          AND b2b_si.docstatus = 1
+          AND b2b_si.is_return = 0
+          AND b2b_si.custom_order_purpose = %(purpose)s
+    )
+)"""
+
 # ── Canonical B2B pipeline stage order (mirrors custom_b2b_stage options) ─
 _STAGE_ORDER = [
     "Lead",
@@ -354,55 +370,71 @@ def _revenue_by_territory(params: Dict[str, str]) -> List[Dict[str, Any]]:
 # Clients
 # ---------------------------------------------------------------------------
 def _clients(params: Dict[str, str]) -> Dict[str, Any]:
-    """Client counts + per-group revenue for B2B/Distributor customer groups."""
+    """Client counts + per-group revenue over every B2B client (see
+    ``_B2B_CLIENT_COND``), so the per-group revenue adds up to B2B revenue."""
+    binds = {**params, "purpose": _B2B_PURPOSE, "groups": _B2B_GROUPS}
     total_b2b_clients = frappe.db.sql(
-        """
+        f"""
         SELECT COUNT(*) AS n
-        FROM `tabCustomer`
-        WHERE disabled = 0
-          AND customer_group IN %(groups)s
+        FROM `tabCustomer` c
+        WHERE c.disabled = 0
+          AND {_B2B_CLIENT_COND}
         """,
-        {"groups": _B2B_GROUPS},
+        binds,
         as_dict=True,
     )[0]["n"]
 
+    # New = first B2B Supply order falls in the range; a group member who has
+    # never ordered counts when it was created in the range.
     new_clients = frappe.db.sql(
         """
-        SELECT COUNT(*) AS n
-        FROM `tabCustomer`
-        WHERE customer_group IN %(groups)s
-          AND DATE(creation) BETWEEN %(fd)s AND %(td)s
+        SELECT COUNT(*) AS n FROM (
+            SELECT c.name, c.customer_group, c.creation,
+                   MIN(si.posting_date) AS first_b2b
+            FROM `tabCustomer` c
+            LEFT JOIN `tabSales Invoice` si
+                   ON si.customer = c.name
+                  AND si.docstatus = 1
+                  AND si.is_return = 0
+                  AND si.custom_order_purpose = %(purpose)s
+            GROUP BY c.name, c.customer_group, c.creation
+        ) t
+        WHERE t.first_b2b BETWEEN %(fd)s AND %(td)s
+           OR (t.first_b2b IS NULL
+               AND t.customer_group IN %(groups)s
+               AND DATE(t.creation) BETWEEN %(fd)s AND %(td)s)
         """,
-        {"groups": _B2B_GROUPS, **params},
+        binds,
         as_dict=True,
     )[0]["n"]
 
-    # Client count per group.
+    # Client count per group (customers without a group are "Unassigned").
     count_rows = frappe.db.sql(
-        """
-        SELECT customer_group, COUNT(*) AS client_count
-        FROM `tabCustomer`
-        WHERE disabled = 0
-          AND customer_group IN %(groups)s
-        GROUP BY customer_group
+        f"""
+        SELECT COALESCE(NULLIF(c.customer_group, ''), 'Unassigned') AS customer_group,
+               COUNT(*) AS client_count
+        FROM `tabCustomer` c
+        WHERE c.disabled = 0
+          AND {_B2B_CLIENT_COND}
+        GROUP BY COALESCE(NULLIF(c.customer_group, ''), 'Unassigned')
         """,
-        {"groups": _B2B_GROUPS},
+        binds,
         as_dict=True,
     )
-    # Revenue per group in range (B2B Supply invoices).
+    # Revenue per group in range (every B2B Supply invoice, whatever the group).
     rev_rows = frappe.db.sql(
         """
-        SELECT c.customer_group, COALESCE(SUM(si.grand_total), 0) AS revenue
+        SELECT COALESCE(NULLIF(c.customer_group, ''), 'Unassigned') AS customer_group,
+               COALESCE(SUM(si.grand_total), 0) AS revenue
         FROM `tabSales Invoice` si
         JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND si.is_return = 0
           AND si.custom_order_purpose = %(purpose)s
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
-          AND c.customer_group IN %(groups)s
-        GROUP BY c.customer_group
+        GROUP BY COALESCE(NULLIF(c.customer_group, ''), 'Unassigned')
         """,
-        {**params, "purpose": _B2B_PURPOSE, "groups": _B2B_GROUPS},
+        binds,
         as_dict=True,
     )
     rev_map = {r["customer_group"]: float(r["revenue"] or 0) for r in rev_rows}
@@ -427,7 +459,7 @@ def _at_risk_clients(params: Dict[str, str]) -> Dict[str, Any]:
     """B2B/Distributor customers currently flagged At Risk / Can't Lose Them,
     with their in-range revenue."""
     rows = frappe.db.sql(
-        """
+        f"""
         SELECT
             c.name                              AS customer,
             c.customer_name,
@@ -445,7 +477,7 @@ def _at_risk_clients(params: Dict[str, str]) -> Dict[str, Any]:
             GROUP BY customer
         ) rev ON rev.customer = c.name
         WHERE c.disabled = 0
-          AND c.customer_group IN %(groups)s
+          AND {_B2B_CLIENT_COND}
           AND c.customer_segment IN %(segs)s
         ORDER BY c.rfm_avg_order_value DESC
         LIMIT 50

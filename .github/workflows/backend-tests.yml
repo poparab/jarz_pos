@@ -565,6 +565,10 @@ jobs:
             # source-scans shipping_analytics for the territory-rate fallback
             # that overstated September 2026 delivery income by 82%.
             test_api_financial_report
+            # Query shapes fixed by the 2026-09-27 audit of every Reports number:
+            # product revenue net of invoice discounts, stock value from the
+            # ledger, B2B clients = whoever places B2B Supply orders.
+            test_report_number_audit
             # The posting TIME a POS user picks. It must be in CI because the
             # failure it guards is invisible at runtime: Journal Entry, Payment
             # Entry and GL Entry have no posting_time field, so the old

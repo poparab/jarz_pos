@@ -126,7 +126,9 @@ def get_product_analytics(
             sii.item_name,
             sii.item_group,
             sii.qty,
-            sii.amount,
+            -- Net of the invoice-level discount, so product revenue agrees with
+            -- the Sales ledger (Sep 2026: gross line amounts overstated it by 816).
+            sii.base_net_amount AS amount,
             si.name   AS invoice_name,
             si.territory,
             si.posting_date

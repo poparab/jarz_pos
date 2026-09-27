@@ -85,7 +85,10 @@ def get_inventory_analytics(
 
     stock_value_row = frappe.db.sql(
         """
-        SELECT COALESCE(SUM(b.actual_qty * i.valuation_rate), 0) AS val
+        -- The ledger's own value per bin, not qty x Item.valuation_rate: the
+        -- item-master rate is a stale default and priced production stock at
+        -- 62,696 against a ledger value of 164,813 (2026-09-27).
+        SELECT COALESCE(SUM(b.stock_value), 0) AS val
         FROM `tabBin` b
         JOIN `tabItem` i ON i.name = b.item_code
         WHERE i.is_stock_item = 1
