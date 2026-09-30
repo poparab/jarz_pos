@@ -802,6 +802,23 @@ class TestAmendmentDeliverySlot(unittest.TestCase):
         self.assertIsNone(manager._derive_delivery_end_datetime(self._source(timedelta(0), duration=None)))
         self.assertIsNone(manager._derive_delivery_end_datetime(self._source(None, duration=3600)))
 
+    def test_the_source_end_only_pairs_with_the_source_start(self):
+        """A new start with no end must not inherit the old slot's end."""
+        from jarz_pos.api import manager
+
+        source = self._source(timedelta(hours=12), duration=3600)
+        # Nothing sent: both come from the source.
+        self.assertEqual(
+            manager._amendment_delivery_end(source, None, None), "2026-09-30 13:00:00"
+        )
+        # A new start alone: no end, so slot normalisation derives one.
+        self.assertIsNone(manager._amendment_delivery_end(source, "2026-09-30 12:30:00", None))
+        # An explicit end always wins.
+        self.assertEqual(
+            manager._amendment_delivery_end(source, "2026-09-30 12:30:00", "2026-09-30 14:00:00"),
+            "2026-09-30 14:00:00",
+        )
+
     def test_an_amendment_keeps_a_midnight_window_as_its_own(self):
         """The explicit-slot decision reads the same derivation, so 00:00 must count."""
         from jarz_pos.api import manager

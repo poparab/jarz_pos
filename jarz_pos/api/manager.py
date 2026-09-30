@@ -1547,6 +1547,25 @@ def _derive_required_delivery_datetime(inv: Any) -> Optional[str]:
     return f"{delivery_date} {normalized_time}"
 
 
+def _amendment_delivery_end(
+    source_invoice: Any,
+    required_delivery_datetime: Optional[str],
+    delivery_end_datetime: Optional[str],
+) -> Optional[str]:
+    """Return the end to use for an amendment's delivery window.
+
+    The source's end only belongs with the source's START. When the caller sends
+    a new start but no end, pairing it with the old end would shrink or stretch
+    the window (12:00-13:00 moved to an off-grid 12:30 became a 30-minute slot),
+    so the end is left for slot normalisation to derive, as it always was.
+    """
+    if delivery_end_datetime:
+        return delivery_end_datetime
+    if required_delivery_datetime:
+        return None
+    return _derive_delivery_end_datetime(source_invoice)
+
+
 def _derive_delivery_end_datetime(inv: Any) -> Optional[str]:
     """Derive the delivery end datetime from the invoice's duration metadata."""
     start_text = _derive_required_delivery_datetime(inv)
@@ -2411,7 +2430,9 @@ def _run_invoice_amendment_job(
         )
     )
     effective_required_delivery_datetime = required_delivery_datetime or _derive_required_delivery_datetime(source_invoice)
-    effective_delivery_end_datetime = delivery_end_datetime or _derive_delivery_end_datetime(source_invoice)
+    effective_delivery_end_datetime = _amendment_delivery_end(
+        source_invoice, required_delivery_datetime, delivery_end_datetime
+    )
     effective_custom_delivery_income = _resolve_amendment_delivery_income(
         source_invoice, custom_delivery_income
     )
@@ -3170,7 +3191,9 @@ def submit_invoice_amendment(
         customer_name=customer_name,
         shipping_address_name=shipping_address_name,
         required_delivery_datetime=required_delivery_datetime or _derive_required_delivery_datetime(source_invoice),
-        delivery_end_datetime=delivery_end_datetime or _derive_delivery_end_datetime(source_invoice),
+        delivery_end_datetime=_amendment_delivery_end(
+            source_invoice, required_delivery_datetime, delivery_end_datetime
+        ),
         sales_partner=sales_partner if sales_partner is not None else source_invoice.get("sales_partner"),
         payment_type=payment_type,
         pickup=pickup,
