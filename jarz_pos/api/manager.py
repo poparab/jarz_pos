@@ -10,6 +10,7 @@ Endpoints:
 """
 from __future__ import annotations
 from contextlib import contextmanager
+from datetime import timedelta
 import hashlib
 import json
 import re
@@ -88,6 +89,8 @@ from jarz_pos.utils.access_control import (
     get_users_for_pos_profiles,
 )
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
+# Renders a Time column (a timedelta) as HH:MM:SS without treating 00:00 as unset.
+from jarz_pos.utils.posting_datetime import format_time_value
 from jarz_pos.utils.realtime import publish_invoice_event, publish_to_branches
 
 
@@ -1521,12 +1524,26 @@ def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:
 
 
 def _derive_required_delivery_datetime(inv: Any) -> Optional[str]:
-    """Derive the delivery start datetime from the invoice's stored slot fields."""
-    delivery_date = str(inv.get("custom_delivery_date") or "").strip()
-    delivery_time_from = str(inv.get("custom_delivery_time_from") or "").strip()
-    if not delivery_date or not delivery_time_from:
+    """Derive the delivery start datetime from the invoice's stored slot fields.
+
+    ``custom_delivery_time_from`` is a Time field, which Frappe hands back as a
+    ``datetime.timedelta``.  The midnight slot ("00:00 - 01:00") is
+    ``timedelta(0)`` — falsy — so an ``or ""`` read treated a real slot as absent
+    and the amendment's replacement invoice lost its delivery date and time.
+    Only ``None``/blank counts as missing; every present value is rendered as a
+    zero-padded ``HH:MM:SS`` (``str(timedelta(0))`` is ``"0:00:00"``, and
+    ``"9:00"`` used to become the unpadded ``"9:00:00"``).
+    """
+    raw_date = inv.get("custom_delivery_date")
+    raw_time = inv.get("custom_delivery_time_from")
+    if raw_date is None or raw_time is None:
         return None
-    normalized_time = delivery_time_from if len(delivery_time_from) > 5 else f"{delivery_time_from}:00"
+    delivery_date = str(raw_date).strip()
+    if not delivery_date:
+        return None
+    normalized_time = format_time_value(raw_time)
+    if not normalized_time:
+        return None
     return f"{delivery_date} {normalized_time}"
 
 
@@ -1549,9 +1566,15 @@ def _derive_delivery_end_datetime(inv: Any) -> Optional[str]:
             duration_seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
         else:
             duration_seconds = int(float(raw_duration or 0))
+        # A zero duration legitimately means "no duration recorded".
         if duration_seconds <= 0:
             return None
-        return frappe.utils.add_to_date(start_dt, seconds=duration_seconds, as_string=True)
+        # Not ``add_to_date(..., as_string=True)``: handed a datetime object and
+        # no ``hours``, it formats with DATE_FORMAT, so every end came back as a
+        # bare "YYYY-MM-DD" (midnight, i.e. before the start) and the slot's
+        # duration was silently discarded downstream.
+        end_dt = start_dt + timedelta(seconds=duration_seconds)
+        return end_dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
 

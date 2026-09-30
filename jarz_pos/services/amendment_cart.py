@@ -28,6 +28,14 @@ created by WooCommerce rather than by this app:
   the split across the repeated rows is left to
   :class:`jarz_pos.services.bundle_processing.BundleProcessor`, which is the one
   place that knows each row's required quantity.
+
+An order can also hold the *same* bundle more than once as separate lines (Woo
+order 17748 / ACC-SINV-2026-18615: two "Jarz Royal Feast" parents, each followed
+by its own children, all naming the same ``parent_bundle``).  The code alone
+cannot tell those instances apart, so a child is attributed to the nearest
+PRECEDING parent row of its bundle — invoice rows are always written parent
+first, then that parent's children, by both the WooCommerce import and POS
+creation.
 """
 
 from __future__ import annotations
@@ -95,6 +103,42 @@ def _resolve_bundle_code(
     return _derive_bundle_code_from_parent_item(row.item_code, bundle_code_cache)
 
 
+def _owning_parent_index(
+    child_index: int, candidate_parents: List[int], child_row: Any, invoice: Any
+) -> int:
+    """Return the row index of the bundle parent that owns the child at ``child_index``.
+
+    ``candidate_parents`` holds, in invoice order, every parent row whose resolved
+    bundle code the child names. Rows are written parent-then-its-children, so the
+    owner is the nearest candidate ABOVE the child.
+
+    A child sitting above every candidate should never happen. With a single
+    candidate there is only one bundle it can belong to, so it is attached there —
+    exactly what the code-keyed attribution always did, so single-instance
+    invoices rebuild unchanged. With several candidates, picking one would be a
+    guess that either overfills one instance or (if the processor tolerated it)
+    silently moves a paid line between bundles, so the rebuild is refused instead,
+    the same stance taken for orphaned children on multi-bundle invoices.
+    """
+    owner = None
+    for parent_index in candidate_parents:
+        if parent_index >= child_index:
+            break
+        owner = parent_index
+    if owner is not None:
+        return owner
+    if len(candidate_parents) == 1:
+        return candidate_parents[0]
+    frappe.throw(
+        _(
+            "Bundle child '{0}' on invoice {1} appears before its bundle row, and the "
+            "order holds that bundle more than once, so the order cannot be rebuilt "
+            "automatically."
+        ).format(getattr(child_row, "item_code", ""), getattr(invoice, "name", ""))
+    )
+    return candidate_parents[0]  # pragma: no cover - frappe.throw does not return
+
+
 def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
     """Return the POS cart payload that reproduces ``invoice`` line-for-line.
 
@@ -119,6 +163,9 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
 
     # Resolve each parent row's bundle code up front so children can be attached.
     parent_bundle_codes: Dict[int, str] = {}
+    # Every parent row index per resolved code, in invoice order. More than one
+    # entry means the order holds the same bundle more than once.
+    parent_indexes_by_code: Dict[str, List[int]] = {}
     # Children point at whatever code the parent row stored. When that code is
     # stale it is replaced above, so keep the translation to re-attach them.
     resolved_by_stored_code: Dict[str, str] = {}
@@ -134,14 +181,16 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
                 ).format(row.item_code, getattr(invoice, "name", ""))
             )
         parent_bundle_codes[index] = bundle_code
+        parent_indexes_by_code.setdefault(bundle_code, []).append(index)
         stored_code = _text(row, "bundle_code")
         if stored_code:
             resolved_by_stored_code[stored_code] = bundle_code
 
-    resolved_codes = set(parent_bundle_codes.values())
-    children_by_bundle: Dict[str, List[Any]] = {}
+    # Keyed by the parent ROW index, not the bundle code: two instances of one
+    # bundle share a code, and keying by it handed every child to both parents.
+    children_by_parent: Dict[int, List[Any]] = {}
     orphan_children: List[Any] = []
-    for row in rows:
+    for index, row in enumerate(rows):
         if not _is_bundle_child_row(row):
             continue
         parent_bundle = _text(row, "parent_bundle")
@@ -149,10 +198,13 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
         # A child pointing at a bundle no parent row resolved to is treated as an
         # orphan rather than quietly dropped from the rebuilt cart — dropping it
         # would produce a replacement invoice missing a line the customer paid for.
-        if parent_bundle and parent_bundle in resolved_codes:
-            children_by_bundle.setdefault(parent_bundle, []).append(row)
-        else:
+        candidate_parents = parent_indexes_by_code.get(parent_bundle) if parent_bundle else None
+        if not candidate_parents:
             orphan_children.append(row)
+            continue
+        children_by_parent.setdefault(
+            _owning_parent_index(index, candidate_parents, row, invoice), []
+        ).append(row)
 
     # Legacy rows sometimes lost `parent_bundle`. That is only recoverable when the
     # invoice holds exactly one bundle — anything else would be a guess.
@@ -164,8 +216,8 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
                     "so the order cannot be rebuilt automatically."
                 ).format(getattr(invoice, "name", ""))
             )
-        only_bundle_code = next(iter(parent_bundle_codes.values()))
-        children_by_bundle.setdefault(only_bundle_code, []).extend(orphan_children)
+        only_parent_index = next(iter(parent_bundle_codes))
+        children_by_parent.setdefault(only_parent_index, []).extend(orphan_children)
 
     cart: List[Dict[str, Any]] = []
     for index, row in enumerate(rows):
@@ -178,7 +230,7 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
                     invoice=invoice,
                     parent_row=row,
                     bundle_code=parent_bundle_codes[index],
-                    children=children_by_bundle.get(parent_bundle_codes[index], []),
+                    children=children_by_parent.get(index, []),
                     group_metadata_cache=group_metadata_cache,
                 )
             )
