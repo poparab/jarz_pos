@@ -1536,10 +1536,15 @@ def get_open_credit_balance(customer_name: str, exclude_invoice: str | None = No
     return round(total, 2)
 
 
-def _is_credit_debt_invoice(name: str | None) -> bool:
+def _is_credit_debt_invoice(name: str | None, customer: str | None = None) -> bool:
     """Was ``name`` taken on account? Method OR the frozen terms stamp.
 
     Never the mutable ``custom_payment_method`` alone — see ``utils/credit_utils``.
+
+    With ``customer``, the answer is also "no" unless ``name`` belongs to that
+    customer. ``submit_invoice_amendment`` accepts a new ``customer_name``, so
+    without this an on-account order could be amended onto a different shop
+    that was never approved for credit, and inherit the original's exemption.
     """
     if not name:
         return False
@@ -1547,17 +1552,20 @@ def _is_credit_debt_invoice(name: str | None) -> bool:
         row = frappe.db.get_value(
             "Sales Invoice",
             name,
-            ["custom_payment_method", "custom_credit_terms_days"],
+            ["customer", "custom_payment_method", "custom_credit_terms_days"],
             as_dict=True,
         )
     except Exception:
         try:
             row = frappe.db.get_value(
-                "Sales Invoice", name, ["custom_payment_method"], as_dict=True
+                "Sales Invoice", name, ["customer", "custom_payment_method"], as_dict=True
             )
         except Exception:
             return False
     if not row:
+        return False
+    if customer is not None and str(row.get("customer") or "").strip() != str(customer).strip():
+        # Fail closed: a missing or different customer is not the same debt.
         return False
     from jarz_pos.utils.credit_utils import is_credit_payment_method
 
@@ -1600,8 +1608,11 @@ def _apply_credit_terms(invoice_doc, customer_doc, logger, amended_from: str | N
 
     # Switching a shop's credit off stops NEW credit orders. Amending one that
     # is already on account is not a new grant, so it is not refused here —
-    # the limit and terms below still apply to the replacement.
-    if not settings["allowed"] and not _is_credit_debt_invoice(amended_from):
+    # the limit and terms below still apply to the replacement. Only for the
+    # SAME customer: moving the debt onto another shop is a new grant to them.
+    if not settings["allowed"] and not _is_credit_debt_invoice(
+        amended_from, customer=customer_name or ""
+    ):
         message = (
             f"{display_name} is not set up for credit orders. "
             "Open the Customer record and tick 'Allow orders on credit' "

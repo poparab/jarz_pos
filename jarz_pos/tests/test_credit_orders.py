@@ -526,7 +526,11 @@ class CreditCreationGateTests(unittest.TestCase):
             {"allowed": False, "days": 30, "limit": 0.0},
             0.0,
             amended_from="ACC-SINV-OLD",
-            source={"custom_payment_method": "Cash", "custom_credit_terms_days": 30},
+            source={
+                "customer": "CUST-1",
+                "custom_payment_method": "Cash",
+                "custom_credit_terms_days": 30,
+            },
         )
         self.assertEqual(inv.custom_credit_terms_days, 30)
 
@@ -536,7 +540,37 @@ class CreditCreationGateTests(unittest.TestCase):
                 {"allowed": False, "days": 30, "limit": 0.0},
                 0.0,
                 amended_from="ACC-SINV-OLD",
-                source={"custom_payment_method": "Cash", "custom_credit_terms_days": 0},
+                source={
+                    "customer": "CUST-1",
+                    "custom_payment_method": "Cash",
+                    "custom_credit_terms_days": 0,
+                },
+            )
+
+    def test_amending_a_credit_order_onto_another_customer_is_refused(self):
+        # submit_invoice_amendment accepts customer_name: the credit-off
+        # exemption belongs to the shop that owes the debt, not to whichever
+        # unapproved customer the amendment moves it onto.
+        with self.assertRaises(RuntimeError) as ctx:
+            self._apply(
+                {"allowed": False, "days": 0, "limit": 0.0},
+                0.0,
+                amended_from="ACC-SINV-OLD",
+                source={
+                    "customer": "CUST-OTHER",
+                    "custom_payment_method": "Credit",
+                    "custom_credit_terms_days": 30,
+                },
+            )
+        self.assertIn("Allow orders on credit", str(ctx.exception))
+
+    def test_amendment_source_without_a_customer_fails_closed(self):
+        with self.assertRaises(RuntimeError):
+            self._apply(
+                {"allowed": False, "days": 0, "limit": 0.0},
+                0.0,
+                amended_from="ACC-SINV-OLD",
+                source={"custom_payment_method": "Credit", "custom_credit_terms_days": 30},
             )
 
     def test_refuses_a_customer_not_set_up_for_credit(self):
