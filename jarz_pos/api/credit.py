@@ -117,6 +117,24 @@ def _ensure_credit_ledger_access() -> None:
     _ensure_manager_dashboard_access()
 
 
+#: Takes the shop's order at checkout, so it may see that ONE shop's credit
+#: standing — but not the branch ledgers, payments or the credit switch.
+B2B_SALES_REP_ROLE = "B2B Sales Rep"
+
+
+def _ensure_credit_profile_access() -> None:
+    """Read gate for a single customer's credit profile (the checkout lookup).
+
+    Wider than :func:`_ensure_credit_ledger_access`: a B2B Sales Rep places and
+    edits the shop's orders, and without the profile the POS cannot offer them
+    Credit at all. The creation gate (``_apply_credit_terms``) still enforces the
+    approval and the limit whoever submits; this only decides who may see them.
+    """
+    if B2B_SALES_REP_ROLE in set(frappe.get_roles() or []):
+        return
+    _ensure_credit_ledger_access()
+
+
 def _ensure_credit_payment_access() -> None:
     """Write gate for taking money against a credit balance.
 
@@ -619,7 +637,7 @@ def get_customer_credit_profile(customer: str) -> Dict[str, Any]:
     "no room left"; ``None`` means "no ceiling", and the two must never be
     confused by a client that would grey out the button on either.
     """
-    _ensure_credit_ledger_access()
+    _ensure_credit_profile_access()
 
     name = str(customer or "").strip()
     if not name:

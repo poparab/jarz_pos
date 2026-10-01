@@ -1474,3 +1474,53 @@ class CreditSettingsFromAppTests(unittest.TestCase):
         result, mock_frappe = self._call(before=dict(same), after=dict(same))
         mock_frappe.get_doc.return_value.add_comment.assert_not_called()
         self.assertFalse(result["changed"])
+
+
+class CreditProfileAccessTests(unittest.TestCase):
+    """A B2B Sales Rep may read ONE shop's credit profile, nothing more.
+
+    Without the profile the POS cannot offer a rep Credit at all (the row reads
+    "could not check"), yet the rep is the one taking the shop's orders. The
+    ledgers, payments and the credit switch stay on their own gates.
+    """
+
+    def _gate(self, roles):
+        from jarz_pos.api import credit as credit_api
+
+        with patch.object(credit_api, "frappe") as mock_frappe, patch.object(
+            credit_api, "_ensure_credit_ledger_access"
+        ) as ledger_gate:
+            mock_frappe.get_roles.return_value = roles
+            ledger_gate.side_effect = RuntimeError("ledger gate refused")
+            credit_api._ensure_credit_profile_access()
+            return ledger_gate
+
+    def test_a_b2b_rep_reads_the_profile_without_the_ledger_tier(self):
+        ledger_gate = self._gate(["B2B Sales Rep", "Employee"])
+        ledger_gate.assert_not_called()
+
+    def test_anyone_else_still_needs_the_ledger_tier(self):
+        with self.assertRaises(RuntimeError):
+            self._gate(["POS User"])
+
+    def test_only_the_profile_endpoint_uses_the_wider_gate(self):
+        import inspect
+
+        from jarz_pos.api import credit as credit_api
+
+        self.assertIn(
+            "_ensure_credit_profile_access()",
+            inspect.getsource(credit_api.get_customer_credit_profile),
+        )
+        self.assertIn(
+            "_ensure_credit_ledger_access()",
+            inspect.getsource(credit_api.get_credit_ledger),
+        )
+        for endpoint in (
+            credit_api.get_credit_ledger,
+            credit_api.record_credit_payment,
+            credit_api.update_customer_credit_settings,
+        ):
+            self.assertNotIn(
+                "_ensure_credit_profile_access", inspect.getsource(endpoint)
+            )
