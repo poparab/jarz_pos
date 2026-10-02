@@ -1653,8 +1653,19 @@ def _temporary_invoice_creation_form_context(
     ``None`` → removed - rather than inherited from the request, so the job's own
     argument decides whether a slot running right now is kept (see
     ``normalize_delivery_window``) even when the job does not run in-request.
+
+    Only the thread-local ``frappe.local.form_dict`` is swapped. ``frappe.form_dict``
+    is a module-level ``LocalProxy`` shared by every thread in the gunicorn worker;
+    assigning to it (as this did from 2026-05-05) replaced the proxy process-wide,
+    so concurrent ``/api/method`` requests saw this amendment's ``cmd`` in
+    ``frappe.app`` and failed with HTTP 417 "Failed to get method for command
+    None" (Sentry JARZ-FLUTTER-CLIENT-D), and overlapping amendments could leave
+    the plain dict installed until the worker restarted. Readers of
+    ``frappe.form_dict`` still see the seeded values through the proxy.
     """
-    previous_form_dict = getattr(frappe, "form_dict", None)
+    local = frappe.local
+    had_form_dict = hasattr(local, "form_dict")
+    previous_form_dict = getattr(local, "form_dict", None) if had_form_dict else None
     next_form_dict = frappe._dict(dict(previous_form_dict or {}))
     if required_delivery_datetime:
         next_form_dict["required_delivery_datetime"] = required_delivery_datetime
@@ -1664,11 +1675,17 @@ def _temporary_invoice_creation_form_context(
         next_form_dict.pop("delivery_slot_explicit", None)
     else:
         next_form_dict["delivery_slot_explicit"] = 1 if delivery_slot_explicit else 0
-    frappe.form_dict = next_form_dict
+    local.form_dict = next_form_dict
     try:
         yield
     finally:
-        frappe.form_dict = previous_form_dict
+        if had_form_dict:
+            local.form_dict = previous_form_dict
+        else:
+            try:
+                del local.form_dict
+            except AttributeError:
+                pass
 
 
 def _build_invoice_amendment_request_id(

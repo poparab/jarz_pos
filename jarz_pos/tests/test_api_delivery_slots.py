@@ -3,6 +3,7 @@
 This module tests delivery slot management endpoints.
 """
 
+import sys
 import unittest
 import datetime
 
@@ -736,10 +737,11 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		import frappe
 		from jarz_pos.api import manager
 
-		previous = getattr(frappe, "form_dict", None)
+		had_previous = hasattr(frappe.local, "form_dict")
+		previous = getattr(frappe.local, "form_dict", None)
 		try:
 			for request_flag in (None, "1", "0"):
-				frappe.form_dict = frappe._dict(
+				frappe.local.form_dict = frappe._dict(
 					{} if request_flag is None else {"delivery_slot_explicit": request_flag}
 				)
 				for given, expected in ((True, 1), (False, 0), (None, None)):
@@ -755,7 +757,94 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 					frappe.form_dict.get("delivery_slot_explicit"), request_flag, "restored"
 				)
 		finally:
-			frappe.form_dict = previous
+			self._restore_local_form_dict(had_previous, previous)
+
+	@staticmethod
+	def _restore_local_form_dict(had_previous, previous):
+		import frappe
+
+		if had_previous:
+			frappe.local.form_dict = previous
+		elif hasattr(frappe.local, "form_dict"):
+			del frappe.local.form_dict
+
+	def test_the_amendment_form_context_never_replaces_the_module_proxy(self):
+		"""``frappe.form_dict`` is process-global; only the thread-local copy may change.
+
+		Rebinding the proxy made concurrent requests in the same gunicorn worker see
+		the amendment's ``cmd`` and fail with HTTP 417 (Sentry JARZ-FLUTTER-CLIENT-D).
+		"""
+		import threading
+
+		import frappe
+		from jarz_pos.api import manager
+
+		proxy = frappe.form_dict
+		had_previous = hasattr(frappe.local, "form_dict")
+		previous = getattr(frappe.local, "form_dict", None)
+		original = frappe._dict({"cmd": "jarz_pos.api.manager.submit_invoice_amendment"})
+		frappe.local.form_dict = original
+		try:
+			seen_in_other_thread = {}
+
+			def _other_request():
+				# A different thread (another request in the worker) must not see
+				# this thread's form_dict at all.
+				seen_in_other_thread["has_form_dict"] = hasattr(frappe.local, "form_dict")
+				seen_in_other_thread["proxy_is_module_proxy"] = frappe.form_dict is proxy
+
+			with manager._temporary_invoice_creation_form_context(
+				required_delivery_datetime="2030-01-06 22:30:00",
+				delivery_end_datetime="2030-01-06 23:30:00",
+				delivery_slot_explicit=True,
+			):
+				self.assertIs(frappe.form_dict, proxy)
+				self.assertIs(sys.modules["frappe"].form_dict, proxy)
+				self.assertEqual(
+					frappe.form_dict.get("required_delivery_datetime"), "2030-01-06 22:30:00"
+				)
+				self.assertEqual(
+					frappe.form_dict.get("delivery_end_datetime"), "2030-01-06 23:30:00"
+				)
+				self.assertEqual(frappe.form_dict.get("delivery_slot_explicit"), 1)
+				# The request's own keys are carried, on a copy - not mutated in place.
+				self.assertEqual(
+					frappe.form_dict.get("cmd"), "jarz_pos.api.manager.submit_invoice_amendment"
+				)
+				self.assertIsNot(frappe.local.form_dict, original)
+				self.assertNotIn("required_delivery_datetime", original)
+
+				worker = threading.Thread(target=_other_request)
+				worker.start()
+				worker.join()
+
+			self.assertFalse(seen_in_other_thread["has_form_dict"])
+			self.assertTrue(seen_in_other_thread["proxy_is_module_proxy"])
+			self.assertIs(frappe.form_dict, proxy)
+			self.assertIs(frappe.local.form_dict, original)
+		finally:
+			self._restore_local_form_dict(had_previous, previous)
+
+	def test_the_amendment_form_context_restores_on_error(self):
+		"""An exception inside the block still puts the original object back."""
+		import frappe
+		from jarz_pos.api import manager
+
+		proxy = frappe.form_dict
+		had_previous = hasattr(frappe.local, "form_dict")
+		previous = getattr(frappe.local, "form_dict", None)
+		original = frappe._dict({"cmd": "x"})
+		frappe.local.form_dict = original
+		try:
+			with self.assertRaises(RuntimeError):
+				with manager._temporary_invoice_creation_form_context(
+					required_delivery_datetime="2030-01-06 22:30:00",
+				):
+					raise RuntimeError("boom")
+			self.assertIs(frappe.form_dict, proxy)
+			self.assertIs(frappe.local.form_dict, original)
+		finally:
+			self._restore_local_form_dict(had_previous, previous)
 
 	def test_submit_invoice_amendment_passes_the_flag_to_the_job(self):
 		"""Declared on the endpoint, so it survives the job leaving the request."""
