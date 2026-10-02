@@ -331,6 +331,67 @@ def _require_confirmed_transfer_proof(invoice_name: str, payment_mode: str) -> N
     )
 
 
+#: The method an invoice is stamped with once a manager records a Kashier
+#: payment-link payment. A link can be paid by card or wallet and nothing on our
+#: side says which, so the card spelling the Woo checkout uses for most Kashier
+#: orders is the honest default -- what matters is that it no longer says Cash.
+KASHIER_PAYMENT_METHOD = "Kashier Card"
+
+
+def _ensure_kashier_payment_access() -> None:
+    """Only the line-manager tier may book money into the Kashier ledger.
+
+    Branch staff cannot see the Kashier dashboard, so they have no way of
+    knowing a payment link was really paid. A line manager can, and that check
+    is what stands in for the transfer screenshot the InstaPay/Wallet modes
+    demand. Same tier as every other line-manager money action
+    (``ROLES.LINE_MANAGER_TIER``) -- never the bare line-manager role.
+    """
+    from jarz_pos.constants import ROLES
+
+    roles = {str(r or "").strip() for r in (frappe.get_roles() or []) if str(r or "").strip()}
+    if not roles.intersection(ROLES.ADMIN | ROLES.LINE_MANAGER_TIER):
+        frappe.throw(
+            "Only a line manager can mark an order as paid with Kashier.",
+            frappe.PermissionError,
+        )
+
+
+def _resolve_kashier_account(company: str) -> str:
+    """The company's Kashier settlement ledger (``kashier - J`` on production).
+
+    Matched by account name, exactly as ``api/cash_transfer`` does: the
+    Woo-owned ``Company.custom_kashier_account`` field is deliberately not read
+    (domain isolation). Only an enabled Asset leaf qualifies, so an expense
+    account such as "Kashier Fees" can never receive a customer's payment.
+    """
+    rows = frappe.get_all(
+        "Account",
+        filters={"company": company, "is_group": 0, "disabled": 0, "root_type": "Asset"},
+        or_filters=[
+            ["Account", "account_name", "like", "%Kashier%"],
+            ["Account", "name", "like", "%Kashier%"],
+        ],
+        fields=["name", "account_name", "is_group", "disabled"],
+        order_by="name asc",
+    )
+    matches = [
+        r["name"]
+        for r in rows or []
+        if "kashier" in f"{r.get('account_name') or ''} {r.get('name') or ''}".lower()
+        and not frappe.utils.cint(r.get("is_group"))
+        and not frappe.utils.cint(r.get("disabled"))
+    ]
+    if not matches:
+        frappe.throw(f"No Kashier account found for company {company}")
+    if len(matches) > 1:
+        # Refuse rather than guess which ledger the money belongs in.
+        frappe.throw(
+            f"More than one Kashier account found for company {company}: {', '.join(matches)}"
+        )
+    return matches[0]
+
+
 def _clear_awaiting_payment_flag(invoice_name: str) -> None:
     """Clear ``Awaiting Payment`` once this invoice's money is actually in.
 
@@ -364,10 +425,14 @@ def pay_invoice(
       - Wallet   -> "Mobile Wallet - <COMPANY ABBR>" (requires reference_no & reference_date)
       - InstaPay -> "Bank Account - <COMPANY ABBR>" (requires reference_no & reference_date)
       - Cash     -> "<POS PROFILE NAME> - <COMPANY ABBR>" (requires pos_profile; reference fields optional/ignored)
+      - Kashier  -> the company's Kashier ledger (line-manager tier only; for an
+                    order the customer paid afterwards through a Kashier payment
+                    link). No till moves, so no open shift is required, and the
+                    invoice is re-stamped "Kashier Card" so it stops reading Cash.
 
     Args:
         invoice_name: Sales Invoice name (must be submitted, outstanding)
-        payment_mode: wallet | instapay | cash (case-insensitive)
+        payment_mode: wallet | instapay | cash | kashier (case-insensitive)
         pos_profile: POS Profile (required when payment_mode == cash)
         reference_no: External transaction / bank reference (required for wallet & instapay)
         reference_date: Date string (YYYY-MM-DD) of external transaction (required for wallet & instapay)
@@ -378,6 +443,11 @@ def pay_invoice(
         if not payment_mode:
             frappe.throw("payment_mode is required")
         payment_mode = payment_mode.strip()
+        mode_lower = payment_mode.lower()
+
+        # Before the lock: a refused caller should not hold the invoice row.
+        if mode_lower == "kashier":
+            _ensure_kashier_payment_access()
 
         # Add database-level lock to prevent concurrent payment entry creation
         try:
@@ -387,7 +457,10 @@ def pay_invoice(
 
         inv = frappe.get_doc("Sales Invoice", invoice_name)
         ensure_profile_scoped_invoice_access(inv, action_label="registering a payment")
-        ensure_open_shift_for_invoice(inv, action_label="registering a payment")
+        # A Kashier payment lands in the gateway ledger, which no shift counts,
+        # and is recorded by a manager who is often not on the branch's shift.
+        if mode_lower != "kashier":
+            ensure_open_shift_for_invoice(inv, action_label="registering a payment")
         if inv.docstatus != 1:
             frappe.throw("Invoice must be submitted before registering payment")
         
@@ -466,8 +539,11 @@ def pay_invoice(
         company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
 
         # Map payment mode to destination account base name
-        mode_lower = payment_mode.lower()
-        if mode_lower == "wallet":
+        account_base = None
+        paid_to_account = None
+        if mode_lower == "kashier":
+            paid_to_account = _resolve_kashier_account(company)
+        elif mode_lower == "wallet":
             account_base = ACCOUNTS.MOBILE_WALLET
             # Wallet payments require reference metadata – auto-generate if absent
             if not reference_no:
@@ -504,7 +580,8 @@ def pay_invoice(
             except Exception:
                 frappe.throw("Invalid reference_date format. Use YYYY-MM-DD")
 
-        paid_to_account = f"{account_base} - {company_abbr}".strip()
+        if not paid_to_account:
+            paid_to_account = f"{account_base} - {company_abbr}".strip()
         if not frappe.db.exists("Account", paid_to_account):
             frappe.throw(f"Destination account not found: {paid_to_account}")
 
@@ -555,6 +632,12 @@ def pay_invoice(
             pe.reference_no = reference_no
         if reference_date:
             pe.reference_date = reference_date
+        if mode_lower == "kashier":
+            # The manager's say-so is the evidence here, so name them on the entry.
+            pe.remarks = (
+                f"Kashier payment link for {inv.name}, recorded by {frappe.session.user}"
+                + (f" (ref {reference_no})" if reference_no else "")
+            )
 
         try:
             pe.insert(ignore_permissions=True)
@@ -631,6 +714,12 @@ def pay_invoice(
         # the customer for money already banked. Reconciling reads the ledger, so
         # it is a no-op for every invoice that was never awaiting anything.
         _clear_awaiting_payment_flag(inv.name)
+
+        if mode_lower == "kashier":
+            # An order taken as Cash/COD and paid later by link must stop reading
+            # Cash, or dispatch, the receipt and the badge all promise the courier
+            # collects money the customer has already paid.
+            inv.db_set("custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False)
 
         return {
             "success": True,

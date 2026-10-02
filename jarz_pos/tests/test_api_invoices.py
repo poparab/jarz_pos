@@ -4,7 +4,7 @@ This module tests invoice creation and management endpoints.
 """
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class TestInvoiceAPI(unittest.TestCase):
@@ -305,3 +305,104 @@ class TestPayInvoiceIdempotency(unittest.TestCase):
 		self.assertIn("try again", str(exc.exception).lower())
 		mock_frappe.new_doc.assert_not_called()
 
+
+class TestPayInvoiceKashier(unittest.TestCase):
+	"""A line manager records a Kashier payment-link payment on an unpaid order.
+
+	Order 17783 (2026-10-02) was taken as Cash/COD and the customer then paid a
+	Kashier payment link. Nothing in the app could book that: Pay offered Cash,
+	InstaPay and Wallet only, so the order would have gone out with the courier
+	told to collect money that was already paid.
+	"""
+
+	def _frappe(self, mock_frappe, *, roles, accounts=None):
+		invoice = MagicMock()
+		invoice.name = "ACC-SINV-0001"
+		invoice.docstatus = 1
+		invoice.company = "JARZ"
+		invoice.customer = "CUST-1"
+		invoice.grand_total = 300.0
+		invoice.outstanding_amount = 300.0
+		mock_frappe.get_doc.return_value = invoice
+		mock_frappe.get_roles.return_value = roles
+		mock_frappe.session.user = "lm@example.com"
+		mock_frappe.db.sql.return_value = []
+		mock_frappe.db.get_value.side_effect = lambda doctype, *a, **k: 300.0 if doctype == "Sales Invoice" else "J"
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.get_cached_value.return_value = "Debtors - J"
+		mock_frappe.get_all.return_value = accounts if accounts is not None else [
+			{"name": "kashier - J", "account_name": "kashier", "is_group": 0, "disabled": 0},
+		]
+		mock_frappe.utils.cint.side_effect = lambda v: int(v or 0)
+		mock_frappe.utils.today.return_value = "2026-10-02"
+		mock_frappe.throw.side_effect = lambda msg, *a, **k: (_ for _ in ()).throw(Exception(msg))
+		pe = MagicMock()
+		pe.name = "ACC-PAY-0001"
+		mock_frappe.new_doc.return_value = pe
+		return invoice, pe
+
+	@patch("jarz_pos.api.invoices._clear_awaiting_payment_flag")
+	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
+	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_branch_staff_are_refused_before_anything_is_locked(self, mock_frappe, _scope, _shift, _flag):
+		from jarz_pos.api.invoices import pay_invoice
+
+		self._frappe(mock_frappe, roles=["POS User", "Sales User"])
+
+		with self.assertRaises(Exception) as exc:
+			pay_invoice("ACC-SINV-0001", "Kashier")
+
+		self.assertIn("line manager", str(exc.exception).lower())
+		mock_frappe.db.sql.assert_not_called()
+		mock_frappe.new_doc.assert_not_called()
+
+	@patch("jarz_pos.api.invoices._clear_awaiting_payment_flag")
+	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
+	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_a_line_manager_books_the_outstanding_into_the_kashier_ledger(self, mock_frappe, scope, shift, _flag):
+		from jarz_pos.api.invoices import KASHIER_PAYMENT_METHOD, pay_invoice
+
+		invoice, pe = self._frappe(mock_frappe, roles=["JARZ line manager"])
+
+		result = pay_invoice("ACC-SINV-0001", "Kashier")
+
+		self.assertTrue(result["success"])
+		self.assertEqual(result["paid_to"], "kashier - J")
+		self.assertEqual(pe.paid_to, "kashier - J")
+		self.assertEqual(pe.paid_amount, 300.0)
+		self.assertIn("lm@example.com", pe.remarks)
+		pe.submit.assert_called_once()
+		# Branch scoping still applies; the shift gate does not (no till moves).
+		scope.assert_called_once()
+		shift.assert_not_called()
+		# The order must stop reading Cash, or the courier is told to collect it.
+		invoice.db_set.assert_called_once_with(
+			"custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False
+		)
+
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_the_kashier_ledger_is_never_guessed(self, mock_frappe):
+		from jarz_pos.api.invoices import _resolve_kashier_account
+
+		mock_frappe.utils.cint.side_effect = lambda v: int(v or 0)
+		mock_frappe.throw.side_effect = lambda msg, *a, **k: (_ for _ in ()).throw(Exception(msg))
+
+		mock_frappe.get_all.return_value = []
+		with self.assertRaises(Exception):
+			_resolve_kashier_account("JARZ")
+
+		mock_frappe.get_all.return_value = [
+			{"name": "kashier - J", "account_name": "kashier", "is_group": 0, "disabled": 0},
+			{"name": "Kashier 2 - J", "account_name": "Kashier 2", "is_group": 0, "disabled": 0},
+		]
+		with self.assertRaises(Exception) as exc:
+			_resolve_kashier_account("JARZ")
+		self.assertIn("More than one", str(exc.exception))
+
+		mock_frappe.get_all.return_value = [
+			{"name": "kashier - J", "account_name": "kashier", "is_group": 0, "disabled": 0},
+			{"name": "Old Kashier - J", "account_name": "Old Kashier", "is_group": 0, "disabled": 1},
+		]
+		self.assertEqual(_resolve_kashier_account("JARZ"), "kashier - J")
