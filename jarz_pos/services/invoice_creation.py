@@ -636,14 +636,16 @@ def _amendment_keeps_source_price_list(amended_from: str | None, requested: str 
 def _deal_pricing_date(amended_from: str | None, customer: str | None):
     """The date customer deals are judged on for this order.
 
-    A new order: today. An amendment: its source order's ``posting_date``, so an
-    order placed during a deal keeps the deal price when it is edited after the
-    deal ended, and an old order cannot borrow a deal that started later.
+    A new order: today. An amendment: the ORIGINAL order's ``posting_date`` --
+    the first invoice of the ``amended_from`` chain, because every replacement
+    is itself posted on the day it was made. So an order placed during a deal
+    keeps the deal price however many times it is edited after the deal ended,
+    and an old order can never pick up a deal that started later.
 
-    ``amended_from`` is client-supplied on a whitelisted endpoint, so the source
-    date is honoured only under the same narrowing as
-    :func:`_amendment_keeps_source_price_list`: the source is CANCELLED (the
-    amendment job cancels it first), belongs to the SAME customer, and has no
+    ``create_pos_invoice`` is whitelisted and ``amended_from`` is client-supplied,
+    so the source date is honoured ONLY inside the amendment job, which marks
+    itself with ``frappe.flags.jarz_amendment_source`` (``api/manager.py``), and
+    only when that source is cancelled, belongs to the same customer and has no
     live replacement yet. Anything else prices on today.
     """
     today = frappe.utils.getdate(frappe.utils.today())
@@ -652,10 +654,12 @@ def _deal_pricing_date(amended_from: str | None, customer: str | None):
     if not source or not customer:
         return today
     try:
+        if str(frappe.flags.get("jarz_amendment_source") or "").strip() != source:
+            return today
         row = frappe.db.get_value(
             "Sales Invoice",
             source,
-            ["docstatus", "customer", "posting_date"],
+            ["docstatus", "customer", "posting_date", "amended_from"],
             as_dict=True,
         )
         if (
@@ -669,7 +673,29 @@ def _deal_pricing_date(amended_from: str | None, customer: str | None):
             "Sales Invoice", {"amended_from": source, "docstatus": ["!=", 2]}
         ):
             return today
-        return frappe.utils.getdate(row.get("posting_date"))
+        original = row
+        seen = {source}
+        # Walk back to the first order of the chain. Bounded: a chain is a
+        # handful of edits, and a cycle (never expected) must not spin.
+        for _ in range(50):
+            parent = str(original.get("amended_from") or "").strip()
+            if not parent or parent in seen:
+                break
+            seen.add(parent)
+            prev = frappe.db.get_value(
+                "Sales Invoice",
+                parent,
+                ["customer", "posting_date", "amended_from"],
+                as_dict=True,
+            )
+            if (
+                not prev
+                or str(prev.get("customer") or "").strip() != customer
+                or not prev.get("posting_date")
+            ):
+                break
+            original = prev
+        return frappe.utils.getdate(original.get("posting_date"))
     except Exception:
         return today
 
@@ -994,6 +1020,7 @@ def _validate_policy_price_list_coverage(
     logger,
     customer: str | None = None,
     pricing_date=None,
+    apply_deals: bool = False,
 ) -> None:
     """For a MATCHED commercial policy, ensure the resolved price list has a selling
     Item Price for every plain cart item. Gives a clear, actionable error (instead of a
@@ -1038,7 +1065,11 @@ def _validate_policy_price_list_coverage(
             continue
         # A live customer deal prices the item outright (it outranks every list
         # row in _resolve_item_rate_with_provenance), so it covers it too.
-        if customer and _customer_deals.find_deal_rate(customer, code, on_date=pricing_date):
+        if (
+            apply_deals
+            and customer
+            and _customer_deals.find_deal_rate(customer, code, on_date=pricing_date)
+        ):
             continue
         # An item is covered if it has a per-item selling Item Price that is either
         # generic (no customer) or scoped to THIS customer — never one scoped to a
@@ -1093,7 +1124,7 @@ PRICE_LIST_ONLY_ITEM_GROUPS = frozenset({"Small"})
 
 
 def _resolve_item_rate_with_provenance(
-    item_code, price_list, fallback_rate=0.0, customer=None, on_date=None, include_deals=True
+    item_code, price_list, fallback_rate=0.0, customer=None, on_date=None, include_deals=False
 ) -> tuple[float, str]:
     """Resolve a plain item's unit rate AND report where it came from.
 
@@ -1101,8 +1132,11 @@ def _resolve_item_rate_with_provenance(
       - ``"deal"``:           a live ``Jarz Customer Deal`` for THIS customer on
                                ``on_date`` (default today) -- a temporary special
                                price that outranks every list row, see
-                               ``services/customer_deals``. ``include_deals=False``
-                               skips it to answer "what is the normal price".
+                               ``services/customer_deals``. Only consulted with
+                               ``include_deals=True``, which callers pass for a
+                               B2B Supply order alone: a deal must never reach a
+                               retail, Employee or waiver order, whose catalog
+                               would not show it.
       - ``"customer_price"``: an Item Price row scoped to THIS exact customer.
       - ``"item_price"``:     a generic (no-customer) Item Price row in this list.
       - ``"category"``:       a ``Jarz Price List Category Rate`` row for the
@@ -1189,7 +1223,7 @@ def _resolve_item_rate_with_provenance(
 
 
 def _resolve_item_rate(
-    item_code, price_list, fallback_rate=0.0, customer=None, on_date=None
+    item_code, price_list, fallback_rate=0.0, customer=None, on_date=None, include_deals=False
 ) -> float:
     """Backward-compatible wrapper: the rate only, no provenance.
 
@@ -1200,7 +1234,12 @@ def _resolve_item_rate(
     :func:`_resolve_item_rate_with_provenance` directly.
     """
     rate, _provenance = _resolve_item_rate_with_provenance(
-        item_code, price_list, fallback_rate=fallback_rate, customer=customer, on_date=on_date
+        item_code,
+        price_list,
+        fallback_rate=fallback_rate,
+        customer=customer,
+        on_date=on_date,
+        include_deals=include_deals,
     )
     return rate
 
@@ -2231,6 +2270,14 @@ def create_pos_invoice(
         # Customer deals are judged on the ORDER date; an amendment keeps its
         # source order's date so a deal that ended since does not re-price it.
         pricing_date = _deal_pricing_date(amended_from, getattr(customer_doc, "name", None))
+        # Deals are B2B Supply prices: the B2B catalog shows them, no other
+        # catalog does, so no other purpose may book them.
+        from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+
+        apply_deals = bool(policy_decision.matched) and (
+            str(getattr(policy_decision, "order_purpose", "") or "").strip()
+            == B2B_SUPPLY_PURPOSE
+        )
         _validate_policy_price_list_coverage(
             policy_decision,
             effective_price_list,
@@ -2238,6 +2285,7 @@ def create_pos_invoice(
             logger,
             customer=getattr(customer_doc, "name", None),
             pricing_date=pricing_date,
+            apply_deals=apply_deals,
         )
         # FIX 3c: a MATCHED, sub-100%-discount policy already requires the coverage
         # check above to pass for every plain cart item, so a rate that STILL resolves
@@ -2268,6 +2316,7 @@ def create_pos_invoice(
             enforce_price_list_pricing=enforce_price_list_pricing,
             free_of_charge_order=free_of_charge_order,
             pricing_date=pricing_date,
+            apply_deals=apply_deals,
         )
 
         # Sample policies may carry a fallback discount %. Apply it to plain item rows
@@ -2958,6 +3007,7 @@ def _process_cart_items(
     enforce_price_list_pricing=False,
     free_of_charge_order=False,
     pricing_date=None,
+    apply_deals=False,
 ):
     """Process all cart items including bundles."""
     logger.debug(f"Processing {len(cart_items)} cart items")
@@ -3052,6 +3102,7 @@ def _process_cart_items(
                 enforce_price_list_pricing=enforce_price_list_pricing,
                 free_of_charge_order=free_of_charge_order,
                 pricing_date=pricing_date,
+                apply_deals=apply_deals,
             )
             processed_items.append(regular_item)
     
@@ -3129,6 +3180,7 @@ def _process_regular_item(
     enforce_price_list_pricing=False,
     free_of_charge_order=False,
     pricing_date=None,
+    apply_deals=False,
 ):
     """Process a regular item."""
     item_code = item_data.get("item_code")
@@ -3187,7 +3239,12 @@ def _process_regular_item(
         print(f"         ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
 
         catalog_rate, rate_provenance = _resolve_item_rate_with_provenance(
-            item_code, price_list, fallback_rate=rate, customer=customer, on_date=pricing_date
+            item_code,
+            price_list,
+            fallback_rate=rate,
+            customer=customer,
+            on_date=pricing_date,
+            include_deals=apply_deals,
         )
         custom_rate_override = item_data.get("custom_rate_override")
         custom_rate_provided = _pricing_field_provided(custom_rate_override)

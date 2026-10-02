@@ -64,8 +64,13 @@ def _get_b2b_catalog_item_rate(
     price_list: str,
     fallback_rate: float,
     customer: str,
+    include_deals: bool = False,
 ) -> float:
-    """Use the invoice pricing engine for a validated B2B catalog context."""
+    """Use the invoice pricing engine for a validated B2B catalog context.
+
+    ``include_deals`` mirrors ``create_pos_invoice``: a customer deal is shown
+    only where it will be booked -- plain items on a B2B Supply order.
+    """
     from jarz_pos.services.invoice_creation import _resolve_item_rate
 
     return _resolve_item_rate(
@@ -73,6 +78,7 @@ def _get_b2b_catalog_item_rate(
         price_list,
         fallback_rate=fallback_rate,
         customer=customer,
+        include_deals=include_deals,
     )
 
 
@@ -701,6 +707,7 @@ def get_profile_products(
                     effective_price_list,
                     itm.get('price') or 0,
                     pricing_customer,
+                    include_deals=(order_purpose or "").strip() == "B2B Supply",
                 )
             else:
                 rate = _get_item_price_from_price_list(itm['id'], effective_price_list)

@@ -2848,31 +2848,37 @@ def _run_invoice_amendment_job(
                 delivery_slot_explicit, effective_required_delivery_datetime, source_invoice
             ),
         ):
-            creation_result = _create_amendment_invoice(
-                cart_json,
-                effective_customer_name,
-                effective_pos_profile,
-                None,
-                effective_required_delivery_datetime,
-                effective_shipping_address_name,
-                effective_sales_partner,
-                payment_type,
-                effective_pickup,
-                effective_payment_method,
-                # 11th positional parameter of create_pos_invoice. Passed by keyword so
-                # the mapping is unmistakable: dropping it is what silently re-priced
-                # every amended B2B order at retail.
-                price_list=effective_price_list,
-                amended_from=invoice_id,
-                woo_order_id=woo_order_id,
-                suppress_shipping_income=effective_suppress_shipping_income,
-                suppress_legacy_delivery_charges=effective_suppress_legacy_delivery_charges,
-                custom_delivery_income=effective_custom_delivery_income,
-                order_purpose=effective_order_purpose,
-                commercial_policy=effective_commercial_policy,
-                policy_reason=effective_policy_reason,
-                employee_payment=effective_employee_payment,
-            )
+            # Lets invoice creation trust amended_from for customer-deal dating;
+            # a direct create_pos_invoice call never carries this flag.
+            frappe.flags.jarz_amendment_source = invoice_id
+            try:
+                creation_result = _create_amendment_invoice(
+                    cart_json,
+                    effective_customer_name,
+                    effective_pos_profile,
+                    None,
+                    effective_required_delivery_datetime,
+                    effective_shipping_address_name,
+                    effective_sales_partner,
+                    payment_type,
+                    effective_pickup,
+                    effective_payment_method,
+                    # 11th positional parameter of create_pos_invoice. Passed by keyword so
+                    # the mapping is unmistakable: dropping it is what silently re-priced
+                    # every amended B2B order at retail.
+                    price_list=effective_price_list,
+                    amended_from=invoice_id,
+                    woo_order_id=woo_order_id,
+                    suppress_shipping_income=effective_suppress_shipping_income,
+                    suppress_legacy_delivery_charges=effective_suppress_legacy_delivery_charges,
+                    custom_delivery_income=effective_custom_delivery_income,
+                    order_purpose=effective_order_purpose,
+                    commercial_policy=effective_commercial_policy,
+                    policy_reason=effective_policy_reason,
+                    employee_payment=effective_employee_payment,
+                )
+            finally:
+                frappe.flags.jarz_amendment_source = None
 
         replacement_invoice_name = (
             creation_result.get("invoice_name")

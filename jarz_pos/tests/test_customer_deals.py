@@ -6,16 +6,17 @@ What is pinned here, and why each matters:
   answers ``None`` outside the window -- that "no match" IS the revert to the
   normal price, there is no job that undoes a deal;
 * the resolver puts a live deal above every list row (customer Item Price
-  included), and ``include_deals=False`` answers "what is the normal price";
-* an amendment is priced on its SOURCE order's date only when the source is a
-  cancelled invoice of the same customer with no live replacement, because
-  ``amended_from`` arrives from the client;
+  included), but only when asked to -- a B2B Supply order or its catalog; a
+  retail, Employee or waiver order never sees a deal;
+* an amendment is priced on its ORIGINAL order's date (the chain is walked,
+  since each replacement is posted the day it is made), and only inside the
+  amendment job -- ``amended_from`` alone arrives from the client;
 * price-list coverage counts a deal as a price, or a deal-only item on a B2B
   list with no rate would be refused at checkout;
 * the DocType refuses ambiguous rows and two live deals pricing the same
   thing on overlapping dates (the resolver would pick one silently);
-* ending a deal that already priced orders moves its end to yesterday instead
-  of cancelling it, so amending one of those orders still finds the deal.
+* a deal that has priced orders is history: its start and prices are fixed,
+  ending it keeps today, and it can be neither cancelled nor deleted.
 """
 
 from __future__ import annotations
@@ -113,18 +114,21 @@ class TestResolverPrecedence(unittest.TestCase):
             ic.frappe.db, "get_value", return_value=95
         ) as gv:
             rate, prov = ic._resolve_item_rate_with_provenance(
-                "Molten Large", "B2B Selling", customer="Cafe A", on_date=TODAY
+                "Molten Large", "B2B Selling", customer="Cafe A", on_date=TODAY, include_deals=True
             )
         self.assertEqual((rate, prov), (80.0, "deal"))
         gv.assert_not_called()
 
-    def test_include_deals_false_returns_normal_price(self):
+    def test_deals_are_off_unless_asked_for(self):
+        # Retail, Employee and waiver orders, the amendment guard and the
+        # bundle catalog all call without include_deals: none may see a deal.
         with patch.object(ic._customer_deals, "find_deal_rate", return_value=(80.0, "DEAL-1")) as fd, patch.object(
             ic.frappe.db, "get_value", return_value=92
         ):
             rate, prov = ic._resolve_item_rate_with_provenance(
-                "Molten Large", "B2B Selling", customer="Cafe A", include_deals=False
+                "Molten Large", "B2B Selling", customer="Cafe A"
             )
+            self.assertEqual(ic._resolve_item_rate("Molten Large", "B2B Selling", customer="Cafe A"), 92.0)
         self.assertEqual((rate, prov), (92.0, "customer_price"))
         fd.assert_not_called()
 
@@ -132,7 +136,9 @@ class TestResolverPrecedence(unittest.TestCase):
         with patch.object(ic._customer_deals, "find_deal_rate") as fd, patch.object(
             ic.frappe.db, "get_value", return_value=160
         ):
-            rate, prov = ic._resolve_item_rate_with_provenance("Molten Large", "Standard Selling")
+            rate, prov = ic._resolve_item_rate_with_provenance(
+                "Molten Large", "Standard Selling", include_deals=True
+            )
         self.assertEqual((rate, prov), (160.0, "item_price"))
         fd.assert_not_called()
 
@@ -141,86 +147,124 @@ class TestResolverPrecedence(unittest.TestCase):
             ic.frappe.db, "get_value", side_effect=[None, 92]
         ):
             rate, prov = ic._resolve_item_rate_with_provenance(
-                "Molten Large", "B2B Selling", customer="Cafe A"
+                "Molten Large", "B2B Selling", customer="Cafe A", include_deals=True
             )
         self.assertEqual((rate, prov), (92.0, "item_price"))
 
     def test_wrapper_passes_the_date(self):
         with patch.object(ic._customer_deals, "find_deal_rate", return_value=(80.0, "DEAL-1")) as fd:
             self.assertEqual(
-                ic._resolve_item_rate("Molten Large", "B2B Selling", customer="Cafe A", on_date=TODAY),
+                ic._resolve_item_rate(
+                    "Molten Large", "B2B Selling", customer="Cafe A", on_date=TODAY, include_deals=True
+                ),
                 80.0,
             )
         self.assertEqual(fd.call_args.kwargs["on_date"], TODAY)
 
 
-class TestDealPricingDate(unittest.TestCase):
-    def _date(self, source_row, replacement=False, amended_from="SINV-1", customer="Cafe A"):
-        with patch.object(ic.frappe.utils, "today", return_value=str(TODAY)), patch.object(
-            ic.frappe.db, "get_value", return_value=source_row
-        ), patch.object(ic.frappe.db, "exists", return_value=replacement):
-            return ic._deal_pricing_date(amended_from, customer)
+class TestCatalogScope(unittest.TestCase):
+    def test_catalog_helper_defaults_to_no_deals(self):
+        from jarz_pos.api import pos
 
-    def _src(self, **kw):
-        row = {"docstatus": 2, "customer": "Cafe A", "posting_date": D(2026, 9, 20)}
-        row.update(kw)
-        return frappe._dict(row)
+        with patch("jarz_pos.services.invoice_creation._resolve_item_rate", return_value=92.0) as r:
+            pos._get_b2b_catalog_item_rate("Molten Large", "B2B Selling", 0, "Cafe A")
+        self.assertFalse(r.call_args.kwargs["include_deals"])
+
+
+class TestDealPricingDate(unittest.TestCase):
+    """``_deal_pricing_date`` for new orders, amendments and forged amended_from."""
+
+    def _date(self, invoices, amended_from="SINV-3", flag="SINV-3", replacement=False, customer="Cafe A"):
+        def gv(doctype, name, fields=None, as_dict=False, **kw):
+            row = invoices.get(name)
+            return frappe._dict(row) if row else None
+
+        old = frappe.flags.get("jarz_amendment_source")
+        frappe.flags.jarz_amendment_source = flag
+        try:
+            with patch.object(ic.frappe.utils, "today", return_value=str(TODAY)), patch.object(
+                ic.frappe.db, "get_value", side_effect=gv
+            ), patch.object(ic.frappe.db, "exists", return_value=replacement):
+                return ic._deal_pricing_date(amended_from, customer)
+        finally:
+            frappe.flags.jarz_amendment_source = old
+
+    def _chain(self, **override):
+        chain = {
+            "SINV-1": {"docstatus": 2, "customer": "Cafe A", "posting_date": D(2026, 9, 5), "amended_from": None},
+            "SINV-2": {"docstatus": 2, "customer": "Cafe A", "posting_date": D(2026, 9, 20), "amended_from": "SINV-1"},
+            "SINV-3": {"docstatus": 2, "customer": "Cafe A", "posting_date": D(2026, 9, 25), "amended_from": "SINV-2"},
+        }
+        for name, fields in override.items():
+            chain[name] = {**chain[name], **fields}
+        return chain
 
     def test_new_order_prices_today(self):
-        self.assertEqual(self._date(None, amended_from=None), TODAY)
+        self.assertEqual(self._date({}, amended_from=None, flag=None), TODAY)
 
-    def test_amendment_keeps_source_date(self):
-        self.assertEqual(self._date(self._src()), D(2026, 9, 20))
+    def test_amendment_uses_the_original_orders_date(self):
+        # A second edit must not re-price: every replacement is posted the day
+        # it was made, so the chain is walked to its first order.
+        self.assertEqual(self._date(self._chain()), D(2026, 9, 5))
+
+    def test_forged_amended_from_outside_the_job_prices_today(self):
+        self.assertEqual(self._date(self._chain(), flag=None), TODAY)
+        self.assertEqual(self._date(self._chain(), flag="SINV-OTHER"), TODAY)
 
     def test_other_customers_source_prices_today(self):
-        self.assertEqual(self._date(self._src(customer="Cafe B")), TODAY)
+        self.assertEqual(self._date(self._chain(**{"SINV-3": {"customer": "Cafe B"}})), TODAY)
 
     def test_live_source_prices_today(self):
-        self.assertEqual(self._date(self._src(docstatus=1)), TODAY)
+        self.assertEqual(self._date(self._chain(**{"SINV-3": {"docstatus": 1}})), TODAY)
 
     def test_source_with_live_replacement_prices_today(self):
-        self.assertEqual(self._date(self._src(), replacement=True), TODAY)
+        self.assertEqual(self._date(self._chain(), replacement=True), TODAY)
+
+    def test_chain_stops_at_a_different_customer(self):
+        chain = self._chain(**{"SINV-1": {"customer": "Cafe B"}})
+        self.assertEqual(self._date(chain), D(2026, 9, 20))
 
     def test_unknown_source_prices_today(self):
-        self.assertEqual(self._date(None), TODAY)
+        self.assertEqual(self._date({}), TODAY)
 
 
 class TestCoverageCountsDeals(unittest.TestCase):
-    def test_deal_only_item_is_covered(self):
+    def _check(self, apply_deals, deal=(80.0, "DEAL-1")):
         decision = SimpleNamespace(matched=True, discount_percentage=0, order_purpose="B2B Supply")
-        logger = MagicMock()
-        with patch.object(ic._customer_deals, "find_deal_rate", return_value=(80.0, "DEAL-1")), patch.object(
+        with patch.object(ic._customer_deals, "find_deal_rate", return_value=deal), patch.object(
             ic.frappe.db, "exists", return_value=False
         ), patch.object(ic.frappe.db, "get_value", return_value=None):
             ic._validate_policy_price_list_coverage(
                 decision,
                 "B2B Selling",
                 [{"item_code": "Molten Large", "qty": 1}],
-                logger,
+                MagicMock(),
                 customer="Cafe A",
                 pricing_date=TODAY,
+                apply_deals=apply_deals,
             )
 
+    def test_deal_only_item_is_covered_on_b2b(self):
+        self._check(apply_deals=True)
+
+    def test_deal_does_not_cover_other_purposes(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._check(apply_deals=False)
+
     def test_without_deal_still_refused(self):
-        decision = SimpleNamespace(matched=True, discount_percentage=0, order_purpose="B2B Supply")
-        with patch.object(ic._customer_deals, "find_deal_rate", return_value=None), patch.object(
-            ic.frappe.db, "exists", return_value=False
-        ), patch.object(ic.frappe.db, "get_value", return_value=None):
-            with self.assertRaises(frappe.ValidationError):
-                ic._validate_policy_price_list_coverage(
-                    decision,
-                    "B2B Selling",
-                    [{"item_code": "Molten Large", "qty": 1}],
-                    MagicMock(),
-                    customer="Cafe A",
-                )
+        with self.assertRaises(frappe.ValidationError):
+            self._check(apply_deals=True, deal=None)
 
 
 class _Row(SimpleNamespace):
-    pass
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
 
-def _deal_doc(items, valid_from=TODAY, valid_upto=TODAY, disabled=0, new=True):
+_CTRL = "jarz_pos.doctype.jarz_customer_deal.jarz_customer_deal"
+
+
+def _deal_doc(items, valid_from=TODAY, valid_upto=TODAY, disabled=0, before=None):
     from jarz_pos.doctype.jarz_customer_deal.jarz_customer_deal import JarzCustomerDeal
 
     doc = JarzCustomerDeal.__new__(JarzCustomerDeal)
@@ -232,30 +276,40 @@ def _deal_doc(items, valid_from=TODAY, valid_upto=TODAY, disabled=0, new=True):
         name="DEAL-9",
         items=[_Row(idx=i + 1, **r) for i, r in enumerate(items)],
     )
-    doc.is_new = lambda: new
+    doc.is_new = lambda: before is None
+    doc.get_doc_before_save = lambda: before
+    doc.as_dict = lambda: {"valid_from": doc.valid_from, "valid_upto": doc.valid_upto, "disabled": doc.disabled}
     return doc
+
+
+def _before(valid_from, valid_upto, items, disabled=0, customer="Cafe A"):
+    rows = [_Row(idx=i + 1, **r) for i, r in enumerate(items)]
+    return SimpleNamespace(
+        customer=customer,
+        valid_from=valid_from,
+        valid_upto=valid_upto,
+        disabled=disabled,
+        items=rows,
+        as_dict=lambda: {"valid_from": valid_from, "valid_upto": valid_upto, "disabled": disabled},
+    )
+
+
+LARGE80 = {"item_group": "Large", "item_code": None, "rate": 80}
 
 
 class TestDealValidation(unittest.TestCase):
     def _validate(self, doc, conflict=None):
-        mod = "jarz_pos.doctype.jarz_customer_deal.jarz_customer_deal"
-        with patch(f"{mod}.frappe.db.exists", return_value=True), patch(
-            f"{mod}.find_conflicting_deal", return_value=conflict
-        ) as fc:
+        with patch(f"{_CTRL}.frappe.db.exists", return_value=True), patch(
+            f"{_CTRL}.find_conflicting_deal", return_value=conflict
+        ) as fc, patch(f"{_CTRL}.frappe.utils.today", return_value=str(TODAY)):
             doc.validate()
         return fc
 
     def test_valid_deal_passes(self):
         fc = self._validate(
-            _deal_doc(
-                [
-                    {"item_group": "Large", "item_code": None, "rate": 80},
-                    {"item_group": None, "item_code": "Molten Medium", "rate": 60},
-                ]
-            )
+            _deal_doc([LARGE80, {"item_group": None, "item_code": "Molten Medium", "rate": 60}])
         )
-        targets = fc.call_args.args[3]
-        self.assertEqual(targets, {("group", "Large"), ("item", "Molten Medium")})
+        self.assertEqual(fc.call_args.args[3], {("group", "Large"), ("item", "Molten Medium")})
 
     def test_row_with_both_targets_refused(self):
         with self.assertRaises(frappe.ValidationError):
@@ -267,14 +321,7 @@ class TestDealValidation(unittest.TestCase):
 
     def test_duplicate_target_refused(self):
         with self.assertRaises(frappe.ValidationError):
-            self._validate(
-                _deal_doc(
-                    [
-                        {"item_group": "Large", "item_code": None, "rate": 80},
-                        {"item_group": "Large", "item_code": None, "rate": 75},
-                    ]
-                )
-            )
+            self._validate(_deal_doc([LARGE80, {"item_group": "Large", "item_code": None, "rate": 75}]))
 
     def test_negative_rate_refused(self):
         with self.assertRaises(frappe.ValidationError):
@@ -282,27 +329,79 @@ class TestDealValidation(unittest.TestCase):
 
     def test_end_before_start_refused(self):
         with self.assertRaises(frappe.ValidationError):
-            self._validate(
-                _deal_doc(
-                    [{"item_group": "Large", "item_code": None, "rate": 80}],
-                    valid_from=D(2026, 10, 5),
-                    valid_upto=D(2026, 10, 4),
-                )
-            )
+            self._validate(_deal_doc([LARGE80], valid_from=D(2026, 10, 5), valid_upto=D(2026, 10, 4)))
 
     def test_overlapping_deal_on_same_target_refused(self):
         with self.assertRaises(frappe.ValidationError):
+            self._validate(_deal_doc([LARGE80], valid_upto=D(2026, 10, 9)), conflict="DEAL-1")
+
+    def test_new_deal_cannot_start_in_the_past(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._validate(_deal_doc([LARGE80], valid_from=D(2026, 10, 1), valid_upto=D(2026, 10, 9)))
+
+    # History rules -- these hold for Desk as well as the API.
+    def _running(self):
+        return _before(D(2026, 9, 25), D(2026, 10, 10), [LARGE80])
+
+    def test_running_deal_end_can_move(self):
+        self._validate(
+            _deal_doc([LARGE80], valid_from=D(2026, 9, 25), valid_upto=D(2026, 10, 20), before=self._running())
+        )
+
+    def test_running_deal_keeps_its_prices(self):
+        with self.assertRaises(frappe.ValidationError):
             self._validate(
-                _deal_doc([{"item_group": "Large", "item_code": None, "rate": 80}]),
-                conflict="DEAL-1",
+                _deal_doc(
+                    [{**LARGE80, "rate": 70}],
+                    valid_from=D(2026, 9, 25),
+                    valid_upto=D(2026, 10, 10),
+                    before=self._running(),
+                )
             )
 
-    def test_cancelled_deal_skips_overlap_check(self):
+    def test_running_deal_keeps_its_start(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._validate(
+                _deal_doc([LARGE80], valid_from=D(2026, 9, 28), valid_upto=D(2026, 10, 10), before=self._running())
+            )
+
+    def test_running_deal_cannot_be_cancelled(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._validate(
+                _deal_doc(
+                    [LARGE80], valid_from=D(2026, 9, 25), valid_upto=D(2026, 10, 10), disabled=1,
+                    before=self._running(),
+                )
+            )
+
+    def test_running_deal_cannot_end_before_today(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._validate(
+                _deal_doc([LARGE80], valid_from=D(2026, 9, 25), valid_upto=D(2026, 10, 1), before=self._running())
+            )
+
+    def test_expired_deal_is_frozen(self):
+        before = _before(D(2026, 9, 1), D(2026, 9, 10), [LARGE80])
+        with self.assertRaises(frappe.ValidationError):
+            self._validate(_deal_doc([LARGE80], valid_from=D(2026, 9, 1), valid_upto=D(2026, 10, 10), before=before))
+
+    def test_upcoming_deal_can_change_and_be_cancelled(self):
+        before = _before(D(2026, 10, 5), D(2026, 10, 10), [LARGE80])
+        self._validate(
+            _deal_doc([{**LARGE80, "rate": 70}], valid_from=D(2026, 10, 6), valid_upto=D(2026, 10, 12), before=before)
+        )
         fc = self._validate(
-            _deal_doc([{"item_group": "Large", "item_code": None, "rate": 80}], disabled=1),
+            _deal_doc([LARGE80], valid_from=D(2026, 10, 5), valid_upto=D(2026, 10, 10), disabled=1, before=before),
             conflict="DEAL-1",
         )
         fc.assert_not_called()
+
+    def test_only_unstarted_deals_can_be_deleted(self):
+        with patch(f"{_CTRL}.deal_status", return_value="active"):
+            with self.assertRaises(frappe.ValidationError):
+                _deal_doc([LARGE80]).on_trash()
+        with patch(f"{_CTRL}.deal_status", return_value="upcoming"):
+            _deal_doc([LARGE80]).on_trash()
 
 
 class TestEndDeal(unittest.TestCase):
@@ -326,14 +425,16 @@ class TestEndDeal(unittest.TestCase):
         doc.save.assert_called_once()
         return doc
 
-    def test_running_deal_ends_yesterday_keeping_history(self):
+    def test_running_deal_ends_after_today(self):
+        # Orders placed today were priced from it; amending one must still find it.
         doc = self._end(D(2026, 9, 25), D(2026, 10, 10))
-        self.assertEqual(frappe.utils.getdate(doc.valid_upto), D(2026, 10, 1))
+        self.assertEqual(doc.valid_upto, TODAY)
         self.assertEqual(doc.disabled, 0)
 
-    def test_deal_starting_today_is_cancelled(self):
+    def test_deal_starting_today_also_ends_after_today(self):
         doc = self._end(TODAY, D(2026, 10, 10))
-        self.assertEqual(doc.disabled, 1)
+        self.assertEqual(doc.valid_upto, TODAY)
+        self.assertEqual(doc.disabled, 0)
 
     def test_upcoming_deal_is_cancelled(self):
         doc = self._end(D(2026, 10, 5), D(2026, 10, 10))
@@ -344,45 +445,33 @@ class TestEndDeal(unittest.TestCase):
             self._end(D(2026, 9, 1), D(2026, 9, 10))
 
 
-class TestSaveDealGuards(unittest.TestCase):
-    def _save(self, existing_from, existing_upto, new_from, new_upto, disabled=0):
+class TestSaveDealApi(unittest.TestCase):
+    def test_another_customers_deal_refused(self):
+        doc = MagicMock()
+        doc.customer = "Cafe B"
+        with patch.object(api, "_ensure_full_manager_pricing_access"), patch.object(
+            api, "_require_customer", return_value="Cafe A"
+        ), patch.object(api.frappe, "get_doc", return_value=doc):
+            with self.assertRaises(frappe.ValidationError):
+                api.save_customer_deal(
+                    "Cafe A", "2026-10-02", "2026-10-09", '[{"item_group": "Large", "rate": 80}]', deal="DEAL-1"
+                )
+        doc.save.assert_not_called()
+
+    def test_edit_replaces_lines_and_saves_through_the_doctype(self):
         doc = MagicMock()
         doc.customer = "Cafe A"
-        doc.valid_from = existing_from
-        doc.valid_upto = existing_upto
-        doc.as_dict.return_value = {
-            "valid_from": existing_from,
-            "valid_upto": existing_upto,
-            "disabled": disabled,
-        }
         with patch.object(api, "_ensure_full_manager_pricing_access"), patch.object(
             api, "_require_customer", return_value="Cafe A"
         ), patch.object(api.frappe, "get_doc", return_value=doc), patch.object(
-            api, "_today", return_value=TODAY
-        ), patch.object(api, "_serialize", return_value={}), patch.object(
-            api, "_normal_price_list", return_value="B2B Selling"
-        ):
+            api, "_serialize", return_value={}
+        ), patch.object(api, "_normal_price_list", return_value="B2B Selling"):
             api.save_customer_deal(
-                "Cafe A",
-                str(new_from),
-                str(new_upto),
-                '[{"item_group": "Large", "rate": 80}]',
-                deal="DEAL-1",
+                "Cafe A", "2026-10-02", "2026-10-20", '[{"item_group": "Large", "rate": 80}]', deal="DEAL-1"
             )
-        return doc
-
-    def test_expired_deal_cannot_be_edited(self):
-        with self.assertRaises(frappe.ValidationError):
-            self._save(D(2026, 9, 1), D(2026, 9, 10), D(2026, 9, 1), D(2026, 10, 10))
-
-    def test_running_deal_keeps_its_start(self):
-        with self.assertRaises(frappe.ValidationError):
-            self._save(D(2026, 9, 25), D(2026, 10, 10), D(2026, 9, 28), D(2026, 10, 10))
-
-    def test_running_deal_can_be_extended(self):
-        doc = self._save(D(2026, 9, 25), D(2026, 10, 10), D(2026, 9, 25), D(2026, 10, 20))
         self.assertEqual(doc.valid_upto, D(2026, 10, 20))
-        doc.save.assert_called_once()
+        doc.append.assert_called_once_with("items", {"item_code": None, "item_group": "Large", "rate": 80.0})
+        doc.save.assert_called_once_with(ignore_permissions=True)
 
     def test_items_must_be_a_list(self):
         with self.assertRaises(frappe.ValidationError):

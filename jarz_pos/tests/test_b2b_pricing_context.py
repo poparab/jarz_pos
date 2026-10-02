@@ -267,7 +267,10 @@ class TestB2BCatalogContext(unittest.TestCase):
         )
         self.assertEqual(rows[0]["price"], 42.0)
         self.assertEqual(rows[0]["price_list"], PRICE_LIST)
-        resolve_rate.assert_called_once_with("ITEM-1", PRICE_LIST, 10, CUSTOMER)
+        # A B2B Supply catalog shows the customer's live deal, as the order will book it.
+        resolve_rate.assert_called_once_with(
+            "ITEM-1", PRICE_LIST, 10, CUSTOMER, include_deals=True
+        )
 
     def test_b2b_catalog_rate_delegates_customer_and_fallback_to_invoice_engine(self):
         with patch(
@@ -285,6 +288,7 @@ class TestB2BCatalogContext(unittest.TestCase):
             PRICE_LIST,
             fallback_rate=12,
             customer=CUSTOMER,
+            include_deals=False,
         )
         self.assertEqual(result, 73)
 

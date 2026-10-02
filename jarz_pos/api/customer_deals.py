@@ -88,6 +88,9 @@ def _catalog(customer: str, price_list: str | None) -> dict:
             }
         )
     items = []
+    # A bundle is booked at its own bundle price, never through a deal, so
+    # neither a bundle item nor a category holding only bundles is offered.
+    groups_with_plain_items = set()
     for row in frappe.get_all(
         "Item",
         filters={"disabled": 0, "is_sales_item": 1},
@@ -96,6 +99,7 @@ def _catalog(customer: str, price_list: str | None) -> dict:
     ):
         if row["name"] in bundles:
             continue
+        groups_with_plain_items.add(row.get("item_group"))
         items.append(
             {
                 "item_code": row["name"],
@@ -106,6 +110,7 @@ def _catalog(customer: str, price_list: str | None) -> dict:
         )
     # Categories nobody prices on this list are noise in the picker; keep them
     # only when nothing is priced at all (e.g. a list that is not set up yet).
+    groups = [g for g in groups if g["item_group"] in groups_with_plain_items]
     priced_groups = [g for g in groups if g["normal_rate"] is not None]
     return {"categories": priced_groups or groups, "items": items}
 
@@ -218,39 +223,27 @@ def get_customer_deals(customer, include_catalog=1):
 # ---------------------------------------------------------------------------
 @frappe.whitelist(methods=["POST"])
 def save_customer_deal(customer, valid_from, valid_upto, items, notes=None, deal=None):
-    """Create a deal, or replace an upcoming/active one's dates and prices.
+    """Create a deal, or change one that has not ended.
 
-    An expired or cancelled deal is history — orders were booked against it —
-    so it cannot be edited; create a new deal instead.
+    The history rules (no start in the past, a running deal keeps its start
+    and prices, an ended deal never changes) are enforced by the DocType, so
+    Desk obeys them too; see ``JarzCustomerDeal``.
     """
     _ensure_full_manager_pricing_access()
     customer = _require_customer(customer)
     rows = _parse_items(items)
-    start = frappe.utils.getdate(valid_from)
-    end = frappe.utils.getdate(valid_upto)
 
     if deal:
         doc = frappe.get_doc(DEAL_DOCTYPE, deal)
         if doc.customer != customer:
             frappe.throw("This deal belongs to a different customer.")
-        status = deal_status(doc.as_dict(), _today())
-        if status not in ("upcoming", "active"):
-            frappe.throw(f"A {status} deal cannot be edited. Create a new deal instead.")
-        if status == "active" and start != frappe.utils.getdate(doc.valid_from):
-            # Orders already priced from the original start; moving it would
-            # rewrite which of them "were" on the deal.
-            frappe.throw("A running deal keeps its start date. Change the end date or the prices.")
-        if end < _today():
-            frappe.throw("The end date cannot be in the past. Use End deal instead.")
         doc.items = []
     else:
-        if end < _today():
-            frappe.throw("The deal's end date is already in the past.")
         doc = frappe.new_doc(DEAL_DOCTYPE)
         doc.customer = customer
 
-    doc.valid_from = start
-    doc.valid_upto = end
+    doc.valid_from = frappe.utils.getdate(valid_from)
+    doc.valid_upto = frappe.utils.getdate(valid_upto)
     doc.notes = (str(notes).strip() or None) if notes is not None else doc.get("notes")
     for row in rows:
         doc.append("items", row)
@@ -261,22 +254,22 @@ def save_customer_deal(customer, valid_from, valid_upto, items, notes=None, deal
 
 @frappe.whitelist(methods=["POST"])
 def end_customer_deal(deal):
-    """Stop a deal from today on.
+    """Stop a deal.
 
-    A deal that already ran keeps its history: its end date moves to yesterday,
-    so amending an order placed during it still finds it. One that has not
-    priced a single day yet (upcoming, or starting today) is cancelled outright.
+    A running deal ends after TODAY: orders already placed today were priced
+    from it, and amending one of them must still find it. A deal that has not
+    started yet is cancelled outright -- it never priced anything.
     """
     _ensure_full_manager_pricing_access()
     doc = frappe.get_doc(DEAL_DOCTYPE, deal)
     today = _today()
     status = deal_status(doc.as_dict(), today)
-    if status not in ("upcoming", "active"):
-        frappe.throw(f"This deal is already {status}.")
-    if frappe.utils.getdate(doc.valid_from) < today:
-        doc.valid_upto = frappe.utils.add_days(today, -1)
-    else:
+    if status == "upcoming":
         doc.disabled = 1
+    elif status == "active":
+        doc.valid_upto = today
+    else:
+        frappe.throw(f"This deal is already {status}.")
     # The role gate above is the permission check, as in api/price_lists.
     doc.save(ignore_permissions=True)
     return _serialize(doc, doc.customer, _normal_price_list(doc.customer))
