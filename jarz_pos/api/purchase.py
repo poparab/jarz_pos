@@ -20,6 +20,9 @@ SETTINGS_DOCTYPE = "Jarz POS Settings"
 #: Seeded by ``jarz_pos.setup.purchase_setup``; blank means "no default".
 DEFAULT_ITEM_TAX_TEMPLATE_FIELD = "purchase_default_item_tax_template"
 
+#: Item custom field holding the item's Arabic name (fixtures/custom_field.json).
+ARABIC_NAME_FIELD = "jarz_item_name_ar"
+
 
 def _ensure_manager_access():
     roles = set(frappe.get_roles())
@@ -103,7 +106,17 @@ def _fold(text: Any) -> str:
     miss the same word spelled with a hamza when it is one word of several.
     """
     decomposed = unicodedata.normalize("NFKD", str(text or ""))
-    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return stripped.casefold().translate(_ARABIC_SPELLING)
+
+
+# Letters typed interchangeably in Egyptian Arabic: taa marbuta and haa at a
+# word's end, alef maqsura and yaa, and the alef forms. The collation keeps
+# them apart, so "فراوله" never found "فراولة" and "مكرونى" never found "مكروني".
+_ARABIC_SPELLING = str.maketrans({"ة": "ه", "ى": "ي", "أ": "ا", "إ": "ا", "آ": "ا"})
+# In SQL each of those letters becomes LIKE's one-character wildcard, so every
+# spelling reaches the candidates; _fold then decides in Python.
+_ARABIC_LIKE_WILDCARDS = str.maketrans({c: "_" for c in "ةهىيأإآا"})
 
 
 def _search_tokens(search: Optional[str]) -> List[str]:
@@ -128,22 +141,24 @@ def _word_search(
     cheese" or "chocolate milk" missed any item whose words run in another
     order. Production showed the buyer retrying empty searches again and again.
 
-    One word stays a single query. With several, the longest word does the SQL
-    filtering and the rest are checked here; the surviving names are pinned
+    One plain word stays a single query. Otherwise the longest word does the
+    SQL filtering and the rest are checked here; the surviving names are pinned
     into ``filters`` so the caller's paged query (ORDER BY, LIMIT/OFFSET)
-    stays a single SQL statement.
+    stays a single SQL statement. An anchor carrying a loosely-spelled Arabic
+    letter is widened to a wildcard in SQL, so it is re-checked here too.
 
     Returns ``[]`` for a blank search (no narrowing) and ``None`` when no row
     can match, so the caller can return an empty page without a second query.
-    Mutates ``filters`` only in the multi-word case.
+    Mutates ``filters`` only when it takes the second, checked path.
     """
     tokens = _search_tokens(search)
     if not tokens:
         return []
     anchor = max(tokens, key=len)
+    pattern = anchor.translate(_ARABIC_LIKE_WILDCARDS)
     # Plain field names: a doctype-qualified or_filter broke get_suppliers once.
-    or_filters = [[field, "like", f"%{anchor}%"] for field in search_fields]
-    rest = [_fold(t) for t in tokens if t != anchor]
+    or_filters = [[field, "like", f"%{pattern}%"] for field in search_fields]
+    rest = [_fold(t) for t in tokens if t != anchor or pattern != anchor]
     if not rest:
         return or_filters
 
@@ -276,17 +291,21 @@ def search_items(
     }
     if item_group:
         filters["item_group"] = item_group
-    or_filters = _word_search(
-        "Item", ["name", "item_name", "item_group"], search, filters
-    )
-    if or_filters is None:
-        return []
+    search_fields = ["name", "item_name", "item_group"]
     fields = [
         "name as item_code",
         "item_name",
         "stock_uom",
         "item_group",
     ]
+    # Most items are named in English while the buyers type Arabic. Guarded:
+    # code reaches the server before `bench migrate` adds the column.
+    if _has_field("Item", ARABIC_NAME_FIELD):
+        search_fields.append(ARABIC_NAME_FIELD)
+        fields.append(f"{ARABIC_NAME_FIELD} as item_name_ar")
+    or_filters = _word_search("Item", search_fields, search, filters)
+    if or_filters is None:
+        return []
     items = frappe.get_all(
         "Item",
         filters=filters,
