@@ -98,6 +98,47 @@ class TestValidateRequestLink(unittest.TestCase):
 			with self.assertRaises(Exception):
 				purchase._validate_request_link(MR, MR_LINE, "RM-TOMATO")
 
+	def test_returns_the_link_unchanged_when_open(self):
+		with patch.object(purchase.frappe.db, "get_value", side_effect=_line_value):
+			self.assertEqual(
+				purchase._validate_request_link(MR, MR_LINE, "RM-TOMATO"), (MR, MR_LINE)
+			)
+
+	def test_follows_an_edited_request_to_its_amendment(self):
+		"""An edit cancels the request and submits <name>-1; the cart's stale
+		link must credit the amended line, not the cancelled one."""
+
+		def edited(doctype, name, fieldname=None, as_dict=False, **kwargs):
+			if doctype == "Material Request" and name == MR and fieldname == "docstatus":
+				return 2
+			if doctype == "Material Request" and name == {"amended_from": MR}:
+				return {"name": f"{MR}-1", "docstatus": 1}
+			if doctype == "Material Request" and fieldname == "docstatus":
+				return 1
+			return _line_value(doctype, name, fieldname, as_dict, **kwargs)
+
+		with patch.object(purchase.frappe.db, "get_value", side_effect=edited):
+			with patch.object(purchase.frappe, "get_all", return_value=["new-line"]):
+				self.assertEqual(
+					purchase._validate_request_link(MR, MR_LINE, "RM-TOMATO"),
+					(f"{MR}-1", "new-line"),
+				)
+
+	def test_refuses_when_the_edit_dropped_the_item(self):
+		def edited(doctype, name, fieldname=None, as_dict=False, **kwargs):
+			if doctype == "Material Request" and name == MR and fieldname == "docstatus":
+				return 2
+			if doctype == "Material Request" and name == {"amended_from": MR}:
+				return {"name": f"{MR}-1", "docstatus": 1}
+			if doctype == "Material Request" and fieldname == "docstatus":
+				return 1
+			return _line_value(doctype, name, fieldname, as_dict, **kwargs)
+
+		with patch.object(purchase.frappe.db, "get_value", side_effect=edited):
+			with patch.object(purchase.frappe, "get_all", return_value=[]):
+				with self.assertRaises(Exception):
+					purchase._validate_request_link(MR, MR_LINE, "RM-TOMATO")
+
 
 class TestBillNoValidation(unittest.TestCase):
 	def test_blank_bill_no_allowed_when_not_required(self):

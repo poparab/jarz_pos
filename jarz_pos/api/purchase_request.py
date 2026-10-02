@@ -260,15 +260,28 @@ def _edit_block_reason(doc: Any) -> Optional[str]:
     """
     if doc.get("material_request_type") != "Purchase" or doc.get("docstatus") != 1:
         return _("Only an open item request can be edited.")
+    # Only requests raised from the app. Desk, auto-reorder and Production Plan
+    # requests carry per-line warehouses, plan links and dates this rebuild
+    # does not reproduce; amending them would quietly drop all of that.
+    if not doc.get("custom_jarz_requested_by_label"):
+        return _("This request was not raised from the app and can only be changed in ERPNext.")
     if doc.get("status") != "Pending":
         return _("Only a pending request can be edited.")
     if doc.get("custom_jarz_acknowledged_at"):
         return _("A buyer already accepted this request, so it can no longer be edited.")
     if flt(doc.get("per_ordered") or 0) > 0 or flt(doc.get("per_received") or 0) > 0:
         return _("Part of this request was already bought, so it can no longer be edited.")
+    seen_items = set()
     for line in doc.get("items") or []:
         if flt(line.get("ordered_qty") or 0) > 0 or flt(line.get("received_qty") or 0) > 0:
             return _("Part of this request was already bought, so it can no longer be edited.")
+        if line.get("production_plan") or line.get("sales_order"):
+            return _("This request was not raised from the app and can only be changed in ERPNext.")
+        # The edit sheet holds one line per item; a request listing an item
+        # twice (e.g. for two warehouses) would be merged on save.
+        if line.get("item_code") in seen_items:
+            return _("This request lists an item more than once and can only be changed in ERPNext.")
+        seen_items.add(line.get("item_code"))
     return None
 
 

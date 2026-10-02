@@ -3,7 +3,7 @@ import unicodedata
 
 import frappe
 from frappe import _
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from jarz_pos.constants import PAYMENT_MODES, PRICE_LISTS, ROLES
 from jarz_pos.utils.warehouse_utils import resolve_purchase_warehouse
@@ -798,7 +798,7 @@ def create_purchase_invoice(
         mr = (row.get("material_request") or "").strip() if row.get("material_request") else None
         mr_item = (row.get("material_request_item") or "").strip() if row.get("material_request_item") else None
         if mr and mr_item:
-            _validate_request_link(mr, mr_item, item_code)
+            mr, mr_item = _validate_request_link(mr, mr_item, item_code)
             line["material_request"] = mr
             line["material_request_item"] = mr_item
 
@@ -1025,11 +1025,18 @@ def _validate_bill_no(supplier: str, bill_no: Optional[str]) -> None:
         frappe.throw(_("Supplier bill number is required for {0}.").format(supplier))
 
 
-def _validate_request_link(material_request: str, material_request_item: str, item_code: str) -> None:
+def _validate_request_link(
+    material_request: str, material_request_item: str, item_code: str
+) -> Tuple[str, str]:
     """Reject a request link that does not belong to the line it is attached to.
 
     A mismatched link would make ERPNext credit the wrong request line as
     received, quietly closing a request nobody actually fulfilled.
+
+    Returns the link to actually use. A requester may edit a request after the
+    buyer put it in the cart; editing cancels it and submits an amended copy
+    (``<name>-1``), so the link is followed to that copy's line for the same
+    item rather than failing the whole invoice over one stale line.
     """
     row = frappe.db.get_value(
         "Material Request Item",
@@ -1051,9 +1058,48 @@ def _validate_request_link(material_request: str, material_request_item: str, it
                 material_request_item, row.get("item_code"), item_code
             )
         )
-    docstatus = frappe.db.get_value("Material Request", material_request, "docstatus")
+    # Row lock, matching update_request: without it an edit committing between
+    # this check and the invoice's submit would leave received_qty credited to
+    # the cancelled original while its amended copy stays open and is bought
+    # a second time. Whichever side locks first, the other now sees its result.
+    docstatus = frappe.db.get_value("Material Request", material_request, "docstatus", for_update=True)
+    if int(docstatus or 0) == 2:
+        return _follow_edited_request(material_request, item_code)
     if int(docstatus or 0) != 1:
         frappe.throw(_("Request {0} is not open.").format(material_request))
+    return material_request, material_request_item
+
+
+def _follow_edited_request(material_request: str, item_code: str) -> Tuple[str, str]:
+    """The live line for ``item_code`` in the latest amendment of a cancelled request."""
+    current = material_request
+    # Bounded: each edit adds one link, and nobody edits a request 20 times.
+    for _hop in range(20):
+        successor = frappe.db.get_value(
+            "Material Request", {"amended_from": current}, ["name", "docstatus"], as_dict=True
+        )
+        if not successor:
+            break
+        if int(successor.get("docstatus") or 0) == 1:
+            frappe.db.get_value("Material Request", successor["name"], "docstatus", for_update=True)
+            lines = frappe.get_all(
+                "Material Request Item",
+                filters={"parent": successor["name"], "item_code": item_code},
+                pluck="name",
+            )
+            if len(lines) == 1:
+                return successor["name"], lines[0]
+            if not lines:
+                frappe.throw(
+                    _("Request {0} was edited and no longer asks for {1}. Reload the requests list.").format(
+                        material_request, item_code
+                    )
+                )
+            break
+        current = successor["name"]
+    frappe.throw(
+        _("Request {0} was changed after you added it. Reload the requests list.").format(material_request)
+    )
 
 
 @frappe.whitelist()
