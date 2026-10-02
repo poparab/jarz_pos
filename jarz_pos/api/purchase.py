@@ -93,16 +93,73 @@ def _default_item_tax_template(company: Optional[str] = None) -> Optional[str]:
     return configured
 
 
+def _search_tokens(search: Optional[str]) -> List[str]:
+    """The words of a typed search: trimmed, split on any whitespace, deduped."""
+    return list(dict.fromkeys(str(search or "").split()))
+
+
+def _word_search(
+    doctype: str,
+    search_fields: List[str],
+    search: Optional[str],
+    filters: Dict[str, Any],
+) -> Optional[List[Any]]:
+    """``or_filters`` matching every typed word, in any order, in any field.
+
+    The search box used to be one ``LIKE '%<raw text>%'``. On a phone that
+    found nothing far too often: the iOS keyboard leaves a trailing space after
+    a predicted or autocorrected word, so "sugar " missed "sugar"; and "cream
+    cheese" or "chocolate milk" missed any item whose words run in another
+    order. Production showed the buyer retrying empty searches again and again.
+
+    One word stays a single query. With several, the longest word does the SQL
+    filtering and the rest are checked here; the surviving names are pinned
+    into ``filters`` so the caller's paged query (ORDER BY, LIMIT/OFFSET)
+    stays a single SQL statement.
+
+    Returns ``[]`` for a blank search (no narrowing) and ``None`` when no row
+    can match, so the caller can return an empty page without a second query.
+    Mutates ``filters`` only in the multi-word case.
+    """
+    tokens = _search_tokens(search)
+    if not tokens:
+        return []
+    anchor = max(tokens, key=len)
+    # Plain field names: a doctype-qualified or_filter broke get_suppliers once.
+    or_filters = [[field, "like", f"%{anchor}%"] for field in search_fields]
+    rest = [t.casefold() for t in tokens if t != anchor]
+    if not rest:
+        return or_filters
+
+    candidates = frappe.get_all(
+        doctype,
+        filters=filters,
+        or_filters=or_filters,
+        fields=list(dict.fromkeys(["name", *search_fields])),
+        limit_page_length=0,
+    )
+    names = [
+        row["name"]
+        for row in candidates
+        if all(
+            any(word in str(row.get(field) or "").casefold() for field in search_fields)
+            for word in rest
+        )
+    ]
+    if not names:
+        return None
+    filters["name"] = ["in", names]
+    return or_filters
+
+
 @frappe.whitelist()
 def get_suppliers(search: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
     _ensure_manager_access()
     filters: Dict[str, Any] = {}
     fields = ["name", "supplier_name", "supplier_group", "supplier_type", "disabled"]
-    or_filters: List[Any] = []
-    if search:
-        like = f"%{search}%"
-        # Use simple field names in or_filters to avoid doctype qualification issues
-        or_filters = [["name", "like", like], ["supplier_name", "like", like]]
+    or_filters = _word_search("Supplier", ["name", "supplier_name"], search, filters)
+    if or_filters is None:
+        return []
     rows = frappe.get_all(
         "Supplier",
         filters=filters,
@@ -203,14 +260,11 @@ def search_items(
     }
     if item_group:
         filters["item_group"] = item_group
-    or_filters = []
-    if search:
-        like = f"%{search}%"
-        or_filters = [
-            ["Item", "name", "like", like],
-            ["Item", "item_name", "like", like],
-            ["Item", "item_group", "like", like],
-        ]
+    or_filters = _word_search(
+        "Item", ["name", "item_name", "item_group"], search, filters
+    )
+    if or_filters is None:
+        return []
     fields = [
         "name as item_code",
         "item_name",

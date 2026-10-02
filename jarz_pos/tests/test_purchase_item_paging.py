@@ -74,5 +74,76 @@ class TestSearchItemsPaging(unittest.TestCase):
         self.assertEqual(0, self._capture_query(search="a", page=-3).get("limit_start"))
 
 
+class TestSearchItemsWordMatching(unittest.TestCase):
+    """The buyer's phone keyboard must not decide whether an item is found.
+
+    Production, 2026-10-02: the iPhone keyboard leaves a trailing space after
+    a predicted word, so "sugar " matched nothing while "sugar" matched two
+    items, and "cream cheese" / "chocolate milk" missed items whose words run
+    in another order.
+    """
+
+    CATALOGUE = [
+        {"name": "sugar", "item_name": "sugar", "item_group": "Raw Material"},
+        {"name": "powder sugar", "item_name": "powder sugar", "item_group": "Raw Material"},
+        {"name": "milkana cheese", "item_name": "milkana cheese", "item_group": "Raw Material"},
+        {
+            "name": "Belcolade Milk Chocolate",
+            "item_name": "Belcolade Milk Chocolate",
+            "item_group": "Raw Material",
+        },
+    ]
+
+    def _run(self, search):
+        from jarz_pos.api import purchase
+
+        calls = []
+
+        def fake_get_all(doctype, **query):
+            calls.append(query)
+            if doctype != "Item" or not query.get("or_filters"):
+                return []
+            anchor = query["or_filters"][0][2].strip("%").casefold()
+            rows = [
+                r for r in self.CATALOGUE
+                if any(anchor in str(r[f]).casefold() for f in ("name", "item_name", "item_group"))
+            ]
+            pinned = query.get("filters", {}).get("name")
+            if pinned:
+                rows = [r for r in rows if r["name"] in pinned[1]]
+            # The paged query reads only these four columns; returning nothing
+            # keeps the bulk enrichment helpers out of the test.
+            return rows if "limit_start" not in query else []
+
+        with patch("jarz_pos.api.purchase._ensure_manager_access"), patch(
+            "jarz_pos.api.purchase.frappe.get_all", side_effect=fake_get_all
+        ):
+            purchase.search_items(search=search)
+        return calls
+
+    def test_trailing_space_is_ignored(self):
+        calls = self._run("sugar ")
+        self.assertEqual(1, len(calls), "one word must stay a single query")
+        self.assertTrue(all(f[2] == "%sugar%" for f in calls[0]["or_filters"]))
+
+    def test_blank_search_does_not_filter(self):
+        calls = self._run("   ")
+        self.assertEqual([], calls[0]["or_filters"])
+
+    def test_words_match_in_any_order(self):
+        calls = self._run("chocolate  milk")
+        paged = calls[-1]
+        self.assertEqual(["in", ["Belcolade Milk Chocolate"]], paged["filters"]["name"])
+
+    def test_every_word_must_match(self):
+        calls = self._run("cheese milkana")
+        self.assertEqual(["in", ["milkana cheese"]], calls[-1]["filters"]["name"])
+
+    def test_no_match_skips_the_paged_query(self):
+        calls = self._run("cream cheese")
+        self.assertEqual(1, len(calls), "nothing matched, so no second query")
+        self.assertNotIn("limit_start", calls[0])
+
+
 if __name__ == "__main__":
     unittest.main()
