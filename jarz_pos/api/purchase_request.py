@@ -187,6 +187,31 @@ def create_request(
     if note:
         doc.custom_jarz_note = note
 
+    for line in _build_request_lines(rows, resolved_company, needed_by):
+        doc.append("items", line)
+
+    doc.flags.ignore_permissions = True
+    doc.insert()
+    doc.submit()
+    doc.reload()
+
+    _notify_reviewers(doc)
+
+    return {"success": True, "request": _serialize_request_with_lines(doc)}
+
+
+def _build_request_lines(
+    rows: List[Dict[str, Any]],
+    company: str,
+    needed_by: Any,
+    warehouses: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Validated Material Request Item rows from the app's ``[{item_code, qty, uom?}]``.
+
+    ``warehouses`` keeps an edited line where it already was, so editing a
+    quantity does not quietly move the request to a different store.
+    """
+    lines: List[Dict[str, Any]] = []
     for row in rows:
         item_code = str(row.get("item_code") or "").strip()
         if not item_code:
@@ -208,7 +233,7 @@ def create_request(
         uom = str(row.get("uom") or "").strip() or item["stock_uom"]
         conversion = _conversion_factor(item_code, uom, item["stock_uom"])
 
-        doc.append("items", {
+        lines.append({
             "item_code": item_code,
             "item_name": item.get("item_name"),
             "qty": qty,
@@ -217,18 +242,140 @@ def create_request(
             "conversion_factor": conversion,
             "schedule_date": needed_by,
             "warehouse": resolve_request_warehouse(
-                item_code, resolved_company, row.get("warehouse")
+                item_code,
+                company,
+                row.get("warehouse") or (warehouses or {}).get(item_code),
             ),
         })
+    return lines
 
-    doc.flags.ignore_permissions = True
-    doc.insert()
-    doc.submit()
-    doc.reload()
 
-    _notify_reviewers(doc)
+def _edit_block_reason(doc: Any) -> Optional[str]:
+    """Why ``doc`` can no longer be edited, or ``None`` when it still can.
 
-    return {"success": True, "request": _serialize_request_with_lines(doc)}
+    Editing is cancel-and-amend, so it is only safe before anything downstream
+    hangs off the request: once a buyer accepted it they may already be buying
+    the old quantities, and once anything is ordered or received the lines are
+    linked from a Purchase Order / Invoice and cannot be cancelled.
+    """
+    if doc.get("material_request_type") != "Purchase" or doc.get("docstatus") != 1:
+        return _("Only an open item request can be edited.")
+    if doc.get("status") != "Pending":
+        return _("Only a pending request can be edited.")
+    if doc.get("custom_jarz_acknowledged_at"):
+        return _("A buyer already accepted this request, so it can no longer be edited.")
+    if flt(doc.get("per_ordered") or 0) > 0 or flt(doc.get("per_received") or 0) > 0:
+        return _("Part of this request was already bought, so it can no longer be edited.")
+    for line in doc.get("items") or []:
+        if flt(line.get("ordered_qty") or 0) > 0 or flt(line.get("received_qty") or 0) > 0:
+            return _("Part of this request was already bought, so it can no longer be edited.")
+    return None
+
+
+def _may_edit(owner: Optional[str]) -> bool:
+    """The person who raised a request may edit it, and so may any buyer."""
+    return owner == frappe.session.user or _can_review()
+
+
+@frappe.whitelist()
+def get_request_for_edit(name: str) -> Dict[str, Any]:
+    """A request plus every line's selectable UOMs, for the edit sheet."""
+    _ensure_request_access()
+    if not name:
+        frappe.throw(_("Request name is required"))
+
+    doc = frappe.get_doc("Material Request", name)
+    if not _may_edit(doc.owner):
+        frappe.throw(_("Only the requester or a buyer can edit this request."), frappe.PermissionError)
+    reason = _edit_block_reason(doc)
+    if reason:
+        frappe.throw(reason)
+
+    from jarz_pos.api.purchase import _get_item_uoms_bulk
+
+    codes = list(dict.fromkeys(row.item_code for row in doc.get("items") or []))
+    return {
+        "request": _serialize_request_with_lines(doc),
+        "uoms": _get_item_uoms_bulk(codes),
+    }
+
+
+@frappe.whitelist()
+def update_request(
+    name: str,
+    items: Optional[List[Dict[str, Any]]] = None,
+    schedule_date: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Edit a request that nobody has acted on yet.
+
+    A submitted Material Request cannot change its lines in place, and the
+    requested quantity is already posted to each ``Bin.indented_qty``. So the
+    edit is ERPNext's own cancel-and-amend: the old request is cancelled (which
+    reverses its indented qty) and an amended copy ``<name>-1`` is submitted with
+    the new lines. Requester, branch, raise date and owner carry over.
+
+    ``note``: ``None`` keeps the existing note; an empty string clears it.
+    """
+    _ensure_request_access()
+    if not name:
+        frappe.throw(_("Request name is required"))
+
+    rows = _coerce_rows(items)
+    if not rows:
+        frappe.throw(_("At least one item is required"))
+
+    # Row lock: a buyer accepting the request while it is being edited must
+    # either see the edit or block it, never accept the cancelled original.
+    old = frappe.get_doc("Material Request", name, for_update=True)
+    if not _may_edit(old.owner):
+        frappe.throw(_("Only the requester or a buyer can edit this request."), frappe.PermissionError)
+    reason = _edit_block_reason(old)
+    if reason:
+        frappe.throw(reason)
+
+    current_date = getdate(old.schedule_date) if old.schedule_date else None
+    if schedule_date:
+        needed_by = getdate(schedule_date)
+        # An unchanged date may already be in the past (the request is overdue);
+        # only a newly chosen date has to be in the future.
+        if needed_by != current_date and needed_by < getdate(nowdate()):
+            frappe.throw(_("The 'needed by' date cannot be in the past."))
+    else:
+        needed_by = current_date or getdate(add_days(nowdate(), _settings_int("purchase_request_schedule_days", 3)))
+
+    warehouses = {line.item_code: line.warehouse for line in old.get("items") or [] if line.warehouse}
+
+    new = frappe.new_doc("Material Request")
+    new.amended_from = old.name
+    new.material_request_type = old.material_request_type
+    new.company = old.company
+    new.transaction_date = old.transaction_date
+    new.schedule_date = needed_by
+    new.custom_jarz_pos_profile = old.get("custom_jarz_pos_profile")
+    new.custom_jarz_requested_by_label = old.get("custom_jarz_requested_by_label")
+    new.custom_jarz_note = old.get("custom_jarz_note") if note is None else (str(note).strip() or None)
+    for line in _build_request_lines(rows, old.company, needed_by, warehouses):
+        new.append("items", line)
+
+    old.flags.ignore_permissions = True
+    old.cancel()
+
+    new.flags.ignore_permissions = True
+    new.insert()
+    new.submit()
+    # Insert stamps the editor as owner; the request still belongs to whoever
+    # raised it, which is what "My requests" and is_mine key off.
+    if old.owner and new.owner != old.owner:
+        new.db_set("owner", old.owner, update_modified=False)
+    new.add_comment("Comment", _("Edited by {0}").format(_user_label(frappe.session.user)))
+    new.reload()
+
+    return {
+        "success": True,
+        "request": _serialize_request_with_lines(new),
+        "replaces": old.name,
+    }
 
 
 @frappe.whitelist()
@@ -533,7 +680,7 @@ def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _REQUEST_FIELDS = [
-    "name", "transaction_date", "schedule_date", "status", "docstatus",
+    "name", "material_request_type", "transaction_date", "schedule_date", "status", "docstatus",
     "per_ordered", "per_received", "company", "owner", "creation", "modified",
     "custom_jarz_pos_profile", "custom_jarz_requested_by_label", "custom_jarz_note",
 ]
@@ -589,6 +736,8 @@ def _serialize_request(doc: Dict[str, Any]) -> Dict[str, Any]:
         or doc.get("custom_jarz_acknowledged_by"),
         "acknowledged_by_user": doc.get("custom_jarz_acknowledged_by"),
         "acknowledged_at": doc.get("custom_jarz_acknowledged_at"),
+        # Header-level only for list rows; update_request re-checks every line.
+        "can_edit": _may_edit(doc.get("owner")) and _edit_block_reason(doc) is None,
     }
 
 
