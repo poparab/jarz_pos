@@ -392,6 +392,39 @@ def _resolve_kashier_account(company: str) -> str:
     return matches[0]
 
 
+def _kashier_existing_payment_or_refuse(inv, existing_payment_entries) -> dict:
+    """Refuse a Kashier request on an invoice whose money went somewhere else.
+
+    Returns the entry when a submitted Receive entry already put the money in
+    the Kashier ledger (a repeated tap), re-stamping the invoice so it reads
+    Kashier Card. Courier Outstanding transfers are not customer payments (see
+    ``get_invoice_settlement_preview``): dispatch posts one for every Cash order,
+    so the courier is carrying the cash, and booking Kashier on top is a
+    settlement question, not a payment.
+    """
+    kashier_account = _resolve_kashier_account(inv.company)
+    customer_payments = [
+        r for r in existing_payment_entries
+        if not str(r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)
+    ]
+    for row in customer_payments:
+        if row.get("paid_to") == kashier_account:
+            inv.db_set("custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False)
+            return row
+    if customer_payments:
+        others = ", ".join(f"{r.get('name')} ({r.get('paid_to')})" for r in customer_payments)
+        frappe.throw(
+            f"{inv.name} is already paid into another account: {others}. "
+            "No Kashier payment was recorded. Cancel that payment first if the "
+            "customer really paid by Kashier link."
+        )
+    transfers = ", ".join(r.get("name") or "" for r in existing_payment_entries)
+    frappe.throw(
+        f"{inv.name} is already out with the courier as a cash order ({transfers}). "
+        "No Kashier payment was recorded; settle it with the courier instead."
+    )
+
+
 def _clear_awaiting_payment_flag(invoice_name: str) -> None:
     """Clear ``Awaiting Payment`` once this invoice's money is actually in.
 
@@ -485,7 +518,7 @@ def pay_invoice(
         try:
             existing_payment_entries = frappe.db.sql(
                 """
-                SELECT pe.name, pe.posting_date, pe.paid_amount
+                SELECT pe.name, pe.posting_date, pe.paid_amount, pe.paid_to
                 FROM `tabPayment Entry` pe
                 INNER JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
                 WHERE per.reference_doctype = 'Sales Invoice'
@@ -518,6 +551,23 @@ def pay_invoice(
                 "Could not check whether this invoice has already been paid. "
                 "Nothing was posted - please try again."
             )
+
+        if mode_lower == "kashier" and existing_payment_entries:
+            # "Already paid" is only the same request repeated when the money
+            # already sits in the Kashier ledger. A Cash tap that won the row
+            # lock, or the Courier Outstanding transfer dispatch posts, would
+            # otherwise answer "success" while nothing was booked to Kashier and
+            # the order still read Cash.
+            pe = _kashier_existing_payment_or_refuse(inv, existing_payment_entries)
+            _clear_awaiting_payment_flag(inv.name)
+            return {
+                "success": True,
+                "payment_entry": pe.get("name"),
+                "invoice": inv.name,
+                "allocated_amount": float(pe.get("paid_amount", 0)),
+                "paid_to": pe.get("paid_to", ""),
+                "note": "Invoice already has a Kashier payment entry (idempotent response)",
+            }
 
         if existing_payment_entries:
             # Return existing payment entry instead of throwing error (idempotency)
@@ -638,6 +688,9 @@ def pay_invoice(
                 f"Kashier payment link for {inv.name}, recorded by {frappe.session.user}"
                 + (f" (ref {reference_no})" if reference_no else "")
             )
+            # Without this, PaymentEntry.validate() -> set_remarks() replaces the
+            # text with its generic "Amount EGP ... received from ..." line.
+            pe.custom_remarks = 1
 
         try:
             pe.insert(ignore_permissions=True)
@@ -660,8 +713,12 @@ def pay_invoice(
                         "Payment Entry",
                         filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
                         fields=["name", "paid_amount", "paid_to"],
-                        limit=1,
+                        order_by="creation asc",
                     )
+                    if mode_lower == "kashier":
+                        # Same rule as the idempotency check: only a payment
+                        # already in the Kashier ledger answers this request.
+                        existing_pe = [r for r in existing_pe if r.get("paid_to") == paid_to_account]
                     if existing_pe:
                         pe_data = existing_pe[0]
                         _clear_awaiting_payment_flag(inv.name)

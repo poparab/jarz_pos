@@ -373,6 +373,8 @@ class TestPayInvoiceKashier(unittest.TestCase):
 		self.assertEqual(pe.paid_to, "kashier - J")
 		self.assertEqual(pe.paid_amount, 300.0)
 		self.assertIn("lm@example.com", pe.remarks)
+		# Without it PaymentEntry.set_remarks() overwrites the manager's name.
+		self.assertEqual(pe.custom_remarks, 1)
 		pe.submit.assert_called_once()
 		# Branch scoping still applies; the shift gate does not (no till moves).
 		scope.assert_called_once()
@@ -381,6 +383,68 @@ class TestPayInvoiceKashier(unittest.TestCase):
 		invoice.db_set.assert_called_once_with(
 			"custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False
 		)
+
+	@patch("jarz_pos.api.invoices._clear_awaiting_payment_flag")
+	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
+	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_a_repeated_kashier_tap_returns_the_kashier_entry(self, mock_frappe, _scope, _shift, _flag):
+		from jarz_pos.api.invoices import KASHIER_PAYMENT_METHOD, pay_invoice
+
+		invoice, _pe = self._frappe(mock_frappe, roles=["JARZ line manager"])
+		mock_frappe.db.sql.return_value = [
+			{"name": "ACC-PAY-0009", "paid_amount": 300.0, "paid_to": "kashier - J"},
+		]
+
+		result = pay_invoice("ACC-SINV-0001", "Kashier")
+
+		self.assertTrue(result["success"])
+		self.assertEqual(result["payment_entry"], "ACC-PAY-0009")
+		mock_frappe.new_doc.assert_not_called()
+		invoice.db_set.assert_called_once_with(
+			"custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False
+		)
+
+	@patch("jarz_pos.api.invoices._clear_awaiting_payment_flag")
+	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
+	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_kashier_is_refused_when_a_cash_tap_won_the_lock(self, mock_frappe, _scope, _shift, _flag):
+		"""Reporting success here left the order reading Cash with nothing in Kashier."""
+		from jarz_pos.api.invoices import pay_invoice
+
+		invoice, _pe = self._frappe(mock_frappe, roles=["JARZ line manager"])
+		mock_frappe.db.sql.return_value = [
+			{"name": "ACC-PAY-0009", "paid_amount": 300.0, "paid_to": "Dokki - J"},
+		]
+
+		with self.assertRaises(Exception) as exc:
+			pay_invoice("ACC-SINV-0001", "Kashier")
+
+		self.assertIn("ACC-PAY-0009", str(exc.exception))
+		self.assertIn("No Kashier payment was recorded", str(exc.exception))
+		mock_frappe.new_doc.assert_not_called()
+		invoice.db_set.assert_not_called()
+
+	@patch("jarz_pos.api.invoices._clear_awaiting_payment_flag")
+	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
+	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
+	@patch("jarz_pos.api.invoices.frappe")
+	def test_kashier_is_refused_once_dispatch_moved_it_to_courier_outstanding(self, mock_frappe, _scope, _shift, _flag):
+		"""Dispatch's Courier Outstanding transfer is not a customer payment."""
+		from jarz_pos.api.invoices import pay_invoice
+
+		invoice, _pe = self._frappe(mock_frappe, roles=["JARZ line manager"])
+		mock_frappe.db.sql.return_value = [
+			{"name": "ACC-PAY-0010", "paid_amount": 300.0, "paid_to": "Courier Outstanding - J"},
+		]
+
+		with self.assertRaises(Exception) as exc:
+			pay_invoice("ACC-SINV-0001", "Kashier")
+
+		self.assertIn("courier", str(exc.exception).lower())
+		mock_frappe.new_doc.assert_not_called()
+		invoice.db_set.assert_not_called()
 
 	@patch("jarz_pos.api.invoices.frappe")
 	def test_the_kashier_ledger_is_never_guessed(self, mock_frappe):
