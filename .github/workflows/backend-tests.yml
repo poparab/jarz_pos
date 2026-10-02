@@ -687,6 +687,14 @@ jobs:
             # after the Lead lock is a locking read, and the gate (B2B Sales Rep
             # on Leads + Company customers only and never delete, cashier out).
             test_settlement_terms_leads
+            # Customer deals (Jarz Customer Deal): a special price for one B2B
+            # customer between two dates. Mocked. Pins that a deal outranks
+            # every list row while live and stops matching the day after it
+            # ends (that IS the revert — nothing runs to undo it), that an
+            # amendment is priced on its source order's date only for a
+            # cancelled same-customer source, that coverage counts a deal, and
+            # that ending a deal which already priced orders keeps its history.
+            test_customer_deals
           )
           rc=0
           for m in "${MODULES[@]}"; do
