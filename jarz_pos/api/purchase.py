@@ -1,4 +1,5 @@
 import json
+import unicodedata
 
 import frappe
 from frappe import _
@@ -93,9 +94,24 @@ def _default_item_tax_template(company: Optional[str] = None) -> Optional[str]:
     return configured
 
 
+def _fold(text: Any) -> str:
+    """Case- and mark-insensitive text, as MariaDB's ``utf8mb4_unicode_ci`` sees it.
+
+    The anchor word is matched by SQL under that collation, which ignores
+    accents and Arabic hamza/tashkeel; the other words are matched here. Plain
+    ``casefold`` would let a word typed with a bare alef match on its own yet
+    miss the same word spelled with a hamza when it is one word of several.
+    """
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
 def _search_tokens(search: Optional[str]) -> List[str]:
     """The words of a typed search: trimmed, split on any whitespace, deduped."""
-    return list(dict.fromkeys(str(search or "").split()))
+    tokens: Dict[str, str] = {}
+    for word in str(search or "").split():
+        tokens.setdefault(_fold(word), word)
+    return list(tokens.values())
 
 
 def _word_search(
@@ -127,7 +143,7 @@ def _word_search(
     anchor = max(tokens, key=len)
     # Plain field names: a doctype-qualified or_filter broke get_suppliers once.
     or_filters = [[field, "like", f"%{anchor}%"] for field in search_fields]
-    rest = [t.casefold() for t in tokens if t != anchor]
+    rest = [_fold(t) for t in tokens if t != anchor]
     if not rest:
         return or_filters
 
@@ -142,7 +158,7 @@ def _word_search(
         row["name"]
         for row in candidates
         if all(
-            any(word in str(row.get(field) or "").casefold() for field in search_fields)
+            any(word in _fold(row.get(field)) for field in search_fields)
             for word in rest
         )
     ]

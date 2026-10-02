@@ -103,10 +103,11 @@ class TestSearchItemsWordMatching(unittest.TestCase):
             calls.append(query)
             if doctype != "Item" or not query.get("or_filters"):
                 return []
-            anchor = query["or_filters"][0][2].strip("%").casefold()
+            # SQL compares under utf8mb4_unicode_ci: case- and accent-blind.
+            anchor = purchase._fold(query["or_filters"][0][2].strip("%"))
             rows = [
                 r for r in self.CATALOGUE
-                if any(anchor in str(r[f]).casefold() for f in ("name", "item_name", "item_group"))
+                if any(anchor in purchase._fold(r[f]) for f in ("name", "item_name", "item_group"))
             ]
             pinned = query.get("filters", {}).get("name")
             if pinned:
@@ -138,6 +139,18 @@ class TestSearchItemsWordMatching(unittest.TestCase):
     def test_every_word_must_match(self):
         calls = self._run("cheese milkana")
         self.assertEqual(["in", ["milkana cheese"]], calls[-1]["filters"]["name"])
+
+    def test_other_words_ignore_marks_like_the_collation(self):
+        """SQL matches the anchor ignoring accents and hamza; the rest must too."""
+        from jarz_pos.api.purchase import _fold
+
+        self.assertEqual(_fold("Cr\u00e8me"), _fold("creme"))
+        self.assertEqual(_fold("\u0625\u0633\u0631\u0627\u0621"), _fold("\u0627\u0633\u0631\u0627\u0621"))
+        self.CATALOGUE = self.CATALOGUE + [
+            {"name": "CB", "item_name": "Cr\u00e8me Br\u00fbl\u00e9e mix", "item_group": "Raw Material"},
+        ]
+        calls = self._run("creme  brulee")
+        self.assertEqual(["in", ["CB"]], calls[-1]["filters"]["name"])
 
     def test_no_match_skips_the_paged_query(self):
         calls = self._run("cream cheese")
