@@ -27,6 +27,7 @@ from jarz_pos.api.price_lists import (
 )
 from jarz_pos.services.customer_deals import (
     DEAL_DOCTYPE,
+    deal_has_orders,
     deal_status,
 )
 
@@ -135,9 +136,12 @@ def _serialize(doc, customer: str, price_list: str | None) -> dict:
                 "normal_rate": normal,
             }
         )
+    # Only a running deal can lock; reading it costs one indexed lookup.
+    has_orders = status == "active" and deal_has_orders(doc.name)
     return {
         "name": doc.name,
         "customer": doc.customer,
+        "has_orders": has_orders,
         "valid_from": str(frappe.utils.getdate(doc.valid_from)),
         "valid_upto": str(frappe.utils.getdate(doc.valid_upto)),
         "status": status,
@@ -256,20 +260,26 @@ def save_customer_deal(customer, valid_from, valid_upto, items, notes=None, deal
 def end_customer_deal(deal):
     """Stop a deal.
 
-    A running deal ends after TODAY: orders already placed today were priced
-    from it, and amending one of them must still find it. A deal that has not
-    started yet is cancelled outright -- it never priced anything.
+    A deal that has not priced a booked order yet -- upcoming, or running with
+    no order so far -- is cancelled outright. One that has priced orders ends
+    after TODAY: orders placed today were booked at it, and amending one of
+    them must still find it.
     """
     _ensure_full_manager_pricing_access()
     doc = frappe.get_doc(DEAL_DOCTYPE, deal)
     today = _today()
     status = deal_status(doc.as_dict(), today)
-    if status == "upcoming":
+    if status not in ("upcoming", "active"):
+        frappe.throw(f"This deal is already {status}.")
+    if status == "upcoming" or not deal_has_orders(doc.name):
         doc.disabled = 1
-    elif status == "active":
+    elif frappe.utils.getdate(doc.valid_upto) > today:
         doc.valid_upto = today
     else:
-        frappe.throw(f"This deal is already {status}.")
+        frappe.throw(
+            "This deal already ends tonight. Orders placed today keep its price; "
+            "from tomorrow the normal price applies."
+        )
     # The role gate above is the permission check, as in api/price_lists.
     doc.save(ignore_permissions=True)
     return _serialize(doc, doc.customer, _normal_price_list(doc.customer))

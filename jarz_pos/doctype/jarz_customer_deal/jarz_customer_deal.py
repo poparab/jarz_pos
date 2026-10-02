@@ -1,7 +1,12 @@
 import frappe
 from frappe.model.document import Document
 
-from jarz_pos.services.customer_deals import deal_status, find_conflicting_deal, row_target
+from jarz_pos.services.customer_deals import (
+    deal_has_orders,
+    deal_status,
+    find_conflicting_deal,
+    row_target,
+)
 
 
 def _targets_and_rates(rows) -> set:
@@ -16,16 +21,18 @@ def _targets_and_rates(rows) -> set:
 class JarzCustomerDeal(Document):
     """A special price for one customer between two dates (inclusive).
 
-    Once a deal has priced a day of orders it is history: amending one of those
-    orders re-reads it on the order's date. So the rules below live here, not
-    only in the API, and hold for Desk too:
+    Once a deal has priced a booked order it is history: amending that order
+    re-reads it on the order's date. So the rules below live here, not only in
+    the API, and hold for Desk too:
 
     * a new deal cannot start in the past (it would re-price amendments of
       orders placed before anyone agreed it);
-    * a running deal keeps its customer, start date and prices -- only its end
-      date moves, and never before today;
-    * an expired or cancelled deal cannot change;
-    * only a deal that has not started may be cancelled or deleted.
+    * a running deal that has priced an order (``deal_has_orders``) keeps its
+      customer, start date and prices -- only its end date moves, never
+      before today -- and can be neither cancelled nor deleted;
+    * a running deal with no order yet (a typo spotted the same morning) is
+      still free to fix, cancel or delete;
+    * an expired or cancelled deal cannot change.
     """
 
     def validate(self):
@@ -85,8 +92,11 @@ class JarzCustomerDeal(Document):
         status = deal_status(before.as_dict(), today)
         if status in ("expired", "cancelled"):
             frappe.throw(f"This deal is {status} and is kept as history. Create a new deal instead.")
-        if status == "upcoming":
-            if frappe.utils.getdate(self.valid_from) < today:
+        if status == "upcoming" or not deal_has_orders(self.name):
+            # Nothing was booked at it yet: free to correct, but never moved
+            # to start further in the past than it already does.
+            new_from = frappe.utils.getdate(self.valid_from)
+            if new_from < today and new_from != frappe.utils.getdate(before.valid_from):
                 frappe.throw("A deal cannot be moved to start in the past.")
             return
 
@@ -107,7 +117,7 @@ class JarzCustomerDeal(Document):
 
     def on_trash(self):
         status = deal_status(self.as_dict())
-        if status not in ("upcoming", "cancelled"):
+        if status not in ("upcoming", "cancelled") and deal_has_orders(self.name):
             frappe.throw(
                 f"This deal is {status}: orders were priced from it, so it is kept. "
                 "End it instead of deleting it."

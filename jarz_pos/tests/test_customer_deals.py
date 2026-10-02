@@ -298,10 +298,12 @@ LARGE80 = {"item_group": "Large", "item_code": None, "rate": 80}
 
 
 class TestDealValidation(unittest.TestCase):
-    def _validate(self, doc, conflict=None):
+    def _validate(self, doc, conflict=None, has_orders=True):
         with patch(f"{_CTRL}.frappe.db.exists", return_value=True), patch(
             f"{_CTRL}.find_conflicting_deal", return_value=conflict
-        ) as fc, patch(f"{_CTRL}.frappe.utils.today", return_value=str(TODAY)):
+        ) as fc, patch(f"{_CTRL}.frappe.utils.today", return_value=str(TODAY)), patch(
+            f"{_CTRL}.deal_has_orders", return_value=has_orders
+        ):
             doc.validate()
         return fc
 
@@ -380,6 +382,36 @@ class TestDealValidation(unittest.TestCase):
                 _deal_doc([LARGE80], valid_from=D(2026, 9, 25), valid_upto=D(2026, 10, 1), before=self._running())
             )
 
+    # A running deal nobody has ordered at yet: a typo spotted the same day.
+    def test_unordered_running_deal_can_fix_its_prices(self):
+        self._validate(
+            _deal_doc(
+                [{**LARGE80, "rate": 60}],
+                valid_from=D(2026, 9, 25),
+                valid_upto=D(2026, 10, 10),
+                before=self._running(),
+            ),
+            has_orders=False,
+        )
+
+    def test_unordered_running_deal_can_be_cancelled(self):
+        fc = self._validate(
+            _deal_doc(
+                [LARGE80], valid_from=D(2026, 9, 25), valid_upto=D(2026, 10, 10), disabled=1,
+                before=self._running(),
+            ),
+            conflict="DEAL-1",
+            has_orders=False,
+        )
+        fc.assert_not_called()
+
+    def test_unordered_running_deal_still_cannot_move_further_back(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._validate(
+                _deal_doc([LARGE80], valid_from=D(2026, 9, 20), valid_upto=D(2026, 10, 10), before=self._running()),
+                has_orders=False,
+            )
+
     def test_expired_deal_is_frozen(self):
         before = _before(D(2026, 9, 1), D(2026, 9, 10), [LARGE80])
         with self.assertRaises(frappe.ValidationError):
@@ -396,16 +428,37 @@ class TestDealValidation(unittest.TestCase):
         )
         fc.assert_not_called()
 
-    def test_only_unstarted_deals_can_be_deleted(self):
-        with patch(f"{_CTRL}.deal_status", return_value="active"):
+    def test_only_deals_without_orders_can_be_deleted(self):
+        with patch(f"{_CTRL}.deal_status", return_value="active"), patch(
+            f"{_CTRL}.deal_has_orders", return_value=True
+        ):
             with self.assertRaises(frappe.ValidationError):
                 _deal_doc([LARGE80]).on_trash()
+        with patch(f"{_CTRL}.deal_status", return_value="active"), patch(
+            f"{_CTRL}.deal_has_orders", return_value=False
+        ):
+            _deal_doc([LARGE80]).on_trash()
         with patch(f"{_CTRL}.deal_status", return_value="upcoming"):
             _deal_doc([LARGE80]).on_trash()
 
 
+class TestDealHasOrders(unittest.TestCase):
+    def test_reads_the_invoice_audit_marker(self):
+        with patch.object(deals.frappe.db, "exists", return_value="SINV-1") as ex:
+            self.assertTrue(deals.deal_has_orders("DEAL-00007"))
+        filters = ex.call_args.args[1]
+        self.assertEqual(filters["docstatus"], 1)
+        self.assertEqual(
+            filters["custom_pos_audit_markers"], ["like", "%[CUSTOMER DEAL]%DEAL-00007%"]
+        )
+
+    def test_unreadable_means_locked(self):
+        with patch.object(deals.frappe.db, "exists", side_effect=RuntimeError("db")):
+            self.assertTrue(deals.deal_has_orders("DEAL-00007"))
+
+
 class TestEndDeal(unittest.TestCase):
-    def _end(self, valid_from, valid_upto):
+    def _end(self, valid_from, valid_upto, has_orders=True):
         doc = MagicMock()
         doc.valid_from = valid_from
         doc.valid_upto = valid_upto
@@ -420,7 +473,9 @@ class TestEndDeal(unittest.TestCase):
             api.frappe, "get_doc", return_value=doc
         ), patch.object(api, "_today", return_value=TODAY), patch.object(
             api, "_serialize", return_value={}
-        ), patch.object(api, "_normal_price_list", return_value="B2B Selling"):
+        ), patch.object(api, "_normal_price_list", return_value="B2B Selling"), patch.object(
+            api, "deal_has_orders", return_value=has_orders
+        ):
             api.end_customer_deal("DEAL-1")
         doc.save.assert_called_once()
         return doc
@@ -435,6 +490,15 @@ class TestEndDeal(unittest.TestCase):
         doc = self._end(TODAY, D(2026, 10, 10))
         self.assertEqual(doc.valid_upto, TODAY)
         self.assertEqual(doc.disabled, 0)
+
+    def test_running_deal_without_orders_is_cancelled(self):
+        # A wrong price spotted before anyone ordered: it stops right now.
+        doc = self._end(TODAY, D(2026, 10, 10), has_orders=False)
+        self.assertEqual(doc.disabled, 1)
+
+    def test_deal_already_ending_tonight_says_so(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._end(D(2026, 9, 25), TODAY)
 
     def test_upcoming_deal_is_cancelled(self):
         doc = self._end(D(2026, 10, 5), D(2026, 10, 10))

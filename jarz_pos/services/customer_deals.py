@@ -103,6 +103,33 @@ def find_deal_rate(customer, item_code, on_date=None, item_group=None):
     return None
 
 
+def deal_has_orders(deal_name: str) -> bool:
+    """True once a submitted invoice was priced from this deal.
+
+    ``create_pos_invoice`` stamps ``[CUSTOMER DEAL] <names>`` into the
+    invoice's audit markers whenever a line took a deal price, so this is the
+    exact "orders were booked at it" test. Until it is true a deal -- even one
+    running today -- may still be corrected, cancelled or deleted; after it, it
+    is history. When the answer cannot be read, assume it HAS orders: locking a
+    deal is recoverable, re-pricing booked orders is not.
+    """
+    name = str(deal_name or "").strip()
+    if not name:
+        return False
+    try:
+        return bool(
+            frappe.db.exists(
+                "Sales Invoice",
+                {
+                    "docstatus": 1,
+                    "custom_pos_audit_markers": ["like", f"%[CUSTOMER DEAL]%{name}%"],
+                },
+            )
+        )
+    except Exception:
+        return True
+
+
 def row_target(row) -> tuple[str, str] | None:
     """``("item", code)`` / ``("group", name)`` for a deal line, ``None`` if empty."""
     code = str((row.get("item_code") if isinstance(row, dict) else row.item_code) or "").strip()
