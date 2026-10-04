@@ -453,6 +453,28 @@ class TestBasketPrecheck(unittest.TestCase):
         self.assertEqual([self.SHORTAGE], result["basket_shortages"])
         self.assertIn("FLOUR", result["results"][0]["error"])
 
+        # The refusal travels inside an HTTP 200, so the Error Log row is the
+        # only server-side trace of it (2026-10-04: two days of refused jars
+        # left none).
+        mock_frappe.log_error.assert_called_once()
+        log_kwargs = mock_frappe.log_error.call_args.kwargs
+        self.assertIn("basket shortage", log_kwargs["title"])
+        self.assertIn("FLOUR", log_kwargs["message"])
+
+    def test_a_failing_refusal_log_still_returns_the_refusal(self):
+        from jarz_pos.api import manufacturing
+
+        with patch("jarz_pos.api.manufacturing._ensure_manager_access"), patch(
+            "jarz_pos.api.manufacturing._get_basket_shortages", return_value=[self.SHORTAGE]
+        ), patch(
+            "jarz_pos.api.manufacturing._", new=lambda msg: msg
+        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+            mock_frappe.log_error.side_effect = RuntimeError("log table locked")
+            result = manufacturing.submit_work_orders(self.LINES)
+
+        self.assertTrue(all(r["ok"] is False for r in result["results"]))
+        self.assertEqual([self.SHORTAGE], result["basket_shortages"])
+
     def test_feasible_basket_proceeds_to_the_per_line_loop(self):
         from jarz_pos.api import manufacturing
 

@@ -1610,6 +1610,25 @@ def _format_basket_shortage_message(shortages: List[Dict[str, Any]]) -> str:
     return _("Combined material shortage across the batch: {0}").format("; ".join(parts))
 
 
+def _log_basket_refusal(route: str, lines: List[Dict[str, Any]], message: str) -> None:
+    """Leave a trace of a basket the shortage check refused.
+
+    The refusal reaches the app as ``ok: False`` inside an HTTP 200, so neither
+    the web log nor the Error Log showed it: on 2026-10-04 a floor that could
+    not post a single jar for two days looked, from the server, like a healthy
+    one.  One row per refused tap, not per call, so it stays clear of the
+    volume concern in :func:`_debug_log`.  Never raises — a failed log must not
+    replace the refusal the operator is waiting for.
+    """
+    try:
+        frappe.log_error(
+            title=f"JARZ – {route} refused: basket shortage",
+            message=f"user={frappe.session.user}\nlines={lines}\n\n{message}",
+        )
+    except Exception:
+        pass
+
+
 def _assert_basket_material_availability(lines: List[Dict[str, Any]], company: str) -> None:
     shortages = _get_basket_shortages(lines, company)
     if shortages:
@@ -2539,6 +2558,7 @@ def _submit_work_orders_impl(
         basket_shortages = _get_basket_shortages(lines, basket_company)
         if basket_shortages:
             message = _format_basket_shortage_message(basket_shortages)
+            _log_basket_refusal("Manufacturing submit", lines, message)
             return {
                 "results": [{"ok": False, "error": message, "line": ln} for ln in lines],
                 "basket_shortages": basket_shortages,
@@ -3162,6 +3182,7 @@ def start_production_batches(lines: Any, strict_basket: Any = 1) -> Dict[str, An
         basket_shortages = _get_basket_shortages(lines, basket_company)
         if basket_shortages:
             message = _format_basket_shortage_message(basket_shortages)
+            _log_basket_refusal("Batch start", lines, message)
             return {
                 "results": [{"ok": False, "error": message, "line": ln} for ln in lines],
                 "basket_shortages": basket_shortages,
