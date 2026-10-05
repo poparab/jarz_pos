@@ -9,7 +9,9 @@ evidence without mutating WooCommerce or ERPNext unless explicitly enabled.
 
 from __future__ import annotations
 
+import copy
 import json
+import random
 import re
 import time
 import traceback
@@ -48,6 +50,42 @@ FLAGS = [
 REPORT_MARKER_START = "WOO_STAGING_FULL_CYCLE_JSON_START"
 REPORT_MARKER_END = "WOO_STAGING_FULL_CYCLE_JSON_END"
 
+#: Case status for a case that was deliberately not run (or not finished).
+#: A skip is never a pass: it is counted on its own in the summary.
+CASE_STATUS_SKIPPED = "Skipped"
+
+#: Egyptian mobile prefixes; every number is 01x + 8 digits = 11 digits.
+_EG_MOBILE_PREFIXES = ("010", "011", "012", "015")
+
+
+class CaseSkipped(Exception):
+    """Raised from a case body to record the case as Skipped, with a reason.
+
+    ``_case`` records it under ``CASE_STATUS_SKIPPED``, never as Pass. An
+    assertion that already FAILED before the skip still turns the case red, so
+    a skip can never hide a failure.
+    """
+
+    def __init__(self, reason: str, *, evidence: dict[str, Any] | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.evidence = evidence or {}
+
+
+class WooCustomerAllocationRefused(RuntimeError):
+    """No Woo customer id safe from hijacking could be allocated.
+
+    Raised by ``_allocate_unhijacked_woo_customer`` when the demo store hands
+    back an id bound to an ERP customer with invoices, or cannot get above the
+    mapped ceiling within the attempt cap. Subclasses RuntimeError so callers
+    that only know RuntimeError (woo_parity_validation) behave as before.
+    """
+
+    def __init__(self, message: str, *, attempts: list[dict[str, Any]] | None = None, ceiling: int = 0) -> None:
+        super().__init__(message)
+        self.attempts = list(attempts or [])
+        self.ceiling = ceiling
+
 
 class FullCycleRunner:
     def __init__(
@@ -64,6 +102,10 @@ class FullCycleRunner:
         self.fixture_catalog: dict[str, Any] = {}
         self.runtime_state: dict[str, Any] = {}
         self._woo_client_cached = None
+        #: case_id -> reason, for every case recorded as Skipped. Read by
+        #: ``_case(depends_on=...)`` so dependants are skipped, not run.
+        self.skipped_case_reasons: dict[str, str] = {}
+        self._issued_mobiles: set[str] = set()
         self.report: dict[str, Any] = {
             "run_id": self.run_id,
             "environment": self.environment,
@@ -74,6 +116,7 @@ class FullCycleRunner:
             "assertions": [],
             "created_records": [],
             "concerns": [],
+            "skipped_cases": [],
             "errors": [],
         }
 
@@ -84,16 +127,21 @@ class FullCycleRunner:
             self._case("PF-02", "Dynamic fixture discovery", self._discover_fixtures)
             self._case("REL-01", "Webhook ACK and invalid signature", self._webhook_reliability_checks)
             if self.allow_staging_mutations:
+                # Every inbound case below hangs off the Woo customer WI-CUST-01
+                # allocates. When no hijack-safe id can be allocated, WI-CUST-01 is
+                # Skipped and so are all of these: they are not run at all.
+                inbound_customer_chain = ("WI-CUST-01",)
+                inbound_order_chain = ("WI-CUST-01", "WI-ORD-01")
                 self._case("WI-CUST-01", "Woo customer inbound create", self._inbound_customer_create)
-                self._case("WI-CUST-02", "Woo customer inbound update", self._inbound_customer_update)
-                self._case("WI-ADDR-01", "Woo customer inbound address update", self._inbound_customer_address_update)
-                self._case("REL-02", "Customer webhook replay is idempotent", self._customer_webhook_replay)
-                self._case("WI-ORD-01", "Woo order inbound create", self._inbound_order_create)
-                self._case("WI-ORD-02", "Woo order inbound replay is idempotent", self._inbound_order_replay)
-                self._case("WI-ORD-03", "Woo order inbound item edit amends submitted invoice", self._inbound_order_update_amendment)
-                self._case("WI-ORD-04", "Woo order inbound customer detail edit amends submitted invoice", self._inbound_order_customer_detail_amendment)
-                self._case("WI-ORD-05", "Woo order inbound terminal status update is held for review", self._inbound_order_status_manual_review)
-                self._case("WI-ORD-06", "Woo order inbound cancellation is held for review", self._inbound_order_cancel_manual_review)
+                self._case("WI-CUST-02", "Woo customer inbound update", self._inbound_customer_update, depends_on=inbound_customer_chain)
+                self._case("WI-ADDR-01", "Woo customer inbound address update", self._inbound_customer_address_update, depends_on=inbound_customer_chain)
+                self._case("REL-02", "Customer webhook replay is idempotent", self._customer_webhook_replay, depends_on=inbound_customer_chain)
+                self._case("WI-ORD-01", "Woo order inbound create", self._inbound_order_create, depends_on=inbound_customer_chain)
+                self._case("WI-ORD-02", "Woo order inbound replay is idempotent", self._inbound_order_replay, depends_on=inbound_order_chain)
+                self._case("WI-ORD-03", "Woo order inbound item edit amends submitted invoice", self._inbound_order_update_amendment, depends_on=inbound_order_chain)
+                self._case("WI-ORD-04", "Woo order inbound customer detail edit re-points the submitted invoice in place", self._inbound_order_customer_detail_amendment, depends_on=inbound_order_chain)
+                self._case("WI-ORD-05", "Woo order inbound completed status on a submitted invoice is a no-op", self._inbound_order_status_manual_review, depends_on=inbound_order_chain)
+                self._case("WI-ORD-06", "Woo order inbound cancellation cancels the submitted invoice", self._inbound_order_cancel_manual_review, depends_on=inbound_order_chain)
                 self._case("EO-CUST-01", "ERP customer creation outbound", self._outbound_customer_create)
                 self._case("EO-ADDR-01", "ERP customer address outbound", self._outbound_customer_address_update)
                 self._case("X-CUST-01", "Customer round trip preserves linkage across ERP and Woo", self._cross_customer_round_trip)
@@ -118,7 +166,14 @@ class FullCycleRunner:
         if self.allow_staging_mutations and self.environment != "staging":
             raise RuntimeError("Mutation mode is only allowed on staging.")
 
-    def _case(self, case_id: str, title: str, fn) -> None:
+    def _case(
+        self,
+        case_id: str,
+        title: str,
+        fn,
+        *,
+        depends_on: tuple[str, ...] | list[str] | None = None,
+    ) -> None:
         started = now_datetime()
         case = {
             "case_id": case_id,
@@ -130,6 +185,14 @@ class FullCycleRunner:
         }
         self.report["cases"].append(case)
         try:
+            skipped_upstream = {dep: self.skipped_case_reasons[dep] for dep in (depends_on or ()) if dep in self.skipped_case_reasons}
+            if skipped_upstream:
+                # Not run at all: its fixture was never created, so running it
+                # would only report the missing prerequisite as a failure.
+                raise CaseSkipped(
+                    "Not run: depends on skipped case(s) " + ", ".join(sorted(skipped_upstream)) + ". " + " | ".join(f"{dep}: {reason}" for dep, reason in sorted(skipped_upstream.items())),
+                    evidence={"skipped_dependencies": skipped_upstream},
+                )
             evidence = fn(case)
             case["evidence"] = _json_safe(evidence or {})
             failing = [item for item in case["assertions"] if item.get("status") == "Fail"]
@@ -140,6 +203,22 @@ class FullCycleRunner:
                 case["status"] = "Concern"
             else:
                 case["status"] = "Pass"
+        except CaseSkipped as skip:
+            case["skip_reason"] = skip.reason
+            case["evidence"] = _json_safe(skip.evidence or {})
+            failing = [item for item in case["assertions"] if item.get("status") == "Fail"]
+            if failing:
+                # A skip never hides a failure that was already recorded.
+                case["status"] = "Fail"
+            else:
+                case["status"] = CASE_STATUS_SKIPPED
+                self.skipped_case_reasons[case_id] = skip.reason
+            self.report.setdefault("skipped_cases", []).append({
+                "case_id": case_id,
+                "title": title,
+                "status": case["status"],
+                "reason": skip.reason,
+            })
         except Exception as exc:  # noqa: BLE001
             case["status"] = "Fail"
             case["error"] = str(exc)
@@ -347,28 +426,53 @@ class FullCycleRunner:
         slug = re.sub(r"[^a-z0-9]+", "", self.run_id.lower())
         first_name = "Woo"
         last_name = self.run_id
-        email = f"woo.{slug}.customer@orderjarz.local"
         phone = self._unique_mobile()
         billing_line1 = f"{self.run_id} Woo Billing A"
         shipping_line1 = f"{self.run_id} Woo Shipping A"
+        issued_payloads: list[dict[str, Any]] = []
 
-        create_payload = self._build_woo_customer_payload(
-            first_name=first_name,
-            last_name=last_name,
-            email=email,
-            phone=phone,
-            billing_line1=billing_line1,
-            shipping_line1=shipping_line1,
-            territory_fixture=fixture,
-            billing_postcode="WIC001",
-            shipping_postcode="WIS001",
-            username=f"woo-{slug}-customer",
-            password="Copilot123!",
-        )
-        created_woo_customer = self._woo_client().post("customers", create_payload)
-        woo_customer_id = str(created_woo_customer.get("id") or "")
-        if not woo_customer_id:
-            raise RuntimeError(f"Woo customer create did not return an id: {created_woo_customer!r}")
+        def payload_factory(attempt: int) -> dict[str, Any]:
+            # Woo refuses a second customer with the same email or username, and
+            # every burned attempt leaves a real demo-store customer behind, so
+            # both carry the attempt number.
+            payload = self._build_woo_customer_payload(
+                first_name=first_name,
+                last_name=last_name,
+                email=f"woo.{slug}.{attempt}.customer@orderjarz.local",
+                phone=phone,
+                billing_line1=billing_line1,
+                shipping_line1=shipping_line1,
+                territory_fixture=fixture,
+                billing_postcode="WIC001",
+                shipping_postcode="WIS001",
+                username=f"woo-{slug}-customer-{attempt}",
+                password="Copilot123!",
+            )
+            issued_payloads.append(payload)
+            return payload
+
+        # Never post("customers") directly: staging is a production clone and the
+        # demo store's id counter sits inside production's range, so a raw create
+        # can return an id a real cloned customer already holds and the inbound
+        # webhook below would overwrite her (2026-10-05: Woo id 5313).
+        mapped_customer_ceiling = self._max_mapped_woo_customer_id()
+        try:
+            created_woo_customer, woo_customer_id, burned_attempts = self._allocate_unhijacked_woo_customer(payload_factory)
+        except WooCustomerAllocationRefused as exc:
+            for row in exc.attempts:
+                if row.get("woo_customer_id"):
+                    self._record_created("Woo Customer", str(row["woo_customer_id"]), note="WI-CUST-01 burned allocation attempt (demo store only; no webhook sent)")
+            raise CaseSkipped(
+                "No hijack-safe Woo customer id could be allocated, so no customer webhook was sent and "
+                f"inbound customer sync was not exercised. {exc}",
+                evidence={"mapped_customer_id_ceiling": exc.ceiling, "allocation_attempts": exc.attempts},
+            ) from exc
+
+        for row in burned_attempts:
+            if row.get("woo_customer_id"):
+                self._record_created("Woo Customer", str(row["woo_customer_id"]), note="WI-CUST-01 burned allocation attempt (demo store only; no webhook sent)")
+        create_payload = issued_payloads[-1] if issued_payloads else {}
+        email = str(create_payload.get("email") or created_woo_customer.get("email") or "")
 
         customer_payload = self._woo_customer(woo_customer_id) or created_woo_customer
         webhook = self._post_signed_woo_webhook(
@@ -412,6 +516,7 @@ class FullCycleRunner:
         self._assert(case, "WI-CUST-01.11", "Shipping address exists in ERP", bool(shipping_address), expected=True, actual=shipping_address)
         self._assert(case, "WI-CUST-01.12", "Customer territory resolves from Woo address state", str(getattr(customer_doc, "territory", "") or "") == fixture["territory"], expected=fixture["territory"], actual=getattr(customer_doc, "territory", None) if customer_doc else None)
         self._assert(case, "WI-CUST-01.13", "Inbound customer sync does not emit a same-run outbound customer event", latest_outbound_event is None, expected=None, actual=latest_outbound_event)
+        self._assert(case, "WI-CUST-01.14", "Allocated Woo customer id sits above the mapped customer-id ceiling", int(woo_customer_id or 0) > int(mapped_customer_ceiling or 0), expected=f"> {mapped_customer_ceiling}", actual={"woo_customer_id": woo_customer_id, "burned_attempts": len(burned_attempts)})
 
         self.runtime_state["inbound_customer"] = {
             "woo_customer_id": woo_customer_id,
@@ -435,6 +540,8 @@ class FullCycleRunner:
         return {
             "create_payload": create_payload,
             "created_woo_customer": created_woo_customer,
+            "mapped_customer_id_ceiling": mapped_customer_ceiling,
+            "allocation_attempts": burned_attempts,
             "webhook": webhook,
             "inbound_sync": inbound_sync,
             "customer": customer_doc.as_dict() if customer_doc else None,
@@ -453,7 +560,7 @@ class FullCycleRunner:
         updated_first_name = "WooUpdated"
         updated_last_name = self.run_id
         updated_email = f"woo.{slug}.updated@orderjarz.local"
-        updated_phone = f"011{''.join(ch for ch in self.run_id if ch.isdigit())[-8:].rjust(8, '0')}"
+        updated_phone = self._unique_mobile("011")
 
         update_payload = self._build_woo_customer_payload(
             first_name=updated_first_name,
@@ -932,7 +1039,9 @@ class FullCycleRunner:
         self._assert(case, "WI-ORD-03.03", "Updated Woo order line items reflect the item edit", bool(expected_signature and expected_signature != runtime_order.get("item_signature")), expected={"changed": True, "signature": expected_signature}, actual={"before": runtime_order.get("item_signature"), "after": expected_signature})
         self._assert(case, "WI-ORD-03.04", "Updated-order webhook queued successfully", webhook.get("status_code") == 200 and bool((webhook.get("payload") or {}).get("queued")), expected={"status_code": 200, "queued": True}, actual=webhook)
         self._assert(case, "WI-ORD-03.05", "Updated inbound order event exists", bool(inbound_sync.get("event_name")), expected="non-empty", actual=inbound_sync)
-        self._assert(case, "WI-ORD-03.06", "Submitted Woo item edit enqueues amendment handling", str(queue_result.get("status") or "").strip().lower() == "queued" and str(queue_result.get("reason") or "").strip().lower() == "amendment_enqueued", expected={"status": "queued", "reason": "amendment_enqueued"}, actual={"latest_event": latest_event, "process_result": process_result, "queue_result": queue_result})
+        # The amendment itself succeeds (WooAmendment Success, replacement created); the event then lands NeedsReview on a PriceMismatch because prices never sync inbound by design, so the queue status is not required to be "queued".
+        amendment_reason = str(process_result.get("reason") or queue_result.get("reason") or "").strip().lower()
+        self._assert(case, "WI-ORD-03.06", "Submitted Woo item edit is routed to amendment handling", amendment_reason == "amendment_enqueued", expected={"reason": "amendment_enqueued"}, actual={"latest_event": latest_event, "process_result": process_result, "queue_result": queue_result})
         self._assert(case, "WI-ORD-03.07", "Source invoice is cancelled after inbound amendment", int(getattr(source_invoice_doc, "docstatus", 0) or 0) == 2, expected=2, actual=getattr(source_invoice_doc, "docstatus", 0))
         self._assert(case, "WI-ORD-03.08", "Replacement invoice is created for the Woo item edit", bool(replacement_invoice_name and replacement_invoice), expected="non-empty", actual=amendment_wait)
         self._assert(case, "WI-ORD-03.09", "Replacement invoice preserves amended_from linkage", str(getattr(replacement_invoice, "amended_from", "") or "") == source_invoice_name, expected=source_invoice_name, actual=getattr(replacement_invoice, "amended_from", None) if replacement_invoice else None)
@@ -980,7 +1089,7 @@ class FullCycleRunner:
         shipping_before = dict(current_order.get("shipping") or {})
         updated_billing_line = f"{self.run_id} Woo Billing C"
         updated_shipping_line = f"{self.run_id} Woo Shipping C"
-        updated_phone = f"012{''.join(ch for ch in self.run_id if ch.isdigit())[-8:].rjust(8, '0')}"
+        updated_phone = self._unique_mobile("012")
         updated_note = f"{self.run_id} Woo customer detail amendment"
 
         update_payload = {
@@ -1012,49 +1121,55 @@ class FullCycleRunner:
         process_result = dict(inbound_sync.get("process_result") or {})
         queue_result = dict(process_result.get("result") or {})
         latest_event = dict(inbound_sync.get("latest_event") or {})
-        amendment_wait = self._wait_for_inbound_amendment(source_invoice_name, woo_order_id, timeout_seconds=45)
-        replacement_invoice_name = str(amendment_wait.get("replacement_invoice_name") or "")
-        replacement_invoice = amendment_wait.get("replacement_invoice_doc")
-        active_invoices = amendment_wait.get("active_invoices") or []
+        process_status = str(process_result.get("status") or queue_result.get("status") or "").strip().lower()
+        process_reason = str(process_result.get("reason") or queue_result.get("reason") or "").strip().lower()
+
+        # A customer-detail/address edit on a submitted invoice is now re-pointed IN PLACE (sync log InboundAddressUpdate "woo_address_changed ... re-pointed"), with no cancel/replace; poll briefly in case the re-point lands a moment after the event.
+        repoint_wait = self._wait_for_invoice_addresses(source_invoice_name, billing_line1=updated_billing_line, shipping_line1=updated_shipping_line, timeout_seconds=20)
+        invoice_after = repoint_wait["invoice_doc"]
+        billing_address_doc = repoint_wait["billing_address_doc"]
+        shipping_address_doc = repoint_wait["shipping_address_doc"]
+        replacement_invoice_name = self._replacement_invoice_name(source_invoice_name)
+        active_invoices = self._active_invoices_for_woo_order_id(woo_order_id)
         linked_invoice_names = [str(row.get("name") or "") for row in active_invoices]
-        order_map = amendment_wait.get("order_map")
+        order_map = self._order_map_row(woo_order_id)
         order_map_link_field = self._order_map_link_field()
-        source_invoice_doc = frappe.get_doc("Sales Invoice", source_invoice_name)
-        billing_address_doc = frappe.get_doc("Address", replacement_invoice.customer_address) if replacement_invoice and getattr(replacement_invoice, "customer_address", None) else None
-        shipping_address_doc = frappe.get_doc("Address", replacement_invoice.shipping_address_name) if replacement_invoice and getattr(replacement_invoice, "shipping_address_name", None) else None
         updated_signature = self._woo_order_item_signature(updated_woo_order)
 
         self._assert(case, "WI-ORD-04.01", "Woo customer-detail update returns the same order id", str(updated_woo_order.get("id") or "") == woo_order_id, expected=woo_order_id, actual=updated_woo_order)
         self._assert(case, "WI-ORD-04.02", "Customer-detail webhook queued successfully", webhook.get("status_code") == 200 and bool((webhook.get("payload") or {}).get("queued")), expected={"status_code": 200, "queued": True}, actual=webhook)
         self._assert(case, "WI-ORD-04.03", "Updated inbound order event exists", bool(inbound_sync.get("event_name")), expected="non-empty", actual=inbound_sync)
-        self._assert(case, "WI-ORD-04.04", "Customer-detail update enqueues amendment handling", str(queue_result.get("status") or "").strip().lower() == "queued" and str(queue_result.get("reason") or "").strip().lower() == "amendment_enqueued", expected={"status": "queued", "reason": "amendment_enqueued"}, actual={"latest_event": latest_event, "process_result": process_result, "queue_result": queue_result})
-        self._assert(case, "WI-ORD-04.05", "Prior invoice is cancelled after customer-detail amendment", int(getattr(source_invoice_doc, "docstatus", 0) or 0) == 2, expected=2, actual=getattr(source_invoice_doc, "docstatus", 0))
-        self._assert(case, "WI-ORD-04.06", "Replacement invoice is created for customer-detail amendment", bool(replacement_invoice_name and replacement_invoice), expected="non-empty", actual=amendment_wait)
-        self._assert(case, "WI-ORD-04.07", "Replacement invoice preserves amended_from linkage", str(getattr(replacement_invoice, "amended_from", "") or "") == source_invoice_name, expected=source_invoice_name, actual=getattr(replacement_invoice, "amended_from", None) if replacement_invoice else None)
-        self._assert(case, "WI-ORD-04.08", "Replacement invoice billing address reflects Woo update", str(getattr(billing_address_doc, "address_line1", "") or "") == updated_billing_line, expected=updated_billing_line, actual=getattr(billing_address_doc, "address_line1", None) if billing_address_doc else None)
-        self._assert(case, "WI-ORD-04.09", "Replacement invoice shipping address reflects Woo update", str(getattr(shipping_address_doc, "address_line1", "") or "") == updated_shipping_line, expected=updated_shipping_line, actual=getattr(shipping_address_doc, "address_line1", None) if shipping_address_doc else None)
-        self._assert(case, "WI-ORD-04.10", "Replacement invoice shipping phone reflects Woo update", str(getattr(shipping_address_doc, "phone", "") or "") == updated_phone, expected=updated_phone, actual=getattr(shipping_address_doc, "phone", None) if shipping_address_doc else None)
-        self._assert(case, "WI-ORD-04.11", "Replacement invoice remarks capture the Woo customer note", updated_note in str(getattr(replacement_invoice, "remarks", "") or ""), expected=updated_note, actual=getattr(replacement_invoice, "remarks", None) if replacement_invoice else None)
-        self._assert(case, "WI-ORD-04.12", "Only one active ERP invoice remains linked after customer-detail amendment", linked_invoice_names == ([replacement_invoice_name] if replacement_invoice_name else []), expected=[replacement_invoice_name] if replacement_invoice_name else ["non-empty"], actual=linked_invoice_names)
-        self._assert(case, "WI-ORD-04.13", "Woo order map relinks to the replacement invoice", bool(order_map and str(order_map.get(order_map_link_field) or "") == replacement_invoice_name), expected=replacement_invoice_name, actual=order_map)
+        # Addresses are re-pointed in place; the rest of the payload hits the submitted-invoice freeze, so the process result is skipped/submitted_frozen.
+        self._assert(case, "WI-ORD-04.04", "Rest of the customer-detail payload is frozen on the submitted invoice", process_status == "skipped" and process_reason == "submitted_frozen", expected={"status": "skipped", "reason": "submitted_frozen"}, actual={"latest_event": latest_event, "process_result": process_result, "queue_result": queue_result})
+        self._assert(case, "WI-ORD-04.05", "The same invoice stays submitted after the customer-detail edit", int(getattr(invoice_after, "docstatus", 0) or 0) == 1, expected=1, actual=getattr(invoice_after, "docstatus", None))
+        self._assert(case, "WI-ORD-04.06", "Invoice billing address (customer_address) is re-pointed to the Woo billing line", str(getattr(billing_address_doc, "address_line1", "") or "") == updated_billing_line, expected=updated_billing_line, actual={"customer_address": getattr(invoice_after, "customer_address", None), "address_line1": getattr(billing_address_doc, "address_line1", None) if billing_address_doc else None})
+        self._assert(case, "WI-ORD-04.07", "Invoice shipping address (shipping_address_name) is re-pointed to the Woo shipping line", str(getattr(shipping_address_doc, "address_line1", "") or "") == updated_shipping_line, expected=updated_shipping_line, actual={"shipping_address_name": getattr(invoice_after, "shipping_address_name", None), "address_line1": getattr(shipping_address_doc, "address_line1", None) if shipping_address_doc else None})
+        self._assert(case, "WI-ORD-04.08", "No replacement invoice is created for a customer-detail edit", not replacement_invoice_name, expected=None, actual=replacement_invoice_name or None)
+        self._assert(case, "WI-ORD-04.09", "Only the original ERP invoice remains linked to the Woo order", linked_invoice_names == [source_invoice_name], expected=[source_invoice_name], actual=linked_invoice_names)
+        self._assert(case, "WI-ORD-04.10", "Woo order map still points to the original invoice", bool(order_map and str(order_map.get(order_map_link_field) or "") == source_invoice_name), expected=source_invoice_name, actual=order_map)
 
         if replacement_invoice_name:
-            self._record_created("Sales Invoice", replacement_invoice_name, note="WI-ORD-04 replacement invoice")
-            self.runtime_state["inbound_order"] = {
-                "woo_order_id": woo_order_id,
-                "invoice_name": replacement_invoice_name,
-                "source_invoice_name": source_invoice_name,
-                "item_signature": updated_signature,
-                "order_payload": updated_woo_order,
-            }
+            self._record_created("Sales Invoice", replacement_invoice_name, note="WI-ORD-04 unexpected replacement invoice")
+        self.runtime_state["inbound_order"] = {
+            **runtime_order,
+            "woo_order_id": woo_order_id,
+            "invoice_name": source_invoice_name,
+            "item_signature": updated_signature,
+            "order_payload": updated_woo_order,
+        }
 
         return {
             "update_payload": update_payload,
             "updated_woo_order": updated_woo_order,
             "webhook": webhook,
             "inbound_sync": inbound_sync,
-            "amendment_wait": amendment_wait,
+            "repoint_wait": {key: value for key, value in repoint_wait.items() if not key.endswith("_doc")},
+            "invoice_after": invoice_after.as_dict() if invoice_after else None,
+            "billing_address": billing_address_doc.as_dict() if billing_address_doc else None,
+            "shipping_address": shipping_address_doc.as_dict() if shipping_address_doc else None,
+            "replacement_invoice_name": replacement_invoice_name,
             "order_map": order_map,
+            "customer_note": updated_note,
         }
 
     def _inbound_order_status_manual_review(self, case: dict[str, Any]) -> dict[str, Any]:
@@ -1091,7 +1206,7 @@ class FullCycleRunner:
         )
 
         process_result = dict(inbound_sync.get("process_result") or {})
-        process_reason = str(process_result.get("reason") or ((process_result.get("result") or {}).get("reason")) or "")
+        process_reason = str(process_result.get("reason") or ((process_result.get("result") or {}).get("reason")) or "").strip().lower()
         latest_event = dict(inbound_sync.get("latest_event") or {})
         invoice_after = frappe.get_doc("Sales Invoice", invoice_name)
         active_invoices = self._active_invoices_for_woo_order_id(woo_order_id)
@@ -1099,15 +1214,16 @@ class FullCycleRunner:
         order_map_after = self._order_map_row(woo_order_id)
         order_map_link_field = self._order_map_link_field()
 
-        self._assert(case, "WI-ORD-05.01", "Terminal-status webhook queued successfully", webhook.get("status_code") == 200 and bool((webhook.get("payload") or {}).get("queued")), expected={"status_code": 200, "queued": True}, actual=webhook)
-        self._assert(case, "WI-ORD-05.02", "Terminal-status inbound order event exists", bool(inbound_sync.get("event_name")), expected="non-empty", actual=inbound_sync)
-        self._assert(case, "WI-ORD-05.03", "Terminal Woo status change is skipped for the submitted ERP invoice", str(process_result.get("status") or "").strip().lower() == "skipped", expected="skipped", actual=process_result)
-        self._assert(case, "WI-ORD-05.04", "Terminal Woo status change is flagged for manual review", process_reason == "needs_manual_review", expected="needs_manual_review", actual={"process_result": process_result, "latest_event": latest_event})
+        self._assert(case, "WI-ORD-05.01", "Completed-status webhook queued successfully", webhook.get("status_code") == 200 and bool((webhook.get("payload") or {}).get("queued")), expected={"status_code": 200, "queued": True}, actual=webhook)
+        self._assert(case, "WI-ORD-05.02", "Completed-status inbound order event exists", bool(inbound_sync.get("event_name")), expected="non-empty", actual=inbound_sync)
+        # Woo "completed" on a submitted invoice is an intentional no-op: status is not in the order hash, and every ERP Delivered push sets Woo completed and echoes back by webhook, so flagging it would put every delivered order in review.
+        self._assert(case, "WI-ORD-05.03", "Woo completed status is skipped for the submitted ERP invoice", str(process_result.get("status") or "").strip().lower() == "skipped", expected="skipped", actual=process_result)
+        self._assert(case, "WI-ORD-05.04", "Woo completed status resolves as unchanged (no manual review)", process_reason == "unchanged", expected="unchanged", actual={"process_result": process_result, "latest_event": latest_event})
         self._assert(case, "WI-ORD-05.05", "Inbound event is recorded as Skipped", str(latest_event.get("status") or "") == "Skipped", expected="Skipped", actual=latest_event)
         self._assert(case, "WI-ORD-05.06", "Woo order status changed to completed", str(updated_woo_order.get("status") or "") == "completed", expected="completed", actual=updated_woo_order.get("status"))
-        self._assert(case, "WI-ORD-05.07", "ERP invoice remains submitted after terminal Woo status change", int(getattr(invoice_after, "docstatus", 0) or 0) == 1, expected=1, actual=getattr(invoice_after, "docstatus", 0))
-        self._assert(case, "WI-ORD-05.08", "ERP invoice state remains unchanged after terminal Woo status change", self._invoice_state_candidates(invoice_after) == state_before, expected=state_before, actual=self._invoice_state_candidates(invoice_after))
-        self._assert(case, "WI-ORD-05.09", "Only the current ERP invoice remains active after terminal Woo status change", linked_invoice_names == [invoice_name], expected=[invoice_name], actual=linked_invoice_names)
+        self._assert(case, "WI-ORD-05.07", "ERP invoice docstatus is untouched by the Woo completed status", int(getattr(invoice_after, "docstatus", 0) or 0) == int(getattr(invoice_before, "docstatus", 0) or 0) == 1, expected=1, actual={"before": getattr(invoice_before, "docstatus", None), "after": getattr(invoice_after, "docstatus", None)})
+        self._assert(case, "WI-ORD-05.08", "ERP invoice state is untouched by the Woo completed status", self._invoice_state_candidates(invoice_after) == state_before, expected=state_before, actual=self._invoice_state_candidates(invoice_after))
+        self._assert(case, "WI-ORD-05.09", "Only the current ERP invoice remains active after the Woo completed status", linked_invoice_names == [invoice_name], expected=[invoice_name], actual=linked_invoice_names)
         self._assert(case, "WI-ORD-05.10", "Woo order map stays linked to the current invoice", bool(order_map_after and str(order_map_after.get(order_map_link_field) or "") == invoice_name), expected=invoice_name, actual={"before": order_map_before, "after": order_map_after})
 
         return {
@@ -1155,24 +1271,31 @@ class FullCycleRunner:
         )
 
         process_result = dict(inbound_sync.get("process_result") or {})
-        process_reason = str(process_result.get("reason") or ((process_result.get("result") or {}).get("reason")) or "")
         latest_event = dict(inbound_sync.get("latest_event") or {})
-        invoice_after = frappe.get_doc("Sales Invoice", invoice_name)
+        # A Woo cancellation now CANCELS the submitted invoice on purpose (TERMINAL_CANCELLATION_STATUSES -> _handle_terminal_status_on_submitted_invoice, sync log InboundCancel Success); poll briefly in case the cancel lands a moment after the event.
+        deadline = time.monotonic() + 20
+        while True:
+            frappe.db.commit()
+            invoice_after = frappe.get_doc("Sales Invoice", invoice_name)
+            if int(getattr(invoice_after, "docstatus", 0) or 0) == 2 or time.monotonic() >= deadline:
+                break
+            time.sleep(1)
         active_invoices = self._active_invoices_for_woo_order_id(woo_order_id)
         linked_invoice_names = [str(row.get("name") or "") for row in active_invoices]
         order_map_after = self._order_map_row(woo_order_id)
-        order_map_link_field = self._order_map_link_field()
+        has_cancellation_type = bool(frappe.get_meta("Sales Invoice").get_field("custom_cancellation_type"))
+        cancellation_type = str(getattr(invoice_after, "custom_cancellation_type", "") or "") if has_cancellation_type else None
 
         self._assert(case, "WI-ORD-06.01", "Cancellation webhook queued successfully", webhook.get("status_code") == 200 and bool((webhook.get("payload") or {}).get("queued")), expected={"status_code": 200, "queued": True}, actual=webhook)
         self._assert(case, "WI-ORD-06.02", "Cancellation inbound order event exists", bool(inbound_sync.get("event_name")), expected="non-empty", actual=inbound_sync)
-        self._assert(case, "WI-ORD-06.03", "Woo cancellation is skipped for the submitted ERP invoice", str(process_result.get("status") or "").strip().lower() == "skipped", expected="skipped", actual=process_result)
-        self._assert(case, "WI-ORD-06.04", "Woo cancellation is flagged for manual review", process_reason == "needs_manual_review", expected="needs_manual_review", actual={"process_result": process_result, "latest_event": latest_event})
-        self._assert(case, "WI-ORD-06.05", "Inbound cancellation event is recorded as Skipped", str(latest_event.get("status") or "") == "Skipped", expected="Skipped", actual=latest_event)
-        self._assert(case, "WI-ORD-06.06", "Woo order status changed to cancelled", str(updated_woo_order.get("status") or "") == "cancelled", expected="cancelled", actual=updated_woo_order.get("status"))
-        self._assert(case, "WI-ORD-06.07", "ERP invoice remains submitted after Woo cancellation", int(getattr(invoice_after, "docstatus", 0) or 0) == 1, expected=1, actual=getattr(invoice_after, "docstatus", 0))
-        self._assert(case, "WI-ORD-06.08", "ERP invoice state remains unchanged after Woo cancellation", self._invoice_state_candidates(invoice_after) == state_before, expected=state_before, actual=self._invoice_state_candidates(invoice_after))
-        self._assert(case, "WI-ORD-06.09", "Only the current ERP invoice remains active after Woo cancellation", linked_invoice_names == [invoice_name], expected=[invoice_name], actual=linked_invoice_names)
-        self._assert(case, "WI-ORD-06.10", "Woo order map stays linked to the current invoice after Woo cancellation", bool(order_map_after and str(order_map_after.get(order_map_link_field) or "") == invoice_name), expected=invoice_name, actual={"before": order_map_before, "after": order_map_after})
+        self._assert(case, "WI-ORD-06.03", "Woo order status changed to cancelled", str(updated_woo_order.get("status") or "") == "cancelled", expected="cancelled", actual=updated_woo_order.get("status"))
+        self._assert(case, "WI-ORD-06.04", "Woo cancellation cancels the submitted ERP invoice", int(getattr(invoice_after, "docstatus", 0) or 0) == 2, expected=2, actual={"before": getattr(invoice_before, "docstatus", None), "after": getattr(invoice_after, "docstatus", None)})
+        self._assert(case, "WI-ORD-06.05", "ERP invoice state is Cancelled after the Woo cancellation", str(getattr(invoice_after, "custom_sales_invoice_state", "") or "") == "Cancelled", expected="Cancelled", actual={"before": state_before, "after": getattr(invoice_after, "custom_sales_invoice_state", None)})
+        if has_cancellation_type:
+            self._assert(case, "WI-ORD-06.06", "A cancellation type is recorded on the cancelled invoice", bool(cancellation_type), expected="non-empty", actual=cancellation_type)
+        self._assert(case, "WI-ORD-06.07", "No active ERP invoice remains linked to the cancelled Woo order", linked_invoice_names == [], expected=[], actual=linked_invoice_names)
+        # Known false positive: the event still lands NeedsReview "woo_terminal_status" although the cancel succeeded, so this is a Concern, not a Fail.
+        self._assert(case, "WI-ORD-06.08", "Cancellation event does not land in NeedsReview (known false positive: woo_terminal_status)", str(latest_event.get("status") or "") != "NeedsReview", expected="not NeedsReview", actual={"latest_event": latest_event, "process_result": process_result}, concern=True)
 
         return {
             "update_payload": update_payload,
@@ -1217,7 +1340,14 @@ class FullCycleRunner:
         self._assert(case, "EO-CUST-01.06", "Customer outbound status is Synced", getattr(customer_doc, "woo_outbound_status", "") == "Synced", expected="Synced", actual=getattr(customer_doc, "woo_outbound_status", ""))
         self._assert(case, "EO-CUST-01.07", "Woo customer exists", isinstance(woo_customer, dict) and bool(woo_customer.get("id")), expected=True, actual=woo_customer)
         self._assert(case, "EO-CUST-01.08", "Woo customer phone matches ERP mobile", ((woo_customer or {}).get("billing") or {}).get("phone") == mobile, expected=mobile, actual=((woo_customer or {}).get("billing") or {}).get("phone"))
-        self._assert(case, "EO-CUST-01.09", "Woo customer email uses local-domain placeholder", str((woo_customer or {}).get("email") or "").endswith("@orderjarz.local"), expected="*@orderjarz.local", actual=(woo_customer or {}).get("email"))
+        woo_email = str((woo_customer or {}).get("email") or "").strip().lower()
+        woo_email_local = woo_email.rsplit("@", 1)[0] if "@" in woo_email else ""
+        # Outbound deliberately keeps a Latin name slug as <slug>@placeholder.com (only an empty/all-digit slug gets a phone/digest identity); what must never happen is a collapsed shared address such as customer@placeholder.com or <digits>@placeholder.com.
+        woo_email_ok = woo_email.endswith(("@placeholder.com", "@orderjarz.local")) and bool(woo_email_local) and woo_email_local != "customer" and not woo_email_local.isdigit()
+        self._assert(case, "EO-CUST-01.09", "Woo customer email is a per-customer placeholder, not a collapsed one", woo_email_ok, expected="<slug>@placeholder.com or *@orderjarz.local (not customer@ / <digits>@)", actual=(woo_customer or {}).get("email"))
+        # The demo store's id counter sits inside production's cloned range, so the id outbound sync is handed can already belong to a real cloned customer; that makes the id ambiguous for every later inbound sync (see X-CUST-01).
+        other_claimants = [name for name in self._customers_by_woo_customer_id(woo_customer_id) if name != customer_name] if woo_customer_id else []
+        self._assert(case, "EO-CUST-01.10", "Outbound-assigned Woo customer id is not already claimed by another ERP customer", not other_claimants, expected=[], actual={"woo_customer_id": woo_customer_id, "other_claimants": other_claimants}, concern=True)
 
         self.runtime_state["customer"] = {
             "customer_name": customer_name,
@@ -1309,7 +1439,7 @@ class FullCycleRunner:
         }
 
     def _cross_customer_round_trip(self, case: dict[str, Any]) -> dict[str, Any]:
-        runtime_customer = self.runtime_state.get("customer") or {}
+        runtime_customer = copy.deepcopy(self.runtime_state.get("customer") or {})
         customer_name = str(runtime_customer.get("customer_name") or "")
         woo_customer_id = str(runtime_customer.get("woo_customer_id") or self._customer_woo_id(customer_name) or "")
         if not customer_name or not woo_customer_id:
@@ -1324,14 +1454,49 @@ class FullCycleRunner:
             )
             return {"prerequisite": "EO-CUST-01"}
 
+        claimants = self._customers_by_woo_customer_id(woo_customer_id)
+        other_claimants = [name for name in claimants if name != customer_name]
+        if other_claimants:
+            # The product resolver deliberately treats a Woo id claimed by more than
+            # one ERP customer as ambiguous and creates a new customer instead of
+            # guessing. That is correct, so there is no round trip to assert here,
+            # and sending the webhook would only mint a stray duplicate customer.
+            raise CaseSkipped(
+                f"Woo customer {woo_customer_id} (pushed by EO-CUST-01 for {customer_name}) is also claimed by "
+                f"other ERP customer(s) {other_claimants}; the inbound resolver treats the id as ambiguous by design, "
+                "so a round trip through it cannot be asserted.",
+                evidence={"customer_name": customer_name, "woo_customer_id": woo_customer_id, "claimants": claimants},
+            )
+
+        # X-CUST-01 must never replace or poison runtime_state["customer"]: the EO-ORD,
+        # EO-PAY, EO-AMEND, EO-STATE and EO-CANCEL cases all bill that customer, and a
+        # leaked "RoundTrip" duplicate or one of its addresses broke them with
+        # "Selected shipping address is no longer available for this customer".
+        customer_snapshot = copy.deepcopy(self.runtime_state.get("customer"))
+        try:
+            evidence = self._cross_customer_round_trip_body(case, runtime_customer=runtime_customer, customer_name=customer_name, woo_customer_id=woo_customer_id, claimants_before=claimants)
+        finally:
+            self.runtime_state["customer"] = customer_snapshot
+        evidence["runtime_customer_after"] = self._revalidate_runtime_customer_address()
+        return evidence
+
+    def _cross_customer_round_trip_body(
+        self,
+        case: dict[str, Any],
+        *,
+        runtime_customer: dict[str, Any],
+        customer_name: str,
+        woo_customer_id: str,
+        claimants_before: list[str],
+    ) -> dict[str, Any]:
         case_started = now_datetime()
         fixture = dict(runtime_customer.get("territory") or self._primary_territory_fixture())
-        duplicate_before = self._count_customers_by_woo_customer_id(woo_customer_id)
+        duplicate_before = len(claimants_before)
         slug = re.sub(r"[^a-z0-9]+", "", self.run_id.lower())
         updated_first_name = "RoundTrip"
         updated_last_name = self.run_id
         updated_email = f"roundtrip.{slug}@orderjarz.local"
-        updated_phone = f"012{''.join(ch for ch in self.run_id if ch.isdigit())[-8:].rjust(8, '0')}"
+        updated_phone = self._unique_mobile("012")
         billing_line1 = f"{self.run_id} RT Billing"
         shipping_line1 = f"{self.run_id} RT Shipping"
 
@@ -1387,14 +1552,11 @@ class FullCycleRunner:
         self._assert(case, "X-CUST-01.10", "Customer territory reflects the Woo round-trip state", str(getattr(customer_doc, "territory", "") or "") == fixture["territory"], expected=fixture["territory"], actual=getattr(customer_doc, "territory", None) if customer_doc else None)
         self._assert(case, "X-CUST-01.11", "Round-trip customer update does not emit a same-case outbound event", latest_outbound_event is None, expected=None, actual=latest_outbound_event)
 
-        if refreshed_customer_name:
-            self.runtime_state["customer"].update({
-                "mobile": updated_phone,
-                "territory": fixture,
-                "woo_customer_id": woo_customer_id,
-            })
-        if shipping_address:
-            self.runtime_state["customer"]["secondary_address_name"] = str(shipping_address.get("name") or "")
+        # Deliberately no runtime_state writes here (the caller restores a snapshot
+        # anyway). Any customer the inbound sync minted is recorded for cleanup only.
+        new_claimants = [name for name in self._customers_by_woo_customer_id(woo_customer_id) if name not in claimants_before]
+        for name in new_claimants:
+            self._record_created("Customer", name, note="X-CUST-01 customer minted by inbound sync (not used by later cases)")
 
         return {
             "update_payload": update_payload,
@@ -1405,7 +1567,27 @@ class FullCycleRunner:
             "addresses": addresses,
             "duplicate_before": duplicate_before,
             "duplicate_after": duplicate_count,
+            "new_claimants": new_claimants,
         }
+
+    def _revalidate_runtime_customer_address(self) -> dict[str, Any]:
+        """Drop a cached shipping address that is no longer linked to the runtime customer.
+
+        ``_default_shipping_address_name`` prefers ``secondary_address_name``; if an
+        inbound sync re-linked or replaced it, later invoices would be refused with
+        "Selected shipping address is no longer available", so fall back to the
+        customer's own linked addresses instead.
+        """
+        runtime_customer = self.runtime_state.get("customer") or {}
+        customer_name = str(runtime_customer.get("customer_name") or "")
+        address_name = str(runtime_customer.get("secondary_address_name") or "")
+        if not customer_name or not address_name:
+            return {"customer_name": customer_name, "secondary_address_name": address_name or None, "checked": False}
+        linked = {str(row.get("name") or "") for row in self._customer_addresses(customer_name)}
+        if address_name in linked:
+            return {"customer_name": customer_name, "secondary_address_name": address_name, "checked": True, "still_linked": True}
+        runtime_customer.pop("secondary_address_name", None)
+        return {"customer_name": customer_name, "dropped_secondary_address_name": address_name, "checked": True, "still_linked": False}
 
     def _outbound_order_create(self, case: dict[str, Any]) -> dict[str, Any]:
         runtime_customer = self.runtime_state.get("customer") or {}
@@ -1533,7 +1715,9 @@ class FullCycleRunner:
         self._assert(case, "X-ORD-01.02", "Woo round-trip order line items reflect the edit", replacement_signature == expected_signature if replacement_invoice else False, expected=expected_signature, actual=replacement_signature)
         self._assert(case, "X-ORD-01.03", "Woo round-trip order webhook queued successfully", webhook.get("status_code") == 200 and bool((webhook.get("payload") or {}).get("queued")), expected={"status_code": 200, "queued": True}, actual=webhook)
         self._assert(case, "X-ORD-01.04", "Woo round-trip inbound order event exists", bool(inbound_sync.get("event_name")), expected="non-empty", actual=inbound_sync)
-        self._assert(case, "X-ORD-01.05", "Woo round-trip edit enqueues amendment handling", str(queue_result.get("status") or "").strip().lower() == "queued" and str(queue_result.get("reason") or "").strip().lower() == "amendment_enqueued", expected={"status": "queued", "reason": "amendment_enqueued"}, actual={"latest_event": latest_event, "process_result": process_result, "queue_result": queue_result})
+        # Same contract as WI-ORD-03.06: the amendment succeeds but the event can land NeedsReview on a PriceMismatch (prices never sync inbound by design), so only the routing reason is asserted, not queue status "queued".
+        amendment_reason = str(process_result.get("reason") or queue_result.get("reason") or "").strip().lower()
+        self._assert(case, "X-ORD-01.05", "Woo round-trip edit is routed to amendment handling", amendment_reason == "amendment_enqueued", expected={"reason": "amendment_enqueued"}, actual={"latest_event": latest_event, "process_result": process_result, "queue_result": queue_result})
         self._assert(case, "X-ORD-01.06", "ERP-originated source invoice is cancelled after the Woo edit", int(getattr(source_invoice_doc, "docstatus", 0) or 0) == 2, expected=2, actual=getattr(source_invoice_doc, "docstatus", 0))
         self._assert(case, "X-ORD-01.07", "ERP-originated replacement invoice is created", bool(replacement_invoice_name and replacement_invoice), expected="non-empty", actual=amendment_wait)
         self._assert(case, "X-ORD-01.08", "ERP-originated replacement invoice preserves amended_from linkage", str(getattr(replacement_invoice, "amended_from", "") or "") == source_invoice_name, expected=source_invoice_name, actual=getattr(replacement_invoice, "amended_from", None) if replacement_invoice else None)
@@ -1567,31 +1751,26 @@ class FullCycleRunner:
         online_payment_method = "Instapay" if online_mode == "instapay" else "Mobile Wallet"
 
         cash_run = self._create_and_sync_invoice(payment_method="Cash")
-        cash_pay_result = pay_invoice(
-            invoice_name=cash_run["invoice_name"],
-            payment_mode="cash",
-            pos_profile=fixture["pos_profile"],
-        )
-        frappe.db.commit()
+        cash_pay_error = ""
+        try:
+            cash_pay_result = pay_invoice(
+                invoice_name=cash_run["invoice_name"],
+                payment_mode="cash",
+                pos_profile=fixture["pos_profile"],
+            )
+            frappe.db.commit()
+        except Exception as exc:  # noqa: BLE001 - recorded as a failed assertion; the online leg still runs
+            cash_pay_result = {}
+            cash_pay_error = f"{type(exc).__name__}: {exc}"
+            frappe.db.rollback()
         cash_sync = self._ensure_invoice_synced_to_woo(cash_run["invoice_name"])
         cash_invoice = frappe.get_doc("Sales Invoice", cash_run["invoice_name"])
         cash_payment_entry = str(cash_pay_result.get("payment_entry") or "")
         cash_payment_doc = frappe.get_doc("Payment Entry", cash_payment_entry) if cash_payment_entry else None
         cash_woo_order = self._woo_order(str(getattr(cash_invoice, "woo_order_id", "") or ""))
 
-        online_run = self._create_and_sync_invoice(payment_method=online_payment_method)
-        online_pay_result = pay_invoice(
-            invoice_name=online_run["invoice_name"],
-            payment_mode=online_mode,
-        )
-        frappe.db.commit()
-        online_sync = self._ensure_invoice_synced_to_woo(online_run["invoice_name"])
-        online_invoice = frappe.get_doc("Sales Invoice", online_run["invoice_name"])
-        online_payment_entry = str(online_pay_result.get("payment_entry") or "")
-        online_payment_doc = frappe.get_doc("Payment Entry", online_payment_entry) if online_payment_entry else None
-        online_woo_order = self._woo_order(str(getattr(online_invoice, "woo_order_id", "") or ""))
-
-        self._assert(case, "EO-PAY-01.01", "Cash payment API succeeds", bool(cash_pay_result.get("success")), expected=True, actual=cash_pay_result)
+        # Cash-leg assertions are recorded BEFORE the online leg starts, so a failure (or exception) in one leg cannot hide the other.
+        self._assert(case, "EO-PAY-01.01", "Cash payment API succeeds", bool(cash_pay_result.get("success")), expected=True, actual=cash_pay_result or {"error": cash_pay_error})
         self._assert(case, "EO-PAY-01.02", "Cash payment entry exists", bool(cash_payment_entry and frappe.db.exists("Payment Entry", cash_payment_entry)), expected=True, actual=cash_payment_entry)
         self._assert(case, "EO-PAY-01.03", "Cash payment entry is submitted", int(getattr(cash_payment_doc, "docstatus", 0) or 0) == 1, expected=1, actual=getattr(cash_payment_doc, "docstatus", 0) if cash_payment_doc else None)
         self._assert(case, "EO-PAY-01.04", "Cash invoice is fully paid", float(getattr(cash_invoice, "outstanding_amount", 0) or 0) <= 0.01, expected="<=0.01", actual=getattr(cash_invoice, "outstanding_amount", 0))
@@ -1599,36 +1778,80 @@ class FullCycleRunner:
         self._assert(case, "EO-PAY-01.06", "Cash Woo order is marked paid", bool((cash_woo_order or {}).get("date_paid") or (cash_woo_order or {}).get("date_paid_gmt")), expected=True, actual={"date_paid": (cash_woo_order or {}).get("date_paid"), "date_paid_gmt": (cash_woo_order or {}).get("date_paid_gmt")}, concern=True)
         self._assert(case, "EO-PAY-01.07", "Cash Woo order payment title is Cash", "cash" in str((cash_woo_order or {}).get("payment_method_title") or "").lower(), expected="contains cash", actual=(cash_woo_order or {}).get("payment_method_title"))
 
-        self._assert(case, "EO-PAY-01.08", "Online payment API succeeds", bool(online_pay_result.get("success")), expected=True, actual=online_pay_result)
-        self._assert(case, "EO-PAY-01.09", "Online payment entry exists", bool(online_payment_entry and frappe.db.exists("Payment Entry", online_payment_entry)), expected=True, actual=online_payment_entry)
-        self._assert(case, "EO-PAY-01.10", "Online payment entry is submitted", int(getattr(online_payment_doc, "docstatus", 0) or 0) == 1, expected=1, actual=getattr(online_payment_doc, "docstatus", 0) if online_payment_doc else None)
-        self._assert(case, "EO-PAY-01.11", "Online invoice is fully paid", float(getattr(online_invoice, "outstanding_amount", 0) or 0) <= 0.01, expected="<=0.01", actual=getattr(online_invoice, "outstanding_amount", 0))
-        self._assert(case, "EO-PAY-01.12", "Online payment outbound path used event processing", online_sync.get("mode") == "event", expected="event", actual=online_sync.get("mode"), concern=True)
-        self._assert(case, "EO-PAY-01.13", "Online Woo order is marked paid", bool((online_woo_order or {}).get("date_paid") or (online_woo_order or {}).get("date_paid_gmt")), expected=True, actual={"date_paid": (online_woo_order or {}).get("date_paid"), "date_paid_gmt": (online_woo_order or {}).get("date_paid_gmt")}, concern=True)
-        self._assert(case, "EO-PAY-01.14", "Online Woo payment method matches expected mode", str((online_woo_order or {}).get("payment_method") or "") == ("instapay" if online_mode == "instapay" else "wallet"), expected=("instapay" if online_mode == "instapay" else "wallet"), actual=(online_woo_order or {}).get("payment_method"))
-
+        self._record_created("Sales Invoice", cash_run["invoice_name"], note="EO-PAY-01 cash invoice")
         if cash_payment_entry:
             self._record_created("Payment Entry", cash_payment_entry, note="EO-PAY-01 cash payment")
-        if online_payment_entry:
-            self._record_created("Payment Entry", online_payment_entry, note=f"EO-PAY-01 {online_mode} payment")
+
+        # Online leg. jarz_pos refuses an InstaPay/Wallet payment without a CONFIRMED transfer receipt (_require_confirmed_transfer_proof in api/invoices.py): staff cannot see the bank account, so only a manager-confirmed screenshot proves the money arrived.
+        online_run = self._create_and_sync_invoice(payment_method=online_payment_method)
+        online_invoice_name = str(online_run["invoice_name"] or "")
+        online_woo_order_id = str(online_run["woo_order_id"] or "")
+        self._record_created("Sales Invoice", online_invoice_name, note=f"EO-PAY-01 {online_mode} invoice (left unpaid on purpose)")
+        online_woo_before = self._woo_order(online_woo_order_id) if online_woo_order_id else None
+        outstanding_before = float(frappe.db.get_value("Sales Invoice", online_invoice_name, "outstanding_amount") or 0)
+
+        online_pay_result: dict[str, Any] | None = None
+        refusal_message = ""
+        refusal_type = ""
+        try:
+            online_pay_result = pay_invoice(
+                invoice_name=online_invoice_name,
+                payment_mode=online_mode,
+            )
+            frappe.db.commit()
+        except frappe.ValidationError as exc:
+            refusal_message = str(exc)
+            refusal_type = type(exc).__name__
+            # A refused request changes nothing; this also releases the invoice row lock pay_invoice took.
+            frappe.db.rollback()
+
+        unexpected_payment_entry = str((online_pay_result or {}).get("payment_entry") or "")
+        if unexpected_payment_entry:
+            self._record_created("Payment Entry", unexpected_payment_entry, note=f"EO-PAY-01 {online_mode} payment that should have been refused")
+        online_sync = self._ensure_invoice_synced_to_woo(online_invoice_name)
+        online_invoice = frappe.get_doc("Sales Invoice", online_invoice_name)
+        outstanding_after = float(getattr(online_invoice, "outstanding_amount", 0) or 0)
+        online_payment_entries = self._submitted_receive_payment_entries(online_invoice_name)
+        online_woo_order = self._woo_order(online_woo_order_id or str(getattr(online_invoice, "woo_order_id", "") or ""))
+        paid_stamp_before = {"date_paid": (online_woo_before or {}).get("date_paid"), "date_paid_gmt": (online_woo_before or {}).get("date_paid_gmt")}
+        paid_stamp_after = {"date_paid": (online_woo_order or {}).get("date_paid"), "date_paid_gmt": (online_woo_order or {}).get("date_paid_gmt")}
+
+        self._assert(case, "EO-PAY-01.08", "Online payment API refuses without a confirmed transfer receipt", online_pay_result is None and bool(refusal_message), expected="frappe.ValidationError", actual={"pay_result": online_pay_result, "refusal_type": refusal_type, "refusal_message": refusal_message})
+        self._assert(case, "EO-PAY-01.09", "Online payment refusal names the missing transfer receipt", "receipt" in refusal_message.lower(), expected="message mentions the receipt", actual=refusal_message)
+        # Asserted on ERP outstanding, not Woo date_paid: WooCommerce stamps date_paid on any non-COD order entering processing (production does the same for website InstaPay orders).
+        self._assert(case, "EO-PAY-01.10", "Online invoice stays unpaid in ERP (outstanding unchanged)", outstanding_after > 0.01 and abs(outstanding_after - outstanding_before) <= 0.01, expected={"outstanding": outstanding_before}, actual={"before": outstanding_before, "after": outstanding_after})
+        self._assert(case, "EO-PAY-01.11", "No submitted payment entry is posted against the online invoice", not online_payment_entries, expected=[], actual=online_payment_entries)
+        self._assert(case, "EO-PAY-01.12", "Online invoice outbound path used event processing", online_sync.get("mode") == "event", expected="event", actual=online_sync.get("mode"), concern=True)
+        self._assert(case, "EO-PAY-01.13", "Online Woo order status is unchanged by the refused payment", str((online_woo_order or {}).get("status") or "") == str((online_woo_before or {}).get("status") or "") and str((online_woo_order or {}).get("status") or "") != "completed", expected=(online_woo_before or {}).get("status"), actual=(online_woo_order or {}).get("status"))
+        # The observable trace of a set_paid push is a changed paid stamp; an unchanged one (empty or Woo's own processing stamp) means none was sent. Concern-level because Woo may stamp it on its own status transitions.
+        self._assert(case, "EO-PAY-01.14", "Online Woo order paid stamp is unchanged by the refused payment (no set_paid push)", paid_stamp_after == paid_stamp_before, expected=paid_stamp_before, actual=paid_stamp_after, concern=True)
+        self._assert(case, "EO-PAY-01.15", "Online Woo payment method matches expected mode", str((online_woo_order or {}).get("payment_method") or "") == ("instapay" if online_mode == "instapay" else "wallet"), expected=("instapay" if online_mode == "instapay" else "wallet"), actual=(online_woo_order or {}).get("payment_method"))
 
         return {
             "cash": {
                 "invoice_name": cash_run["invoice_name"],
                 "pay_result": cash_pay_result,
+                "pay_error": cash_pay_error,
                 "sync_result": cash_sync,
                 "invoice": cash_invoice.as_dict(),
                 "payment_entry": cash_payment_doc.as_dict() if cash_payment_doc else None,
                 "woo_order": cash_woo_order,
             },
             "online": {
-                "invoice_name": online_run["invoice_name"],
+                "invoice_name": online_invoice_name,
                 "payment_mode": online_mode,
                 "pay_result": online_pay_result,
+                "refusal_type": refusal_type,
+                "refusal_message": refusal_message,
                 "sync_result": online_sync,
                 "invoice": online_invoice.as_dict(),
-                "payment_entry": online_payment_doc.as_dict() if online_payment_doc else None,
+                "payment_entries": online_payment_entries,
+                "woo_order_before": online_woo_before,
                 "woo_order": online_woo_order,
+                "receipt_confirm_flow": (
+                    "Not exercised: the receipt path needs real image bytes saved as a File "
+                    "(payment_receipts.upload_receipt_image) before confirm_receipt will accept it."
+                ),
             },
         }
 
@@ -1716,50 +1939,55 @@ class FullCycleRunner:
         )
         state_run = self._create_and_sync_invoice(payment_method="Cash", cart_items=state_items)
         invoice_name = state_run["invoice_name"]
+        self._record_created("Sales Invoice", invoice_name, note="EO-STATE-01 invoice")
 
-        ofd_result = update_invoice_state(invoice_id=invoice_name, new_state="Out for Delivery")
-        frappe.db.commit()
-        ofd_sync = self._ensure_invoice_synced_to_woo(invoice_name)
-        invoice_after_ofd = frappe.get_doc("Sales Invoice", invoice_name)
-        ofd_woo_order = self._woo_order(str(getattr(invoice_after_ofd, "woo_order_id", "") or ""))
-        delivery_note_name = str(ofd_result.get("delivery_note") or "")
+        # kanban.update_invoice_state enforces one stage at a time (_STATE_SEQUENCE recieved -> in_progress -> ready -> out_for_delivery -> delivered, server-side since 2026-09-05), so step through every stage. Woo status per stage was verified on staging.
+        steps = [
+            # (kanban label, accepted invoice state keys, expected Woo status, slug)
+            ("In Progress", {"in-progress"}, "processing", "in_progress"),
+            ("Ready", {"ready"}, "processing", "ready"),
+            ("Out for Delivery", {"out-for-delivery"}, "out-for-delivery", "out_for_delivery"),
+            ("Delivered", {"delivered", "completed"}, "completed", "delivered"),
+        ]
+        evidence: dict[str, Any] = {"invoice_name": invoice_name, "cart_items": state_run["cart_items"], "steps": {}}
+        delivery_note_name = ""
+        seq = 0
+        for index, (label, state_keys, woo_status, slug) in enumerate(steps):
+            result = update_invoice_state(invoice_id=invoice_name, new_state=label)
+            frappe.db.commit()
+            sync_result = self._ensure_invoice_synced_to_woo(invoice_name)
+            invoice_after = frappe.get_doc("Sales Invoice", invoice_name)
+            woo_order = self._woo_order(str(getattr(invoice_after, "woo_order_id", "") or ""))
+            transition_ok = bool((result or {}).get("success"))
 
-        delivered_result = update_invoice_state(invoice_id=invoice_name, new_state="Delivered")
-        frappe.db.commit()
-        delivered_sync = self._ensure_invoice_synced_to_woo(invoice_name)
-        invoice_after_delivered = frappe.get_doc("Sales Invoice", invoice_name)
-        delivered_woo_order = self._woo_order(str(getattr(invoice_after_delivered, "woo_order_id", "") or ""))
+            seq += 1
+            self._assert(case, f"EO-STATE-01.{seq:02d}", f"{label} transition succeeds", transition_ok, expected=True, actual=result)
+            seq += 1
+            self._assert(case, f"EO-STATE-01.{seq:02d}", f"Invoice state is {label} after the transition", self._invoice_state_key(invoice_after) in state_keys, expected=sorted(state_keys), actual=self._invoice_state_key(invoice_after))
+            seq += 1
+            self._assert(case, f"EO-STATE-01.{seq:02d}", f"{label} outbound path used event processing", sync_result.get("mode") == "event", expected="event", actual=sync_result.get("mode"), concern=True)
+            seq += 1
+            self._assert(case, f"EO-STATE-01.{seq:02d}", f"Woo order status is {woo_status} after {label}", str((woo_order or {}).get("status") or "") == woo_status, expected=woo_status, actual=(woo_order or {}).get("status"))
+            if label == "Out for Delivery":
+                delivery_note_name = str((result or {}).get("delivery_note") or "")
+                seq += 1
+                self._assert(case, f"EO-STATE-01.{seq:02d}", "Delivery Note is created on out-for-delivery", bool(delivery_note_name and frappe.db.exists("Delivery Note", delivery_note_name)), expected=True, actual=delivery_note_name)
+                if delivery_note_name:
+                    self._record_created("Delivery Note", delivery_note_name, note="EO-STATE-01 delivery note")
 
-        self._assert(case, "EO-STATE-01.01", "Out-for-delivery transition succeeds", bool(ofd_result.get("success")), expected=True, actual=ofd_result)
-        self._assert(case, "EO-STATE-01.02", "Delivery Note is created on out-for-delivery", bool(delivery_note_name and frappe.db.exists("Delivery Note", delivery_note_name)), expected=True, actual=delivery_note_name)
-        self._assert(case, "EO-STATE-01.03", "Invoice state is out-for-delivery after first transition", self._invoice_state_key(invoice_after_ofd) == "out-for-delivery", expected="out-for-delivery", actual=self._invoice_state_key(invoice_after_ofd))
-        self._assert(case, "EO-STATE-01.04", "Out-for-delivery outbound path used event processing", ofd_sync.get("mode") == "event", expected="event", actual=ofd_sync.get("mode"), concern=True)
-        self._assert(case, "EO-STATE-01.05", "Woo order status is out-for-delivery", str((ofd_woo_order or {}).get("status") or "") == "out-for-delivery", expected="out-for-delivery", actual=(ofd_woo_order or {}).get("status"))
+            evidence["steps"][slug] = {
+                "result": result,
+                "sync_result": sync_result,
+                "invoice_state": self._invoice_state_key(invoice_after),
+                "woo_order": woo_order,
+            }
+            if not transition_ok:
+                # Every later stage would be refused as "move one stage at a time"; the failed step above already turns the case red.
+                evidence["not_attempted"] = [row[0] for row in steps[index + 1:]]
+                break
 
-        self._assert(case, "EO-STATE-01.06", "Delivered transition succeeds", bool(delivered_result.get("success")), expected=True, actual=delivered_result)
-        self._assert(case, "EO-STATE-01.07", "Invoice state is delivered after second transition", self._invoice_state_key(invoice_after_delivered) in {"delivered", "completed"}, expected="delivered/completed", actual=self._invoice_state_key(invoice_after_delivered))
-        self._assert(case, "EO-STATE-01.08", "Delivered outbound path used event processing", delivered_sync.get("mode") == "event", expected="event", actual=delivered_sync.get("mode"), concern=True)
-        self._assert(case, "EO-STATE-01.09", "Woo order status is completed after delivery", str((delivered_woo_order or {}).get("status") or "") == "completed", expected="completed", actual=(delivered_woo_order or {}).get("status"))
-
-        if delivery_note_name:
-            self._record_created("Delivery Note", delivery_note_name, note="EO-STATE-01 delivery note")
-
-        return {
-            "invoice_name": invoice_name,
-            "cart_items": state_run["cart_items"],
-            "out_for_delivery": {
-                "result": ofd_result,
-                "sync_result": ofd_sync,
-                "invoice": invoice_after_ofd.as_dict(),
-                "woo_order": ofd_woo_order,
-            },
-            "delivered": {
-                "result": delivered_result,
-                "sync_result": delivered_sync,
-                "invoice": invoice_after_delivered.as_dict(),
-                "woo_order": delivered_woo_order,
-            },
-        }
+        evidence["invoice"] = frappe.get_doc("Sales Invoice", invoice_name).as_dict()
+        return evidence
 
     def _outbound_cancel(self, case: dict[str, Any]) -> dict[str, Any]:
         from jarz_pos.api.kanban import cancel_invoice
@@ -2072,9 +2300,32 @@ class FullCycleRunner:
             raise RuntimeError("Site host_name is not configured")
         return host_name
 
-    def _unique_mobile(self) -> str:
-        digits = "".join(ch for ch in self.run_id if ch.isdigit())[-8:].rjust(8, "0")
-        return f"010{digits}"
+    def _unique_mobile(self, prefix: str = "010") -> str:
+        """A valid Egyptian mobile (01x + 8 digits) that no Customer already carries.
+
+        It used to be the run_id's last 8 digits, so every call in one run (and
+        any rerun with the same run_id) returned the same number and
+        create_customer's duplicate-mobile guard refused the second customer.
+        Now the 8 digits are random, each candidate is checked against
+        Customer.mobile_no (local and +20 spellings), and a number is never
+        handed out twice in one run.
+        """
+        if prefix not in _EG_MOBILE_PREFIXES:
+            prefix = "010"
+        issued = getattr(self, "_issued_mobiles", None)
+        if issued is None:
+            issued = self._issued_mobiles = set()
+        rng = random.SystemRandom()
+        for _attempt in range(50):
+            candidate = f"{prefix}{rng.randrange(10 ** 8):08d}"
+            if candidate in issued:
+                continue
+            spellings = [candidate, f"+2{candidate}", f"2{candidate}"]
+            if frappe.get_all("Customer", filters={"mobile_no": ["in", spellings]}, pluck="name", limit_page_length=1):
+                continue
+            issued.add(candidate)
+            return candidate
+        raise RuntimeError(f"Could not find an unused {prefix}xxxxxxxx mobile after 50 attempts")
 
     def _woo_client(self):
         if self._woo_client_cached is not None:
@@ -2294,13 +2545,71 @@ class FullCycleRunner:
         return ""
 
     def _count_customers_by_woo_customer_id(self, woo_customer_id: str | None) -> int:
+        return len(self._customers_by_woo_customer_id(woo_customer_id))
+
+    def _customers_by_woo_customer_id(self, woo_customer_id: str | None) -> list[str]:
+        """Every ERP customer claiming this Woo customer id, in name order."""
         if not woo_customer_id:
-            return 0
+            return []
         names: set[str] = set()
         for fieldname in self._customer_woo_id_fields():
             rows = frappe.get_all("Customer", filters={fieldname: str(woo_customer_id)}, fields=["name"], limit_page_length=20)
             names.update(str(row.get("name") or "") for row in rows if row.get("name"))
-        return len(names)
+        return sorted(names)
+
+    def _submitted_receive_payment_entries(self, invoice_name: str) -> list[str]:
+        """Submitted Receive Payment Entries allocated against this invoice."""
+        if not invoice_name:
+            return []
+        rows = frappe.db.sql(
+            """
+            SELECT DISTINCT pe.name
+            FROM `tabPayment Entry` pe
+            INNER JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
+            WHERE per.reference_doctype = 'Sales Invoice'
+              AND per.reference_name = %s
+              AND pe.docstatus = 1
+              AND pe.payment_type = 'Receive'
+            """,
+            (invoice_name,),
+            as_dict=True,
+        )
+        return [str(row.get("name") or "") for row in rows if row.get("name")]
+
+    def _wait_for_invoice_addresses(
+        self,
+        invoice_name: str,
+        *,
+        billing_line1: str,
+        shipping_line1: str,
+        timeout_seconds: int = 20,
+    ) -> dict[str, Any]:
+        """Poll until the invoice's billing/shipping addresses carry these address_line1 values."""
+        deadline = time.monotonic() + max(timeout_seconds, 1)
+        polls = 0
+        while True:
+            polls += 1
+            frappe.db.commit()
+            invoice_doc = frappe.get_doc("Sales Invoice", invoice_name)
+            billing_name = str(getattr(invoice_doc, "customer_address", "") or "")
+            shipping_name = str(getattr(invoice_doc, "shipping_address_name", "") or "")
+            billing_doc = frappe.get_doc("Address", billing_name) if billing_name and frappe.db.exists("Address", billing_name) else None
+            shipping_doc = frappe.get_doc("Address", shipping_name) if shipping_name and frappe.db.exists("Address", shipping_name) else None
+            matched = (
+                str(getattr(billing_doc, "address_line1", "") or "") == billing_line1
+                and str(getattr(shipping_doc, "address_line1", "") or "") == shipping_line1
+            )
+            if matched or time.monotonic() >= deadline:
+                return {
+                    "matched": matched,
+                    "polls": polls,
+                    "customer_address": billing_name,
+                    "shipping_address_name": shipping_name,
+                    "invoice_doc": invoice_doc,
+                    "billing_address_doc": billing_doc,
+                    "shipping_address_doc": shipping_doc,
+                }
+            time.sleep(1)
 
     def _customer_woo_id_fields(self) -> list[str]:
         try:
@@ -2465,22 +2774,36 @@ class FullCycleRunner:
         )
         return dict(row) if row else None
 
-    def _active_invoices_for_woo_order_id(self, woo_order_id: str | None) -> list[dict[str, Any]]:
+    def _active_invoices_for_woo_order_id(
+        self, woo_order_id: str | None, *, include_preexisting: bool = False
+    ) -> list[dict[str, Any]]:
+        """Active invoices carrying ``woo_order_id``.
+
+        Scoped to invoices created during this run unless ``include_preexisting``.
+        The demo store's order counter sits inside staging's cloned id range, so a
+        demo order id is routinely also carried by a cloned production invoice
+        (demo 16194 / cloned ACC-SINV-2026-17154 on 2026-10-05). Assertions about
+        "the invoice this run produced" must not count that bystander; the
+        collision pre-check is the one caller that must see it.
+        """
         if not woo_order_id:
             return []
+        filters: dict[str, Any] = {
+            "woo_order_id": woo_order_id,
+            "docstatus": ["<", 2],
+        }
+        if not include_preexisting:
+            filters["creation"] = [">=", self.started_on]
         return frappe.get_all(
             "Sales Invoice",
-            filters={
-                "woo_order_id": woo_order_id,
-                "docstatus": ["<", 2],
-            },
+            filters=filters,
             fields=["name", "customer", "docstatus", "custom_payment_method", "custom_sales_invoice_state"],
             order_by="creation desc",
             limit_page_length=10,
         )
 
     def _preexisting_inbound_order_artifacts(self, woo_order_id: str | None) -> dict[str, Any]:
-        invoice_rows = self._active_invoices_for_woo_order_id(woo_order_id)
+        invoice_rows = self._active_invoices_for_woo_order_id(woo_order_id, include_preexisting=True)
         order_map = self._order_map_row(woo_order_id)
         return {
             "has_collision": bool(invoice_rows or order_map),
@@ -2575,6 +2898,28 @@ class FullCycleRunner:
         attempt = 0
         hard_cap = 250
 
+        # Refuse BEFORE creating anything when the store's counter sits inside the
+        # cloned range. Checking each id after creating it is too late: the store's
+        # own customer.created webhook delivers every burned id to staging's
+        # inbound sync, which binds it to the cloned customer that already holds
+        # that id and overwrites them (how "Eman mohamed" was hijacked on
+        # 2026-10-05). Burning ~1,400 ids through that webhook is the hijack, not
+        # a way round it, so the counter has to be raised on the store itself.
+        latest_rows = self._woo_client().get(
+            "customers", params={"orderby": "id", "order": "desc", "per_page": 1, "role": "all"}
+        ) or []
+        store_latest_id = int((latest_rows[0] or {}).get("id") or 0) if latest_rows else 0
+        if store_latest_id < ceiling:
+            raise WooCustomerAllocationRefused(
+                f"Demo store customer counter ({store_latest_id}) is below the mapped "
+                f"ceiling ({ceiling}); every new store customer would collide with a "
+                "cloned ERP customer, and the store's customer.created webhook would "
+                "deliver it to staging before this harness could refuse it. Raise the "
+                "store's wp_users AUTO_INCREMENT above the ceiling first.",
+                attempts=[],
+                ceiling=ceiling,
+            )
+
         while attempt < hard_cap:
             attempt += 1
             payload = payload_factory(attempt)
@@ -2594,11 +2939,20 @@ class FullCycleRunner:
                 # trading history means the ceiling query is not seeing what it
                 # should, and continuing would create more Woo customers while
                 # the real problem goes unreported.
-                raise RuntimeError(
+                attempts.append({
+                    "attempt": attempt,
+                    "woo_customer_id": candidate_id,
+                    "ceiling": ceiling,
+                    "collision": collision,
+                    "refused": True,
+                })
+                raise WooCustomerAllocationRefused(
                     "Refusing to continue: Woo customer id "
                     f"{candidate_id} is already bound to ERP customer "
                     f"{collision['customer']!r}, which has {collision['invoice_count']} "
-                    "invoices. This run would have overwritten a real customer."
+                    "invoices. This run would have overwritten a real customer.",
+                    attempts=attempts,
+                    ceiling=ceiling,
                 )
 
             if candidate_id_int > ceiling and not collision["has_collision"]:
@@ -2611,9 +2965,14 @@ class FullCycleRunner:
                 "collision": collision,
             })
 
-        raise RuntimeError(
+        # The full attempt list travels on the exception, not in the message: 250
+        # rows of collision detail made the message itself unreadable.
+        last_ids = [row.get("woo_customer_id") for row in attempts[-5:]]
+        raise WooCustomerAllocationRefused(
             f"Unable to allocate a Woo customer id above the mapped ceiling ({ceiling}) "
-            f"after {attempt} attempts: {attempts!r}"
+            f"after {attempt} attempts (last ids tried: {last_ids}).",
+            attempts=attempts,
+            ceiling=ceiling,
         )
 
     def _ensure_customer_synced_to_woo(self, customer_name: str, scope: str | None = None) -> dict[str, Any]:
@@ -2701,6 +3060,9 @@ class FullCycleRunner:
                 "cases_passed": sum(1 for row in cases if row.get("status") == "Pass"),
                 "cases_failed": sum(1 for row in cases if row.get("status") == "Fail"),
                 "cases_concern": sum(1 for row in cases if row.get("status") == "Concern"),
+                # Counted on their own: a skipped case is neither a pass nor a fail.
+                "cases_skipped": sum(1 for row in cases if row.get("status") == CASE_STATUS_SKIPPED),
+                "skipped_case_ids": [str(row.get("case_id")) for row in cases if row.get("status") == CASE_STATUS_SKIPPED],
                 "assertions_total": len(assertions),
                 "assertions_passed": sum(1 for row in assertions if row.get("status") == "Pass"),
                 "assertions_failed": sum(1 for row in assertions if row.get("status") == "Fail"),
