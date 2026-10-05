@@ -47,6 +47,12 @@ FLAGS = [
     "sync_event_circuit_breaker_cooldown_seconds",
 ]
 
+#: Production-origin store ids on a staging clone are re-keyed to ``id + 1e9`` by
+#: ``jarz_woocommerce_integration.utils.staging_rekey_cloned_ids`` so the demo store's
+#: counters can never collide with them. Ceilings must ignore that band, or the
+#: allocators would see a ~1e9 "ceiling" and refuse forever.
+REKEYED_ID_FLOOR = 1_000_000_000
+
 REPORT_MARKER_START = "WOO_STAGING_FULL_CYCLE_JSON_START"
 REPORT_MARKER_END = "WOO_STAGING_FULL_CYCLE_JSON_END"
 
@@ -2817,7 +2823,9 @@ class FullCycleRunner:
             SELECT MAX(CAST(woo_order_id AS UNSIGNED)) AS max_woo_order_id
             FROM `tabWooCommerce Order Map`
             WHERE IFNULL(woo_order_id, '') != ''
+              AND CAST(woo_order_id AS UNSIGNED) < %s
             """,
+            (REKEYED_ID_FLOOR,),
             as_dict=True,
         )
         if not rows:
@@ -2850,7 +2858,9 @@ class FullCycleRunner:
             SELECT MAX(CAST(woo_customer_id AS UNSIGNED)) AS max_woo_customer_id
             FROM `tabCustomer`
             WHERE IFNULL(woo_customer_id, '') != ''
+              AND CAST(woo_customer_id AS UNSIGNED) < %s
             """,
+            (REKEYED_ID_FLOOR,),
             as_dict=True,
         )
         if not rows:

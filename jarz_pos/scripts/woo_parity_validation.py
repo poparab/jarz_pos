@@ -62,6 +62,7 @@ import frappe
 from frappe.utils import now_datetime
 
 from jarz_pos.scripts.woo_staging_full_cycle import (
+    REKEYED_ID_FLOOR,
     FullCycleRunner,
     _json_safe,
     _next_delivery_slot,
@@ -814,7 +815,9 @@ class ParityRunner(FullCycleRunner):
                 SELECT MAX(CAST(woo_order_id AS UNSIGNED)) AS max_id
                 FROM `tabSales Invoice`
                 WHERE IFNULL(woo_order_id, 0) > 0
+                  AND woo_order_id < %s
                 """,
+                (REKEYED_ID_FLOOR,),
                 as_dict=True,
             )
             ceiling = max(ceiling, int((rows[0].get("max_id") if rows else 0) or 0))
