@@ -53,6 +53,7 @@ import frappe
 from jarz_pos.utils.employee_link import (
     ADVANCE_DOCTYPE,
     CUSTOMER_EMPLOYEE_FIELD,
+    F_SALARY_MONTH,
     F_SETTLED_AMOUNT,
     F_SETTLED_VIA,
     hrms_available,
@@ -133,6 +134,30 @@ CUSTOMER_FIELDS: List[Dict[str, Any]] = [
 #: land together and out of the way instead of interleaving with the accounting
 #: fields.
 ADVANCE_FIELDS: List[Dict[str, Any]] = [
+    {
+        "fieldname": F_SALARY_MONTH,
+        "label": "Salary Month (Jarz)",
+        # Data ``YYYY-MM`` rather than a Date: it names a payroll month, not a
+        # day, and the Monthly Expenses board keys every month on that string.
+        "fieldtype": "Data",
+        "length": 7,
+        # Beside posting_date, not tucked into the collapsed Jarz section: the
+        # two dates are the whole point (cash out today, salary of last month)
+        # and reading one without the other is how they get confused.
+        "insert_after": "posting_date",
+        "in_list_view": 1,
+        "in_standard_filter": 1,
+        # Correctable after approval: it moves no money, it only says which
+        # payslip the advance comes off, and a wrong month must be fixable
+        # without reversing the payout.
+        "allow_on_submit": 1,
+        "module": "jarz pos",
+        "description": (
+            "Salary month (YYYY-MM) this advance is drawn against. The cash posts "
+            "on the posting date; the Monthly Expenses board deducts it from this "
+            "month's salary."
+        ),
+    },
     {
         "fieldname": "custom_jarz_paying_account",
         "label": "Paying Account (Jarz)",

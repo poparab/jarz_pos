@@ -3294,3 +3294,38 @@ class TestAccessGateIsShared(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestAdvancesDueByMonth(unittest.TestCase):
+    """An advance comes off the salary month it was drawn against.
+
+    7 October, before the 10th's pay day: the cash leaves today's drawer but the
+    advance is September's. It must reduce September's hand-over, and an
+    advance against OCTOBER's salary must not.
+    """
+
+    def _due(self, rows, month):
+        from jarz_pos.api.monthly_expenses import _advances_due_by_month
+
+        return _advances_due_by_month({"EMP-1": rows}, month)
+
+    def test_an_advance_for_a_later_salary_month_is_not_deducted(self):
+        rows = [
+            {"name": "A-SEP", "posting_date": "2026-10-07", "custom_jarz_salary_month": "2026-09"},
+            {"name": "A-OCT", "posting_date": "2026-10-15", "custom_jarz_salary_month": "2026-10"},
+        ]
+        due = self._due(rows, "2026-09")
+        self.assertEqual([r["name"] for r in due["EMP-1"]], ["A-SEP"])
+
+    def test_older_unrecovered_advances_stay_on_the_board(self):
+        rows = [{"name": "A-JUL", "posting_date": "2026-07-03", "custom_jarz_salary_month": "2026-07"}]
+        self.assertEqual(len(self._due(rows, "2026-09")["EMP-1"]), 1)
+
+    def test_a_legacy_advance_counts_from_its_posting_month(self):
+        rows = [{"name": "A-OLD", "posting_date": "2026-10-02"}]
+        self.assertEqual(self._due(rows, "2026-09"), {})
+        self.assertEqual(len(self._due(rows, "2026-10")["EMP-1"]), 1)
+
+    def test_an_employee_left_with_nothing_drops_out(self):
+        rows = [{"name": "A-OCT", "posting_date": "2026-10-15", "custom_jarz_salary_month": "2026-10"}]
+        self.assertNotIn("EMP-1", self._due(rows, "2026-09"))

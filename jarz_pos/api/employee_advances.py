@@ -77,8 +77,14 @@ from jarz_pos.api.expenses import (
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.employee_link import (
     ADVANCE_DOCTYPE,
+    F_SALARY_MONTH,
+    SALARY_PAY_DAY,
+    advance_salary_month,
     hrms_available,
     list_active_employees,
+    normalize_salary_month,
+    salary_month_options,
+    suggested_salary_month,
 )
 from jarz_pos.utils.posting_datetime import (
     apply_ledger_posting_datetime,
@@ -105,7 +111,13 @@ JARZ_FIELDS = (
     F_APPROVED_BY,
     F_APPROVED_ON,
     F_PAYMENT_ENTRY,
+    F_SALARY_MONTH,
 )
+
+#: How far back a salary month may be named. An advance against a salary that
+#: was settled months ago is almost certainly a mis-tap, and the payroll board
+#: would deduct it from a month nobody is looking at any more.
+SALARY_MONTH_LOOKBACK = 3
 
 #: The time of day the requester chose, parked on the advance between the
 #: request and the payout. Employee Advance has `posting_date` and no
@@ -384,6 +396,7 @@ def _serialize_advance(
     bilingual = _bilingual_label_from_account(paying_account, payment_label, account_labels)
 
     requested_by = str(row.get(F_REQUESTED_BY) or row.get("owner") or "")
+    salary_month = advance_salary_month(row)
 
     amount = flt(row.get("advance_amount"), 2)
     paid_amount = flt(row.get("paid_amount"), 2)
@@ -397,6 +410,12 @@ def _serialize_advance(
         "branch": meta.get("branch", ""),
         "pos_profile": str(row.get(F_POS_PROFILE) or ""),
         "posting_date": _date_str(row.get("posting_date")),
+        # The salary this advance comes off — distinct from posting_date, the
+        # day the cash left the drawer. Legacy rows fall back to their posting
+        # month; ``salary_month_explicit`` says which one the client is seeing.
+        "salary_month": salary_month,
+        "salary_month_label": _month_label(salary_month) if salary_month else "",
+        "salary_month_explicit": bool(normalize_salary_month(row.get(F_SALARY_MONTH))),
         "currency": str(row.get("currency") or ""),
         "amount": amount,
         "paid_amount": paid_amount,
@@ -538,6 +557,29 @@ def _month_bounds(month_key: str) -> Optional[tuple]:
         return None
 
 
+def _salary_month_options() -> List[str]:
+    return salary_month_options(today(), SALARY_MONTH_LOOKBACK)
+
+
+def _resolve_salary_month(raw: Any) -> str:
+    """The salary month for a new request: the caller's choice, validated, or
+    the pay-day suggestion when the caller sent none (a client built before the
+    field existed)."""
+    if raw is None or str(raw).strip() == "":
+        return suggested_salary_month(today())
+    month = normalize_salary_month(raw)
+    if not month:
+        frappe.throw(_("Salary month must look like YYYY-MM (got {0}).").format(raw))
+    allowed = _salary_month_options()
+    if month not in allowed:
+        frappe.throw(
+            _("Salary month {0} is not allowed. Choose one of: {1}.").format(
+                _month_label(month), ", ".join(_month_label(m) for m in allowed)
+            )
+        )
+    return month
+
+
 def _payment_sources(company: str, can_approve: bool) -> List[Dict[str, Any]]:
     """The branch/cash accounts this user may name as the source of the cash.
 
@@ -606,6 +648,9 @@ def get_employee_advance_bootstrap(filters: Optional[str] = None) -> Dict[str, A
             "current_month": current_month,
             "requested_month": requested_month or current_month,
             "months": [],
+            "salary_months": [],
+            "suggested_salary_month": suggested_salary_month(today()),
+            "salary_pay_day": SALARY_PAY_DAY,
             "employees": [],
             "payment_sources": [],
             "advances": [],
@@ -687,6 +732,14 @@ def get_employee_advance_bootstrap(filters: Optional[str] = None) -> Dict[str, A
         "current_month": current_month,
         "requested_month": month_to_use,
         "months": [{"id": m, "label": _month_label(m)} for m in months],
+        # Which salary an advance comes off. The request form ASKS — nothing is
+        # pre-chosen there — and ``suggested_salary_month`` only marks the
+        # likely answer (last month's salary until pay day, this month's after).
+        "salary_months": [
+            {"id": m, "label": _month_label(m)} for m in _salary_month_options()
+        ],
+        "suggested_salary_month": suggested_salary_month(today()),
+        "salary_pay_day": SALARY_PAY_DAY,
         "employees": list_active_employees(branch=employee_branch, company=company),
         "payment_sources": _payment_sources(company, can_approve),
         "advances": advances,
@@ -1057,7 +1110,9 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
 
     Params: ``employee`` (required), ``amount`` (required, > 0), ``purpose``
     (required), ``paying_account`` (required), ``pos_profile`` (optional),
-    ``posting_date`` (optional, defaults to today).
+    ``posting_date`` (optional, defaults to today), ``salary_month``
+    (``YYYY-MM``; the salary the advance is deducted from — optional only for
+    clients that predate it, which get the pay-day suggestion).
     """
     _ensure_can_request()
     _ensure_hrms()
@@ -1114,6 +1169,8 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
     amount = flt(raw_amount, 2)
     if amount <= 0:
         frappe.throw(_("Amount must be greater than zero."))
+
+    salary_month = _resolve_salary_month(data.get("salary_month"))
 
     employee_row = _validate_employee(employee)
     company = str(employee_row.get("company") or "") or _default_company()
@@ -1205,6 +1262,7 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
         # None on a date-only request, which leaves the Time field empty rather
         # than claiming midnight.
         F_POSTING_TIME: posting_time,
+        F_SALARY_MONTH: salary_month,
     }
     for fieldname, value in stamps.items():
         if _advance_has_field(fieldname):

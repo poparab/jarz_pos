@@ -82,7 +82,12 @@ from jarz_pos.utils.posting_datetime import (
 # bench carrying this module but not `utils.employee_link` or the penalty
 # controller cannot exist — and a fallback that restates the fieldnames or the
 # conversion here is a SECOND definition waiting to drift from the first.
-from jarz_pos.utils.employee_link import F_SETTLED_AMOUNT, F_SETTLED_VIA
+from jarz_pos.utils.employee_link import (
+    F_SALARY_MONTH,
+    F_SETTLED_AMOUNT,
+    F_SETTLED_VIA,
+    advance_salary_month,
+)
 from jarz_pos.doctype.jarz_employee_penalty.jarz_employee_penalty import (
     DAYS_PER_MONTH,
     PENALTY_UNITS,
@@ -535,6 +540,7 @@ def _serialize_advance(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "name": row.get("name"),
         "posting_date": row.get("posting_date"),
+        "salary_month": advance_salary_month(row) or None,
         "amount": _money(row.get("advance_amount")),
         "paid_amount": _money(row.get("paid_amount")),
         "claimed_amount": _money(row.get("claimed_amount")),
@@ -1460,6 +1466,8 @@ def _load_advances(
         fields.append(F_SETTLED_AMOUNT)
     if _advance_has_field(F_SETTLED_VIA):
         fields.append(F_SETTLED_VIA)
+    if _advance_has_field(F_SALARY_MONTH):
+        fields.append(F_SALARY_MONTH)
 
     filters: Dict[str, Any] = {"docstatus": 1}
     if company:
@@ -1481,6 +1489,33 @@ def _load_advances(
         _log("monthly_expenses: employee advance load")
         return {}, False
     return grouped, True
+
+
+def _advances_due_by_month(
+    advances_by_employee: Dict[str, List[Dict[str, Any]]], month_key: str
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Drop advances drawn against a salary month LATER than ``month_key``. Pure.
+
+    An advance carries the salary month it comes off (``custom_jarz_salary_month``),
+    which is often not the month the cash left the drawer: on 7 October, before
+    the 10th's pay day, an advance is an early slice of SEPTEMBER's salary. One
+    taken on 15 October belongs to October's salary and must not shrink what
+    September's row hands over.
+
+    Earlier months stay — the all-time balance rule in ``_build_payroll_rows``
+    is unchanged: an advance against July still unrecovered in September is
+    exactly the stale debt the board exists to chase. Legacy advances with no
+    salary month count from their posting month (``advance_salary_month``).
+    """
+    month_key = str(month_key or "")[:7]
+    if not month_key:
+        return advances_by_employee
+    due: Dict[str, List[Dict[str, Any]]] = {}
+    for employee, rows in (advances_by_employee or {}).items():
+        kept = [r for r in rows or [] if (advance_salary_month(r) or month_key) <= month_key]
+        if kept:
+            due[employee] = kept
+    return due
 
 
 def _employee_order_field_ready() -> bool:
@@ -1882,6 +1917,7 @@ def _compute_month(
     # payment index is. The builder stays pure and issues no query per row.
     penalties_by_employee = _load_penalties(month_key, company)
     advances_by_employee, advances_readable = _load_advances(company)
+    advances_by_employee = _advances_due_by_month(advances_by_employee, month_key)
     settled_by_employee = _load_settlements(month_key, company)
 
     # Anyone the month has anything to say about, whether or not payroll knows

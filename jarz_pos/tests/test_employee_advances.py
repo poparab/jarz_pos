@@ -231,6 +231,9 @@ class TestRequestGate(unittest.TestCase):
         self.assertEqual(fake_doc.get(F_PAYING_ACCOUNT), "Dokki - J")
         self.assertIsNone(fake_doc.get(F_POS_PROFILE))
         self.assertEqual(fake_doc.get(F_REQUESTED_BY), "line@example.com")
+        # No salary month sent (a pre-field client): the pay-day suggestion is
+        # stored rather than nothing, so the payroll board can still place it.
+        self.assertRegex(fake_doc.get("custom_jarz_salary_month") or "", r"^\d{4}-\d{2}$")
 
         fake_doc.insert.assert_called_once()
         # The request must NOT submit and must NOT pay. Both are the approver's job.
@@ -705,6 +708,9 @@ class TestAdvanceSerializer(unittest.TestCase):
                 "branch",
                 "pos_profile",
                 "posting_date",
+                "salary_month",
+                "salary_month_label",
+                "salary_month_explicit",
                 "currency",
                 "amount",
                 "paid_amount",
@@ -1207,3 +1213,84 @@ class TestApproveRepairsTheAccount(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSalaryMonthHelpers(unittest.TestCase):
+    """Which salary an advance comes off — distinct from the day the cash left.
+
+    The case that motivated it: on the 7th, before the 10th's pay day, an
+    advance is an early slice of LAST month's salary even though the Payment
+    Entry posts today on today's drawer.
+    """
+
+    def test_before_and_on_pay_day_suggests_last_month(self):
+        from jarz_pos.utils.employee_link import suggested_salary_month
+
+        self.assertEqual(suggested_salary_month("2026-10-07"), "2026-09")
+        self.assertEqual(suggested_salary_month("2026-10-10"), "2026-09")
+
+    def test_after_pay_day_suggests_this_month(self):
+        from jarz_pos.utils.employee_link import suggested_salary_month
+
+        self.assertEqual(suggested_salary_month("2026-10-11"), "2026-10")
+
+    def test_january_rolls_back_to_last_december(self):
+        from jarz_pos.utils.employee_link import suggested_salary_month
+
+        self.assertEqual(suggested_salary_month("2027-01-05"), "2026-12")
+
+    def test_options_are_this_month_and_three_before_never_the_future(self):
+        from jarz_pos.utils.employee_link import salary_month_options
+
+        self.assertEqual(
+            salary_month_options("2026-02-15", 3),
+            ["2026-02", "2026-01", "2025-12", "2025-11"],
+        )
+
+    def test_normalize(self):
+        from jarz_pos.utils.employee_link import normalize_salary_month
+
+        self.assertEqual(normalize_salary_month("2026-09"), "2026-09")
+        self.assertEqual(normalize_salary_month("2026-09-12"), "2026-09")
+        self.assertIsNone(normalize_salary_month("2026-13"))
+        self.assertIsNone(normalize_salary_month("Sept"))
+        self.assertIsNone(normalize_salary_month(None))
+
+    def test_legacy_advance_falls_back_to_its_posting_month(self):
+        from jarz_pos.utils.employee_link import advance_salary_month
+
+        self.assertEqual(advance_salary_month({"posting_date": "2026-09-12"}), "2026-09")
+        self.assertEqual(
+            advance_salary_month(
+                {"posting_date": "2026-10-07", "custom_jarz_salary_month": "2026-09"}
+            ),
+            "2026-09",
+        )
+
+
+class TestRequestSalaryMonth(unittest.TestCase):
+    def _resolve(self, raw, today="2026-10-07"):
+        from jarz_pos.api import employee_advances as mod
+
+        with patch(MODULE + ".frappe", _mock_frappe(ROLES.LINE_MANAGER_TIER)),                 patch(MODULE + ".today", lambda: today),                 patch(MODULE + "._month_label", lambda m: m):
+            return mod._resolve_salary_month(raw)
+
+    def test_the_requesters_choice_is_kept(self):
+        self.assertEqual(self._resolve("2026-09"), "2026-09")
+        self.assertEqual(self._resolve("2026-10"), "2026-10")
+
+    def test_no_choice_falls_back_to_the_pay_day_suggestion(self):
+        self.assertEqual(self._resolve(None), "2026-09")
+        self.assertEqual(self._resolve("", today="2026-10-20"), "2026-10")
+
+    def test_a_future_salary_month_is_refused(self):
+        with self.assertRaises(Exception):
+            self._resolve("2026-11")
+
+    def test_a_month_too_far_back_is_refused(self):
+        with self.assertRaises(Exception):
+            self._resolve("2026-05")
+
+    def test_garbage_is_refused(self):
+        with self.assertRaises(Exception):
+            self._resolve("September")

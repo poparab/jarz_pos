@@ -22,9 +22,11 @@ without HRMS still migrates and still serves the POS.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 import frappe
+from frappe.utils import getdate
 
 #: The ``Sales Invoice.custom_order_purpose`` value that marks a staff order.
 #: Must stay in lockstep with the ``Jarz Commercial Policy.order_purpose``
@@ -56,6 +58,64 @@ ADVANCE_DOCTYPE = "Employee Advance"
 #: Salary Slip, which this business has never produced one of.
 F_SETTLED_AMOUNT = "custom_jarz_settled_amount"
 F_SETTLED_VIA = "custom_jarz_settled_via"
+
+#: The SALARY month (``YYYY-MM``) an advance is drawn against, which is not the
+#: month the cash left the drawer. Salaries are paid around the 10th, so on the
+#: 7th of October an advance is normally an early slice of SEPTEMBER's pay: the
+#: Payment Entry still posts today on today's drawer, but the payroll board must
+#: deduct it from September, not October. ``posting_date`` alone cannot carry
+#: that, so the requester is asked and the answer is stored here.
+F_SALARY_MONTH = "custom_jarz_salary_month"
+
+#: Day of the month salaries are paid. Up to and including this day an advance
+#: defaults to the PREVIOUS month's salary; after it, to the current month's.
+#: Only a suggestion — the request form asks explicitly.
+SALARY_PAY_DAY = 10
+
+_MONTH_KEY_RE = re.compile(r"^(\d{4})-(\d{2})$")
+
+
+def month_key_shift(month_key: str, delta: int) -> str:
+    """``YYYY-MM`` moved by ``delta`` months. Pure."""
+    year, month = int(month_key[:4]), int(month_key[5:7])
+    index = year * 12 + (month - 1) + int(delta)
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
+def suggested_salary_month(on: Any = None) -> str:
+    """The salary month an advance taken on ``on`` most likely belongs to."""
+    day = getdate(on) if on else getdate()
+    current = day.strftime("%Y-%m")
+    return month_key_shift(current, -1) if day.day <= SALARY_PAY_DAY else current
+
+
+def salary_month_options(on: Any = None, lookback: int = 3) -> List[str]:
+    """Salary months a new advance may be drawn against, newest first: the
+    current month and the ``lookback`` before it. No future month — an advance
+    against a salary that has not started accruing is a loan, not an advance."""
+    current = (getdate(on) if on else getdate()).strftime("%Y-%m")
+    return [month_key_shift(current, -i) for i in range(int(lookback) + 1)]
+
+
+def normalize_salary_month(value: Any) -> Optional[str]:
+    """``YYYY-MM`` for a well-formed month key (a full date is cut to its month),
+    or ``None``. Never raises."""
+    raw = str(value or "").strip()[:7]
+    match = _MONTH_KEY_RE.match(raw)
+    if not match or not 1 <= int(match.group(2)) <= 12:
+        return None
+    return raw
+
+
+def advance_salary_month(row: Dict[str, Any]) -> str:
+    """The salary month an advance row counts against.
+
+    Advances filed before the field existed carry nothing; they fall back to the
+    month of their ``posting_date``, the only date they have.
+    """
+    return normalize_salary_month(row.get(F_SALARY_MONTH)) or normalize_salary_month(
+        row.get("posting_date")
+    ) or ""
 
 #: HRMS's own columns that make up the rest of the balance below.
 F_PAID_AMOUNT = "paid_amount"
