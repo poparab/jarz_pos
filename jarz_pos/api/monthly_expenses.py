@@ -902,6 +902,10 @@ def _build_payroll_rows(
     hides exactly the stale debt worth chasing — a 5,000 EGP advance drawn in
     July would vanish from August's screen while still being owed.
 
+    One cap applies to advances, upstream in ``_advances_due_by_month``: an
+    advance drawn against a LATER salary month than this board is left off it.
+    Earlier months all carry over.
+
     ``off_payroll_rows`` are people with NO Salary Structure Assignment who
     nonetheless carry an advance, an order or a penalty. They get a row with
     ``gross_due`` 0 so their debt is visible; production has two (Kareem Mamdouh
@@ -1453,7 +1457,8 @@ def _load_advances(
     ``_build_gaps`` says advances are missing, rather than showing a confident
     zero next to a salary that is about to be overpaid.
 
-    Not month-scoped, deliberately: see ``_build_payroll_rows``. Fully settled
+    Not month-scoped here, deliberately: see ``_build_payroll_rows``. The board
+    caps it at its own salary month afterwards (``_advances_due_by_month``). Fully settled
     advances are dropped here rather than shown with a zero balance; they are
     history, and the row is a list of what is still owed.
     """
@@ -1916,8 +1921,8 @@ def _compute_month(
     # Loaded HERE and handed to `_build_payroll_rows` as maps, the same way the
     # payment index is. The builder stays pure and issues no query per row.
     penalties_by_employee = _load_penalties(month_key, company)
-    advances_by_employee, advances_readable = _load_advances(company)
-    advances_by_employee = _advances_due_by_month(advances_by_employee, month_key)
+    all_open_advances, advances_readable = _load_advances(company)
+    advances_by_employee = _advances_due_by_month(all_open_advances, month_key)
     settled_by_employee = _load_settlements(month_key, company)
 
     # Anyone the month has anything to say about, whether or not payroll knows
@@ -1993,7 +1998,9 @@ def _compute_month(
         payroll_rows,
         advances_readable=advances_readable,
         employee_orders_present=_employee_orders_exist(company),
-        advances_by_employee=advances_by_employee,
+        # Unfiltered on purpose: the wrong-ledger check is hygiene, not payroll,
+        # and an advance against a later salary month is just as mis-booked.
+        advances_by_employee=all_open_advances,
         unattributed_orders=unattributed_orders,
     )
 
@@ -2388,7 +2395,10 @@ def _parse_settlement_list(value: Any, key: str) -> List[Dict[str, Any]]:
 
 
 def _plan_advance_settlements(
-    employee: str, company: str, requests: Sequence[Dict[str, Any]]
+    employee: str,
+    company: str,
+    requests: Sequence[Dict[str, Any]],
+    allowed_advances: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Validate each requested advance and cap it at its OPEN balance.
 
@@ -2397,11 +2407,18 @@ def _plan_advance_settlements(
     standing between "recover an advance" and "recover the same advance every
     month forever", and it must be read inside the same lock the write happens
     under.
+
+    ``allowed_advances`` is the set the month's row actually lists. Since
+    advances carry a salary month, the row is narrower than "every open
+    advance": one drawn against October's salary is not on September's row and
+    must not be recovered from September's pay by a stale client or a direct
+    call. ``None`` skips the check (callers with no month context).
     """
     if not requests:
         # Nothing asked for, nothing read: the ordinary cash-only payslip must
         # not touch HRMS at all, so a bench without it keeps working.
         return []
+    allowed = set(allowed_advances) if allowed_advances is not None else None
 
     plan: List[Dict[str, Any]] = []
     seen: set = set()
@@ -2425,6 +2442,14 @@ def _plan_advance_settlements(
         if name in seen:
             frappe.throw(_("Advance {0} is listed twice in this settlement.").format(name))
         seen.add(name)
+        if allowed is not None and name not in allowed:
+            frappe.throw(
+                _(
+                    "Advance {0} is not on this month's row for {1} — it is drawn "
+                    "against a later salary month, or is not theirs. Settle it from "
+                    "its own month."
+                ).format(name, employee)
+            )
 
         # Locked BEFORE the balance is read, so a second settlement of the same
         # advance queues here and then sees the balance this one leaves behind.
@@ -2777,7 +2802,12 @@ def pay_salary(
     # Planned (and capped) BEFORE the guard, because the guard measures the
     # TOTAL discharge and the plan is what decides that total: asking to settle
     # 5,000 against an advance with 500 open discharges 500, not 5,000.
-    advance_plan = _plan_advance_settlements(employee, company, advance_requests)
+    advance_plan = _plan_advance_settlements(
+        employee,
+        company,
+        advance_requests,
+        [a.get("name") for a in ((row or {}).get("advances") or [])],
+    )
     order_plan = _plan_order_settlements(
         employee,
         company,

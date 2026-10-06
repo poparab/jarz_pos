@@ -561,12 +561,19 @@ def _salary_month_options() -> List[str]:
     return salary_month_options(today(), SALARY_MONTH_LOOKBACK)
 
 
-def _resolve_salary_month(raw: Any) -> str:
+def _resolve_salary_month(raw: Any, posting_date: Any = None) -> str:
     """The salary month for a new request: the caller's choice, validated, or
     the pay-day suggestion when the caller sent none (a client built before the
-    field existed)."""
+    field existed).
+
+    Both are anchored on the advance's ``posting_date`` where one is given: a
+    request backdated to 2 September is August's salary whatever day it is
+    filed, and an advance cannot come off a salary month that starts after the
+    cash was handed over.
+    """
+    anchor = posting_date or today()
     if raw is None or str(raw).strip() == "":
-        return suggested_salary_month(today())
+        return suggested_salary_month(anchor)
     month = normalize_salary_month(raw)
     if not month:
         frappe.throw(_("Salary month must look like YYYY-MM (got {0}).").format(raw))
@@ -576,6 +583,14 @@ def _resolve_salary_month(raw: Any) -> str:
             _("Salary month {0} is not allowed. Choose one of: {1}.").format(
                 _month_label(month), ", ".join(_month_label(m) for m in allowed)
             )
+        )
+    posted_month = normalize_salary_month(anchor)
+    if posted_month and month > posted_month:
+        frappe.throw(
+            _(
+                "An advance paid on {0} cannot come off the salary of {1}, which "
+                "starts after it. Choose {2} or earlier."
+            ).format(anchor, _month_label(month), _month_label(posted_month))
         )
     return month
 
@@ -735,9 +750,13 @@ def get_employee_advance_bootstrap(filters: Optional[str] = None) -> Dict[str, A
         # Which salary an advance comes off. The request form ASKS — nothing is
         # pre-chosen there — and ``suggested_salary_month`` only marks the
         # likely answer (last month's salary until pay day, this month's after).
+        # Empty until `bench migrate` has created the column: the form hides the
+        # picker rather than demanding a choice the request would silently drop.
         "salary_months": [
             {"id": m, "label": _month_label(m)} for m in _salary_month_options()
-        ],
+        ]
+        if _advance_has_field(F_SALARY_MONTH)
+        else [],
         "suggested_salary_month": suggested_salary_month(today()),
         "salary_pay_day": SALARY_PAY_DAY,
         "employees": list_active_employees(branch=employee_branch, company=company),
@@ -1170,8 +1189,6 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
     if amount <= 0:
         frappe.throw(_("Amount must be greater than zero."))
 
-    salary_month = _resolve_salary_month(data.get("salary_month"))
-
     employee_row = _validate_employee(employee)
     company = str(employee_row.get("company") or "") or _default_company()
     _validate_paying_account(company, paying_account)
@@ -1205,6 +1222,10 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
                 posting_date, today()
             )
         )
+
+    # After the future-date guard, so a future date is refused for being in the
+    # future rather than for naming a salary month that does not exist yet.
+    salary_month = _resolve_salary_month(data.get("salary_month"), posting_date)
 
     # ``currency`` is reqd on Employee Advance and normally fetched from
     # ``employee.salary_currency``. Plenty of Employee records here have that

@@ -110,12 +110,24 @@ def normalize_salary_month(value: Any) -> Optional[str]:
 def advance_salary_month(row: Dict[str, Any]) -> str:
     """The salary month an advance row counts against.
 
-    Advances filed before the field existed carry nothing; they fall back to the
-    month of their ``posting_date``, the only date they have.
+    Advances filed before the field existed carry nothing. They fall back to the
+    pay-day rule applied to their ``posting_date`` — NOT to the posting month.
+    The difference is the whole feature: an advance paid on 7 October, before
+    the 10th, is September's salary, and a posting-month fallback would push it
+    off September's board three days before September is paid. The rule never
+    lands later than the posting month, so a legacy row can only stay on a
+    board it was already on.
     """
-    return normalize_salary_month(row.get(F_SALARY_MONTH)) or normalize_salary_month(
-        row.get("posting_date")
-    ) or ""
+    explicit = normalize_salary_month(row.get(F_SALARY_MONTH))
+    if explicit:
+        return explicit
+    posted = row.get("posting_date")
+    if not posted or not normalize_salary_month(posted):
+        return ""
+    try:
+        return suggested_salary_month(posted)
+    except Exception:
+        return normalize_salary_month(posted) or ""
 
 #: HRMS's own columns that make up the rest of the balance below.
 F_PAID_AMOUNT = "paid_amount"

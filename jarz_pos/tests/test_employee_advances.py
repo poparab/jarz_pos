@@ -1256,10 +1256,12 @@ class TestSalaryMonthHelpers(unittest.TestCase):
         self.assertIsNone(normalize_salary_month("Sept"))
         self.assertIsNone(normalize_salary_month(None))
 
-    def test_legacy_advance_falls_back_to_its_posting_month(self):
+    def test_legacy_advance_falls_back_to_the_pay_day_rule(self):
         from jarz_pos.utils.employee_link import advance_salary_month
 
         self.assertEqual(advance_salary_month({"posting_date": "2026-09-12"}), "2026-09")
+        self.assertEqual(advance_salary_month({"posting_date": "2026-10-07"}), "2026-09")
+        self.assertEqual(advance_salary_month({"posting_date": None}), "")
         self.assertEqual(
             advance_salary_month(
                 {"posting_date": "2026-10-07", "custom_jarz_salary_month": "2026-09"}
@@ -1269,11 +1271,18 @@ class TestSalaryMonthHelpers(unittest.TestCase):
 
 
 class TestRequestSalaryMonth(unittest.TestCase):
-    def _resolve(self, raw, today="2026-10-07"):
+    def _resolve(self, raw, today="2026-10-07", posting_date=None):
         from jarz_pos.api import employee_advances as mod
 
         with patch(MODULE + ".frappe", _mock_frappe(ROLES.LINE_MANAGER_TIER)),                 patch(MODULE + ".today", lambda: today),                 patch(MODULE + "._month_label", lambda m: m):
-            return mod._resolve_salary_month(raw)
+            return mod._resolve_salary_month(raw, posting_date)
+
+    def test_a_backdated_request_defaults_from_its_own_date(self):
+        self.assertEqual(self._resolve(None, posting_date="2026-09-02"), "2026-08")
+
+    def test_a_salary_month_after_the_cash_was_paid_is_refused(self):
+        with self.assertRaises(Exception):
+            self._resolve("2026-10", posting_date="2026-09-20")
 
     def test_the_requesters_choice_is_kept(self):
         self.assertEqual(self._resolve("2026-09"), "2026-09")

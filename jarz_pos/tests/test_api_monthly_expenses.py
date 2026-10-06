@@ -3292,9 +3292,6 @@ class TestAccessGateIsShared(unittest.TestCase):
 			)
 
 
-if __name__ == "__main__":
-	unittest.main()
-
 
 class TestAdvancesDueByMonth(unittest.TestCase):
     """An advance comes off the salary month it was drawn against.
@@ -3321,11 +3318,38 @@ class TestAdvancesDueByMonth(unittest.TestCase):
         rows = [{"name": "A-JUL", "posting_date": "2026-07-03", "custom_jarz_salary_month": "2026-07"}]
         self.assertEqual(len(self._due(rows, "2026-09")["EMP-1"]), 1)
 
-    def test_a_legacy_advance_counts_from_its_posting_month(self):
+    def test_a_legacy_advance_before_pay_day_stays_on_last_months_board(self):
+        # Filed 2 October, before the field existed: September's salary. A
+        # posting-month fallback would drop it off September three days before
+        # September is paid.
         rows = [{"name": "A-OLD", "posting_date": "2026-10-02"}]
+        self.assertEqual(len(self._due(rows, "2026-09")["EMP-1"]), 1)
+
+    def test_a_legacy_advance_after_pay_day_is_this_months(self):
+        rows = [{"name": "A-OLD", "posting_date": "2026-10-15"}]
         self.assertEqual(self._due(rows, "2026-09"), {})
         self.assertEqual(len(self._due(rows, "2026-10")["EMP-1"]), 1)
 
     def test_an_employee_left_with_nothing_drops_out(self):
         rows = [{"name": "A-OCT", "posting_date": "2026-10-15", "custom_jarz_salary_month": "2026-10"}]
         self.assertNotIn("EMP-1", self._due(rows, "2026-09"))
+
+
+class TestAdvanceSettlementAllowList(unittest.TestCase):
+    def test_an_advance_not_on_the_row_is_refused_before_anything_is_read(self):
+        from jarz_pos.api import monthly_expenses
+
+        mock = MagicMock()
+        mock.throw.side_effect = lambda msg, *a, **k: (_ for _ in ()).throw(ValueError(msg))
+        with patch.object(monthly_expenses, "frappe", mock),                 patch.object(monthly_expenses, "_lock_row") as lock:
+            with self.assertRaises(ValueError) as ctx:
+                monthly_expenses._plan_advance_settlements(
+                    "EMP-1", "JARZ", [{"name": "A-OCT", "amount": 100}], ["A-SEP"]
+                )
+        self.assertIn("A-OCT", str(ctx.exception))
+        lock.assert_not_called()
+
+
+if __name__ == "__main__":
+	unittest.main()
+
