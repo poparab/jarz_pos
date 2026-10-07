@@ -164,6 +164,25 @@ def _is_due_in_month(row: Dict[str, Any], month_start: date, month_end: date) ->
 # ── payroll (HRMS, live) ──────────────────────────────────────────────────
 
 
+#: Fixed month basis for a part month, matching the penalty day rate
+#: (``monthly_expenses.DAYS_PER_MONTH``): every month is 30 days, so the same
+#: leaving day prices the same in February and August.
+PAYROLL_DAYS_PER_MONTH = 30
+
+
+def _worked_fraction(relieving_date: Any, month_start: date, month_end: Any) -> float:
+    """Share of the month's salary earned by someone relieved on ``relieving_date``. Pure.
+
+    1.0 unless the relieving date falls inside the month; then day/30, capped at 1.
+    """
+    if not relieving_date:
+        return 1.0
+    relieved = getdate(relieving_date)
+    if relieved < month_start or relieved > getdate(month_end):
+        return 1.0
+    return min(relieved.day, PAYROLL_DAYS_PER_MONTH) / float(PAYROLL_DAYS_PER_MONTH)
+
+
 def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
     """Payroll for the month ending ``month_end``, straight from HRMS. Never cached into Jarz.
 
@@ -187,7 +206,7 @@ def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
             ["status", "=", "Active"],
             ["relieving_date", ">=", month_start],
         ],
-        fields=["name", "employee_name", "designation", "department", "date_of_joining"],
+        fields=["name", "employee_name", "designation", "department", "date_of_joining", "relieving_date"],
         order_by="employee_name",
     )
     emp_index = {e["name"]: e for e in employees}
@@ -221,7 +240,14 @@ def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
     monthly_total = 0.0
     for emp_id, assignment in latest.items():
         emp = emp_index.get(emp_id, {})
-        monthly = flt(assignment.get("base")) + flt(assignment.get("variable"))
+        base = flt(assignment.get("base"))
+        variable = flt(assignment.get("variable"))
+        # A leaver relieved inside this month is owed only the days worked, on
+        # the same fixed 30-day basis penalties use: relieved on the 10th of a
+        # 4,500 salary = 10/30 = 1,500. Relieved on the 30th or 31st = full month.
+        factor = _worked_fraction(emp.get("relieving_date"), month_start, month_end)
+        base, variable = flt(base * factor, 2), flt(variable * factor, 2)
+        monthly = base + variable
         monthly_total += monthly
         rows.append(
             {
@@ -232,9 +258,11 @@ def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
                 "department": emp.get("department"),
                 "salary_structure": assignment.get("salary_structure"),
                 "from_date": assignment.get("from_date"),
-                "base": flt(assignment.get("base")),
-                "variable": flt(assignment.get("variable")),
+                "base": base,
+                "variable": variable,
                 "monthly": monthly,
+                "relieving_date": emp.get("relieving_date"),
+                "worked_days": round(factor * PAYROLL_DAYS_PER_MONTH) if factor < 1 else None,
             }
         )
 

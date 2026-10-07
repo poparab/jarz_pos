@@ -253,5 +253,41 @@ class TestPayrollIncludesLeaversForTheirMonths(unittest.TestCase):
 		self.assertIn(["relieving_date", ">=", date(2026, 9, 1)], kwargs["or_filters"])
 
 
+class TestLeaverIsPaidForDaysWorked(unittest.TestCase):
+	def _f(self, relieved, month_end):
+		from jarz_pos.api.recurring_expenses import _worked_fraction
+
+		return _worked_fraction(relieved, date(2026, 8, 1), month_end)
+
+	def test_relieved_mid_month_is_day_over_thirty(self):
+		self.assertAlmostEqual(self._f("2026-08-10", date(2026, 8, 31)) * 4500, 1500)
+		self.assertAlmostEqual(self._f("2026-08-15", date(2026, 8, 31)) * 7000, 3500)
+
+	def test_relieved_on_the_last_days_is_a_full_month(self):
+		self.assertEqual(self._f("2026-08-31", date(2026, 8, 31)), 1.0)
+		self.assertEqual(self._f("2026-08-30", date(2026, 8, 31)), 1.0)
+
+	def test_relieved_outside_the_month_or_never_is_full(self):
+		self.assertEqual(self._f(None, date(2026, 8, 31)), 1.0)
+		self.assertEqual(self._f("2026-09-12", date(2026, 8, 31)), 1.0)
+
+	def test_the_payroll_row_carries_the_prorated_amount(self):
+		from jarz_pos.api import recurring_expenses
+
+		def get_all(doctype, **kwargs):
+			if doctype == "Employee":
+				return [{"name": "E1", "employee_name": "Left Mid", "relieving_date": date(2026, 8, 10)}]
+			if doctype == "Salary Structure Assignment":
+				return [{"employee": "E1", "employee_name": "Left Mid", "base": 4500, "variable": 0,
+						 "from_date": date(2026, 1, 1), "salary_structure": "S"}]
+			return []
+
+		with patch.object(recurring_expenses.frappe, "get_all", side_effect=get_all):
+			out = recurring_expenses._load_payroll("JARZ", date(2026, 8, 31))
+		row = out["rows"][0]
+		self.assertEqual(row["monthly"], 1500)
+		self.assertEqual(row["worked_days"], 10)
+
+
 if __name__ == "__main__":
 	unittest.main()
