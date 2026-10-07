@@ -654,6 +654,28 @@ def _normalize_count_lines(
     return counted, provided_vr, provided_batch, provided_serials
 
 
+def _current_valuation_rate(
+    item_code: str, warehouse: str, posting_date: Any, posting_time: Any
+) -> Optional[float]:
+    """The rate ERPNext will copy onto a row that does not state one.
+
+    A FIFO consumption can leave a remainder valued below zero (production
+    2026-10-05: 42 of 43 Lotus Large jars took 1,747.62 out of a 1,740.46
+    balance, leaving 1 jar at -7.16), and Stock Reconciliation then refuses
+    the row with "Negative Valuation Rate is not allowed".
+    """
+    try:
+        from erpnext.stock.utils import get_stock_balance
+
+        balance = get_stock_balance(
+            item_code, warehouse, posting_date, posting_time, with_valuation_rate=True
+        )
+        return float(balance[1] or 0)
+    except Exception:
+        _safe_log(f"jarz_pos current valuation probe failed for {item_code}")
+        return None
+
+
 def _format_inventory_qty(value: float) -> str:
     text = f"{float(value):.3f}"
     return text.rstrip("0").rstrip(".")
@@ -822,6 +844,24 @@ def submit_reconciliation(
                         )
                     )
                 row["valuation_rate"] = float(vr)
+            else:
+                # A decrease states no rate, so ERPNext keeps the current one --
+                # and refuses the whole count if that rate has gone negative.
+                current_rate = _current_valuation_rate(
+                    code,
+                    warehouse,
+                    getattr(sr, "posting_date", None),
+                    getattr(sr, "posting_time", None),
+                )
+                if current_rate is not None and current_rate < 0:
+                    vr = _resolve_item_valuation(code, warehouse)
+                    if vr is None:
+                        frappe.throw(
+                            _(
+                                "Item {0} in Warehouse {1} is valued at a negative rate ({2}) and no positive valuation rate could be resolved. Set the Item's Valuation Rate, then count again."
+                            ).format(code, warehouse, current_rate)
+                        )
+                    row["valuation_rate"] = float(vr)
 
             # Handle batch/serial requirements
             has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)

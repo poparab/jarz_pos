@@ -472,6 +472,70 @@ class TestInventoryCountAPI(unittest.TestCase):
 
 		self.assertAlmostEqual(265.0, rate)
 
+	def _submit_one_decrease(self, *, current_rate, resolved_rate):
+		"""Count 1 where the bin holds 43, with a stated current rate."""
+
+		class FakeReconciliation:
+			def __init__(self):
+				self.company = None
+				self.flags = SimpleNamespace(ignore_permissions=False)
+				self.name = "MAT-RECO-1"
+				self.items = []
+
+			def append(self, field, row):
+				self.items.append(row)
+
+			def insert(self):
+				return None
+
+			def submit(self):
+				return None
+
+		doc = FakeReconciliation()
+		with patch.object(inventory_count, "_ensure_manager_access"), patch.object(
+			inventory_count, "_get_bin_qty_map", return_value={"Lotus Large": 43}
+		), patch.object(
+			inventory_count, "_current_valuation_rate", return_value=current_rate
+		), patch.object(
+			inventory_count, "_resolve_item_valuation", return_value=resolved_rate
+		) as resolver, patch.object(
+			inventory_count.frappe.db, "get_value", return_value=None
+		), patch.object(
+			inventory_count.frappe.db, "get_single_value", return_value=0
+		), patch.object(
+			inventory_count.frappe.db, "commit", create=True
+		), patch.object(
+			inventory_count.frappe, "get_all", return_value=[]
+		), patch.object(
+			inventory_count.frappe, "new_doc", return_value=doc, create=True
+		):
+			result = inventory_count.submit_reconciliation(
+				warehouse="Finished Goods - J",
+				posting_date="2026-10-07",
+				lines=[{"item_code": "Lotus Large", "counted_qty": 1}],
+				enforce_all=0,
+			)
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(1, len(doc.items))
+		return doc.items[0], resolver
+
+	def test_a_decrease_from_a_negative_rate_is_restated_at_a_positive_cost(self):
+		"""Production 2026-10-07: 1 Lotus Large jar at -7.16 refused the whole count."""
+		row, resolver = self._submit_one_decrease(current_rate=-7.16, resolved_rate=40.98)
+		self.assertEqual(40.98, row["valuation_rate"])
+		resolver.assert_called_once_with("Lotus Large", "Finished Goods - J")
+
+	def test_a_decrease_keeps_a_positive_current_rate(self):
+		row, resolver = self._submit_one_decrease(current_rate=40.47, resolved_rate=99.0)
+		self.assertNotIn("valuation_rate", row)
+		resolver.assert_not_called()
+
+	def test_a_decrease_from_a_negative_rate_with_no_cost_anywhere_is_refused(self):
+		with self.assertRaises(Exception) as ctx:
+			self._submit_one_decrease(current_rate=-7.16, resolved_rate=None)
+		self.assertIn("negative rate", str(ctx.exception))
+
 	def test_to_stock_qty_rejects_an_unconfigured_uom(self):
 		with patch.object(
 			inventory_count.frappe.db, "get_value", return_value="Kg"
