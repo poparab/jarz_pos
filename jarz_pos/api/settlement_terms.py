@@ -732,10 +732,29 @@ def _collection_entries(profiles: List[str]) -> List[Dict[str, Any]]:
         )
         bucket["invoices"].extend(_invoice_inputs([row]))
     terms_by_customer = _load_terms_rows(list(by_customer))
+    terms_parsed = {
+        c: (ss.parse_terms(terms_by_customer[c]) if terms_by_customer.get(c) else None)
+        for c in by_customer
+    }
+    # Per-branch Invoice after Invoice judges each door by its NEWEST invoice,
+    # and that one may belong to a POS Profile outside the caller's scope.
+    # Fetch those customers' full open set; rows outside the scope decide
+    # "newest" but are marked so they add nothing to the caller's amounts.
+    split = [c for c in by_customer if ss.splits_by_branch(terms_parsed[c])]
+    if split:
+        in_scope = {r.get("name") for r in open_rows or []}
+        for c in split:
+            by_customer[c]["invoices"] = []
+        for row in _open_credit_invoices(customers=split) or []:
+            bucket = by_customer.get(str(row.get("customer") or ""))
+            if bucket is None:
+                continue
+            entry = _invoice_inputs([row])[0]
+            entry["in_scope"] = row.get("name") in in_scope
+            bucket["invoices"].append(entry)
     entries: List[Dict[str, Any]] = []
     for customer, bucket in by_customer.items():
-        row = terms_by_customer.get(customer)
-        bucket["terms"] = ss.parse_terms(row) if row else None
+        bucket["terms"] = terms_parsed[customer]
         _tag_branches(customer, bucket["terms"], bucket["invoices"])
         entries.append(bucket)
     return entries

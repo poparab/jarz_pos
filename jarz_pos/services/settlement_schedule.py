@@ -660,14 +660,22 @@ def _invoice_rows(open_invoices: Optional[Iterable[Any]], today: datetime.date) 
                 "posting_date": posting,
                 "amount": amount,
                 "_i": index,
-                # The shop's door (see ``splits_by_branch``); None when untagged.
+                # The shop's door (see ``splits_by_branch``); None when untagged,
+                # UNASSIGNED_BRANCH when it matches none of the shop's branches.
                 "branch": _get(inv, "branch"),
                 "branch_name": _get(inv, "branch_name"),
+                # False: the caller's view excludes it (another POS Profile), but
+                # it still decides which invoice is a branch's newest.
+                "in_scope": _truthy(_get(inv, "in_scope"), True),
             }
         )
     # Stable: equal dates keep the caller's order (the ledger query's creation asc).
     rows.sort(key=lambda r: (r["posting_date"], r["_i"]))
     return rows
+
+
+#: Branch tag of an invoice that matches none of the shop's branches.
+UNASSIGNED_BRANCH = ""
 
 
 def splits_by_branch(terms: Optional[Dict[str, Any]]) -> bool:
@@ -718,7 +726,8 @@ def compute_status(
     float rounded to 2 places, so the dict goes on the wire unchanged.
     """
     day = to_date(today)
-    rows = _invoice_rows(open_invoices, day)
+    all_rows = _invoice_rows(open_invoices, day)
+    rows = [r for r in all_rows if r["in_scope"]]
     balance = sum(r["amount"] for r in rows)
     cycle = (terms or {}).get("cycle")
     dated = has_schedule(terms)
@@ -780,42 +789,57 @@ def compute_status(
 
     elif cycle == CYCLE_INVOICE_AFTER_INVOICE:
         # Each BRANCH of the shop settles on its own: within one door, every
-        # open invoice but the newest fell due when that newest one was
-        # delivered. Untagged rows share one group -- the whole customer, which
-        # is exactly the pre-split behaviour when the caller tags nothing.
+        # open invoice but that door's newest fell due when the newest was
+        # delivered. Rows with no door -- untagged (the caller split nothing:
+        # the whole customer, i.e. the pre-split rule) or UNASSIGNED (an address
+        # that is none of the branches) -- fall due on the shop's newest
+        # delivery to ANY door, so an unattributable invoice can never sit
+        # forever as its own "newest". Out-of-scope rows (another POS Profile)
+        # still decide which invoice is newest, but add no amounts.
         groups: Dict[Any, List[Dict[str, Any]]] = {}
-        for row in rows:
+        for row in all_rows:
             groups.setdefault(row.get("branch"), []).append(row)
         verdict: Dict[int, Tuple[Optional[datetime.date], bool]] = {}
         collect_next = 0.0
         for key, group in groups.items():
-            newest = group[-1]
-            g_due = g_overdue = 0.0
-            for row in group[:-1]:
+            newest = all_rows[-1] if key in (None, UNASSIGNED_BRANCH) else group[-1]
+            g_due = g_overdue = g_open = g_next = 0.0
+            g_count = 0
+            for row in group:
+                if row is newest:
+                    verdict[row["_i"]] = (None, False)
+                    continue
                 is_late = row["posting_date"] < newest["posting_date"]
-                g_due += row["amount"]
-                if is_late:
-                    g_overdue += row["amount"]
                 verdict[row["_i"]] = (newest["posting_date"], is_late)
-            verdict[newest["_i"]] = (None, False)
+                if row["in_scope"]:
+                    g_due += row["amount"]
+                    if is_late:
+                        g_overdue += row["amount"]
+            for row in group:
+                if row["in_scope"]:
+                    g_count += 1
+                    g_open += row["amount"]
+            if newest in group and newest["in_scope"]:
+                g_next = newest["amount"]
             due_now += g_due
             overdue += g_overdue
-            collect_next += newest["amount"]
+            collect_next += g_next
             if g_overdue > MONEY_EPSILON and (
                 oldest_overdue is None or newest["posting_date"] < oldest_overdue
             ):
                 oldest_overdue = newest["posting_date"]
-            if key is not None:
+            if key is not None and g_count:
                 result["branches"].append(
                     {
                         "branch": key,
-                        "branch_name": newest.get("branch_name"),
-                        "invoice_count": len(group),
-                        "open_balance": _round(sum(r["amount"] for r in group)),
+                        "branch_name": group[-1].get("branch_name") if key != UNASSIGNED_BRANCH else None,
+                        "unassigned": key == UNASSIGNED_BRANCH,
+                        "invoice_count": g_count,
+                        "open_balance": _round(g_open),
                         "due_now_amount": _round(g_due),
                         "overdue_amount": _round(g_overdue),
-                        "collect_on_next_delivery": _round(newest["amount"]),
-                        "last_delivery_date": _iso(newest["posting_date"]),
+                        "collect_on_next_delivery": _round(g_next),
+                        "last_delivery_date": _iso(group[-1]["posting_date"]),
                     }
                 )
         for row in rows:

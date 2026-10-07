@@ -368,6 +368,45 @@ class TestStatusInvoiceAfterInvoice(unittest.TestCase):
         self.assertEqual(status["due_now_amount"], 0.0)
         self.assertIsNone(ss.due_branch_label(status))
 
+    def test_unassigned_invoices_fall_due_on_any_delivery(self):
+        # An invoice that matches none of the shop's doors must not sit forever
+        # as its own "newest": the next delivery to any door makes it due.
+        status = ss.compute_status(
+            self.t,
+            [
+                dict(inv("X1", "2026-09-10", 80), branch=ss.UNASSIGNED_BRANCH),
+                dict(inv("H1", "2026-09-20", 100), branch="hel", branch_name="Hel"),
+                dict(inv("M1", "2026-09-24", 60), branch="mad", branch_name="Mad"),
+            ],
+            FRI,
+        )
+        self.assertEqual(status["due_now_amount"], 80.0)
+        self.assertEqual(status["overdue_amount"], 80.0)
+        self.assertEqual(status["oldest_overdue_date"], "2026-09-24")
+        self.assertEqual(status["collect_on_next_delivery"], 160.0)
+        orphan = [b for b in status["branches"] if b["unassigned"]][0]
+        self.assertEqual(orphan["due_now_amount"], 80.0)
+        self.assertIsNone(orphan["branch_name"])
+
+    def test_out_of_scope_rows_decide_newest_but_add_nothing(self):
+        # A manager scoped to one POS Profile: the branch's newest invoice was
+        # sold by another profile. Their older invoice is still due, and the
+        # other profile's invoice is neither listed nor counted.
+        status = ss.compute_status(
+            self.t,
+            [
+                dict(inv("H1", "2026-09-20", 100), branch="hel"),
+                dict(inv("H2", "2026-09-23", 50), branch="hel", in_scope=False),
+            ],
+            FRI,
+        )
+        self.assertEqual(status["state"], ss.STATE_OVERDUE)
+        self.assertEqual(status["due_now_amount"], 100.0)
+        self.assertEqual(status["open_balance"], 100.0)
+        self.assertEqual(status["collect_on_next_delivery"], 0.0)
+        self.assertEqual([i["name"] for i in status["invoices"]], ["H1"])
+        self.assertEqual(status["invoice_count"], 1)
+
     def test_untagged_rows_keep_the_whole_customer_rule(self):
         status = ss.compute_status(self.t, [inv("A", "2026-09-20", 100), inv("B", "2026-09-24", 40)], FRI)
         self.assertEqual(status["due_now_amount"], 100.0)

@@ -162,7 +162,9 @@ def enqueue_settlement_push(
             recipients=cleaned,
             description=str(description or ""),
             invoice=str(invoice or ""),
-            branch_name=str(branch_name or ""),
+            # Only when set: a worker still on the previous release during the
+            # deploy restart does not know the kwarg.
+            **({"branch_name": str(branch_name)} if branch_name else {}),
         )
         return True
     except Exception:
@@ -573,7 +575,13 @@ def on_sales_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
             # Branch lookup failed: asking for another door's invoice is the
             # exact mistake per-branch settlement exists to prevent.
             return
-        previous = [r for r in others if r.get("branch") == this["branch"]]
+        # The same door's older invoices, plus any that belong to no door
+        # (they fall due on the next delivery anywhere -- see the schedule).
+        previous = [
+            r
+            for r in others
+            if r.get("branch") in (this["branch"], ss.UNASSIGNED_BRANCH)
+        ]
         amount = round(sum(float(r.get("outstanding_amount") or 0) for r in previous), 2)
         if amount <= ss.MONEY_EPSILON:
             return

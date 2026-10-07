@@ -153,31 +153,38 @@ def tag_invoice_branches(customer: str, rows: List[Dict[str, Any]]) -> List[Dict
     """Stamp each invoice row of *customer* with the door it was delivered to.
 
     Sets ``branch`` (the branch's canonical address_name) and ``branch_name``
-    in place; rows need ``shipping_address_name`` / ``customer_address``. An
-    address that is none of the branches stays its own door (keyed by that
-    address) -- folding it into a branch would be a guess, and settling it
-    against another door's delivery is exactly what per-branch settlement
-    forbids. No address at all is one shared "unassigned" door (key ``""``).
+    in place; rows need ``shipping_address_name`` / ``customer_address``.
+
+    An invoice whose address is none of the branches (no address, or an
+    Address no longer in the book) is folded into the shop's ONLY branch when
+    it has exactly one -- there is no other door it could be. With several
+    branches it is tagged ``settlement_schedule.UNASSIGNED_BRANCH``, which the
+    schedule lets fall due on the next delivery to any door: guessing a door
+    would put the debt on the wrong branch, and leaving it as its own door
+    would mean it is never due at all.
 
     Never raises: on failure the rows are left untagged, which the settlement
     schedule reads as one group -- the whole customer, i.e. the old behaviour.
     """
     if not rows:
         return rows
+    from jarz_pos.services.settlement_schedule import UNASSIGNED_BRANCH
+
     try:
-        index = _member_index(customer_branches(customer))
+        branches = customer_branches(customer)
+        index = _member_index(branches)
     except Exception:
         _log_quietly(f"tag_invoice_branches: {customer}")
         return rows
+    only = branches[0] if len(branches) == 1 else None
     for row in rows:
-        address = _invoice_address(row)
-        branch = index.get(address)
+        branch = index.get(_invoice_address(row)) or only
         if branch:
             row["branch"] = branch["address_name"]
             row["branch_name"] = branch["branch_name"]
         else:
-            row["branch"] = address
-            row["branch_name"] = address or None
+            row["branch"] = UNASSIGNED_BRANCH
+            row["branch_name"] = None
     return rows
 
 
@@ -364,7 +371,9 @@ def _area_tokens(*values: Any) -> set:
 def _log_quietly(title: str) -> None:
     """``frappe.log_error`` can itself raise; a degraded read must not."""
     try:
-        frappe.log_error(title=title, message=frappe.get_traceback())
+        # defer_insert: this can run inside a Sales Invoice submit, whose
+        # rollback must not take the Error Log row with it.
+        frappe.log_error(title=title, message=frappe.get_traceback(), defer_insert=True)
     except Exception:
         pass
 

@@ -524,6 +524,21 @@ class TestInvoiceAfterInvoiceTrigger(unittest.TestCase):
         self.assertEqual(push.call_args.args[3], 570.0)
         self.assertEqual(push.call_args.kwargs["branch_name"], "Heliopolis")
 
+    def test_unassigned_invoices_are_collected_with_any_delivery(self):
+        rows = [
+            {"name": "SINV-X", "outstanding_amount": 30, "shipping_address_name": "GONE-ADDR"},
+            {"name": "SINV-H1", "outstanding_amount": 500, "shipping_address_name": "ADDR-HEL"},
+        ]
+        _fr, push = self._run(self._doc(shipping_address_name="ADDR-MAD"), open_rows=rows)
+        self.assertEqual(push.call_args.args[3], 30.0)
+
+    def test_single_branch_shop_folds_addressless_invoices(self):
+        only = [self.BRANCHES[0]]
+        rows = [{"name": "SINV-OLD", "outstanding_amount": 90}]
+        _fr, push = self._run(self._doc(shipping_address_name="ADDR-HEL"), open_rows=rows, branches=only)
+        self.assertEqual(push.call_args.args[3], 90.0)
+        self.assertEqual(push.call_args.kwargs["branch_name"], "Heliopolis")
+
     def test_first_delivery_to_a_branch_asks_nothing(self):
         rows = [{"name": "SINV-H1", "outstanding_amount": 500, "shipping_address_name": "ADDR-HEL"}]
         _fr, push = self._run(self._doc(shipping_address_name="ADDR-MAD"), open_rows=rows)

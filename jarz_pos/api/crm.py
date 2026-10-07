@@ -821,12 +821,17 @@ def rename_branch(customer, address_name, branch_name):
     Nothing else changes: invoices point at the Address by docname, so a
     branch's history, balance and settlement all stay with it.
 
-    Refused: an empty name, the account's own name (the address book shows
-    the street instead of a title equal to the shop name, so the rename would
-    appear not to stick), and a name another branch of the same customer
-    already shows. Returns ``{"success", "address_name", "branch_name",
-    "renamed"}``.
+    Refused: an empty name, the account's own name or ``<account>-N`` (the
+    address book shows the street instead of such a title, so the rename would
+    appear not to stick), a name another branch of the same customer already
+    shows, and a branch whose Address some other party also uses (renaming it
+    would relabel that account too). Needs Customer write. ``modified`` is not
+    touched: it breaks ties for the default delivery address and the branch's
+    canonical row, and a label change must move neither. Returns
+    ``{"success", "address_name", "branch_name", "renamed"}``.
     """
+    import re
+
     from jarz_pos.services import b2b_branches
 
     _ensure_b2b_access()
@@ -834,7 +839,7 @@ def rename_branch(customer, address_name, branch_name):
     address_name = str(address_name or "").strip()
     if not customer or not frappe.db.exists("Customer", customer):
         frappe.throw("Customer not found.")
-    _require_doc_permission("Customer", customer, "read")
+    _require_doc_permission("Customer", customer, "write")
 
     new_name = " ".join(str(branch_name or "").split())
     if not new_name:
@@ -850,7 +855,9 @@ def rename_branch(customer, address_name, branch_name):
     customer_name = " ".join(
         str(frappe.db.get_value("Customer", customer, "customer_name") or "").split()
     )
-    if customer_name and new_name.lower() == customer_name.lower():
+    if customer_name and re.fullmatch(
+        re.escape(customer_name.lower()) + r"(-\d+)?", new_name.lower()
+    ):
         frappe.throw(
             "A branch name must differ from the account name. Add the area, e.g. "
             f"\"{customer_name} - Heliopolis\"."
@@ -863,8 +870,19 @@ def rename_branch(customer, address_name, branch_name):
 
     old_name = branch.get("branch_name")
     members = [m for m in (branch.get("member_address_names") or []) if m] or [branch["address_name"]]
+    shared = frappe.db.sql(
+        """SELECT COUNT(*) FROM `tabDynamic Link`
+           WHERE parenttype = 'Address' AND parent IN %(members)s
+             AND NOT (link_doctype = 'Customer' AND link_name = %(customer)s)""",
+        {"members": tuple(members), "customer": customer},
+    )[0][0]
+    if shared:
+        frappe.throw(
+            "This branch's address is also used by another account, so it cannot be "
+            "renamed from here."
+        )
     for member in members:
-        frappe.db.set_value("Address", member, "address_title", new_name)
+        frappe.db.set_value("Address", member, "address_title", new_name, update_modified=False)
     if old_name != new_name:
         try:
             frappe.get_doc("Customer", customer).add_comment(

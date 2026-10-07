@@ -522,10 +522,11 @@ class TestRenameBranch(unittest.TestCase):
         _branch("ILO-MADINATY", title="Madinaty"),
     ]
 
-    def _call(self, address, name, branches=None):
+    def _call(self, address, name, branches=None, shared=0):
         db = MagicMock()
         db.exists.return_value = True
         db.get_value.return_value = "ilo specialty coffee"
+        db.sql.return_value = [[shared]]
         with patch.object(crm, "_ensure_b2b_access"), patch.object(
             crm, "_require_doc_permission"
         ), patch.object(crm.frappe, "db", db), patch.object(
@@ -548,6 +549,8 @@ class TestRenameBranch(unittest.TestCase):
         for c in db.set_value.call_args_list:
             self.assertEqual(c.args[0], "Address")
             self.assertEqual(c.args[2], "address_title")
+            # modified breaks ties for the default delivery address.
+            self.assertIs(c.kwargs.get("update_modified"), False)
         get_doc.return_value.add_comment.assert_called_once()
 
     def test_refusals(self):
@@ -556,11 +559,16 @@ class TestRenameBranch(unittest.TestCase):
             ("ILO-HELIO", "x" * 141),  # too long
             ("SOMEONE-ELSES", "Heliopolis"),  # not this customer's branch
             ("ILO-HELIO", "ILO Specialty Coffee"),  # the account's own name
+            ("ILO-HELIO", "ilo specialty coffee-2"),  # shown as the street
             ("ILO-HELIO", "madinaty"),  # another branch's name
         ):
             with self.subTest(name=name):
                 with self.assertRaises(Exception):
                     self._call(address, name)
+
+    def test_address_shared_with_another_party_is_refused(self):
+        with self.assertRaises(Exception):
+            self._call("ILO-HELIO", "ilo Heliopolis", shared=1)
 
     def test_keeping_its_own_name_is_allowed(self):
         result, _db, _get_doc = self._call("ILO-MADINATY", "Madinaty")
