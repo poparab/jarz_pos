@@ -149,6 +149,38 @@ def _branch_for_invoice(row, index):
     return index.get(_invoice_address(row))
 
 
+def tag_invoice_branches(customer: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stamp each invoice row of *customer* with the door it was delivered to.
+
+    Sets ``branch`` (the branch's canonical address_name) and ``branch_name``
+    in place; rows need ``shipping_address_name`` / ``customer_address``. An
+    address that is none of the branches stays its own door (keyed by that
+    address) -- folding it into a branch would be a guess, and settling it
+    against another door's delivery is exactly what per-branch settlement
+    forbids. No address at all is one shared "unassigned" door (key ``""``).
+
+    Never raises: on failure the rows are left untagged, which the settlement
+    schedule reads as one group -- the whole customer, i.e. the old behaviour.
+    """
+    if not rows:
+        return rows
+    try:
+        index = _member_index(customer_branches(customer))
+    except Exception:
+        _log_quietly(f"tag_invoice_branches: {customer}")
+        return rows
+    for row in rows:
+        address = _invoice_address(row)
+        branch = index.get(address)
+        if branch:
+            row["branch"] = branch["address_name"]
+            row["branch_name"] = branch["branch_name"]
+        else:
+            row["branch"] = address
+            row["branch_name"] = address or None
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Per-branch invoice separation
 # ---------------------------------------------------------------------------

@@ -808,6 +808,78 @@ def link_branch(doctype, name, maps_row, address_name=None):
     return b2b_branches.unified_branches(customer, lead)
 
 
+BRANCH_NAME_MAX = 140
+
+
+@frappe.whitelist(methods=["POST"])
+def rename_branch(customer, address_name, branch_name):
+    """Rename one delivery branch of a B2B customer.
+
+    A branch's label is ``Address.address_title``. It is written on EVERY
+    Address row folded into the branch (``member_address_names``), so the
+    label survives whichever row the address book later picks as canonical.
+    Nothing else changes: invoices point at the Address by docname, so a
+    branch's history, balance and settlement all stay with it.
+
+    Refused: an empty name, the account's own name (the address book shows
+    the street instead of a title equal to the shop name, so the rename would
+    appear not to stick), and a name another branch of the same customer
+    already shows. Returns ``{"success", "address_name", "branch_name",
+    "renamed"}``.
+    """
+    from jarz_pos.services import b2b_branches
+
+    _ensure_b2b_access()
+    customer = str(customer or "").strip()
+    address_name = str(address_name or "").strip()
+    if not customer or not frappe.db.exists("Customer", customer):
+        frappe.throw("Customer not found.")
+    _require_doc_permission("Customer", customer, "read")
+
+    new_name = " ".join(str(branch_name or "").split())
+    if not new_name:
+        frappe.throw("Enter a branch name.")
+    if len(new_name) > BRANCH_NAME_MAX:
+        frappe.throw(f"A branch name can be at most {BRANCH_NAME_MAX} characters.")
+
+    branches = b2b_branches.customer_branches(customer)
+    branch = b2b_branches._member_index(branches).get(address_name)
+    if not branch:
+        frappe.throw("That address is not one of this customer's delivery branches.")
+
+    customer_name = " ".join(
+        str(frappe.db.get_value("Customer", customer, "customer_name") or "").split()
+    )
+    if customer_name and new_name.lower() == customer_name.lower():
+        frappe.throw(
+            "A branch name must differ from the account name. Add the area, e.g. "
+            f"\"{customer_name} - Heliopolis\"."
+        )
+    for other in branches:
+        if other["address_name"] == branch["address_name"]:
+            continue
+        if " ".join(str(other.get("branch_name") or "").split()).lower() == new_name.lower():
+            frappe.throw(f"Another branch of this account is already called \"{new_name}\".")
+
+    old_name = branch.get("branch_name")
+    members = [m for m in (branch.get("member_address_names") or []) if m] or [branch["address_name"]]
+    for member in members:
+        frappe.db.set_value("Address", member, "address_title", new_name)
+    if old_name != new_name:
+        try:
+            frappe.get_doc("Customer", customer).add_comment(
+                "Info", f"Branch renamed: \"{old_name}\" -> \"{new_name}\""
+            )
+        except Exception:
+            pass  # the audit line is a nicety; the rename itself is done
+    return {
+        "success": True,
+        "address_name": branch["address_name"],
+        "branch_name": new_name,
+        "renamed": len(members),
+    }
+
+
 def _materialize_self_branch(lead):
     """Save a branch-less Lead's own location as its first branch row."""
     from jarz_pos.api.leads import _lead_self_branch

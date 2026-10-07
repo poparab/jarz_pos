@@ -471,14 +471,25 @@ class TestInvoiceAfterInvoiceTrigger(unittest.TestCase):
         values.update(extra)
         return SimpleNamespace(**values)
 
-    def _run(self, doc, terms=None, open_rows=None, suppressed=False):
+    BRANCHES = [
+        {"address_name": "ADDR-HEL", "branch_name": "Heliopolis", "member_address_names": ["ADDR-HEL", "ADDR-HEL-OLD"]},
+        {"address_name": "ADDR-MAD", "branch_name": "Madinaty", "member_address_names": ["ADDR-MAD"]},
+    ]
+
+    def _run(self, doc, terms=None, open_rows=None, suppressed=False, branches=None):
+        book = patch("jarz_pos.services.b2b_branches.customer_branches")
         with patch.object(sr, "frappe") as fr, \
                 patch.object(sr, "_suppressed", return_value=suppressed), \
                 patch.object(sr, "_recipients", return_value=["m@x"]), \
                 patch.object(sr, "enqueue_settlement_push") as push, \
                 patch.object(sr, "nowdate", return_value="2026-09-24"), \
                 patch("jarz_pos.api.credit._open_credit_invoices", return_value=open_rows or []), \
-                patch("jarz_pos.api.credit._credit_currency", return_value="EGP"):
+                patch("jarz_pos.api.credit._credit_currency", return_value="EGP"), \
+                book as customer_branches:
+            if isinstance(branches, Exception):
+                customer_branches.side_effect = branches
+            else:
+                customer_branches.return_value = self.BRANCHES if branches is None else branches
             fr.db.exists.return_value = True
             fr.db.get_value.return_value = self.TERMS if terms is None else terms
             sr.on_sales_invoice_submit(doc)
@@ -493,6 +504,36 @@ class TestInvoiceAfterInvoiceTrigger(unittest.TestCase):
         self.assertEqual(args[2], ss.KIND_COLLECT_ON_DELIVERY)
         self.assertEqual(args[3], 100.0)
         self.assertEqual(kwargs["invoice"], "SINV-2")
+
+    def test_only_the_same_branch_is_collected(self):
+        # Owner, 2026-10-07: every branch of a shop settles on its own. A
+        # delivery to Madinaty collects Madinaty's previous invoice only.
+        rows = [
+            {"name": "SINV-H1", "outstanding_amount": 500, "shipping_address_name": "ADDR-HEL"},
+            {"name": "SINV-M1", "outstanding_amount": 100, "shipping_address_name": "ADDR-MAD"},
+            {"name": "SINV-H2", "outstanding_amount": 70, "customer_address": "ADDR-HEL-OLD"},
+            {"name": "SINV-2", "outstanding_amount": 40, "shipping_address_name": "ADDR-MAD"},
+        ]
+        _fr, push = self._run(self._doc(shipping_address_name="ADDR-MAD"), open_rows=rows)
+        push.assert_called_once()
+        args, kwargs = push.call_args
+        self.assertEqual(args[3], 100.0)
+        self.assertEqual(kwargs["branch_name"], "Madinaty")
+        # A folded legacy Address row is the same door as its branch.
+        _fr, push = self._run(self._doc(shipping_address_name="ADDR-HEL"), open_rows=rows)
+        self.assertEqual(push.call_args.args[3], 570.0)
+        self.assertEqual(push.call_args.kwargs["branch_name"], "Heliopolis")
+
+    def test_first_delivery_to_a_branch_asks_nothing(self):
+        rows = [{"name": "SINV-H1", "outstanding_amount": 500, "shipping_address_name": "ADDR-HEL"}]
+        _fr, push = self._run(self._doc(shipping_address_name="ADDR-MAD"), open_rows=rows)
+        push.assert_not_called()
+
+    def test_branch_lookup_failure_pushes_nothing(self):
+        rows = [{"name": "SINV-1", "outstanding_amount": 100}]
+        with patch("jarz_pos.services.b2b_branches._log_quietly"):
+            _fr, push = self._run(self._doc(), open_rows=rows, branches=RuntimeError("boom"))
+        push.assert_not_called()
 
     def test_amendment_does_not_ask_again(self):
         rows = [{"name": "SINV-1", "outstanding_amount": 100}]

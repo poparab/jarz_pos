@@ -17,8 +17,10 @@ record:
   same day (a retried job, a manual run) never sends a second copy.
 
 On submit (:func:`on_sales_invoice_submit`): a credit invoice for a customer
-whose cycle is ``Invoice after Invoice`` with OLDER open credit invoices pushes
-"Collect <amount> for previous invoice(s) with this delivery".
+whose cycle is ``Invoice after Invoice`` with OLDER open credit invoices AT THE
+SAME SHOP BRANCH pushes "Collect <amount> for previous invoice(s) with this
+delivery". Each branch of a shop settles on its own: a delivery to one door
+never asks for another door's invoice (``settlement_schedule.splits_by_branch``).
 
 Everything here never raises, and nothing leaves the process during a test run
 (``api.notifications.outbound_alerts_suppressed``): CI runs against the live
@@ -134,6 +136,7 @@ def enqueue_settlement_push(
     recipients: Sequence[str],
     description: Optional[str] = None,
     invoice: Optional[str] = None,
+    branch_name: Optional[str] = None,
 ) -> bool:
     """Queue a settlement push for after the current transaction commits.
 
@@ -159,6 +162,7 @@ def enqueue_settlement_push(
             recipients=cleaned,
             description=str(description or ""),
             invoice=str(invoice or ""),
+            branch_name=str(branch_name or ""),
         )
         return True
     except Exception:
@@ -176,10 +180,19 @@ def build_push_data(
     description: Optional[str] = None,
     invoice: Optional[str] = None,
     now: Any = None,
+    branch_name: Optional[str] = None,
 ) -> Dict[str, str]:
     """The string-only FCM / web-push data map for a settlement push."""
     now = now or frappe.utils.now_datetime()
-    title, body = ss.reminder_text(kind, customer_name, float(amount or 0), currency, due_date or None, description or None)
+    title, body = ss.reminder_text(
+        kind,
+        customer_name,
+        float(amount or 0),
+        currency,
+        due_date or None,
+        description or None,
+        branch_name=branch_name or None,
+    )
     day = str(now.date()) if hasattr(now, "date") else str(now)[:10]
     # One tray entry per customer, kind and day (or per invoice for the
     # on-delivery push), so a re-run replaces rather than stacks, and two
@@ -214,6 +227,7 @@ def send_settlement_reminder(
     recipients: Sequence[str],
     description: Optional[str] = None,
     invoice: Optional[str] = None,
+    branch_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Background-worker entry point: deliver one settlement push. Never raises.
 
@@ -234,7 +248,10 @@ def send_settlement_reminder(
 
         from jarz_pos.api import notifications as n
 
-        data = build_push_data(customer, customer_name, kind, amount, currency, due_date, description, invoice)
+        data = build_push_data(
+            customer, customer_name, kind, amount, currency, due_date, description, invoice,
+            branch_name=branch_name,
+        )
         tokens, token_platforms = n._get_token_targets_for_users(cleaned)
         vapid_subs = n._get_vapid_subscriptions_for_users(cleaned)
         if tokens:
@@ -375,9 +392,14 @@ def _process_terms_row(
     if not customer:
         return
     terms = ss.parse_terms(row)
+    if invoices and ss.splits_by_branch(terms):
+        from jarz_pos.services.b2b_branches import tag_invoice_branches
+
+        tag_invoice_branches(customer, invoices)
     status = ss.compute_status(terms, invoices, today)
     summary["checked"] += 1
     customer_name = row.get("customer_name") or customer
+    branch_label = ss.due_branch_label(status)
 
     if not terms.get("enabled"):
         # Reminders switched off: take down anything we left open.
@@ -394,7 +416,9 @@ def _process_terms_row(
             customer,
             todo_on,
             recipients,
-            f"Collect {todo_amount:,.2f} {currency} from {customer_name} ({description})",
+            f"Collect {todo_amount:,.2f} {currency} from {customer_name}"
+            + (f" - {branch_label}" if branch_label else "")
+            + f" ({description})",
             summary,
         )
     except Exception:
@@ -422,6 +446,7 @@ def _process_terms_row(
         ss.reminder_due_date(kind, status, today),
         recipients,
         description,
+        branch_name=branch_label if kind != ss.KIND_DUE_SOON else None,
     ):
         summary["sent"] += 1
 
@@ -460,6 +485,8 @@ def run_settlement_reminders() -> Dict[str, int]:
                     "name": inv.get("name"),
                     "posting_date": inv.get("posting_date"),
                     "outstanding_amount": inv.get("outstanding_amount"),
+                    "shipping_address_name": inv.get("shipping_address_name"),
+                    "customer_address": inv.get("customer_address"),
                 }
             )
         currency = _credit_currency()
@@ -497,8 +524,9 @@ def on_sales_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
 
     Fires only for a CREDIT invoice (same OR as ``utils/credit_utils``: the
     payment method or the frozen terms stamp) whose customer's enabled terms
-    say ``Invoice after Invoice`` and who has OTHER open credit invoices. The
-    push is queued after commit. Never raises, never blocks the submit.
+    say ``Invoice after Invoice`` and who has OTHER open credit invoices at
+    the SAME shop branch (the door this invoice is delivered to). The push is
+    queued after commit. Never raises, never blocks the submit.
     """
     try:
         if not doc or not getattr(doc, "name", None):
@@ -528,12 +556,24 @@ def on_sales_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
             return
 
         from jarz_pos.api.credit import _credit_currency, _open_credit_invoices
+        from jarz_pos.services.b2b_branches import tag_invoice_branches
 
-        previous = [
-            r
+        this = {
+            "name": doc.name,
+            "shipping_address_name": getattr(doc, "shipping_address_name", None),
+            "customer_address": getattr(doc, "customer_address", None),
+        }
+        others = [
+            dict(r)
             for r in _open_credit_invoices(customers=[customer])
             if r.get("name") != doc.name
         ]
+        tag_invoice_branches(customer, [this] + others)
+        if "branch" not in this:
+            # Branch lookup failed: asking for another door's invoice is the
+            # exact mistake per-branch settlement exists to prevent.
+            return
+        previous = [r for r in others if r.get("branch") == this["branch"]]
         amount = round(sum(float(r.get("outstanding_amount") or 0) for r in previous), 2)
         if amount <= ss.MONEY_EPSILON:
             return
@@ -546,6 +586,7 @@ def on_sales_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
             str(getdate(nowdate())),
             _recipients(row.get("responsible_user")),
             invoice=doc.name,
+            branch_name=this.get("branch_name"),
         )
     except Exception:
         _safe_log("settlement_reminders: on_submit trigger failed")

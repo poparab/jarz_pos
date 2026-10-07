@@ -228,6 +228,10 @@ def _open_credit_invoice_fields() -> List[str]:
         "outstanding_amount",
         "status",
         _branch_field(),
+        # The shop's door (B2B branch): per-branch Invoice-after-Invoice
+        # settlement reads it via ``b2b_branches.tag_invoice_branches``.
+        "shipping_address_name",
+        "customer_address",
     ]
     try:
         if frappe.get_meta("Sales Invoice").get_field("custom_credit_terms_days"):

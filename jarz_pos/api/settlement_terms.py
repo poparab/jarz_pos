@@ -246,9 +246,20 @@ def _invoice_inputs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "name": r.get("name"),
             "posting_date": r.get("posting_date"),
             "outstanding_amount": r.get("outstanding_amount"),
+            "shipping_address_name": r.get("shipping_address_name"),
+            "customer_address": r.get("customer_address"),
         }
         for r in rows or []
     ]
+
+
+def _tag_branches(customer: str, terms: Optional[Dict[str, Any]], inputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Tag *inputs* with the shop's branch when the schedule settles per branch."""
+    if inputs and ss.splits_by_branch(terms):
+        from jarz_pos.services.b2b_branches import tag_invoice_branches
+
+        tag_invoice_branches(customer, inputs)
+    return inputs
 
 
 def _user_full_name(user: Optional[str]) -> Optional[str]:
@@ -292,9 +303,10 @@ def _terms_payload(customer: str) -> Dict[str, Any]:
     row = _load_terms_row(customer)
     parsed = ss.parse_terms(row) if row else None
     # All branches, deliberately -- the same scope get_customer_credit_profile
-    # uses. What a shop owes is one debt, not one per branch.
+    # uses. What a shop owes is one debt; WHEN each part falls due is per shop
+    # branch under Invoice after Invoice (``status.branches``).
     open_rows = _open_credit_invoices(customers=[customer])
-    status = ss.compute_status(parsed, _invoice_inputs(open_rows), _today())
+    status = ss.compute_status(parsed, _tag_branches(customer, parsed, _invoice_inputs(open_rows)), _today())
     customer_name = (row or {}).get("customer_name") or (
         frappe.db.get_value("Customer", customer, "customer_name") or customer
     )
@@ -718,18 +730,13 @@ def _collection_entries(profiles: List[str]) -> List[Dict[str, Any]]:
                 "invoices": [],
             },
         )
-        bucket["invoices"].append(
-            {
-                "name": row.get("name"),
-                "posting_date": row.get("posting_date"),
-                "outstanding_amount": row.get("outstanding_amount"),
-            }
-        )
+        bucket["invoices"].extend(_invoice_inputs([row]))
     terms_by_customer = _load_terms_rows(list(by_customer))
     entries: List[Dict[str, Any]] = []
     for customer, bucket in by_customer.items():
         row = terms_by_customer.get(customer)
         bucket["terms"] = ss.parse_terms(row) if row else None
+        _tag_branches(customer, bucket["terms"], bucket["invoices"])
         entries.append(bucket)
     return entries
 

@@ -512,3 +512,56 @@ class TestEndpointsGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRenameBranch(unittest.TestCase):
+    """Renaming a delivery branch writes its label on every folded Address row."""
+
+    BRANCHES = [
+        _branch("ILO-HELIO", ["ILO-HELIO", "ILO-HELIO-DUP"], "ilo specialty coffee-16815"),
+        _branch("ILO-MADINATY", title="Madinaty"),
+    ]
+
+    def _call(self, address, name, branches=None):
+        db = MagicMock()
+        db.exists.return_value = True
+        db.get_value.return_value = "ilo specialty coffee"
+        with patch.object(crm, "_ensure_b2b_access"), patch.object(
+            crm, "_require_doc_permission"
+        ), patch.object(crm.frappe, "db", db), patch.object(
+            crm.frappe, "get_doc"
+        ) as get_doc, patch.object(
+            bb, "customer_branches", return_value=self.BRANCHES if branches is None else branches
+        ):
+            result = crm.rename_branch("ilo", address, name)
+        return result, db, get_doc
+
+    def test_renames_every_member_row(self):
+        result, db, get_doc = self._call("ILO-HELIO-DUP", "  ilo   Heliopolis ")
+        self.assertEqual(result["branch_name"], "ilo Heliopolis")
+        self.assertEqual(result["address_name"], "ILO-HELIO")
+        self.assertEqual(result["renamed"], 2)
+        written = [(c.args[1], c.args[3]) for c in db.set_value.call_args_list]
+        self.assertEqual(
+            written, [("ILO-HELIO", "ilo Heliopolis"), ("ILO-HELIO-DUP", "ilo Heliopolis")]
+        )
+        for c in db.set_value.call_args_list:
+            self.assertEqual(c.args[0], "Address")
+            self.assertEqual(c.args[2], "address_title")
+        get_doc.return_value.add_comment.assert_called_once()
+
+    def test_refusals(self):
+        for address, name in (
+            ("ILO-HELIO", "   "),  # empty
+            ("ILO-HELIO", "x" * 141),  # too long
+            ("SOMEONE-ELSES", "Heliopolis"),  # not this customer's branch
+            ("ILO-HELIO", "ILO Specialty Coffee"),  # the account's own name
+            ("ILO-HELIO", "madinaty"),  # another branch's name
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(Exception):
+                    self._call(address, name)
+
+    def test_keeping_its_own_name_is_allowed(self):
+        result, _db, _get_doc = self._call("ILO-MADINATY", "Madinaty")
+        self.assertEqual(result["branch_name"], "Madinaty")

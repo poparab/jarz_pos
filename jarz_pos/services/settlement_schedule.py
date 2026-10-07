@@ -654,10 +654,46 @@ def _invoice_rows(open_invoices: Optional[Iterable[Any]], today: datetime.date) 
         # A row with no readable date is still money owed; it is dated today
         # rather than dropped, because dropping it would understate the debt.
         posting = _to_date_lenient(_get(inv, "posting_date")) or today
-        rows.append({"name": _get(inv, "name"), "posting_date": posting, "amount": amount, "_i": index})
+        rows.append(
+            {
+                "name": _get(inv, "name"),
+                "posting_date": posting,
+                "amount": amount,
+                "_i": index,
+                # The shop's door (see ``splits_by_branch``); None when untagged.
+                "branch": _get(inv, "branch"),
+                "branch_name": _get(inv, "branch_name"),
+            }
+        )
     # Stable: equal dates keep the caller's order (the ledger query's creation asc).
     rows.sort(key=lambda r: (r["posting_date"], r["_i"]))
     return rows
+
+
+def splits_by_branch(terms: Optional[Dict[str, Any]]) -> bool:
+    """Whether this schedule settles each branch of the shop on its own.
+
+    Invoice after Invoice does (owner, 2026-10-07: "we deal with every branch
+    alone"): a delivery to one door collects THAT door's previous invoice,
+    never another door's. The dated cycles key on the calendar, not on a
+    delivery, so a branch split changes nothing for them. Callers tag each
+    invoice with ``branch`` / ``branch_name`` only when this is true.
+    """
+    return canonical_cycle((terms or {}).get("cycle")) == CYCLE_INVOICE_AFTER_INVOICE
+
+
+def due_branch_label(status: Dict[str, Any]) -> Optional[str]:
+    """Names of the branches with money due now, for a push or ToDo line.
+
+    ``None`` when the status carries no branch split, or nothing is due.
+    """
+    names = [
+        str(b.get("branch_name") or "").strip()
+        for b in status.get("branches") or []
+        if _money(b.get("due_now_amount")) > MONEY_EPSILON
+    ]
+    names = [n for n in names if n]
+    return ", ".join(names) or None
 
 
 def _round(value: float) -> float:
@@ -700,20 +736,24 @@ def compute_status(
         "collect_on_next_delivery": 0.0,
         "invoice_count": len(rows),
         "invoices": [],
+        # Per-branch split; filled for Invoice after Invoice only.
+        "branches": [],
     }
     if dated:
         result["next_due_date"] = _iso(next_due_date(terms, day))
 
     def _emit(row: Dict[str, Any], due: Optional[datetime.date], overdue: bool) -> None:
-        result["invoices"].append(
-            {
-                "name": row["name"],
-                "posting_date": _iso(row["posting_date"]),
-                "outstanding_amount": _round(row["amount"]),
-                "due_date": _iso(due),
-                "overdue": bool(overdue),
-            }
-        )
+        entry = {
+            "name": row["name"],
+            "posting_date": _iso(row["posting_date"]),
+            "outstanding_amount": _round(row["amount"]),
+            "due_date": _iso(due),
+            "overdue": bool(overdue),
+        }
+        if row.get("branch") is not None:
+            entry["branch"] = row["branch"]
+            entry["branch_name"] = row.get("branch_name")
+        result["invoices"].append(entry)
 
     if balance <= MONEY_EPSILON:
         return result
@@ -739,17 +779,50 @@ def compute_status(
         result["state"] = STATE_OVERDUE
 
     elif cycle == CYCLE_INVOICE_AFTER_INVOICE:
-        newest = rows[-1]
-        for row in rows[:-1]:
-            is_late = row["posting_date"] < newest["posting_date"]
-            due_now += row["amount"]
-            if is_late:
-                overdue += row["amount"]
-            _emit(row, newest["posting_date"], is_late)
-        _emit(newest, None, False)
-        result["collect_on_next_delivery"] = _round(newest["amount"])
+        # Each BRANCH of the shop settles on its own: within one door, every
+        # open invoice but the newest fell due when that newest one was
+        # delivered. Untagged rows share one group -- the whole customer, which
+        # is exactly the pre-split behaviour when the caller tags nothing.
+        groups: Dict[Any, List[Dict[str, Any]]] = {}
+        for row in rows:
+            groups.setdefault(row.get("branch"), []).append(row)
+        verdict: Dict[int, Tuple[Optional[datetime.date], bool]] = {}
+        collect_next = 0.0
+        for key, group in groups.items():
+            newest = group[-1]
+            g_due = g_overdue = 0.0
+            for row in group[:-1]:
+                is_late = row["posting_date"] < newest["posting_date"]
+                g_due += row["amount"]
+                if is_late:
+                    g_overdue += row["amount"]
+                verdict[row["_i"]] = (newest["posting_date"], is_late)
+            verdict[newest["_i"]] = (None, False)
+            due_now += g_due
+            overdue += g_overdue
+            collect_next += newest["amount"]
+            if g_overdue > MONEY_EPSILON and (
+                oldest_overdue is None or newest["posting_date"] < oldest_overdue
+            ):
+                oldest_overdue = newest["posting_date"]
+            if key is not None:
+                result["branches"].append(
+                    {
+                        "branch": key,
+                        "branch_name": newest.get("branch_name"),
+                        "invoice_count": len(group),
+                        "open_balance": _round(sum(r["amount"] for r in group)),
+                        "due_now_amount": _round(g_due),
+                        "overdue_amount": _round(g_overdue),
+                        "collect_on_next_delivery": _round(newest["amount"]),
+                        "last_delivery_date": _iso(newest["posting_date"]),
+                    }
+                )
+        for row in rows:
+            due, is_late = verdict[row["_i"]]
+            _emit(row, due, is_late)
+        result["collect_on_next_delivery"] = _round(collect_next)
         if overdue > MONEY_EPSILON:
-            oldest_overdue = newest["posting_date"]
             result["state"] = STATE_OVERDUE
         elif due_now > MONEY_EPSILON:
             result["state"] = STATE_DUE_TODAY
@@ -878,10 +951,17 @@ def reminder_text(
     currency: str,
     due_date: Optional[str],
     description: Optional[str] = None,
+    branch_name: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """(title, body) for a settlement push. English, like every other push."""
+    """(title, body) for a settlement push. English, like every other push.
+
+    *branch_name* names the shop branch(es) the money is for, when the terms
+    settle per branch (Invoice after Invoice).
+    """
     money = f"{amount:,.2f} {currency or ''}".strip()
     who = customer_name or "customer"
+    if branch_name:
+        who = f"{who} ({branch_name})"
     if kind == KIND_OVERDUE:
         title = f"Overdue: collect {money} from {who}"
         body = f"Payment overdue since {due_date}." if due_date else "Payment overdue."
@@ -980,6 +1060,7 @@ def build_collection_rows(
                 "oldest_overdue_date": status["oldest_overdue_date"],
                 "collect_on_next_delivery": status["collect_on_next_delivery"],
                 "invoice_count": status["invoice_count"],
+                "branches": status["branches"],
                 "responsible_user": (terms or {}).get("responsible_user") if terms else None,
             }
         )

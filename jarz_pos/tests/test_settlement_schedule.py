@@ -323,6 +323,66 @@ class TestStatusInvoiceAfterInvoice(unittest.TestCase):
         self.assertEqual(status["overdue_amount"], 0.0)
         self.assertEqual(status["collect_on_next_delivery"], 40.0)
 
+    def test_each_branch_settles_on_its_own(self):
+        # Owner, 2026-10-07: a new Madinaty delivery does not make Heliopolis's
+        # only open invoice due; each door's own newest invoice is "next".
+        def b(name, day, amount, branch):
+            return dict(inv(name, day, amount), branch=branch, branch_name=branch.title())
+
+        status = ss.compute_status(
+            self.t,
+            [
+                b("H1", "2026-09-20", 100, "hel"),
+                b("M1", "2026-09-21", 60, "mad"),
+                b("M2", "2026-09-23", 30, "mad"),
+                b("M3", "2026-09-24", 25, "mad"),
+            ],
+            FRI,
+        )
+        self.assertEqual(status["due_now_amount"], 90.0)
+        self.assertEqual(status["overdue_amount"], 90.0)
+        self.assertEqual(status["collect_on_next_delivery"], 125.0)
+        self.assertEqual(status["oldest_overdue_date"], "2026-09-24")
+        by_name = {i["name"]: i for i in status["invoices"]}
+        self.assertIsNone(by_name["H1"]["due_date"], "Heliopolis's only invoice is not due")
+        self.assertEqual(by_name["M1"]["due_date"], "2026-09-24")
+        self.assertEqual(by_name["M1"]["branch_name"], "Mad")
+        self.assertEqual([i["name"] for i in status["invoices"]], ["H1", "M1", "M2", "M3"])
+        branches = {x["branch"]: x for x in status["branches"]}
+        self.assertEqual(branches["hel"]["due_now_amount"], 0.0)
+        self.assertEqual(branches["hel"]["collect_on_next_delivery"], 100.0)
+        self.assertEqual(branches["mad"]["due_now_amount"], 90.0)
+        self.assertEqual(branches["mad"]["invoice_count"], 3)
+        self.assertEqual(ss.due_branch_label(status), "Mad")
+
+    def test_one_invoice_per_branch_is_nothing_due(self):
+        status = ss.compute_status(
+            self.t,
+            [
+                dict(inv("H1", "2026-09-20", 100), branch="hel"),
+                dict(inv("M1", "2026-09-24", 60), branch="mad"),
+            ],
+            FRI,
+        )
+        self.assertEqual(status["state"], ss.STATE_OK)
+        self.assertEqual(status["due_now_amount"], 0.0)
+        self.assertIsNone(ss.due_branch_label(status))
+
+    def test_untagged_rows_keep_the_whole_customer_rule(self):
+        status = ss.compute_status(self.t, [inv("A", "2026-09-20", 100), inv("B", "2026-09-24", 40)], FRI)
+        self.assertEqual(status["due_now_amount"], 100.0)
+        self.assertEqual(status["branches"], [])
+        self.assertNotIn("branch", status["invoices"][0])
+
+    def test_only_invoice_after_invoice_splits_by_branch(self):
+        self.assertTrue(ss.splits_by_branch(self.t))
+        self.assertFalse(ss.splits_by_branch(terms(cycle="Weekly", weekdays="Thu")))
+        self.assertFalse(ss.splits_by_branch(None))
+
+    def test_push_names_the_branch(self):
+        title, _body = ss.reminder_text(ss.KIND_COLLECT_ON_DELIVERY, "ilo", 100.0, "EGP", None, branch_name="Madinaty")
+        self.assertEqual(title, "Collect 100.00 EGP from ilo (Madinaty)")
+
     def test_single_open_invoice_is_ok(self):
         status = ss.compute_status(self.t, [inv("A", "2026-09-24", 40)], FRI)
         self.assertEqual(status["state"], ss.STATE_OK)
