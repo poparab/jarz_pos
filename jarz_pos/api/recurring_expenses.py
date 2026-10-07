@@ -165,14 +165,28 @@ def _is_due_in_month(row: Dict[str, Any], month_start: date, month_end: date) ->
 
 
 def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
-    """Current payroll run-rate straight from HRMS. Never cached into Jarz."""
-    emp_filters: Dict[str, Any] = {"status": "Active"}
+    """Payroll for the month ending ``month_end``, straight from HRMS. Never cached into Jarz.
+
+    Who is on it is decided by the MONTH, not by today's status alone: Active
+    employees, plus anyone marked Left/Inactive whose ``relieving_date`` falls on
+    or after the month's first day. Filtering on ``status = Active`` only made a
+    leaver's salary disappear from the months they actually worked (so August
+    could not be closed for someone who left on 31 August), and — the other way
+    round — kept charging months after they left until somebody flipped the
+    status. A leaver with no relieving date is treated as gone, as before.
+    """
+    month_start = getdate(month_end).replace(day=1)
+    emp_filters: Dict[str, Any] = {}
     if company:
         emp_filters["company"] = company
 
     employees = frappe.get_all(
         "Employee",
         filters=emp_filters,
+        or_filters=[
+            ["status", "=", "Active"],
+            ["relieving_date", ">=", month_start],
+        ],
         fields=["name", "employee_name", "designation", "department", "date_of_joining"],
         order_by="employee_name",
     )

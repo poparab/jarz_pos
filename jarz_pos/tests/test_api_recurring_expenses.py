@@ -220,5 +220,38 @@ class TestNamingSeriesFallback(unittest.TestCase):
 		self.assertEqual(field["options"], mod.DEFAULT_NAMING_SERIES)
 
 
+class TestPayrollIncludesLeaversForTheirMonths(unittest.TestCase):
+	"""A leaver stays on the months they worked and drops off after.
+
+	Filtering on ``status = Active`` alone made a leaver's salary vanish from
+	the month they left in (August could not be closed for someone relieved on
+	31 August) and kept charging later months until the status was flipped.
+	"""
+
+	def _employee_query(self, month_end):
+		from jarz_pos.api import recurring_expenses
+
+		calls = []
+
+		def get_all(doctype, **kwargs):
+			calls.append((doctype, kwargs))
+			return []
+
+		with patch.object(recurring_expenses.frappe, "get_all", side_effect=get_all):
+			recurring_expenses._load_payroll("JARZ", month_end)
+		return next(kw for dt, kw in calls if dt == "Employee")
+
+	def test_active_or_relieved_on_or_after_the_month_start(self):
+		kwargs = self._employee_query(date(2026, 8, 31))
+		self.assertNotIn("status", kwargs.get("filters") or {})
+		self.assertEqual(kwargs["filters"], {"company": "JARZ"})
+		self.assertIn(["status", "=", "Active"], kwargs["or_filters"])
+		self.assertIn(["relieving_date", ">=", date(2026, 8, 1)], kwargs["or_filters"])
+
+	def test_month_start_follows_the_month_end(self):
+		kwargs = self._employee_query("2026-09-30")
+		self.assertIn(["relieving_date", ">=", date(2026, 9, 1)], kwargs["or_filters"])
+
+
 if __name__ == "__main__":
 	unittest.main()
