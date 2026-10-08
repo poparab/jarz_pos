@@ -371,6 +371,38 @@ class TestEachModifier(unittest.TestCase):
         self.assertFalse(uses_each(None))
 
 
+class TestCountVariant(unittest.TestCase):
+    EGGS = {
+        "component_qty_map": {"eggs": 30, "SUGAR": 2.5},
+        "uom_map": {"eggs": "piece", "SUGAR": "Kg"},
+        "name_map": {"eggs": "Eggs", "SUGAR": "Sugar"},
+    }
+
+    def test_a_count_is_a_bare_trimmed_number(self):
+        out, unresolved = render("Beat {{item:eggs|count}} eggs.", **self.EGGS)
+        self.assertEqual("Beat 30 eggs.", out)
+        self.assertEqual([], unresolved)
+
+    def test_a_count_scales_and_keeps_one_decimal(self):
+        out, _ = render("{{item:eggs|count}}", batches=1.5, **self.EGGS)
+        self.assertEqual("45", out)
+        out, _ = render("{{item:eggs|count}}", batches=1 / 3, **self.EGGS)
+        self.assertEqual("10", out)
+        out, _ = render("{{item:eggs|count}}", batches=0.25, **self.EGGS)
+        self.assertEqual("7.5", out)
+
+    def test_a_count_takes_a_multiplier_and_each(self):
+        out, _ = render("{{item:eggs|count|x0.5}}", **self.EGGS)
+        self.assertEqual("15", out)
+        out, _ = render("{{item:eggs|count|each}}", units_per_batch=10, **self.EGGS)
+        self.assertEqual("3", out)
+
+    def test_a_count_over_mixed_units_is_refused(self):
+        out, unresolved = render("{{item:eggs+SUGAR|count}}", **self.EGGS)
+        self.assertEqual("{{item:eggs+SUGAR|count}}", out)
+        self.assertEqual(["eggs+SUGAR|count"], unresolved)
+
+
 class TestSumTokens(unittest.TestCase):
     def test_grams_of_a_sum(self):
         out, unresolved = render("{{item:MIX+SUGAR|grams}}", **JAR)

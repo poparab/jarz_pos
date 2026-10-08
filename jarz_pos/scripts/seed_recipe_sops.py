@@ -16,10 +16,11 @@ place rather than stacking duplicates, so fixing a typo is just an edit and a
 re-run.  Bump ``version`` in the data below to keep the old one for comparison
 instead of overwriting it.
 
-Quantities are stated per the manual's own batch, not per BOM run.  Where the
-two disagree the manual wins here and the difference is reported at the end —
-a BOM is what the system bills, but the SOP is what the bench actually does,
-and quietly rewriting one to match the other would hide a real question.
+Quantities are ``{{item:...}}`` tokens on the BOM lines (base recipes since
+v2, 2026-10-08), so every screen quotes the run being made.  Where the manual
+and the BOM disagree the step follows the BOM and the recipe's ``notes`` say
+what the manual said — the BOM is what stock and cost follow, and a note keeps
+the question visible instead of quietly settling it.
 """
 
 from __future__ import annotations
@@ -34,34 +35,41 @@ from frappe.utils import flt
 # where the manual states a measurable target — inventing thresholds would make
 # the SOP look authoritative about things nobody measured.
 
+BASES_V2_NOTE = (
+    "v2 (2026-10-08): every amount is a token on the BOM line, so the recipe "
+    "sheet on the Bases tab and the Production Board quote the run actually "
+    "being made, not one manual batch."
+)
+
 CHEESECAKE_MIX = {
     "item_code": "Cheesecake Mix",
-    "version": 1,
+    "version": 2,
     "yield_percent": 100,
     "prep_time_mins": 12,
     "equipment": "Planetary mixer, paddle (كف) attachment",
     "notes": (
-        "Batch = 9.520 Kg, which fills 120 medium or 77 large jars.\n"
-        "Vanilla is 20 g, confirmed by the owner 2026-08-08. BOM-Cheesecake "
-        "Mix-006 still bills 18 g and a yield of 9.518 Kg — both need "
-        "correcting. 9.520 is also what the jar BOMs already assume: the medium "
-        "carries exactly 9.520/120 = 79.333 g of mix."
+        "One BOM batch = 9.520 Kg, which fills 120 medium or 77 large jars.\n"
+        "Vanilla is 20 g per batch, confirmed by the owner 2026-08-08; the BOM "
+        "now bills the same.\n" + BASES_V2_NOTE
     ),
     "steps": [
         {
             "title": "Weigh cheese, powder sugar and vanilla",
             "instruction": (
-                "Weigh into the mixer bowl: 2.5 kg Milkana + 2.5 kg Remas "
-                "(5 kg cheese total), 1.5 kg powder sugar, 20 g vanilla.\n"
-                "يوزن في حلة المضرب: 2.5 كيلو ميلكانا + 2.5 كيلو ريماس "
-                "(إجمالي 5 كيلو جبنة)، 1.5 كيلو سكر بودر، 20 جرام فانيليا."
+                "Weigh into the mixer bowl: {{item:milkana cheese|grams}} Milkana + "
+                "{{item:Remas cheese|grams}} Remas, {{item:powder sugar|grams}} powder "
+                "sugar, {{item:kamina vanilla|grams}} vanilla — "
+                "{{item:milkana cheese+Remas cheese+powder sugar+kamina vanilla|grams}} "
+                "in the bowl.\n"
+                "يوزن في حلة المضرب: {{item:milkana cheese|grams}} ميلكانا + "
+                "{{item:Remas cheese|grams}} ريماس، {{item:powder sugar|grams}} سكر بودر، "
+                "{{item:kamina vanilla|grams}} فانيليا — الإجمالي "
+                "{{item:milkana cheese+Remas cheese+powder sugar+kamina vanilla|grams}}."
             ),
             "duration_mins": 4,
             "scaling_mode": "Per Batch",
             "capture_type": "Number",
-            "capture_label": "Total weighed into bowl (Kg)",
-            "capture_min": 6.0,
-            "capture_max": 7.0,
+            "capture_label": "Total weighed into bowl (g)",
             "requires_confirmation": 1,
         },
         {
@@ -77,12 +85,13 @@ CHEESECAKE_MIX = {
         {
             "title": "Drop to speed 1 and add the cream",
             "instruction": (
-                "Drop the mixer to speed 1 and add 3 kg dr baker cream "
-                "(unsweetened) at medium speed until well combined — about one "
-                "minute. Stop the moment it comes together; over-mixing after "
-                "the cream goes in breaks the texture.\n"
-                "يتم انزال السرعة الي 1 و يضاف الكريمة بسرعة متوسطة حتي تمتزج "
-                "جيدا لمدة دقيقة او حتي تمتزج و يغلق بمجرد الامتزاج."
+                "Drop the mixer to speed 1 and add {{item:dr baker cream|grams}} dr "
+                "baker cream (unsweetened) at medium speed until well combined — "
+                "about one minute. Stop the moment it comes together; over-mixing "
+                "after the cream goes in breaks the texture.\n"
+                "يتم انزال السرعة الي 1 و يضاف {{item:dr baker cream|grams}} كريمة "
+                "بسرعة متوسطة حتي تمتزج جيدا لمدة دقيقة او حتي تمتزج و يغلق بمجرد "
+                "الامتزاج."
             ),
             "duration_mins": 1,
             "scaling_mode": "Fixed",
@@ -103,171 +112,156 @@ CHEESECAKE_MIX = {
     ],
 }
 
+_BAKE_180_45 = {
+    "title": "Bake at 180°C for 45 minutes",
+    "instruction": (
+        "Bake at 180°C for 45 minutes.\n"
+        "يسوي الخليط علي درجه حراره 180 لمده 45 دقيقه."
+    ),
+    "duration_mins": 45,
+    "scaling_mode": "Fixed",
+    "capture_type": "Temperature",
+    "capture_label": "Oven temperature (°C)",
+    "capture_min": 170,
+    "capture_max": 190,
+    "requires_confirmation": 1,
+}
+
+_CAKE_WHIP = {
+    "title": "Whip eggs, sugar and vanilla to near-white",
+    "instruction": (
+        "Using the whisk, beat {{item:eggs|count}} eggs + {{item:sugar|grams}} "
+        "sugar + {{item:kamina vanilla|grams}} vanilla on speed 3 until the "
+        "colour is close to white.\n"
+        "يستخدم مضرب السلك في ضرب {{item:eggs|count}} بيضة و {{item:sugar|grams}} "
+        "سكر و {{item:kamina vanilla|grams}} فانيليا حتي تصل الي لون اقرب الي "
+        "الأبيض و المضرب علي سرعه 3."
+    ),
+    "duration_mins": 10,
+    "scaling_mode": "Per Batch",
+    "requires_confirmation": 1,
+}
+
+_CAKE_OIL_WATER = {
+    "title": "Combine oil and boiling water, add gradually",
+    "instruction": (
+        "Mix {{item:oil|grams}} oil with {{item:Water (tap)|grams}} boiling water "
+        "in a container, then add gradually to the mixer.\n"
+        "يخلط {{item:oil|grams}} زيت و {{item:Water (tap)|grams}} ماء مغلي في وعاء "
+        "ثم يضاف علي الخليط في العجان تدريجيا."
+    ),
+    "duration_mins": 5,
+    "scaling_mode": "Per Batch",
+    "requires_confirmation": 1,
+}
+
+_CAKE_DIVIDE = {
+    "title": "Stop the mixer, hand-stir, divide over the trays",
+    "instruction": (
+        "Stop the mixer, stir well by hand with a spoon, then divide evenly "
+        "over the trays.\n"
+        "يفصل العجان و يقلب الخليط بمعلقه جيدا ثم يوزع بالتساوي علي الصاجات."
+    ),
+    "duration_mins": 5,
+    "scaling_mode": "Per Batch",
+    "requires_confirmation": 1,
+}
+
+_CAKE_NOTE = (
+    "The manual's batch (45 eggs, 3.750 kg sugar) is 1.5x the BOM batch (30 "
+    "eggs, 2.5 kg sugar) on every line; the steps now follow the BOM. Its "
+    "\"2 trays\" is not restated because it is unclear which batch it meant."
+)
+
 FUDGE_CAKE = {
     "item_code": "Fudge Cake",
-    "version": 1,
+    "version": 2,
     "yield_percent": 98,
     "prep_time_mins": 60,
-    "equipment": "Planetary mixer (whisk then hand), 2 trays, oven",
-    "notes": "Batch = 9.258 Kg over 2 trays. BOM inputs total 9.278 Kg — the 0.02 gap looks like a typo in the BOM quantity.",
+    "equipment": "Planetary mixer (whisk then hand), trays, oven",
+    "notes": (
+        "One BOM batch = 9.258 Kg. The manual says baking soda; the BOM bills "
+        "baking powder, which is what the step now names.\n"
+        + _CAKE_NOTE + "\n" + BASES_V2_NOTE
+    ),
     "steps": [
-        {
-            "title": "Whip eggs, sugar and vanilla to near-white",
-            "instruction": (
-                "Using the whisk, beat 45 eggs + 3.750 kg sugar + 30 g vanilla "
-                "on speed 3 until the colour is close to white.\n"
-                "يستخدم مضرب السلك في ضرب البيض و السكر و الفانيليا حتي تصل الي "
-                "لون اقرب الي الأبيض و المضرب علي سرعه 3."
-            ),
-            "duration_mins": 10,
-            "scaling_mode": "Per Batch",
-            "requires_confirmation": 1,
-        },
+        dict(_CAKE_WHIP),
         {
             "title": "Add the dry mix in three additions on speed 1",
             "instruction": (
-                "Drop to speed 1 and add the dry mix — 2.700 kg flour, 120 g "
-                "baking soda, 570 g cocoa powder, a pinch of salt — in three "
-                "additions, each until it disappears.\n"
+                "Drop to speed 1 and add the dry mix — {{item:flour|grams}} flour, "
+                "{{item:baking powder|grams}} baking powder, {{item:coco powder|grams}} "
+                "cocoa powder, a pinch of salt — in three additions, each until it "
+                "disappears.\n"
                 "انزال المضرب علي سرعه 1 ثم يضاف اليه الخليط الجاف "
-                "( الدقيق – البيكنج بودر – الكاكاو – رشه ملح ) علي ثلاث مرات "
-                "حتي يختفي الخليط."
+                "( {{item:flour|grams}} دقيق – {{item:baking powder|grams}} بيكنج بودر – "
+                "{{item:coco powder|grams}} كاكاو – رشه ملح ) علي ثلاث مرات حتي يختفي "
+                "الخليط."
             ),
             "duration_mins": 5,
             "scaling_mode": "Per Batch",
             "requires_confirmation": 1,
         },
-        {
-            "title": "Combine oil and boiling water, add gradually",
-            "instruction": (
-                "Mix 2.250 kg oil with 2.250 kg boiling water in a container, "
-                "then add gradually to the mixer.\n"
-                "يخلط الزيت و الماء المغلي في وعاء ثم يضاف علي الخليط في العجان "
-                "تدريجيا."
-            ),
-            "duration_mins": 5,
-            "scaling_mode": "Per Batch",
-            "requires_confirmation": 1,
-        },
-        {
-            "title": "Stop the mixer, hand-stir, divide over 2 trays",
-            "instruction": (
-                "Stop the mixer, stir well by hand with a spoon, then divide "
-                "over 2 trays.\n"
-                "يفصل العجان و يقلب الخليط بمعلقه جيدا ثم يوزع علي 2 صاج."
-            ),
-            "duration_mins": 5,
-            "scaling_mode": "Per Batch",
-            "requires_confirmation": 1,
-        },
-        {
-            "title": "Bake at 180°C for 45 minutes",
-            "instruction": (
-                "Bake at 180°C for 45 minutes.\n"
-                "يسوي الخليط علي درجه حراره 180 لمده 45 دقيقه."
-            ),
-            "duration_mins": 45,
-            "scaling_mode": "Fixed",
-            "capture_type": "Temperature",
-            "capture_label": "Oven temperature (°C)",
-            "capture_min": 170,
-            "capture_max": 190,
-            "requires_confirmation": 1,
-        },
+        dict(_CAKE_OIL_WATER),
+        dict(_CAKE_DIVIDE),
+        dict(_BAKE_180_45),
     ],
 }
 
 RED_VELVET_CAKE = {
     "item_code": "Red Velvet Cake",
-    "version": 1,
+    "version": 2,
     "yield_percent": 98,
     "prep_time_mins": 60,
-    "equipment": "Planetary mixer (whisk then hand), 2 trays, oven",
-    "notes": "Batch = 9.278 Kg over 2 trays.",
+    "equipment": "Planetary mixer (whisk then hand), trays, oven",
+    "notes": "One BOM batch = 9.278 Kg.\n" + _CAKE_NOTE + "\n" + BASES_V2_NOTE,
     "steps": [
-        {
-            "title": "Whip eggs, sugar and vanilla to near-white",
-            "instruction": (
-                "Using the whisk, beat 45 eggs + 3.750 kg sugar + 30 g vanilla "
-                "on speed 3 until the colour is close to white.\n"
-                "يستخدم مضرب السلك في ضرب البيض و السكر و الفانيليا حتي تصل الي "
-                "لون اقرب الي الأبيض و المضرب علي سرعه 3."
-            ),
-            "duration_mins": 10,
-            "scaling_mode": "Per Batch",
-            "requires_confirmation": 1,
-        },
+        dict(_CAKE_WHIP),
         {
             "title": "Add the dry mix with the red colour, three additions",
             "instruction": (
-                "Drop to speed 1 and add the dry mix — 3.150 kg flour, 120 g "
-                "baking soda, 75 g cocoa powder, a pinch of salt, 45 g red "
-                "colour (دم الغزال) — in three additions until it disappears.\n"
+                "Drop to speed 1 and add the dry mix — {{item:flour|grams}} flour, "
+                "{{item:baking powder|grams}} baking powder, {{item:coco powder|grams}} "
+                "cocoa powder, a pinch of salt, {{item:red color|grams}} red colour "
+                "(دم الغزال) — in three additions until it disappears.\n"
                 "انزال المضرب علي سرعه 1 ثم يضاف اليه الخليط الجاف "
-                "( الدقيق – البيكنج بودر – الكاكاو – رشه ملح – اللون الاحمر ) "
-                "علي ثلاث مرات حتي يختفي الخليط."
+                "( {{item:flour|grams}} دقيق – {{item:baking powder|grams}} بيكنج بودر – "
+                "{{item:coco powder|grams}} كاكاو – رشه ملح – {{item:red color|grams}} "
+                "اللون الاحمر ) علي ثلاث مرات حتي يختفي الخليط."
             ),
             "duration_mins": 5,
             "scaling_mode": "Per Batch",
             "requires_confirmation": 1,
         },
-        {
-            "title": "Combine oil and boiling water, add gradually",
-            "instruction": (
-                "Mix 2.250 kg oil with 2.250 kg boiling water, then add "
-                "gradually to the mixer.\n"
-                "يخلط الزيت و الماء المغلي في وعاء ثم يضاف علي الخليط في العجان "
-                "تدريجيا."
-            ),
-            "duration_mins": 5,
-            "scaling_mode": "Per Batch",
-            "requires_confirmation": 1,
-        },
-        {
-            "title": "Stop the mixer, hand-stir, divide over 2 trays",
-            "instruction": (
-                "Stop the mixer, stir well by hand, divide over 2 trays.\n"
-                "يفصل العجان و يقلب الخليط بمعلقه جيدا ثم يوزع علي 2 صاج."
-            ),
-            "duration_mins": 5,
-            "scaling_mode": "Per Batch",
-            "requires_confirmation": 1,
-        },
-        {
-            "title": "Bake at 180°C for 45 minutes",
-            "instruction": (
-                "Bake at 180°C for 45 minutes.\n"
-                "يسوي الخليط علي درجه حراره 180 لمده 45 دقيقه."
-            ),
-            "duration_mins": 45,
-            "scaling_mode": "Fixed",
-            "capture_type": "Temperature",
-            "capture_label": "Oven temperature (°C)",
-            "capture_min": 170,
-            "capture_max": 190,
-            "requires_confirmation": 1,
-        },
+        dict(_CAKE_OIL_WATER),
+        dict(_CAKE_DIVIDE),
+        dict(_BAKE_180_45),
     ],
 }
 
 SAVOIARDI = {
     "item_code": "Savoiardi",
-    "version": 1,
+    "version": 2,
     "yield_percent": 80,
     "prep_time_mins": 45,
-    "equipment": "Large planetary mixer (whisk), small mixer, sieve, 2 silicone-lined trays, oven",
+    "equipment": "Large planetary mixer (whisk), small mixer, sieve, silicone-lined trays, oven",
     "notes": (
-        "Batch = 2.5 Kg from 30 eggs. Whites and yolks are whipped separately; "
-        "the whites are the structure, so stop the moment they hold stiff peaks."
+        "One BOM batch = 2.5 Kg from 30 eggs, two trays. Whites and yolks are "
+        "whipped separately; the whites are the structure, so stop the moment "
+        "they hold stiff peaks. The sugar is split in two equal halves: one into "
+        "the yolks, one into the whites. Salt is on the BOM but not in the "
+        "manual; it goes in with the dry mix.\n" + BASES_V2_NOTE
     ),
     "steps": [
         {
-            "title": "Preheat oven to 180°C and separate 30 eggs",
+            "title": "Preheat oven to 180°C and separate the eggs",
             "instruction": (
-                "Preheat the oven to 180°C. Separate 30 eggs, whites from "
-                "yolks. Split 900 g sugar into 450 g and 450 g.\n"
-                "يتم تشغيل الفرن للتسخين علي درجة حرارة 180. 30 بيضه مفصول "
-                "البياض عن الصفار. 900 جرام سكر مقسمين الي 450 و 450 جرام."
+                "Preheat the oven to 180°C. Separate {{item:eggs|count}} eggs, whites "
+                "from yolks. Split {{item:sugar|grams}} sugar into two halves of "
+                "{{item:sugar|grams|x0.5}}.\n"
+                "يتم تشغيل الفرن للتسخين علي درجة حرارة 180. {{item:eggs|count}} بيضه "
+                "مفصول البياض عن الصفار. {{item:sugar|grams}} سكر مقسمين نصين، كل نص "
+                "{{item:sugar|grams|x0.5}}."
             ),
             "duration_mins": 8,
             "scaling_mode": "Per Batch",
@@ -276,10 +270,12 @@ SAVOIARDI = {
         {
             "title": "Whip yolks with sugar, glucose and vanilla",
             "instruction": (
-                "To the yolks add 450 g sugar, 25 g glucose honey and 12 g "
-                "vanilla. Whip in the small mixer with the whisk until the "
-                "colour turns creamy.\n"
-                "يضاف الي الصفار 450 جرام سكر و 25 جرام عسل جلوكوز و 12 جرام "
+                "To the yolks add {{item:sugar|grams|x0.5}} sugar, "
+                "{{item:Glucose honey|grams}} glucose honey and "
+                "{{item:kamina vanilla|grams}} vanilla. Whip in the small mixer with "
+                "the whisk until the colour turns creamy.\n"
+                "يضاف الي الصفار {{item:sugar|grams|x0.5}} سكر و "
+                "{{item:Glucose honey|grams}} عسل جلوكوز و {{item:kamina vanilla|grams}} "
                 "فانيليا. و يخفق في المضرب الصغير بالسلك حتي يبقي اللون كريمي."
             ),
             "duration_mins": 5,
@@ -301,11 +297,11 @@ SAVOIARDI = {
         {
             "title": "Speed 3, add sugar gradually to stiff glossy peaks",
             "instruction": (
-                "Move to speed 3 and add the remaining 450 g sugar gradually "
-                "until the mix is glossy and — most importantly — holds stiff "
-                "peaks.\n"
-                "يتم نقل المضرب علي سرعة 3 و يتم إضافة السكر تدريجيا حتي وصول "
-                "الخليط الي لمعة و الأهم ان يكون قمم قوية."
+                "Move to speed 3 and add the other {{item:sugar|grams|x0.5}} sugar "
+                "gradually until the mix is glossy and — most importantly — holds "
+                "stiff peaks.\n"
+                "يتم نقل المضرب علي سرعة 3 و يتم إضافة {{item:sugar|grams|x0.5}} سكر "
+                "تدريجيا حتي وصول الخليط الي لمعة و الأهم ان يكون قمم قوية."
             ),
             "duration_mins": 6,
             "scaling_mode": "Per Batch",
@@ -352,10 +348,12 @@ SAVOIARDI = {
         {
             "title": "Sieve in flour, starch and baking powder on speed 1",
             "instruction": (
-                "Add the flour + starch + baking powder mix (480 g flour, 200 g "
-                "cornstarch, 3 g baking powder) through the sieve, on speed 1.\n"
-                "يتم إضافة خليط الدقيق و النشا و البيكنج بودر علي سرعة 1 عن "
-                "طريق المصفاة في المضرب."
+                "Add the dry mix ({{item:flour|grams}} flour, {{item:Cornstarch|grams}} "
+                "cornstarch, {{item:baking powder|grams}} baking powder, "
+                "{{item:Salt|grams}} salt) through the sieve, on speed 1.\n"
+                "يتم إضافة الخليط الجاف ({{item:flour|grams}} دقيق، "
+                "{{item:Cornstarch|grams}} نشا، {{item:baking powder|grams}} بيكنج بودر، "
+                "{{item:Salt|grams}} ملح) علي سرعة 1 عن طريق المصفاة في المضرب."
             ),
             "duration_mins": 3,
             "scaling_mode": "Per Batch",
@@ -374,12 +372,12 @@ SAVOIARDI = {
             "requires_confirmation": 1,
         },
         {
-            "title": "Divide over 2 silicone trays and bake 180°C / 15 min",
+            "title": "Divide over silicone trays and bake 180°C / 15 min",
             "instruction": (
-                "Divide over two silicone-lined trays and bake at 180°C for 15 "
-                "minutes.\n"
-                "يقسم الخليط علي صاجين اسفلهم سليكون و يدخل الفرن علي حرارة 180 "
-                "لمدة 15 دقيقة."
+                "Divide over silicone-lined trays, two trays for every 30 eggs, "
+                "and bake at 180°C for 15 minutes.\n"
+                "يقسم الخليط علي صاجات اسفلها سليكون، صاجين لكل 30 بيضة، و يدخل "
+                "الفرن علي حرارة 180 لمدة 15 دقيقة."
             ),
             "duration_mins": 15,
             "scaling_mode": "Fixed",
@@ -394,13 +392,15 @@ SAVOIARDI = {
 
 SPONGE_CAKE = {
     "item_code": "Sponge Cake",
-    "version": 1,
+    "version": 2,
     "yield_percent": 80,
     "prep_time_mins": 50,
-    "equipment": "Planetary mixer (whisk then paddle), sieve, 3 trays, oven",
+    "equipment": "Planetary mixer (whisk then paddle), sieve, trays, oven",
     "notes": (
-        "Batch = 4.0 Kg from 45 eggs. Note the last step: after cooling the "
-        "sheet is ground and dried at 140°C for 30 minutes, stirred halfway."
+        "One BOM batch = 4.0 Kg from 45 eggs, three trays. Note the last step: "
+        "after cooling the sheet is ground and dried at 140°C for 30 minutes, "
+        "stirred halfway. The manual says 9 g salt per batch; the BOM bills "
+        "5 g, which is what the step now quotes.\n" + BASES_V2_NOTE
     ),
     "steps": [
         {
@@ -413,20 +413,25 @@ SPONGE_CAKE = {
         {
             "title": "Prepare the dry mix",
             "instruction": (
-                "Combine 1050 g flour, 210 g cornstarch, 9 g salt and 9 g "
+                "Combine {{item:flour|grams}} flour, {{item:Cornstarch|grams}} "
+                "cornstarch, {{item:Salt|grams}} salt and {{item:baking powder|grams}} "
                 "baking powder to make the dry mix.\n"
-                "خلط الدقيق و النشا و الملح و البيكنج بودر لتجهيز الخليط الناشف."
+                "خلط {{item:flour|grams}} دقيق و {{item:Cornstarch|grams}} نشا و "
+                "{{item:Salt|grams}} ملح و {{item:baking powder|grams}} بيكنج بودر "
+                "لتجهيز الخليط الناشف."
             ),
             "duration_mins": 5,
             "scaling_mode": "Per Batch",
             "requires_confirmation": 1,
         },
         {
-            "title": "Whip 45 eggs with sugar and vanilla to triple volume",
+            "title": "Whip the eggs with sugar and vanilla to triple volume",
             "instruction": (
-                "Whip 45 eggs with 1260 g sugar and 50 g vanilla on speed 3 "
-                "with the whisk until the volume triples.\n"
-                "يتم خفق البيض مع السكر و الفانيليا حتي يتضاعف حجمة الي 3 اضعاف "
+                "Whip {{item:eggs|count}} eggs with {{item:sugar|grams}} sugar and "
+                "{{item:kamina vanilla|grams}} vanilla on speed 3 with the whisk "
+                "until the volume triples.\n"
+                "يتم خفق {{item:eggs|count}} بيضة مع {{item:sugar|grams}} سكر و "
+                "{{item:kamina vanilla|grams}} فانيليا حتي يتضاعف حجمة الي 3 اضعاف "
                 "بمضرب السلك علي سرعة 3."
             ),
             "duration_mins": 12,
@@ -452,12 +457,12 @@ SPONGE_CAKE = {
         {
             "title": "Oil liaison at 45–50°C, then return and stop",
             "instruction": (
-                "Take a portion of the batter and mix it thoroughly with 180 g "
-                "oil warmed to 45–50°C. Once combined, return it to the mixer, "
-                "fold briefly, then stop.\n"
-                "بعد ان يمتزج يتم اخذ جزء من الخليط ووضعة علي الزيت بدرجة حرارة "
-                "من 45 الي 50 و يتم تقليبة جيدا و بعد الامتزاج يعاد الخليط الي "
-                "المضرب و يتم التقليب قليلا ثم الفصل."
+                "Take a portion of the batter and mix it thoroughly with "
+                "{{item:oil|grams}} oil warmed to 45–50°C. Once combined, return it "
+                "to the mixer, fold briefly, then stop.\n"
+                "بعد ان يمتزج يتم اخذ جزء من الخليط ووضعة علي {{item:oil|grams}} زيت "
+                "بدرجة حرارة من 45 الي 50 و يتم تقليبة جيدا و بعد الامتزاج يعاد "
+                "الخليط الي المضرب و يتم التقليب قليلا ثم الفصل."
             ),
             "duration_mins": 5,
             "scaling_mode": "Per Batch",
@@ -468,12 +473,14 @@ SPONGE_CAKE = {
             "requires_confirmation": 1,
         },
         {
-            "title": "Hand-fold, divide over 3 trays, bake 175°C / 20 min",
+            "title": "Hand-fold, divide over the trays, bake 175°C / 20 min",
             "instruction": (
-                "Fold by hand a little to confirm it is combined, divide over 3 "
-                "trays and bake at 175°C for 20 minutes.\n"
-                "يتم التقليب يدويا قليلا للتاكد من الامتزاج و توزيع الخليط علي 3 "
-                "صاجات و ادخالة الي الفرن في درجة حراره 175 لمدة 20 دقيقة."
+                "Fold by hand a little to confirm it is combined, divide over the "
+                "trays, three trays for every 45 eggs, and bake at 175°C for 20 "
+                "minutes.\n"
+                "يتم التقليب يدويا قليلا للتاكد من الامتزاج و توزيع الخليط علي "
+                "الصاجات، 3 صاجات لكل 45 بيضة، و ادخالة الي الفرن في درجة حراره 175 "
+                "لمدة 20 دقيقة."
             ),
             "duration_mins": 20,
             "scaling_mode": "Fixed",

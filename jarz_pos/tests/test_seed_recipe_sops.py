@@ -195,6 +195,147 @@ class TestTiramisuRecipes(unittest.TestCase):
             self.assertIn("2026-08-08", recipe["notes"])
 
 
+# One BOM batch per base, as on production 2026-10-08 (eggs in piece, the rest
+# in Kg), with the batch yield in Kg.
+BASE_BOMS = {
+    "Cheesecake Mix": (9.52, {
+        "Remas cheese": 2.5, "milkana cheese": 2.5, "powder sugar": 1.5,
+        "kamina vanilla": 0.02, "dr baker cream": 3.0,
+    }),
+    "Fudge Cake": (9.258, {
+        "eggs": 30, "sugar": 2.5, "kamina vanilla": 0.018, "flour": 1.8,
+        "coco powder": 0.38, "baking powder": 0.08, "oil": 1.5, "Water (tap)": 1.5,
+    }),
+    "Red Velvet Cake": (9.278, {
+        "sugar": 2.5, "eggs": 30, "kamina vanilla": 0.018, "flour": 2.1,
+        "baking powder": 0.08, "coco powder": 0.05, "red color": 0.03, "oil": 1.5,
+        "Water (tap)": 1.5,
+    }),
+    "Savoiardi": (2.5, {
+        "eggs": 30, "sugar": 0.9, "kamina vanilla": 0.012, "Salt": 0.004,
+        "flour": 0.48, "Cornstarch": 0.2, "baking powder": 0.003, "Glucose honey": 0.025,
+    }),
+    "Sponge Cake": (4.0, {
+        "eggs": 45, "sugar": 1.26, "Salt": 0.005, "kamina vanilla": 0.05,
+        "flour": 1.05, "Cornstarch": 0.21, "baking powder": 0.009, "oil": 0.18,
+    }),
+}
+
+
+def render_base(item_code, batches=1):
+    from jarz_pos.scripts import seed_recipe_sops as seed
+    from jarz_pos.services.sop_rendering import render_sop
+
+    recipe = next(r for r in seed.RECIPES if r["item_code"] == item_code)
+    _, qty = BASE_BOMS[item_code]
+    return render_sop(
+        recipe,
+        batches=batches,
+        units=batches,
+        component_qty_map=qty,
+        uom_map={code: ("piece" if code == "eggs" else "Kg") for code in qty},
+        name_map={code: code for code in qty},
+    )
+
+
+class TestBaseRecipes(unittest.TestCase):
+    def test_bases_were_bumped_to_version_two(self):
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        versions = {r["item_code"]: r["version"] for r in seed.RECIPES if r["item_code"] in BASE_BOMS}
+        self.assertEqual({code: 2 for code in BASE_BOMS}, versions)
+
+    def test_no_base_leaves_a_token_unresolved(self):
+        for item_code in BASE_BOMS:
+            for batches in (1, 1.5):
+                rendered = render_base(item_code, batches)
+                self.assertEqual([], rendered["unresolved_tokens"], item_code)
+                for step in rendered["steps"]:
+                    self.assertNotIn("{{", step["title"] + step["instruction_html"], item_code)
+
+    def test_every_bom_line_is_quoted_somewhere(self):
+        # A BOM line the steps never mention is an ingredient the bench is not
+        # told when to add.
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        for item_code, (_, lines) in BASE_BOMS.items():
+            recipe = next(r for r in seed.RECIPES if r["item_code"] == item_code)
+            text = " ".join(s["instruction"] for s in recipe["steps"])
+            for code in lines:
+                self.assertIn("{{item:" + code + "|", text, (item_code, code))
+
+    def test_no_static_batch_figure_survived(self):
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        stale = ("2.5 kg", "1.5 kg", "3.750", "2.700", "2.250", "3.150", "450 g", "1050 g", "1260 g")
+        for recipe in seed.RECIPES:
+            if recipe["item_code"] not in BASE_BOMS:
+                continue
+            for step in recipe["steps"]:
+                for figure in stale:
+                    self.assertNotIn(figure, step["instruction"], (recipe["item_code"], figure))
+
+    def test_cheesecake_mix_one_batch(self):
+        rendered = render_base("Cheesecake Mix")
+        first = rendered["steps"][0]["instruction_html"]
+        self.assertIn("2500 g Milkana + 2500 g Remas, 1500 g powder sugar, 20 g vanilla", first)
+        self.assertIn("6520 g in the bowl", first)
+        self.assertIn("3000 g dr baker cream", rendered["steps"][2]["instruction_html"])
+
+    def test_cheesecake_mix_scales_with_the_run(self):
+        # 19.04 Kg typed on the Bases tab = two batches.
+        rendered = render_base("Cheesecake Mix", batches=2)
+        self.assertIn("13040 g in the bowl", rendered["steps"][0]["instruction_html"])
+        self.assertIn("6000 g dr baker cream", rendered["steps"][2]["instruction_html"])
+
+    def test_the_weigh_in_capture_has_no_fixed_bounds(self):
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        step = next(r for r in seed.RECIPES if r["item_code"] == "Cheesecake Mix")["steps"][0]
+        self.assertEqual("Total weighed into bowl (g)", step["capture_label"])
+        self.assertNotIn("capture_min", step)
+        self.assertNotIn("capture_max", step)
+
+    def test_cakes_follow_the_bom_not_the_manual_batch(self):
+        fudge = render_base("Fudge Cake")
+        self.assertIn("beat 30 eggs + 2500 g sugar + 18 g vanilla", fudge["steps"][0]["instruction_html"])
+        self.assertIn("1800 g flour, 80 g baking powder, 380 g cocoa", fudge["steps"][1]["instruction_html"])
+        self.assertIn("1500 g oil with 1500 g boiling water", fudge["steps"][2]["instruction_html"])
+
+        velvet = render_base("Red Velvet Cake", batches=1.5)
+        self.assertIn("beat 45 eggs + 3750 g sugar", velvet["steps"][0]["instruction_html"])
+        self.assertIn("45 g red colour", velvet["steps"][1]["instruction_html"])
+
+    def test_savoiardi_splits_the_sugar_in_half(self):
+        rendered = render_base("Savoiardi")
+        self.assertIn("Separate 30 eggs", rendered["steps"][0]["instruction_html"])
+        self.assertIn("900 g sugar into two halves of 450 g", rendered["steps"][0]["instruction_html"])
+        self.assertIn("add 450 g sugar, 25 g glucose honey and 12 g vanilla", rendered["steps"][1]["instruction_html"])
+        self.assertIn("other 450 g sugar", rendered["steps"][3]["instruction_html"])
+        self.assertIn("4 g salt", rendered["steps"][7]["instruction_html"])
+
+    def test_sponge_quotes_eggs_as_a_count(self):
+        rendered = render_base("Sponge Cake", batches=0.5)
+        self.assertIn("Whip 22.5 eggs with 630 g sugar", rendered["steps"][2]["instruction_html"])
+        self.assertIn("90 g oil", rendered["steps"][4]["instruction_html"])
+
+    def test_every_base_step_is_bilingual_with_figures_in_both(self):
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        for recipe in seed.RECIPES:
+            if recipe["item_code"] not in BASE_BOMS:
+                continue
+            for step in recipe["steps"]:
+                english, _, arabic = step["instruction"].partition("\n")
+                self.assertTrue(english.strip() and arabic.strip(), step["title"])
+                self.assertEqual(english.count("{{"), arabic.count("{{"), step["title"])
+
+    def test_shared_cake_steps_are_separate_copies(self):
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        self.assertIsNot(seed.FUDGE_CAKE["steps"][0], seed.RED_VELVET_CAKE["steps"][0])
+
+
 class TestItemsFilter(unittest.TestCase):
     def test_parse_items(self):
         from jarz_pos.scripts.seed_recipe_sops import _parse_items

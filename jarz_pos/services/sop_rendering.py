@@ -22,6 +22,11 @@ Token grammar
 ``{{item:COFFEE|qty|x0.3}}`` -> ``"0.024"``      (qty x 0.3, stock UOM)
 ``{{item:COFFEE|grams|each}}`` -> ``"8 g"``      (for ONE finished unit)
 ``{{item:MIX+SUGAR|grams}}``   -> ``"970 g"``    (both lines, summed)
+``{{item:eggs|count}}``        -> ``"45"``       (qty x batches, one decimal at most)
+
+``count`` is ``qty`` for things the bench counts rather than weighs (eggs in
+``piece``): one decimal, trailing ``.0`` dropped, no unit - "45 eggs", not
+"45.000 eggs".  Like ``qty`` it needs one shared UOM across a sum.
 
 ``grams`` is for the bench, which weighs in grams while the BOM is in Kg: it
 converts ``Kg``/``kg``/``Kilogram`` (x1000) and ``Gram``/``Gm``/``g`` (x1), rounds
@@ -97,9 +102,9 @@ _TOKEN_RE = re.compile(r"\{\{\s*item\s*:\s*([^{}]+?)\s*\}\}", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 _VARIANT_FULL = ""
-_VARIANTS = frozenset({_VARIANT_FULL, "qty", "name", "uom", "grams"})
+_VARIANTS = frozenset({_VARIANT_FULL, "qty", "name", "uom", "grams", "count"})
 # Only a numeric rendering can be multiplied; "x3" after a name is meaningless.
-_MULTIPLIABLE_VARIANTS = frozenset({"qty", "grams"})
+_MULTIPLIABLE_VARIANTS = frozenset({"qty", "grams", "count"})
 _MULTIPLIER_RE = re.compile(r"^x(\d+(?:\.\d+)?|\.\d+)$", re.IGNORECASE)
 _EACH = "each"
 _SUM_SEPARATOR = "+"
@@ -296,13 +301,18 @@ def format_grams(qty: float, uom: Any) -> Optional[str]:
     return _grams_text(grams)
 
 
-def _grams_text(grams: float) -> str:
-    text = f"{grams:.1f}"
+def _one_decimal(value: float) -> str:
+    """``53.333`` -> ``"53.3"``, ``45.0`` -> ``"45"``."""
+    text = f"{value:.1f}"
     if text.endswith(".0"):
         text = text[:-2]
     if text == "-0":
         text = "0"
-    return f"{text} g"
+    return text
+
+
+def _grams_text(grams: float) -> str:
+    return f"{_one_decimal(grams)} g"
 
 
 def _lookup_code(
@@ -431,10 +441,12 @@ def render_instruction(
         if variant == "name":
             return name_text
 
-        # qty, uom and the full form quote ONE unit, so a sum must share it.
+        # qty, count, uom and the full form quote ONE unit, so a sum must share it.
         if len({u.lower() for u in uoms}) > 1:
             _remember(unresolved, str(payload).strip())
             return match.group(0)
+        if variant == "count":
+            return _one_decimal(sum(quantities))
         qty_text = f"{sum(quantities):.{places}f}"
         uom_text = uoms[0]
 
