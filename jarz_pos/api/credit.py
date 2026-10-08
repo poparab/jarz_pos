@@ -624,6 +624,66 @@ def get_credit_ledger(
 
 
 @frappe.whitelist(allow_guest=False)
+def get_invoice_shop_branches(customer: str, invoices: Any = None) -> Dict[str, Any]:
+    """Which of the shop's branches (delivery doors) each invoice went to.
+
+    The account statement groups a shop's orders under its branches. Asked for
+    at send time, for the chosen invoices only, rather than stamped on every
+    ledger row: the ledger lists every credit customer, and resolving a shop's
+    branches reads its whole address book.
+
+    Only the caller's own POS Profiles' invoices of *customer* are answered;
+    any other name is simply left out. An invoice that matches no branch of a
+    multi-branch shop comes back with an empty ``branch_name``.
+
+    Returns ``{"success", "branch_count", "invoices": {name: {branch, branch_name}}}``.
+    """
+    _ensure_credit_ledger_access()
+    customer = str(customer or "").strip()
+    if not customer:
+        frappe.throw(_("Customer is required"))
+    names = invoices
+    if isinstance(names, str):
+        names = frappe.parse_json(names) if names.strip() else []
+    names = [str(n).strip() for n in names or [] if str(n or "").strip()][:200]
+    allowed = list(_allowed_profiles() or [])
+    if not names or not allowed:
+        return {"success": True, "branch_count": 0, "invoices": {}}
+
+    rows = (
+        frappe.get_all(
+            "Sales Invoice",
+            filters={
+                "name": ["in", names],
+                "customer": customer,
+                "docstatus": 1,
+                _branch_field(): ["in", allowed],
+            },
+            fields=["name", "shipping_address_name", "customer_address"],
+        )
+        or []
+    )
+    from jarz_pos.services.b2b_branches import customer_branches, tag_invoice_branches
+
+    try:
+        branch_count = len(customer_branches(customer))
+    except Exception:
+        branch_count = 0
+    tagged = tag_invoice_branches(customer, [dict(r) for r in rows])
+    return {
+        "success": True,
+        "branch_count": branch_count,
+        "invoices": {
+            str(r.get("name")): {
+                "branch": str(r.get("branch") or ""),
+                "branch_name": str(r.get("branch_name") or ""),
+            }
+            for r in tagged
+        },
+    }
+
+
+@frappe.whitelist(allow_guest=False)
 def get_customer_credit_profile(customer: str) -> Dict[str, Any]:
     """Whether this shop may order on credit, and how much room is left.
 

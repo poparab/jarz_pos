@@ -324,6 +324,9 @@ jobs:
             # unpaid Instapay order still routes to the online handler, because
             # the credit branch sits directly above it in `dispatch_settlement`.
             test_credit_orders
+            # The shop branch each invoice went to, for the statement's
+            # per-branch sections; scoped to the caller's branches.
+            test_credit_invoice_shop_branches
             # The operator-chosen posting date AND time. One shared splitter
             # feeds every write that lets the till pick a moment (transfers,
             # counts, purchases, cash transfers, expenses, advances), so a
