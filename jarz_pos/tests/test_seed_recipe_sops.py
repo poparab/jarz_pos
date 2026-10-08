@@ -67,13 +67,26 @@ class TestTiramisuRecipes(unittest.TestCase):
         self.assertEqual(["Tiramisu Large", "Tiramisu Medium", "Tiramisu Small"], sorted(codes))
         self.assertFalse(hasattr(seed, "TIRAMISU_ASSEMBLY"))
 
-    def test_medium_is_version_two_so_a_v1_is_superseded_not_overwritten(self):
+    def test_versions_were_bumped_so_the_old_per_size_sops_stay_on_file(self):
         from jarz_pos.scripts import seed_recipe_sops as seed
 
         versions = {r["item_code"]: r["version"] for r in seed.RECIPES if r["item_code"].startswith("Tiramisu")}
         self.assertEqual(
-            {"Tiramisu Large": 1, "Tiramisu Medium": 2, "Tiramisu Small": 1}, versions
+            {"Tiramisu Large": 2, "Tiramisu Medium": 3, "Tiramisu Small": 2}, versions
         )
+
+    def test_all_sizes_share_the_same_steps_word_for_word(self):
+        # The recipe sheet merges SOPs whose steps are identical; the sizes are
+        # made together, so one difference would split the sheet in three.
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        large, medium, small = (
+            next(r for r in seed.RECIPES if r["item_code"] == code)["steps"]
+            for code in ("Tiramisu Large", "Tiramisu Medium", "Tiramisu Small")
+        )
+        self.assertEqual(large, medium)
+        self.assertEqual(large, small)
+        self.assertEqual(5, len(large))
 
     def test_no_recipe_leaves_a_token_unresolved(self):
         for item_code in BOM_PER_JAR:
@@ -90,9 +103,8 @@ class TestTiramisuRecipes(unittest.TestCase):
         self.assertIn("72 g", step_text(rendered, 2))  # sugar
         self.assertIn("898 g", step_text(rendered, 3))  # cheesecake mix
         self.assertIn("72 g", step_text(rendered, 3))  # syrup into the cream = sugar weight
-        self.assertIn("400 g", step_text(rendered, 4))  # savoiardi
-        self.assertIn("240 g", step_text(rendered, 4))  # all the coffee, in total
-        self.assertIn("30 g", step_text(rendered, 6))  # cocoa
+        self.assertIn("970 g", step_text(rendered, 3))  # cream = mix + syrup
+        self.assertIn("240 g", step_text(rendered, 3))  # the rest goes onto the savoiardi
 
     def test_medium_run_of_ten_jars(self):
         _, rendered = render_recipe("Tiramisu Medium")
@@ -101,8 +113,7 @@ class TestTiramisuRecipes(unittest.TestCase):
         self.assertIn("160 g", step_text(rendered, 1))
         self.assertIn("48 g", step_text(rendered, 2))
         self.assertIn("652 g", step_text(rendered, 3))
-        self.assertIn("280 g", step_text(rendered, 4))
-        self.assertIn("20 g", step_text(rendered, 6))
+        self.assertIn("700 g", step_text(rendered, 3))
 
     def test_small_run_of_ten_jars(self):
         _, rendered = render_recipe("Tiramisu Small")
@@ -111,8 +122,7 @@ class TestTiramisuRecipes(unittest.TestCase):
         self.assertIn("106.7 g", step_text(rendered, 1))
         self.assertIn("32 g", step_text(rendered, 2))
         self.assertIn("434.7 g", step_text(rendered, 3))
-        self.assertIn("186.7 g", step_text(rendered, 4))
-        self.assertIn("13.3 g", step_text(rendered, 6))
+        self.assertIn("466.7 g", step_text(rendered, 3))
 
     def test_run_totals_scale_with_the_jar_count(self):
         _, one = render_recipe("Tiramisu Large", jars=1)
@@ -123,19 +133,29 @@ class TestTiramisuRecipes(unittest.TestCase):
         self.assertIn("80 g", step_text(ten, 1))
         self.assertIn("240 g", step_text(ten, 1))
 
-    def test_per_jar_portions_are_static_spec_text(self):
+    def test_the_jar_step_quotes_one_jar_whatever_the_run(self):
         expectations = {
-            "Tiramisu Large": ("97 g", "24 g", "40 g", "3 g"),
-            "Tiramisu Medium": ("70 g", "16 g", "28 g", "2 g"),
-            "Tiramisu Small": ("46.7 g", "10.7 g", "18.7 g", "1.3 g"),
+            "Tiramisu Large": ("40 g", "24 g", "97 g", "3 g"),
+            "Tiramisu Medium": ("28 g", "16 g", "70 g", "2 g"),
+            "Tiramisu Small": ("18.7 g", "10.7 g", "46.7 g", "1.3 g"),
         }
-        for item_code, (cream, syrup, savoiardi, cocoa) in expectations.items():
-            _, rendered = render_recipe(item_code)
-            self.assertIn(f"Each jar takes {cream} of cream", step_text(rendered, 3), item_code)
-            self.assertIn(f"({savoiardi} per jar)", step_text(rendered, 4), item_code)
-            self.assertIn(f"({syrup} per jar)", step_text(rendered, 4), item_code)
-            self.assertIn(f"Fill each jar with {cream} of cream", step_text(rendered, 5), item_code)
-            self.assertIn(f"({cocoa} per jar)", step_text(rendered, 6), item_code)
+        for item_code, (savoiardi, syrup, cream, cocoa) in expectations.items():
+            for jars in (1, 10):
+                _, rendered = render_recipe(item_code, jars=jars)
+                english = step_text(rendered, 4).split("\n")[1]
+                self.assertEqual(
+                    f"{savoiardi} savoiardi + {syrup} coffee, then {cream} cream, "
+                    f"then {cocoa} cocoa on top.",
+                    english,
+                    (item_code, jars),
+                )
+
+    def test_notes_keep_the_per_jar_spec(self):
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        recipe = next(r for r in seed.RECIPES if r["item_code"] == "Tiramisu Small")
+        self.assertIn("cream 46.7 g, savoiardi 18.7 g", recipe["notes"])
+        self.assertIn("savoiardi 10.7 g, cocoa 1.3 g", recipe["notes"])
 
     def test_the_liquid_coffee_weigh_in_has_no_fixed_bounds(self):
         # The figure scales with the run, so a min/max would reject real runs.
@@ -150,17 +170,22 @@ class TestTiramisuRecipes(unittest.TestCase):
         from jarz_pos.scripts import seed_recipe_sops as seed
 
         for recipe in seed.TIRAMISU_SOPS:
-            self.assertEqual(7, len(recipe["steps"]), recipe["item_code"])
             for step in recipe["steps"]:
                 english, _, arabic = step["instruction"].partition("\n")
                 self.assertTrue(english.strip() and arabic.strip(), step["title"])
                 self.assertEqual(1, step["requires_confirmation"])
 
-    def test_the_run_cocoa_step_scales_per_unit(self):
+    def test_bowl_steps_are_fixed_and_jar_steps_per_unit(self):
         from jarz_pos.scripts import seed_recipe_sops as seed
 
-        recipe = next(r for r in seed.RECIPES if r["item_code"] == "Tiramisu Large")
-        self.assertEqual("Per Unit", recipe["steps"][5]["scaling_mode"])
+        modes = [s["scaling_mode"] for s in seed.TIRAMISU_STEPS]
+        self.assertEqual(["Fixed", "Fixed", "Fixed", "Per Unit", "Per Unit"], modes)
+
+    def test_each_sop_gets_its_own_copy_of_the_steps(self):
+        from jarz_pos.scripts import seed_recipe_sops as seed
+
+        first, second = seed.TIRAMISU_SOPS[0]["steps"], seed.TIRAMISU_SOPS[1]["steps"]
+        self.assertIsNot(first[0], second[0])
 
     def test_notes_record_the_owner_method_date(self):
         from jarz_pos.scripts import seed_recipe_sops as seed

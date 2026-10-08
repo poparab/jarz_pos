@@ -319,6 +319,128 @@ class TestMultiplierSegment(unittest.TestCase):
         self.assertEqual("1.830 Kg Pistachio spread", out)
 
 
+# A jar BOM: qty 10 jars per batch, so one jar is a tenth of each line.
+JAR = {
+    "component_qty_map": {"MIX": 0.898, "SUGAR": 0.072, "COFFEE": 0.08, "LID": 10, "WATER": 1.5},
+    "uom_map": {"MIX": "Kg", "SUGAR": "Kg", "COFFEE": "Kg", "LID": "Nos", "WATER": "Litre"},
+    "name_map": {"MIX": "Cheesecake Mix", "SUGAR": "Powder sugar", "COFFEE": "Coffee beans", "LID": "Lid", "WATER": "Water"},
+}
+
+
+class TestEachModifier(unittest.TestCase):
+    def test_each_quotes_one_unit_whatever_the_batch_count(self):
+        for batches in (1, 3, 0.5):
+            out, unresolved = render("{{item:MIX|grams|each}}", batches=batches, units_per_batch=10, **JAR)
+            self.assertEqual("89.8 g", out, batches)
+            self.assertEqual([], unresolved)
+
+    def test_each_and_a_multiplier_combine_in_either_order(self):
+        for token in ("{{item:COFFEE|grams|x3|each}}", "{{item:COFFEE|grams|each|x3}}"):
+            out, unresolved = render(token, batches=4, units_per_batch=10, **JAR)
+            self.assertEqual("24 g", out, token)
+            self.assertEqual([], unresolved)
+
+    def test_each_on_qty_keeps_the_uom_out(self):
+        out, _ = render("{{item:LID|qty|each}}", units_per_batch=10, **JAR)
+        self.assertEqual("1.000", out)
+
+    def test_each_without_units_per_batch_is_unresolved(self):
+        for per_batch in (None, 0, -1):
+            out, unresolved = render("{{item:MIX|grams|each}}", units_per_batch=per_batch, **JAR)
+            self.assertEqual("{{item:MIX|grams|each}}", out, per_batch)
+            self.assertEqual(["MIX|grams|each"], unresolved)
+
+    def test_each_twice_is_invalid(self):
+        out, unresolved = render("{{item:MIX|grams|each|each}}", units_per_batch=10, **JAR)
+        self.assertEqual("{{item:MIX|grams|each|each}}", out)
+        self.assertEqual(1, len(unresolved))
+
+    def test_each_on_name_uom_or_full_form_is_invalid(self):
+        for token in ("{{item:MIX|name|each}}", "{{item:MIX|uom|each}}", "{{item:MIX||each}}", "{{item:MIX|each}}"):
+            out, unresolved = render(token, units_per_batch=10, **JAR)
+            self.assertEqual(token, out, token)
+            self.assertEqual(1, len(unresolved), token)
+
+    def test_uses_each(self):
+        from jarz_pos.services.sop_rendering import uses_each
+
+        self.assertTrue(uses_each("Fill {{item:MIX|grams|each}} per jar"))
+        self.assertTrue(uses_each("{{ item : MIX | grams | x3 | EACH }}"))
+        self.assertFalse(uses_each("Mix {{item:MIX|grams}} for each jar"))
+        self.assertFalse(uses_each(""))
+        self.assertFalse(uses_each(None))
+
+
+class TestSumTokens(unittest.TestCase):
+    def test_grams_of_a_sum(self):
+        out, unresolved = render("{{item:MIX+SUGAR|grams}}", **JAR)
+        self.assertEqual("970 g", out)
+        self.assertEqual([], unresolved)
+
+    def test_a_sum_scales_with_batches_multipliers_and_each(self):
+        out, _ = render("{{item:MIX+SUGAR|grams}}", batches=2, **JAR)
+        self.assertEqual("1940 g", out)
+        out, _ = render("{{item:MIX+SUGAR|grams|each}}", batches=2, units_per_batch=10, **JAR)
+        self.assertEqual("97 g", out)
+
+    def test_grams_of_a_sum_across_mass_units(self):
+        params = {
+            "component_qty_map": {"A": 0.5, "B": 250},
+            "uom_map": {"A": "Kg", "B": "Gram"},
+            "name_map": {"A": "A", "B": "B"},
+        }
+        out, unresolved = render("{{item:A+B|grams}}", **params)
+        self.assertEqual("750 g", out)
+        self.assertEqual([], unresolved)
+
+    def test_qty_of_a_sum_needs_one_shared_uom(self):
+        out, unresolved = render("{{item:MIX+SUGAR|qty}}", **JAR)
+        self.assertEqual("0.970", out)
+        self.assertEqual([], unresolved)
+
+        out, unresolved = render("{{item:MIX+LID|qty}}", **JAR)
+        self.assertEqual("{{item:MIX+LID|qty}}", out)
+        self.assertEqual(["MIX+LID|qty"], unresolved)
+
+    def test_grams_of_a_sum_with_a_non_mass_part_is_unresolved(self):
+        out, unresolved = render("{{item:MIX+WATER|grams}}", **JAR)
+        self.assertEqual("{{item:MIX+WATER|grams}}", out)
+        self.assertEqual(["MIX+WATER|grams"], unresolved)
+
+    def test_an_unknown_part_leaves_the_sum_unresolved(self):
+        out, unresolved = render("{{item:MIX+NOPE|grams}}", **JAR)
+        self.assertEqual("{{item:MIX+NOPE|grams}}", out)
+        # Same as any unknown code: the code alone is reported.
+        self.assertEqual(["MIX+NOPE"], unresolved)
+
+    def test_the_name_of_a_sum_joins_the_names(self):
+        out, _ = render("{{item:MIX+SUGAR|name}}", **JAR)
+        self.assertEqual("Cheesecake Mix + Powder sugar", out)
+
+    def test_a_code_that_really_contains_a_plus_resolves_as_itself(self):
+        params = {
+            "component_qty_map": {"MIX+SUGAR": 0.1, "MIX": 1, "SUGAR": 1},
+            "uom_map": {"MIX+SUGAR": "Kg", "MIX": "Kg", "SUGAR": "Kg"},
+            "name_map": {"MIX+SUGAR": "Premix", "MIX": "Mix", "SUGAR": "Sugar"},
+        }
+        out, _ = render("{{item:MIX+SUGAR|grams}}", **params)
+        self.assertEqual("100 g", out)
+
+
+class TestFormatQuantity(unittest.TestCase):
+    def test_mass_is_shown_in_grams(self):
+        from jarz_pos.services.sop_rendering import format_quantity
+
+        self.assertEqual("1224 g", format_quantity(1.224, "Kg"))
+        self.assertEqual("46.7 g", format_quantity(46.6667, "Gram"))
+
+    def test_other_units_keep_their_uom(self):
+        from jarz_pos.services.sop_rendering import format_quantity
+
+        self.assertEqual("28 Nos", format_quantity(28.0, "Nos"))
+        self.assertEqual("1.5 Litre", format_quantity(1.5, "Litre"))
+
+
 class TestScaleDuration(unittest.TestCase):
     def _call(self, duration=10.0, mode="Fixed", batches=3, units=30):
         from jarz_pos.services.sop_rendering import scale_duration

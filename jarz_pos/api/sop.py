@@ -22,6 +22,7 @@ Two behaviours here are load-bearing and easy to break later:
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -276,12 +277,25 @@ def _build_component_maps(
     If the direct read fails it is logged (distinct title) and layer 2 alone is
     used, which is the behaviour before the direct reader existed.
     """
+    qty_map, uom_map, name_map, _direct = _build_component_maps_with_direct(bom, company, bom_qty)
+    return qty_map, uom_map, name_map
+
+
+def _build_component_maps_with_direct(
+    bom: Optional[str], company: Optional[str], bom_qty: float
+) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, str], List[str]]:
+    """``_build_component_maps`` plus the BOM's direct-line codes, in BOM order.
+
+    The recipe sheet lists what the bench takes out of the store - the direct
+    lines - and must not also list the raw ingredients *inside* the phantom
+    Cheesecake Mix, which layer 2 adds only so tokens can name them.
+    """
     qty_map: Dict[str, float] = {}
     uom_map: Dict[str, str] = {}
     name_map: Dict[str, str] = {}
 
     if not bom:
-        return qty_map, uom_map, name_map
+        return qty_map, uom_map, name_map, []
 
     try:
         direct_rows = _resolve_direct_bom_lines(bom) or []
@@ -301,7 +315,8 @@ def _build_component_maps(
         uom_map[code] = _field(row, "stock_uom") or ""
         name_map[code] = _field(row, "item_name") or code
 
-    direct_codes = set(qty_map)
+    direct_order = list(qty_map)
+    direct_codes = set(direct_order)
 
     try:
         rows = _resolve_required_material_rows()(bom, company, bom_qty, fetch_exploded=0) or []
@@ -312,7 +327,7 @@ def _build_component_maps(
             title="JARZ SOP – BOM component read failed",
             message=f"bom={bom} company={company}\n{frappe.get_traceback()}",
         )
-        return qty_map, uom_map, name_map
+        return qty_map, uom_map, name_map, direct_order
 
     for row in rows:
         code = str(_field(row, "item_code") or "").strip()
@@ -325,7 +340,8 @@ def _build_component_maps(
         uom_map[code] = _field(row, "uom") or ""
         name_map[code] = _field(row, "item_name") or code
 
-    return qty_map, uom_map, name_map
+    # No direct lines read: every code is all there is to list.
+    return qty_map, uom_map, name_map, (direct_order or list(qty_map))
 
 
 def _build_payload(
@@ -426,6 +442,217 @@ def _resolve_sop_for_work_order(wo: Mapping[str, Any]) -> Tuple[Any, Optional[st
     if not active:
         return None, None, False
     return _resolve_sop_doc(active), None, False
+
+
+# ── Recipe sheet: every size made together ─────────────────────────────
+#
+# The kitchen makes Tiramisu Large, Medium and Small in one go: one pot of
+# coffee, one bowl of cream, then the jars.  One SOP per size, opened one at a
+# time, made the bench add three sets of numbers up in their heads.  The sheet
+# groups the items whose SOP steps are word-for-word the same into one
+# "family", quotes the bowl steps for the whole run (tokens are linear, so the
+# sum of the per-size figures is exact) and splits only the steps written with
+# ``|each`` tokens into one line per size.
+
+_MAX_SHEET_LINES = 100
+
+
+def _parse_sheet_lines(lines: Any) -> Dict[str, float]:
+    """``[{"item_code", "qty"}]`` (a list, its JSON, or ``{code: qty}``).
+
+    Returns ``{code: qty}`` in first-seen order, positive quantities only, a
+    repeated code summed.
+    """
+    data = lines
+    if isinstance(data, bytes):
+        data = data.decode("utf-8", "replace")
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return {}
+        try:
+            data = json.loads(text)
+        except ValueError:
+            frappe.throw(_("lines must be a JSON list of {item_code, qty}"))
+    if data is None:
+        return {}
+    if isinstance(data, dict):
+        data = [{"item_code": code, "qty": qty} for code, qty in data.items()]
+    if not isinstance(data, list):
+        frappe.throw(_("lines must be a JSON list of {item_code, qty}"))
+    if len(data) > _MAX_SHEET_LINES:
+        frappe.throw(_("Too many lines: at most {0}").format(_MAX_SHEET_LINES))
+
+    wanted: Dict[str, float] = {}
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("item_code") or "").strip()
+        qty = rendering.to_float(row.get("qty"), 0.0)
+        if code and qty > 0:
+            wanted[code] = wanted.get(code, 0.0) + qty
+    return wanted
+
+
+def _clean_number(value: float) -> Any:
+    """``28.0`` -> ``28``; anything fractional stays a float."""
+    return int(value) if float(value).is_integer() else round(value, 6)
+
+
+def _sheet_entry(item_code: str, qty: float) -> Optional[Dict[str, Any]]:
+    """One item's SOP and per-batch component maps, or ``None`` with no SOP."""
+    sop_name = _resolve_active_sop(item_code)
+    if not sop_name:
+        return None
+    sop = _sop_to_dict(_resolve_sop_doc(sop_name))
+    if not sop["steps"]:
+        return None
+
+    # Same BOM precedence as ``_build_payload``: current default, then snapshot.
+    bom = _resolve_default_bom(item_code) or sop.get("bom")
+    bom_row = _resolve_bom_row(bom) or {}
+    bom_qty = rendering.to_float(bom_row.get("quantity"), 1.0) or 1.0
+    qty_map, uom_map, name_map, direct = _build_component_maps_with_direct(
+        bom, bom_row.get("company"), bom_qty
+    )
+    return {
+        "item_code": item_code,
+        "item_name": sop.get("item_name") or item_code,
+        "qty": qty,
+        "sop": sop.get("name"),
+        "bom_qty": bom_qty,
+        "batches": qty / bom_qty,
+        "steps": sop["steps"],
+        "qty_map": qty_map,
+        "uom_map": uom_map,
+        "name_map": name_map,
+        "direct": direct,
+    }
+
+
+def _steps_signature(steps: List[Mapping[str, Any]]) -> Tuple[Tuple[str, str], ...]:
+    return tuple(
+        (
+            rendering.normalise_markup(step.get("title")).strip(),
+            rendering.normalise_markup(step.get("instruction")).strip(),
+        )
+        for step in steps
+    )
+
+
+def _unit_mass(entry: Mapping[str, Any]) -> float:
+    """Grams in one finished unit, over the direct lines: sorts Large first."""
+    total = 0.0
+    for code in entry["direct"]:
+        grams = rendering.to_grams(
+            rendering.to_float(entry["qty_map"].get(code), 0.0) / entry["bom_qty"],
+            entry["uom_map"].get(code),
+        )
+        total += grams or 0.0
+    return total
+
+
+def _common_title(names: List[str]) -> str:
+    """Shared leading words: "Tiramisu Large" + "Tiramisu Small" -> "Tiramisu"."""
+    split = [str(name).split() for name in names]
+    prefix: List[str] = []
+    for words in zip(*split):
+        if all(word == words[0] for word in words):
+            prefix.append(words[0])
+        else:
+            break
+    return " ".join(prefix) or str(names[0])
+
+
+def _render_sheet(entries: List[Dict[str, Any]], to_text) -> Dict[str, Any]:
+    entries = sorted(entries, key=lambda e: (-_unit_mass(e), e["item_code"]))
+
+    # Whole-run maps.  ``batches=1`` against these renders the run total.
+    run_qty: Dict[str, float] = {}
+    run_uom: Dict[str, str] = {}
+    run_name: Dict[str, str] = {}
+    listed: List[str] = []
+    for entry in entries:
+        for code, per_batch in entry["qty_map"].items():
+            run_qty[code] = run_qty.get(code, 0.0) + per_batch * entry["batches"]
+            run_uom.setdefault(code, entry["uom_map"].get(code) or "")
+            run_name.setdefault(code, entry["name_map"].get(code) or code)
+        for code in entry["direct"]:
+            if code not in listed:
+                listed.append(code)
+
+    run_kwargs = {"component_qty_map": run_qty, "uom_map": run_uom, "name_map": run_name, "batches": 1}
+    unresolved: List[str] = []
+
+    def keep(tokens: List[str]) -> None:
+        for token in tokens:
+            if token not in unresolved:
+                unresolved.append(token)
+
+    steps: List[Dict[str, Any]] = []
+    for position, raw in enumerate(entries[0]["steps"], start=1):
+        title_html, tokens = rendering.render_instruction(raw.get("title") or "", **run_kwargs)
+        keep(tokens)
+        instruction = raw.get("instruction") or ""
+
+        text: Optional[str] = None
+        per_item: Optional[List[Dict[str, Any]]] = None
+        if rendering.uses_each(instruction):
+            per_item = []
+            for entry in entries:
+                html, tokens = rendering.render_instruction(
+                    instruction,
+                    component_qty_map=entry["qty_map"],
+                    uom_map=entry["uom_map"],
+                    name_map=entry["name_map"],
+                    batches=entry["batches"],
+                    units_per_batch=entry["bom_qty"],
+                )
+                keep(tokens)
+                per_item.append(
+                    {
+                        "item_code": entry["item_code"],
+                        "item_name": entry["item_name"],
+                        "qty": _clean_number(entry["qty"]),
+                        "text": to_text(html),
+                    }
+                )
+        else:
+            html, tokens = rendering.render_instruction(instruction, **run_kwargs)
+            keep(tokens)
+            text = to_text(html)
+
+        steps.append(
+            {
+                "step_no": _coerce_int(raw.get("step_no"), position) or position,
+                "title": to_text(title_html),
+                "text": text,
+                "per_item": per_item,
+                "capture_label": raw.get("capture_label") or None,
+            }
+        )
+
+    return {
+        "title": _common_title([e["item_name"] for e in entries]),
+        "sops": [e["sop"] for e in entries],
+        "items": [
+            {"item_code": e["item_code"], "item_name": e["item_name"], "qty": _clean_number(e["qty"])}
+            for e in entries
+        ],
+        "total_qty": _clean_number(sum(e["qty"] for e in entries)),
+        "ingredients": [
+            {
+                "item_code": code,
+                "item_name": run_name.get(code) or code,
+                "qty": round(run_qty.get(code, 0.0), 6),
+                "uom": run_uom.get(code) or "",
+                "display": rendering.format_quantity(run_qty.get(code, 0.0), run_uom.get(code)),
+            }
+            for code in listed
+        ],
+        "steps": steps,
+        "unresolved_tokens": unresolved,
+    }
 
 
 # ── Whitelisted endpoints ───────────────────────────────────────────────
@@ -614,6 +841,57 @@ def record_sop_step_capture(
         "value_text": value_text,
         "attachment": attachment,
     }
+
+
+@frappe.whitelist()
+def get_recipe_sheet(lines: Any = None) -> Dict[str, Any]:
+    """One combined work sheet for everything being made, per recipe family.
+
+    ``lines`` is ``[{"item_code": ..., "qty": jars}]`` (or its JSON).  Items
+    with no active SOP are skipped, and one that fails to render is logged
+    and skipped, so a single broken SOP never blanks the whole sheet.  The
+    response shape is a contract with the Flutter client::
+
+        {"sheets": [{"title", "sops", "items": [{item_code, item_name, qty}],
+                     "total_qty", "ingredients": [{item_code, item_name, qty,
+                     uom, display}], "steps": [{step_no, title, text,
+                     per_item: [{item_code, item_name, qty, text}] | null,
+                     capture_label}], "unresolved_tokens"}]}
+
+    A step has either ``text`` (bowl step, whole run) or ``per_item`` (written
+    with ``|each`` tokens: one line per size), never both.
+    """
+    _ensure_production_view_access()
+
+    entries: List[Dict[str, Any]] = []
+    for item_code, qty in _parse_sheet_lines(lines).items():
+        try:
+            entry = _sheet_entry(item_code, qty)
+        except Exception:
+            frappe.log_error(
+                title="JARZ SOP – recipe sheet entry failed",
+                message=f"item_code={item_code}\n{frappe.get_traceback()}",
+            )
+            continue
+        if entry:
+            entries.append(entry)
+
+    families: Dict[Tuple[Tuple[str, str], ...], List[Dict[str, Any]]] = {}
+    for entry in entries:
+        families.setdefault(_steps_signature(entry["steps"]), []).append(entry)
+
+    to_text = _make_plain_text_fn()
+    sheets: List[Dict[str, Any]] = []
+    for group in families.values():
+        try:
+            sheets.append(_render_sheet(group, to_text))
+        except Exception:
+            frappe.log_error(
+                title="JARZ SOP – recipe sheet render failed",
+                message=f"items={[e['item_code'] for e in group]}\n{frappe.get_traceback()}",
+            )
+    sheets.sort(key=lambda sheet: str(sheet["title"]).lower())
+    return {"sheets": sheets}
 
 
 @frappe.whitelist()

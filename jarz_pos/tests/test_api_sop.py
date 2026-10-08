@@ -965,5 +965,238 @@ class TestAccessGate(unittest.TestCase):
                 sop._ensure_production_view_access()
 
 
+# ── Recipe sheet ────────────────────────────────────────────────────────
+
+# A two-step "jar" SOP shared by two sizes: one bowl step quoting the whole
+# run, one ``|each`` step quoting one jar.  Per-jar BOM lines in Kg, BOM qty 1.
+JAR_STEPS = [
+    StubRow(
+        step_no=1,
+        title="Make the cream",
+        instruction="<p>Mix {{item:MIX|grams}} with {{item:SUGAR|grams}} = {{item:MIX+SUGAR|grams}}.</p>",
+        scaling_mode="Fixed",
+        capture_label="Cream weighed (g)",
+    ),
+    StubRow(
+        step_no=2,
+        title="Fill each jar",
+        instruction="<p>{{item:MIX+SUGAR|grams|each}} cream, {{item:COCOA|grams|each}} cocoa.</p>",
+        scaling_mode="Per Unit",
+        capture_label=None,
+    ),
+]
+
+JAR_BOM_LINES = {
+    "BOM-L": [
+        {"item_code": "MIX", "item_name": "Cheesecake Mix", "stock_qty": 0.0898, "stock_uom": "Kg"},
+        {"item_code": "SUGAR", "item_name": "Powder sugar", "stock_qty": 0.0072, "stock_uom": "Kg"},
+        {"item_code": "COCOA", "item_name": "Cocoa", "stock_qty": 0.003, "stock_uom": "Kg"},
+    ],
+    "BOM-M": [
+        {"item_code": "MIX", "item_name": "Cheesecake Mix", "stock_qty": 0.0652, "stock_uom": "Kg"},
+        {"item_code": "SUGAR", "item_name": "Powder sugar", "stock_qty": 0.0048, "stock_uom": "Kg"},
+        {"item_code": "COCOA", "item_name": "Cocoa", "stock_qty": 0.002, "stock_uom": "Kg"},
+    ],
+    "BOM-PIST-CAKE-001": [],
+}
+
+SHEET_SOPS = {"TIRA-L": "SOP-L", "TIRA-M": "SOP-M", "PIST-CAKE": "SOP-CAKE"}
+
+
+def sheet_doc(name):
+    if name == "SOP-CAKE":
+        return sop_doc(name="SOP-CAKE", steps=[sop_doc().steps[1]])
+    item_code, item_name = {"SOP-L": ("TIRA-L", "Tiramisu Large"), "SOP-M": ("TIRA-M", "Tiramisu Medium")}[name]
+    return StubDoc(
+        name=name,
+        item_code=item_code,
+        item_name=item_name,
+        bom=None,
+        version=2,
+        yield_percent=100,
+        prep_time_mins=30,
+        equipment="",
+        steps=JAR_STEPS,
+    )
+
+
+class TestRecipeSheet(unittest.TestCase):
+    def _call(self, lines, *, active=None, inner_rows=None):
+        from jarz_pos.api import sop
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
+            mock_frappe = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
+            mock_frappe.throw.side_effect = ValueError
+            stack.enter_context(passthrough_translate())
+            stack.enter_context(
+                patch(
+                    "jarz_pos.api.sop._resolve_active_sop",
+                    side_effect=active or (lambda code: SHEET_SOPS.get(code)),
+                )
+            )
+            stack.enter_context(patch("jarz_pos.api.sop._resolve_sop_doc", side_effect=sheet_doc))
+            stack.enter_context(
+                patch(
+                    "jarz_pos.api.sop._resolve_default_bom",
+                    side_effect=lambda code: {"TIRA-L": "BOM-L", "TIRA-M": "BOM-M"}.get(code),
+                )
+            )
+            stack.enter_context(
+                patch("jarz_pos.api.sop._resolve_bom_row", return_value={"quantity": 1, "company": "Jarz Co"})
+            )
+            stack.enter_context(
+                patch("jarz_pos.api.sop._resolve_direct_bom_lines", side_effect=lambda bom: JAR_BOM_LINES[bom])
+            )
+            stack.enter_context(
+                patch(
+                    "jarz_pos.api.sop._resolve_required_material_rows",
+                    return_value=MagicMock(return_value=inner_rows or []),
+                )
+            )
+            stack.enter_context(patch("jarz_pos.api.sop._resolve_strip_html", return_value=fake_strip_html))
+            result = sop.get_recipe_sheet(lines)
+        return result, mock_frappe
+
+    def tiramisu(self, result):
+        return next(sheet for sheet in result["sheets"] if sheet["title"] == "Tiramisu")
+
+    def test_sizes_with_the_same_steps_share_one_sheet(self):
+        result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
+
+        self.assertEqual(1, len(result["sheets"]))
+        sheet = result["sheets"][0]
+        self.assertEqual("Tiramisu", sheet["title"])
+        self.assertEqual(["SOP-L", "SOP-M"], sheet["sops"])
+        self.assertEqual(15, sheet["total_qty"])
+        # Biggest jar first, whatever order the lines came in.
+        self.assertEqual(
+            [
+                {"item_code": "TIRA-L", "item_name": "Tiramisu Large", "qty": 10},
+                {"item_code": "TIRA-M", "item_name": "Tiramisu Medium", "qty": 5},
+            ],
+            sheet["items"],
+        )
+        self.assertEqual([], sheet["unresolved_tokens"])
+
+    def test_bowl_steps_quote_the_whole_run(self):
+        result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
+        step = self.tiramisu(result)["steps"][0]
+
+        # 10 x 89.8 + 5 x 65.2 = 1224 g of mix; 72 + 24 = 96 g of sugar.
+        self.assertEqual("Mix 1224 g with 96 g = 1320 g.", step["text"])
+        self.assertIsNone(step["per_item"])
+        self.assertEqual("Make the cream", step["title"])
+        self.assertEqual("Cream weighed (g)", step["capture_label"])
+
+    def test_each_steps_split_into_one_line_per_size(self):
+        result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
+        step = self.tiramisu(result)["steps"][1]
+
+        self.assertIsNone(step["text"])
+        self.assertEqual(
+            [
+                {"item_code": "TIRA-L", "item_name": "Tiramisu Large", "qty": 10, "text": "97 g cream, 3 g cocoa."},
+                {"item_code": "TIRA-M", "item_name": "Tiramisu Medium", "qty": 5, "text": "70 g cream, 2 g cocoa."},
+            ],
+            step["per_item"],
+        )
+        self.assertIsNone(step["capture_label"])
+
+    def test_ingredients_are_the_direct_lines_summed(self):
+        # The material reader also returns what is INSIDE the phantom mix; the
+        # bench takes the mix out of the store, not its cream cheese.
+        inner = [{"item_code": "CREAM-CHEESE", "item_name": "Cream cheese", "required_qty": 0.05, "uom": "Kg"}]
+        result, _ = self._call(
+            [{"item_code": "TIRA-L", "qty": 10}, {"item_code": "TIRA-M", "qty": 5}], inner_rows=inner
+        )
+        ingredients = self.tiramisu(result)["ingredients"]
+
+        self.assertEqual(["MIX", "SUGAR", "COCOA"], [i["item_code"] for i in ingredients])
+        self.assertEqual(["1224 g", "96 g", "40 g"], [i["display"] for i in ingredients])
+        self.assertAlmostEqual(1.224, ingredients[0]["qty"])
+        self.assertEqual("Kg", ingredients[0]["uom"])
+        self.assertEqual("Cheesecake Mix", ingredients[0]["item_name"])
+
+    def test_one_size_alone_takes_its_full_name(self):
+        result, _ = self._call([{"item_code": "TIRA-M", "qty": 4}])
+        sheet = result["sheets"][0]
+
+        self.assertEqual("Tiramisu Medium", sheet["title"])
+        self.assertEqual("Mix 260.8 g with 19.2 g = 280 g.", sheet["steps"][0]["text"])
+        self.assertEqual("70 g cream, 2 g cocoa.", sheet["steps"][1]["per_item"][0]["text"])
+
+    def test_different_steps_make_separate_sheets_sorted_by_title(self):
+        result, _ = self._call([{"item_code": "TIRA-L", "qty": 2}, {"item_code": "PIST-CAKE", "qty": 1}])
+
+        self.assertEqual(["Pistachio cake", "Tiramisu Large"], [s["title"] for s in result["sheets"]])
+
+    def test_items_without_an_sop_are_skipped(self):
+        result, _ = self._call([{"item_code": "PLAIN", "qty": 3}, {"item_code": "TIRA-L", "qty": 1}])
+
+        self.assertEqual(1, len(result["sheets"]))
+        self.assertEqual(["TIRA-L"], [i["item_code"] for i in result["sheets"][0]["items"]])
+
+    def test_one_failing_item_is_logged_and_the_rest_still_render(self):
+        def active(code):
+            if code == "TIRA-M":
+                raise RuntimeError("boom")
+            return SHEET_SOPS.get(code)
+
+        result, mock_frappe = self._call(
+            [{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}], active=active
+        )
+
+        self.assertEqual(["TIRA-L"], [i["item_code"] for i in result["sheets"][0]["items"]])
+        titles = [c.kwargs.get("title") for c in mock_frappe.log_error.call_args_list]
+        self.assertIn("JARZ SOP – recipe sheet entry failed", titles)
+
+    def test_nothing_asked_is_an_empty_sheet_list(self):
+        self.assertEqual({"sheets": []}, self._call(None)[0])
+        self.assertEqual({"sheets": []}, self._call("")[0])
+        self.assertEqual({"sheets": []}, self._call([])[0])
+
+
+class TestParseSheetLines(unittest.TestCase):
+    def _parse(self, lines):
+        from jarz_pos.api import sop
+
+        with passthrough_translate(), patch("jarz_pos.api.sop.frappe") as mock_frappe:
+            mock_frappe.throw.side_effect = ValueError
+            return sop._parse_sheet_lines(lines)
+
+    def test_json_list_dict_and_bytes_are_accepted(self):
+        expected = {"A": 2.0, "B": 1.5}
+        text = '[{"item_code": "A", "qty": 2}, {"item_code": "B", "qty": 1.5}]'
+        self.assertEqual(expected, self._parse(text))
+        self.assertEqual(expected, self._parse(text.encode()))
+        self.assertEqual(expected, self._parse({"A": 2, "B": 1.5}))
+
+    def test_repeats_are_summed_and_empty_or_non_positive_rows_dropped(self):
+        parsed = self._parse(
+            [
+                {"item_code": " A ", "qty": 2},
+                {"item_code": "A", "qty": "3"},
+                {"item_code": "B", "qty": 0},
+                {"item_code": "C", "qty": -1},
+                {"item_code": "", "qty": 4},
+                "junk",
+            ]
+        )
+        self.assertEqual({"A": 5.0}, parsed)
+
+    def test_bad_json_or_a_non_list_is_refused(self):
+        with self.assertRaises(ValueError):
+            self._parse("[not json")
+        with self.assertRaises(ValueError):
+            self._parse('"just a string"')
+
+    def test_too_many_lines_is_refused(self):
+        from jarz_pos.api import sop
+
+        with self.assertRaises(ValueError):
+            self._parse([{"item_code": f"I{n}", "qty": 1} for n in range(sop._MAX_SHEET_LINES + 1)])
+
+
 if __name__ == "__main__":
     unittest.main()

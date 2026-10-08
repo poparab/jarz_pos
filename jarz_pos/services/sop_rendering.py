@@ -20,6 +20,8 @@ Token grammar
 ``{{item:PIST-SPR|grams}}``  -> ``"1830 g"``     (qty x batches, in grams)
 ``{{item:COFFEE|grams|x3}}`` -> ``"240 g"``      (grams x 3)
 ``{{item:COFFEE|qty|x0.3}}`` -> ``"0.024"``      (qty x 0.3, stock UOM)
+``{{item:COFFEE|grams|each}}`` -> ``"8 g"``      (for ONE finished unit)
+``{{item:MIX+SUGAR|grams}}``   -> ``"970 g"``    (both lines, summed)
 
 ``grams`` is for the bench, which weighs in grams while the BOM is in Kg: it
 converts ``Kg``/``kg``/``Kilogram`` (x1000) and ``Gram``/``Gm``/``g`` (x1), rounds
@@ -27,13 +29,27 @@ to one decimal and drops a trailing ``.0`` ("80 g", "53.3 g").  Any other stock
 UOM cannot be converted honestly, so the token is left verbatim and reported
 rather than rendered as a wrong number.
 
-``xN`` is an optional **last** segment, a positive decimal multiplier, allowed
-only after ``qty`` or ``grams``.  It exists for derived figures that follow a
+``xN`` is an optional segment after the variant, a positive decimal multiplier,
+allowed only after ``qty`` or ``grams``.  It exists for derived figures that follow a
 fixed ratio to a BOM line - liquid coffee is 3 x the grinds, so the recipe
 cannot list it as a component but can still say ``{{item:Coffee beans|grams|x3}}``
 and have it follow the BOM and the run size.  On the full form, ``name`` and
 ``uom`` it makes no sense, so it is invalid (verbatim + reported), as is a zero,
 negative or non-numeric ``N``.
+
+``each`` is the other optional modifier (same rules, either order with ``xN``,
+each at most once).  It renders the figure for **one** finished unit -
+``qty_map[code] / units_per_batch`` - whatever the run size.  The kitchen makes
+every Tiramisu size in one go: the bowl steps quote the whole run, and the
+"fill each jar" step quotes the portion per jar, which is the number the
+person at the scale actually needs.  Without a known ``units_per_batch`` the
+token is reported rather than guessed.
+
+``A+B`` in the code position sums two or more components (the tiramisu cream
+is the cheesecake mix **plus** the sweet coffee folded into it).  A code that
+really contains ``+`` still resolves as itself first; the sum is used only
+when the whole string is unknown and every part is known.  ``qty``, ``uom`` and
+the full form need one shared UOM; ``grams`` converts each part on its own.
 
 Whitespace inside the braces is tolerated (``{{ item : X | qty }}``), because
 the instruction is authored in a Text Editor by somebody who is thinking about
@@ -85,6 +101,8 @@ _VARIANTS = frozenset({_VARIANT_FULL, "qty", "name", "uom", "grams"})
 # Only a numeric rendering can be multiplied; "x3" after a name is meaningless.
 _MULTIPLIABLE_VARIANTS = frozenset({"qty", "grams"})
 _MULTIPLIER_RE = re.compile(r"^x(\d+(?:\.\d+)?|\.\d+)$", re.IGNORECASE)
+_EACH = "each"
+_SUM_SEPARATOR = "+"
 
 # Stock UOM -> grams per unit, matched case-insensitively.  Deliberately small:
 # a UOM that is not a unit of mass (Nos, Litre, Box) must NOT be guessed at.
@@ -209,32 +227,61 @@ def _parse_multiplier(segment: str) -> Optional[float]:
     return value if value > 0 else None
 
 
-def _split_payload(payload: str) -> Tuple[str, str, float, bool]:
-    """``"X|grams|x3"`` -> ``("X", "grams", 3.0, True)``; bad shapes are invalid.
+def _split_payload(payload: str) -> Tuple[str, str, float, bool, bool]:
+    """``"X|grams|x3|each"`` -> ``("X", "grams", 3.0, True, True)``.
 
-    The multiplier defaults to ``1.0`` and is only accepted as the third
-    segment of a ``qty``/``grams`` token.
+    Returns ``(code, variant, multiplier, each, valid)``.  After the variant
+    come at most two modifiers, ``xN`` and ``each``, in either order and each
+    at most once, and only on a ``qty``/``grams`` token.  Anything else is
+    invalid.
     """
     parts = str(payload).split("|")
     code = _TAG_RE.sub("", parts[0]).strip()
+    invalid = (code, _VARIANT_FULL, 1.0, False, False)
 
     if len(parts) == 1:
-        return code, _VARIANT_FULL, 1.0, True
-    if len(parts) > 3:
-        return code, _VARIANT_FULL, 1.0, False
+        return code, _VARIANT_FULL, 1.0, False, True
+    if len(parts) > 4:
+        return invalid
 
     variant = _TAG_RE.sub("", parts[1]).strip().lower()
     if variant not in _VARIANTS or variant == _VARIANT_FULL:
         # A trailing pipe with nothing after it is a typo, not the full form.
-        return code, _VARIANT_FULL, 1.0, False
+        return invalid
 
-    multiplier = 1.0
-    if len(parts) == 3:
-        parsed = _parse_multiplier(_TAG_RE.sub("", parts[2]))
-        if variant not in _MULTIPLIABLE_VARIANTS or parsed is None:
-            return code, _VARIANT_FULL, 1.0, False
+    multiplier: Optional[float] = None
+    each = False
+    for raw in parts[2:]:
+        if variant not in _MULTIPLIABLE_VARIANTS:
+            return invalid
+        segment = _TAG_RE.sub("", raw).strip()
+        if segment.lower() == _EACH:
+            if each:
+                return invalid
+            each = True
+            continue
+        parsed = _parse_multiplier(segment)
+        if parsed is None or multiplier is not None:
+            return invalid
         multiplier = parsed
-    return code, variant, multiplier, True
+    return code, variant, (multiplier if multiplier is not None else 1.0), each, True
+
+
+def uses_each(text: Any) -> bool:
+    """True when any valid token in ``text`` carries the ``each`` modifier."""
+    for match in _TOKEN_RE.finditer(normalise_markup(text)):
+        _code, _variant, _multiplier, each, valid = _split_payload(match.group(1))
+        if valid and each:
+            return True
+    return False
+
+
+def to_grams(qty: float, uom: Any) -> Optional[float]:
+    """``(0.08, "Kg")`` -> ``80.0``; ``None`` when the UOM is not a mass."""
+    factor = _GRAMS_PER_UOM.get(str(uom or "").strip().lower())
+    if factor is None:
+        return None
+    return qty * factor
 
 
 def format_grams(qty: float, uom: Any) -> Optional[str]:
@@ -243,10 +290,14 @@ def format_grams(qty: float, uom: Any) -> Optional[str]:
     One decimal, trailing ``.0`` dropped: the scales on the bench read to a
     tenth of a gram and "53.3 g" is usable where "53.333 g" is noise.
     """
-    factor = _GRAMS_PER_UOM.get(str(uom or "").strip().lower())
-    if factor is None:
+    grams = to_grams(qty, uom)
+    if grams is None:
         return None
-    text = f"{qty * factor:.1f}"
+    return _grams_text(grams)
+
+
+def _grams_text(grams: float) -> str:
+    text = f"{grams:.1f}"
     if text.endswith(".0"):
         text = text[:-2]
     if text == "-0":
@@ -266,6 +317,44 @@ def _lookup_code(
     return lowered.get(code.strip().lower())
 
 
+def _resolve_parts(
+    code: str,
+    component_qty_map: Mapping[str, Any],
+    name_map: Mapping[str, Any],
+    uom_map: Mapping[str, Any],
+    lowered: Mapping[str, str],
+) -> Optional[List[str]]:
+    """The component code(s) a token names, or ``None`` if any is unknown."""
+    whole = _lookup_code(code, component_qty_map, name_map, uom_map, lowered)
+    if whole is not None:
+        return [whole]
+    if _SUM_SEPARATOR not in code:
+        return None
+    resolved: List[str] = []
+    for part in code.split(_SUM_SEPARATOR):
+        part = part.strip()
+        found = _lookup_code(part, component_qty_map, name_map, uom_map, lowered) if part else None
+        if found is None:
+            return None
+        resolved.append(found)
+    return resolved
+
+
+def format_quantity(qty: Any, uom: Any) -> str:
+    """Bench-readable amount: grams for a mass, else a trimmed count and UOM.
+
+    ``(0.898, "Kg")`` -> ``"898 g"``; ``(28.0, "Nos")`` -> ``"28 Nos"``.
+    """
+    value = to_float(qty, 0.0)
+    grams = format_grams(value, uom)
+    if grams is not None:
+        return grams
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    if text in ("", "-0"):
+        text = "0"
+    return f"{text} {str(uom or '').strip()}".strip()
+
+
 # ── Public API ──────────────────────────────────────────────────────────
 
 
@@ -277,11 +366,13 @@ def render_instruction(
     name_map: Mapping[str, Any],
     batches: Any,
     decimals: int = DEFAULT_DECIMALS,
+    units_per_batch: Any = None,
 ) -> Tuple[str, List[str]]:
     """Substitute every ``{{item:...}}`` token; return ``(text, unresolved)``.
 
     ``component_qty_map`` holds the requirement for **one** BOM batch; every
-    quantity rendered is that figure multiplied by ``batches``.
+    quantity rendered is that figure multiplied by ``batches`` - except on an
+    ``each`` token, which divides it by ``units_per_batch`` instead.
 
     Unknown codes and unknown variants come back untouched *and* listed in
     ``unresolved`` — see the module docstring for why they are never dropped.
@@ -295,6 +386,7 @@ def render_instruction(
     name_map = name_map or {}
 
     batch_count = to_float(batches, 1.0)
+    per_batch_units = to_float(units_per_batch, 0.0)
     try:
         places = max(0, int(decimals))
     except (TypeError, ValueError):
@@ -305,33 +397,49 @@ def render_instruction(
 
     def _replace(match: "re.Match[str]") -> str:
         payload = match.group(1)
-        code, variant, multiplier, valid = _split_payload(payload)
+        code, variant, multiplier, each, valid = _split_payload(payload)
 
         if not valid or not code:
             _remember(unresolved, str(payload).strip())
             return match.group(0)
 
-        resolved = _lookup_code(code, component_qty_map, name_map, uom_map, lowered)
-        if resolved is None:
+        parts = _resolve_parts(code, component_qty_map, name_map, uom_map, lowered)
+        if parts is None:
             _remember(unresolved, code)
             return match.group(0)
 
-        qty = to_float(component_qty_map.get(resolved), 0.0) * batch_count * multiplier
-        qty_text = f"{qty:.{places}f}"
-        name_text = str(name_map.get(resolved) or resolved).strip()
-        uom_text = str(uom_map.get(resolved) or "").strip()
+        if each:
+            if per_batch_units <= 0:
+                # "Per jar" without a known yield would be a made-up number.
+                _remember(unresolved, str(payload).strip())
+                return match.group(0)
+            scale = multiplier / per_batch_units
+        else:
+            scale = batch_count * multiplier
 
-        if variant == "qty":
-            return qty_text
+        quantities = [to_float(component_qty_map.get(p), 0.0) * scale for p in parts]
+        uoms = [str(uom_map.get(p) or "").strip() for p in parts]
+        name_text = " + ".join(str(name_map.get(p) or p).strip() for p in parts)
+
         if variant == "grams":
-            grams_text = format_grams(qty, uom_text)
-            if grams_text is None:
+            grams = [to_grams(q, u) for q, u in zip(quantities, uoms)]
+            if any(g is None for g in grams):
                 # Not a unit of mass: refuse rather than print a wrong number.
                 _remember(unresolved, str(payload).strip())
                 return match.group(0)
-            return grams_text
+            return _grams_text(sum(grams))
         if variant == "name":
             return name_text
+
+        # qty, uom and the full form quote ONE unit, so a sum must share it.
+        if len({u.lower() for u in uoms}) > 1:
+            _remember(unresolved, str(payload).strip())
+            return match.group(0)
+        qty_text = f"{sum(quantities):.{places}f}"
+        uom_text = uoms[0]
+
+        if variant == "qty":
+            return qty_text
         if variant == "uom":
             return uom_text
         return " ".join(part for part in (qty_text, uom_text, name_text) if part)
@@ -367,12 +475,14 @@ def _step_payload(
     component_qty_map: Mapping[str, Any],
     uom_map: Mapping[str, Any],
     name_map: Mapping[str, Any],
+    units_per_batch: Any = None,
 ) -> Tuple[Dict[str, Any], List[str]]:
     render_kwargs = {
         "component_qty_map": component_qty_map,
         "uom_map": uom_map,
         "name_map": name_map,
         "batches": batches,
+        "units_per_batch": units_per_batch,
     }
 
     # Titles are rendered too: "Weigh {{item:PIST-SPR|qty}} of spread" is a
@@ -417,8 +527,12 @@ def render_sop(
     component_qty_map: Mapping[str, Any],
     uom_map: Mapping[str, Any],
     name_map: Mapping[str, Any],
+    units_per_batch: Any = None,
 ) -> Dict[str, Any]:
     """Render every step of an SOP for a specific run size.
+
+    ``units_per_batch`` (the BOM yield) feeds ``each`` tokens; left unset it is
+    ``units / batches``, which is exactly the yield whenever both are known.
 
     Returns ``{batches, units, steps, total_duration_mins, unresolved_tokens}``.
     ``instruction_text`` is deliberately **not** produced here — stripping HTML
@@ -427,6 +541,9 @@ def render_sop(
     """
     batch_count = to_float(batches, 1.0)
     unit_count = to_float(units, 0.0)
+    per_batch_units = to_float(units_per_batch, 0.0)
+    if per_batch_units <= 0 and batch_count > 0 and unit_count > 0:
+        per_batch_units = unit_count / batch_count
 
     steps: List[Dict[str, Any]] = []
     unresolved: List[str] = []
@@ -441,6 +558,7 @@ def render_sop(
             component_qty_map=component_qty_map or {},
             uom_map=uom_map or {},
             name_map=name_map or {},
+            units_per_batch=per_batch_units or None,
         )
         steps.append(payload)
         for token in step_unresolved:

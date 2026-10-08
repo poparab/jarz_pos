@@ -507,23 +507,104 @@ SPONGE_CAKE = {
 #   syrup into the cream = the SUGAR weight, folded into the cheesecake mix
 #   syrup onto savoiardi = the rest, i.e. the liquid weight
 #
-# Every run-size total in the steps is a ``{{item:...}}`` token, so it follows
-# the jar BOM and scales with the number of jars.  Only the PER-JAR portion
-# figures below are static text: they are the spec the bench portions to, and
-# they are not BOM lines (the BOM carries cream as "Cheesecake Mix" and the
-# syrup not at all).  Grams per jar:
+# Every size is made in the same session: one pot of coffee, one bowl of
+# cream, then the jars.  So the three SOPs share ONE set of steps, word for
+# word, and ``get_recipe_sheet`` merges them into a single sheet: the bowl
+# steps quote the whole run (all sizes summed) and the jar step, written with
+# ``|each`` tokens, prints one line per size.  Nothing in the steps is static
+# text any more - every figure follows the jar BOM.
+#
+# Per-jar spec in grams, kept for the notes and checked by the tests against
+# what the ``|each`` tokens render.  ``version`` was bumped when the steps
+# became shared (L 1->2, M 2->3, S 1->2) so the per-size v1/v2 stay on file.
 TIRAMISU_JAR_PORTIONS: Dict[str, Dict[str, Any]] = {
-    "Tiramisu Large": {"version": 1, "cream": 97, "syrup": 24, "savoiardi": 40, "cocoa": 3},
-    "Tiramisu Medium": {"version": 2, "cream": 70, "syrup": 16, "savoiardi": 28, "cocoa": 2},
+    "Tiramisu Large": {"version": 2, "cream": 97, "syrup": 24, "savoiardi": 40, "cocoa": 3},
+    "Tiramisu Medium": {"version": 3, "cream": 70, "syrup": 16, "savoiardi": 28, "cocoa": 2},
     # Small is exactly 2/3 of the Medium.
     "Tiramisu Small": {
-        "version": 1,
+        "version": 2,
         "cream": 70 * 2 / 3,
         "syrup": 16 * 2 / 3,
         "savoiardi": 28 * 2 / 3,
         "cocoa": 2 * 2 / 3,
     },
 }
+
+_GRINDS = "{{item:Coffee beans|grams}}"
+_LIQUID = "{{item:Coffee beans|grams|x3}}"
+_SUGAR = "{{item:powder sugar|grams}}"
+_MIX = "{{item:Cheesecake Mix|grams}}"
+# The cream is the mix plus the sweet coffee folded into it (= the sugar weight).
+_CREAM = "{{item:Cheesecake Mix+powder sugar|grams}}"
+
+TIRAMISU_STEPS: List[Dict[str, Any]] = [
+    {
+        "title": "Brew the coffee",
+        "instruction": (
+            f"Brew {_GRINDS} of coffee grinds into {_LIQUID} of liquid coffee "
+            "(1 to 3). Weigh the liquid: if it is short brew a little more, if "
+            f"it is over keep only {_LIQUID}.\n"
+            f"اعمل {_LIQUID} قهوة سايلة من {_GRINDS} بن مطحون (1 لـ 3). "
+            "اوزن القهوة السايلة: لو ناقصة اعمل شوية كمان، و لو زادت خد "
+            f"{_LIQUID} بس."
+        ),
+        "duration_mins": 8,
+        "scaling_mode": "Fixed",
+        "capture_type": "Number",
+        "capture_label": "Liquid coffee weighed (g)",
+        "requires_confirmation": 1,
+    },
+    {
+        "title": "Sweeten the coffee",
+        "instruction": (
+            f"Dissolve {_SUGAR} of powder sugar in the hot coffee, then let it "
+            "cool.\n"
+            f"دوب {_SUGAR} سكر بودر في القهوة و هي سخنة، و سيبها تبرد."
+        ),
+        "duration_mins": 5,
+        "scaling_mode": "Fixed",
+        "requires_confirmation": 1,
+    },
+    {
+        "title": "Make the cream in one bowl",
+        "instruction": (
+            f"Mix {_MIX} of cheesecake mix with {_SUGAR} of the sweet coffee = "
+            f"{_CREAM} of cream. The rest of the coffee ({_LIQUID}) is for the "
+            "savoiardi.\n"
+            f"اخلط {_MIX} خليط تشيز كيك مع {_SUGAR} من القهوة المحلاة = "
+            f"{_CREAM} كريمة. باقي القهوة ({_LIQUID}) للسافوياردي."
+        ),
+        "duration_mins": 10,
+        "scaling_mode": "Fixed",
+        "requires_confirmation": 1,
+    },
+    {
+        "title": "Fill each jar",
+        "instruction": (
+            "{{item:Savoiardi|grams|each}} savoiardi + "
+            "{{item:Coffee beans|grams|x3|each}} coffee, then "
+            "{{item:Cheesecake Mix+powder sugar|grams|each}} cream, then "
+            "{{item:coco powder|grams|each}} cocoa on top.\n"
+            "{{item:Savoiardi|grams|each}} سافوياردي + "
+            "{{item:Coffee beans|grams|x3|each}} قهوة، بعدين "
+            "{{item:Cheesecake Mix+powder sugar|grams|each}} كريمة، بعدين "
+            "{{item:coco powder|grams|each}} كاكاو على الوش."
+        ),
+        "duration_mins": 1,
+        "scaling_mode": "Per Unit",
+        "requires_confirmation": 1,
+    },
+    {
+        "title": "Lid and label",
+        "instruction": (
+            "Close each jar and stick on its label.\n"
+            "اقفل كل برطمان و الزق الليبل بتاعه."
+        ),
+        "duration_mins": 1,
+        "scaling_mode": "Per Unit",
+        "requires_confirmation": 1,
+    },
+]
 
 
 def _grams(value: float) -> str:
@@ -535,19 +616,11 @@ def _grams(value: float) -> str:
 
 
 def build_tiramisu_sop(item_code: str, portions: Dict[str, Any]) -> Dict[str, Any]:
-    """One Tiramisu jar SOP from its per-jar portion figures.
-
-    Run-size totals are tokens (they scale with the jar count and follow the
-    BOM); the ``(... per jar)`` figures come from ``portions``.
-    """
+    """One Tiramisu jar SOP: the shared steps plus this size's spec in the notes."""
     cream = _grams(portions["cream"])
     syrup = _grams(portions["syrup"])
     savoiardi = _grams(portions["savoiardi"])
     cocoa = _grams(portions["cocoa"])
-
-    grinds = "{{item:Coffee beans|grams}}"
-    liquid = "{{item:Coffee beans|grams|x3}}"
-    sugar = "{{item:powder sugar|grams}}"
 
     return {
         "item_code": item_code,
@@ -565,103 +638,15 @@ def build_tiramisu_sop(item_code: str, portions: Dict[str, Any]) -> Dict[str, An
             "the SUGAR weight is folded into the cheesecake mix to make the "
             "tiramisu cream; the rest (= the liquid weight) goes onto the "
             "savoiardi.\n"
+            "All sizes are made together, so every Tiramisu SOP has the same "
+            "steps and the app shows them as one sheet.\n"
             f"Per jar: cream {cream}, savoiardi {savoiardi}, coffee syrup onto "
-            f"the savoiardi {syrup}, cocoa {cocoa}. Run totals in the steps come "
-            "from the jar BOM and scale with the number of jars."
+            f"the savoiardi {syrup}, cocoa {cocoa}. Every figure in the steps "
+            "comes from the jar BOM."
         ),
-        "steps": [
-            {
-                "title": "Brew the coffee: grinds to liquid at 1 to 3",
-                "instruction": (
-                    f"Weigh {grinds} of coffee grinds and brew to {liquid} of "
-                    "liquid coffee (3 x the grinds, e.g. 16 g becomes 48 g). "
-                    "Extraction varies, so weigh the liquid: the liquid weight is "
-                    "what counts. If it is short, brew a little more; if it is "
-                    "over, keep only the target.\n"
-                    f"يوزن {grinds} بن مطحون و يستخرج منه {liquid} قهوة سائلة "
-                    "(3 اضعاف وزن البن، يعني 16 جرام بن يطلعوا 48 جرام). "
-                    "الاستخراج بيختلف فلازم نوزن القهوة السايلة: وزن السايل هو "
-                    "المهم. لو ناقص نستخرج شوية كمان، و لو زاد ناخد المطلوب بس."
-                ),
-                "duration_mins": 8,
-                "scaling_mode": "Fixed",
-                "capture_type": "Number",
-                "capture_label": "Liquid coffee weighed (g)",
-                "requires_confirmation": 1,
-            },
-            {
-                "title": "Sweeten with powder sugar (liquid x 0.3)",
-                "instruction": (
-                    f"Dissolve {sugar} of powder sugar (liquid x 0.3) in the hot "
-                    "coffee, then cool.\n"
-                    f"يذوب {sugar} سكر بودر (وزن السايل × 0.3) في القهوة و هي "
-                    "سخنة ثم تبرد."
-                ),
-                "duration_mins": 5,
-                "scaling_mode": "Fixed",
-                "requires_confirmation": 1,
-            },
-            {
-                "title": "Make the tiramisu cream",
-                "instruction": (
-                    "Weigh {{item:Cheesecake Mix|grams}} of cheesecake mix and "
-                    f"fold in {sugar} of the sweetened coffee (the same weight as "
-                    f"the sugar). Each jar takes {cream} of cream.\n"
-                    "يوزن {{item:Cheesecake Mix|grams}} خليط تشيز كيك و يضاف "
-                    f"عليه {sugar} من القهوة المحلاة (نفس وزن السكر) و يقلب "
-                    f"برفق. كل برطمان ياخد {cream} كريمة."
-                ),
-                "duration_mins": 10,
-                "scaling_mode": "Fixed",
-                "requires_confirmation": 1,
-            },
-            {
-                "title": "Lay the savoiardi and soak with the rest of the coffee",
-                "instruction": (
-                    "Lay {{item:Savoiardi|grams}} of savoiardi "
-                    f"({savoiardi} per jar) and pour the rest of the sweetened "
-                    f"coffee over it: {liquid} in total ({syrup} per jar).\n"
-                    "يرص {{item:Savoiardi|grams}} سافوياردي "
-                    f"({savoiardi} لكل برطمان) و يصب عليه باقي القهوة المحلاة: "
-                    f"{liquid} إجمالي ({syrup} لكل برطمان)."
-                ),
-                "duration_mins": 1,
-                "scaling_mode": "Per Unit",
-                "requires_confirmation": 1,
-            },
-            {
-                "title": "Fill each jar with cream",
-                "instruction": (
-                    f"Fill each jar with {cream} of cream.\n"
-                    f"يتم ملء كل برطمان بـ {cream} كريمة."
-                ),
-                "duration_mins": 1,
-                "scaling_mode": "Per Unit",
-                "requires_confirmation": 1,
-            },
-            {
-                "title": "Dust with cocoa powder",
-                "instruction": (
-                    "Dust {{item:coco powder|grams}} of cocoa powder over the "
-                    f"jars ({cocoa} per jar).\n"
-                    "يرش {{item:coco powder|grams}} كاكاو بودرة علي وش "
-                    f"البرطمانات ({cocoa} لكل برطمان)."
-                ),
-                "duration_mins": 1,
-                "scaling_mode": "Per Unit",
-                "requires_confirmation": 1,
-            },
-            {
-                "title": "Lid and label each jar",
-                "instruction": (
-                    "Lid and label each jar.\n"
-                    "يتم تغطية كل برطمان و لصق الملصق."
-                ),
-                "duration_mins": 1,
-                "scaling_mode": "Per Unit",
-                "requires_confirmation": 1,
-            },
-        ],
+        # A copy per SOP: ``_apply`` only reads, but shared dicts invite a
+        # later edit that changes all three sizes by accident.
+        "steps": [dict(step) for step in TIRAMISU_STEPS],
     }
 
 
