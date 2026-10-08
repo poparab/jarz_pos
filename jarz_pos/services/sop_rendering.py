@@ -17,6 +17,23 @@ Token grammar
 ``{{item:PIST-SPR|qty}}``    -> ``"1.830"``
 ``{{item:PIST-SPR|name}}``   -> ``"Pistachio spread"``
 ``{{item:PIST-SPR|uom}}``    -> ``"Kg"``
+``{{item:PIST-SPR|grams}}``  -> ``"1830 g"``     (qty x batches, in grams)
+``{{item:COFFEE|grams|x3}}`` -> ``"240 g"``      (grams x 3)
+``{{item:COFFEE|qty|x0.3}}`` -> ``"0.024"``      (qty x 0.3, stock UOM)
+
+``grams`` is for the bench, which weighs in grams while the BOM is in Kg: it
+converts ``Kg``/``kg``/``Kilogram`` (x1000) and ``Gram``/``Gm``/``g`` (x1), rounds
+to one decimal and drops a trailing ``.0`` ("80 g", "53.3 g").  Any other stock
+UOM cannot be converted honestly, so the token is left verbatim and reported
+rather than rendered as a wrong number.
+
+``xN`` is an optional **last** segment, a positive decimal multiplier, allowed
+only after ``qty`` or ``grams``.  It exists for derived figures that follow a
+fixed ratio to a BOM line - liquid coffee is 3 x the grinds, so the recipe
+cannot list it as a component but can still say ``{{item:Coffee beans|grams|x3}}``
+and have it follow the BOM and the run size.  On the full form, ``name`` and
+``uom`` it makes no sense, so it is invalid (verbatim + reported), as is a zero,
+negative or non-numeric ``N``.
 
 Whitespace inside the braces is tolerated (``{{ item : X | qty }}``), because
 the instruction is authored in a Text Editor by somebody who is thinking about
@@ -64,7 +81,23 @@ _TOKEN_RE = re.compile(r"\{\{\s*item\s*:\s*([^{}]+?)\s*\}\}", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 _VARIANT_FULL = ""
-_VARIANTS = frozenset({_VARIANT_FULL, "qty", "name", "uom"})
+_VARIANTS = frozenset({_VARIANT_FULL, "qty", "name", "uom", "grams"})
+# Only a numeric rendering can be multiplied; "x3" after a name is meaningless.
+_MULTIPLIABLE_VARIANTS = frozenset({"qty", "grams"})
+_MULTIPLIER_RE = re.compile(r"^x(\d+(?:\.\d+)?|\.\d+)$", re.IGNORECASE)
+
+# Stock UOM -> grams per unit, matched case-insensitively.  Deliberately small:
+# a UOM that is not a unit of mass (Nos, Litre, Box) must NOT be guessed at.
+_GRAMS_PER_UOM = {
+    "kg": 1000.0,
+    "kgs": 1000.0,
+    "kilogram": 1000.0,
+    "kilograms": 1000.0,
+    "g": 1.0,
+    "gm": 1.0,
+    "gram": 1.0,
+    "grams": 1.0,
+}
 
 # A Text Editor is free to emit non-breaking spaces and HTML-escaped braces.
 # Both are invisible to the author and fatal to a naive matcher, so they are
@@ -167,21 +200,58 @@ def _lowered_index(*maps: Mapping[str, Any]) -> Dict[str, str]:
     return index
 
 
-def _split_payload(payload: str) -> Tuple[str, str, bool]:
-    """``"X|qty"`` -> ``("X", "qty", True)``; an unknown variant is invalid."""
+def _parse_multiplier(segment: str) -> Optional[float]:
+    """``"x3"`` -> ``3.0``; ``None`` for anything else or a non-positive value."""
+    match = _MULTIPLIER_RE.match(segment.strip())
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value if value > 0 else None
+
+
+def _split_payload(payload: str) -> Tuple[str, str, float, bool]:
+    """``"X|grams|x3"`` -> ``("X", "grams", 3.0, True)``; bad shapes are invalid.
+
+    The multiplier defaults to ``1.0`` and is only accepted as the third
+    segment of a ``qty``/``grams`` token.
+    """
     parts = str(payload).split("|")
     code = _TAG_RE.sub("", parts[0]).strip()
 
     if len(parts) == 1:
-        return code, _VARIANT_FULL, True
-    if len(parts) > 2:
-        return code, _VARIANT_FULL, False
+        return code, _VARIANT_FULL, 1.0, True
+    if len(parts) > 3:
+        return code, _VARIANT_FULL, 1.0, False
 
     variant = _TAG_RE.sub("", parts[1]).strip().lower()
     if variant not in _VARIANTS or variant == _VARIANT_FULL:
         # A trailing pipe with nothing after it is a typo, not the full form.
-        return code, _VARIANT_FULL, False
-    return code, variant, True
+        return code, _VARIANT_FULL, 1.0, False
+
+    multiplier = 1.0
+    if len(parts) == 3:
+        parsed = _parse_multiplier(_TAG_RE.sub("", parts[2]))
+        if variant not in _MULTIPLIABLE_VARIANTS or parsed is None:
+            return code, _VARIANT_FULL, 1.0, False
+        multiplier = parsed
+    return code, variant, multiplier, True
+
+
+def format_grams(qty: float, uom: Any) -> Optional[str]:
+    """``(0.08, "Kg")`` -> ``"80 g"``; ``None`` when the UOM is not a mass.
+
+    One decimal, trailing ``.0`` dropped: the scales on the bench read to a
+    tenth of a gram and "53.3 g" is usable where "53.333 g" is noise.
+    """
+    factor = _GRAMS_PER_UOM.get(str(uom or "").strip().lower())
+    if factor is None:
+        return None
+    text = f"{qty * factor:.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    if text == "-0":
+        text = "0"
+    return f"{text} g"
 
 
 def _lookup_code(
@@ -235,7 +305,7 @@ def render_instruction(
 
     def _replace(match: "re.Match[str]") -> str:
         payload = match.group(1)
-        code, variant, valid = _split_payload(payload)
+        code, variant, multiplier, valid = _split_payload(payload)
 
         if not valid or not code:
             _remember(unresolved, str(payload).strip())
@@ -246,13 +316,20 @@ def render_instruction(
             _remember(unresolved, code)
             return match.group(0)
 
-        qty = to_float(component_qty_map.get(resolved), 0.0) * batch_count
+        qty = to_float(component_qty_map.get(resolved), 0.0) * batch_count * multiplier
         qty_text = f"{qty:.{places}f}"
         name_text = str(name_map.get(resolved) or resolved).strip()
         uom_text = str(uom_map.get(resolved) or "").strip()
 
         if variant == "qty":
             return qty_text
+        if variant == "grams":
+            grams_text = format_grams(qty, uom_text)
+            if grams_text is None:
+                # Not a unit of mass: refuse rather than print a wrong number.
+                _remember(unresolved, str(payload).strip())
+                return match.group(0)
+            return grams_text
         if variant == "name":
             return name_text
         if variant == "uom":

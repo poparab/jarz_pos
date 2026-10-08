@@ -162,6 +162,163 @@ class TestRenderInstruction(unittest.TestCase):
         self.assertEqual("2.000 Water", out)
 
 
+# The Tiramisu Large jar: 8 g of grinds, in Kg because that is the stock UOM.
+COFFEE = {
+    "component_qty_map": {"COFFEE": 0.008, "SUGAR-G": 7.2, "WATER": 1.5},
+    "uom_map": {"COFFEE": "Kg", "SUGAR-G": "Gram", "WATER": "Litre"},
+    "name_map": {"COFFEE": "Coffee beans", "SUGAR-G": "Sugar", "WATER": "Water"},
+}
+
+
+class TestGramsVariant(unittest.TestCase):
+    def test_kg_is_converted_to_grams_and_scaled_by_batches(self):
+        out, unresolved = render("{{item:COFFEE|grams}}", batches=10, **COFFEE)
+        self.assertEqual("80 g", out)
+        self.assertEqual([], unresolved)
+
+    def test_one_decimal_is_kept_when_it_is_not_zero(self):
+        out, _ = render("{{item:COFFEE|grams}}", batches=6.6666667, **COFFEE)
+        self.assertEqual("53.3 g", out)
+
+    def test_a_trailing_point_zero_is_dropped_even_for_thousands(self):
+        out, _ = render("{{item:COFFEE|grams}}", batches=1122.5, **COFFEE)
+        self.assertEqual("8980 g", out)
+
+    def test_float_noise_does_not_leak(self):
+        # 0.0072 Kg x 10 x 1000 is 72.00000000000001 in binary floating point.
+        out, _ = render(
+            "{{item:S|grams}}",
+            batches=10,
+            component_qty_map={"S": 0.0072},
+            uom_map={"S": "Kg"},
+            name_map={"S": "Sugar"},
+        )
+        self.assertEqual("72 g", out)
+
+    def test_gram_uoms_are_not_multiplied_by_a_thousand(self):
+        for uom in ("Gram", "Gm", "g", "gram", "G"):
+            out, unresolved = render(
+                "{{item:X|grams}}",
+                component_qty_map={"X": 7.2},
+                uom_map={"X": uom},
+                name_map={"X": "Sugar"},
+                batches=1,
+            )
+            self.assertEqual("7.2 g", out, uom)
+            self.assertEqual([], unresolved)
+
+    def test_kilogram_spellings_are_all_accepted(self):
+        for uom in ("Kg", "kg", "KG", "Kilogram", "kilogram"):
+            out, _ = render(
+                "{{item:X|grams}}",
+                component_qty_map={"X": 0.5},
+                uom_map={"X": uom},
+                name_map={"X": "Flour"},
+                batches=1,
+            )
+            self.assertEqual("500 g", out, uom)
+
+    def test_a_non_mass_uom_is_left_verbatim_and_reported(self):
+        out, unresolved = render("Add {{item:WATER|grams}}.", **COFFEE)
+        self.assertEqual("Add {{item:WATER|grams}}.", out)
+        self.assertEqual(["WATER|grams"], unresolved)
+
+    def test_a_missing_uom_is_left_verbatim_and_reported(self):
+        out, unresolved = render(
+            "{{item:X|grams}}",
+            component_qty_map={"X": 1.0},
+            uom_map={"X": ""},
+            name_map={"X": "Thing"},
+        )
+        self.assertEqual("{{item:X|grams}}", out)
+        self.assertEqual(["X|grams"], unresolved)
+
+    def test_an_unknown_code_is_reported_by_code(self):
+        out, unresolved = render("{{item:GHOST|grams}}")
+        self.assertEqual("{{item:GHOST|grams}}", out)
+        self.assertEqual(["GHOST"], unresolved)
+
+    def test_the_variant_name_is_case_insensitive(self):
+        out, _ = render("{{item:COFFEE|Grams}}", batches=10, **COFFEE)
+        self.assertEqual("80 g", out)
+
+    def test_zero_batches_render_zero_grams(self):
+        out, _ = render("{{item:COFFEE|grams}}", batches=0, **COFFEE)
+        self.assertEqual("0 g", out)
+
+
+class TestMultiplierSegment(unittest.TestCase):
+    def test_grams_multiplier_scales_the_figure(self):
+        out, unresolved = render("{{item:COFFEE|grams|x3}}", batches=10, **COFFEE)
+        self.assertEqual("240 g", out)
+        self.assertEqual([], unresolved)
+
+    def test_a_decimal_multiplier_is_supported(self):
+        out, _ = render("{{item:COFFEE|grams|x0.3}}", batches=10, **COFFEE)
+        self.assertEqual("24 g", out)
+        out, _ = render("{{item:COFFEE|grams|x1.3}}", batches=10, **COFFEE)
+        self.assertEqual("104 g", out)
+
+    def test_a_leading_point_multiplier_is_supported(self):
+        out, _ = render("{{item:COFFEE|grams|x.5}}", batches=10, **COFFEE)
+        self.assertEqual("40 g", out)
+
+    def test_an_uppercase_x_is_accepted(self):
+        out, _ = render("{{item:COFFEE|grams|X3}}", batches=10, **COFFEE)
+        self.assertEqual("240 g", out)
+
+    def test_qty_accepts_a_multiplier_too(self):
+        out, _ = render("{{item:FLOUR|qty|x2}}", batches=1)
+        self.assertEqual("1.000", out)
+
+    def test_whitespace_around_segments_is_tolerated(self):
+        out, _ = render("{{ item : COFFEE | grams | x3 }}", batches=10, **COFFEE)
+        self.assertEqual("240 g", out)
+
+    def test_the_multiplier_never_changes_the_unmultiplied_token(self):
+        out, _ = render("{{item:COFFEE|grams}} / {{item:COFFEE|grams|x3}}", batches=10, **COFFEE)
+        self.assertEqual("80 g / 240 g", out)
+
+    def test_a_multiplier_on_the_full_form_is_invalid(self):
+        # Three segments with an empty middle one.
+        out, unresolved = render("{{item:FLOUR||x3}}")
+        self.assertEqual("{{item:FLOUR||x3}}", out)
+        self.assertEqual(["FLOUR||x3"], unresolved)
+
+    def test_a_multiplier_on_name_or_uom_is_invalid(self):
+        for variant in ("name", "uom"):
+            token = "{{item:FLOUR|%s|x3}}" % variant
+            out, unresolved = render(token)
+            self.assertEqual(token, out)
+            self.assertEqual(["FLOUR|%s|x3" % variant], unresolved)
+
+    def test_a_bare_multiplier_without_a_variant_is_invalid(self):
+        out, unresolved = render("{{item:FLOUR|x3}}")
+        self.assertEqual("{{item:FLOUR|x3}}", out)
+        self.assertEqual(["FLOUR|x3"], unresolved)
+
+    def test_zero_negative_and_garbage_multipliers_are_invalid(self):
+        for segment in ("x0", "x0.0", "x-3", "x", "x3x", "3", "xabc", "x1.2.3", "x 3 4", ""):
+            token = "{{item:COFFEE|grams|%s}}" % segment
+            out, unresolved = render(token, batches=10, **COFFEE)
+            self.assertEqual(token, out, segment)
+            self.assertEqual(1, len(unresolved), segment)
+
+    def test_a_fourth_segment_is_invalid(self):
+        out, unresolved = render("{{item:COFFEE|grams|x3|x2}}", batches=10, **COFFEE)
+        self.assertEqual("{{item:COFFEE|grams|x3|x2}}", out)
+        self.assertEqual(1, len(unresolved))
+
+    def test_a_multiplied_non_mass_uom_is_still_refused(self):
+        out, unresolved = render("{{item:WATER|grams|x3}}", **COFFEE)
+        self.assertEqual("{{item:WATER|grams|x3}}", out)
+        self.assertEqual(["WATER|grams|x3"], unresolved)
+
+    def test_existing_two_segment_tokens_are_unchanged(self):
+        out, _ = render("{{item:PIST-SPR|qty}} {{item:PIST-SPR|uom}} {{item:PIST-SPR|name}}")
+        self.assertEqual("1.830 Kg Pistachio spread", out)
+
+
 class TestScaleDuration(unittest.TestCase):
     def _call(self, duration=10.0, mode="Fixed", batches=3, units=30):
         from jarz_pos.services.sop_rendering import scale_duration

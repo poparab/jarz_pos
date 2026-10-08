@@ -9,6 +9,7 @@ would make one of those two audiences guess.
 Run::
 
     bench --site <site> execute jarz_pos.scripts.seed_recipe_sops.run
+    bench --site <site> execute jarz_pos.scripts.seed_recipe_sops.run --kwargs "{'items': 'Tiramisu Large,Tiramisu Small'}"
 
 Idempotent by ``(item_code, version)``: re-running updates the existing SOP in
 place rather than stacking duplicates, so fixing a typo is just an edit and a
@@ -497,86 +498,177 @@ SPONGE_CAKE = {
     ],
 }
 
-# The espresso syrup, as the owner described it on 2026-08-08.  It is not a
-# stocked item, so it hangs off the Tiramisu jar SOP where it is actually used.
-TIRAMISU_ASSEMBLY = {
-    "item_code": "Tiramisu Medium",
-    "version": 1,
-    "yield_percent": 100,
-    "prep_time_mins": 30,
-    "equipment": "Espresso machine, scales, jars",
-    "notes": (
-        "Espresso ratios per the owner, 2026-08-08.\n"
-        "Each jar takes HALF a shot's yield, which is why the BOM figures are "
-        "right: 8 g of beans per large jar is half a 16 g dose, and half of the "
-        "48 g yield is 24 g of espresso. The medium takes 6 g of beans and so "
-        "18 g of espresso — which is the figure the Tiramisu manual quotes.\n"
-        "The manual's '11 g sugar per double shot' (23%) is superseded by the "
-        "30% below."
-    ),
-    "steps": [
-        {
-            "title": "Pull the espresso — 16 g in, 48 g out, half a shot per jar",
-            "instruction": (
-                "Dose 16 g of coffee and pull to three times the dose — 48 g of "
-                "liquid espresso per shot. Each jar takes half that yield: "
-                "24 g for a large jar, 18 g for a medium.\n"
-                "يتم استخدام 16 جرام قهوة و استخراج 3 اضعاف الوزن اي 48 جرام "
-                "اسبريسو. كل برطمان بياخد نص الكمية دي: 24 جرام للكبير و 18 "
-                "جرام للوسط."
-            ),
-            "duration_mins": 5,
-            "scaling_mode": "Per Batch",
-            "capture_type": "Number",
-            "capture_label": "Espresso yield per 16 g shot (g)",
-            "capture_min": 44,
-            "capture_max": 52,
-            "requires_confirmation": 1,
-        },
-        {
-            "title": "Sweeten — 300 g powder sugar per 1 litre of espresso",
-            "instruction": (
-                "For every 1 litre of espresso, dissolve 300 g of powdered "
-                "sugar while hot, then chill. One litre therefore yields 1300 g "
-                "of sweetened espresso.\n"
-                "لكل 1 لتر اسبريسو يضاف 300 جرام سكر بودرة و يذوب و هو ساخن ثم "
-                "يبرد. اللتر بيطلع 1300 جرام اسبريسو محلى."
-            ),
-            "duration_mins": 8,
-            "scaling_mode": "Per Batch",
-            "capture_type": "Number",
-            "capture_label": "Powder sugar added (g)",
-            "requires_confirmation": 1,
-        },
-        {
-            "title": "Split the syrup — sugar-weight to the cream, rest to the Savoiardi",
-            "instruction": (
-                "Take an amount of sweetened espresso equal to the sugar you "
-                "added — 300 g per litre — and fold it into the cheesecake "
-                "mixture to make the tiramisu cream. Everything left, the "
-                "remaining 1000 g per litre, goes onto the Savoiardi.\n"
-                "يتم اخذ كمية من الاسبريسو المحلى مساوية لوزن السكر اللي اتحط "
-                "(300 جرام لكل لتر) و تضاف الي خليط التشيز كيك، و الباقي "
-                "(1000 جرام) يضاف علي السافوياردي."
-            ),
-            "duration_mins": 10,
-            "scaling_mode": "Per Batch",
-            "capture_type": "Number",
-            "capture_label": "Syrup into the cheesecake mixture (g)",
-            "requires_confirmation": 1,
-        },
-        {
-            "title": "Dust with cocoa powder",
-            "instruction": (
-                "Finish each jar with a dusting of cocoa powder.\n"
-                "يتم رش الكاكاو البودرة علي وش كل برطمان."
-            ),
-            "duration_mins": 5,
-            "scaling_mode": "Per Unit",
-            "requires_confirmation": 1,
-        },
-    ],
+# The Tiramisu jars, per the owner's method of 2026-10-08 (superseding the
+# 2026-08-08 "half a shot per jar" note, which is why the old single-recipe
+# TIRAMISU_ASSEMBLY for the Medium is gone).
+#
+#   grinds -> liquid coffee at 1:3 by weight        (16 g -> 48 g)
+#   powder sugar        = liquid x 0.3, dissolved in the hot coffee
+#   syrup into the cream = the SUGAR weight, folded into the cheesecake mix
+#   syrup onto savoiardi = the rest, i.e. the liquid weight
+#
+# Every run-size total in the steps is a ``{{item:...}}`` token, so it follows
+# the jar BOM and scales with the number of jars.  Only the PER-JAR portion
+# figures below are static text: they are the spec the bench portions to, and
+# they are not BOM lines (the BOM carries cream as "Cheesecake Mix" and the
+# syrup not at all).  Grams per jar:
+TIRAMISU_JAR_PORTIONS: Dict[str, Dict[str, Any]] = {
+    "Tiramisu Large": {"version": 1, "cream": 97, "syrup": 24, "savoiardi": 40, "cocoa": 3},
+    "Tiramisu Medium": {"version": 2, "cream": 70, "syrup": 16, "savoiardi": 28, "cocoa": 2},
+    # Small is exactly 2/3 of the Medium.
+    "Tiramisu Small": {
+        "version": 1,
+        "cream": 70 * 2 / 3,
+        "syrup": 16 * 2 / 3,
+        "savoiardi": 28 * 2 / 3,
+        "cocoa": 2 * 2 / 3,
+    },
 }
+
+
+def _grams(value: float) -> str:
+    """``97`` -> ``"97 g"``; ``46.667`` -> ``"46.7 g"`` (one decimal, no ``.0``)."""
+    text = f"{value:.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return f"{text} g"
+
+
+def build_tiramisu_sop(item_code: str, portions: Dict[str, Any]) -> Dict[str, Any]:
+    """One Tiramisu jar SOP from its per-jar portion figures.
+
+    Run-size totals are tokens (they scale with the jar count and follow the
+    BOM); the ``(... per jar)`` figures come from ``portions``.
+    """
+    cream = _grams(portions["cream"])
+    syrup = _grams(portions["syrup"])
+    savoiardi = _grams(portions["savoiardi"])
+    cocoa = _grams(portions["cocoa"])
+
+    grinds = "{{item:Coffee beans|grams}}"
+    liquid = "{{item:Coffee beans|grams|x3}}"
+    sugar = "{{item:powder sugar|grams}}"
+
+    return {
+        "item_code": item_code,
+        "version": portions["version"],
+        "yield_percent": 100,
+        "prep_time_mins": 30,
+        "equipment": "Coffee brewer, scales, mixing bowl, jars",
+        "notes": (
+            "Method per the owner, 2026-10-08, superseding the 2026-08-08 "
+            "half-shot note.\n"
+            "Coffee grinds become liquid coffee at 1:3 by weight (16 g -> 48 g). "
+            "Extraction varies, so the kitchen weighs the liquid: the liquid "
+            "weight is what the recipe needs. Powder sugar = liquid x 0.3, "
+            "dissolved in the hot coffee. An amount of sweetened coffee equal to "
+            "the SUGAR weight is folded into the cheesecake mix to make the "
+            "tiramisu cream; the rest (= the liquid weight) goes onto the "
+            "savoiardi.\n"
+            f"Per jar: cream {cream}, savoiardi {savoiardi}, coffee syrup onto "
+            f"the savoiardi {syrup}, cocoa {cocoa}. Run totals in the steps come "
+            "from the jar BOM and scale with the number of jars."
+        ),
+        "steps": [
+            {
+                "title": "Brew the coffee: grinds to liquid at 1 to 3",
+                "instruction": (
+                    f"Weigh {grinds} of coffee grinds and brew to {liquid} of "
+                    "liquid coffee (3 x the grinds, e.g. 16 g becomes 48 g). "
+                    "Extraction varies, so weigh the liquid: the liquid weight is "
+                    "what counts. If it is short, brew a little more; if it is "
+                    "over, keep only the target.\n"
+                    f"يوزن {grinds} بن مطحون و يستخرج منه {liquid} قهوة سائلة "
+                    "(3 اضعاف وزن البن، يعني 16 جرام بن يطلعوا 48 جرام). "
+                    "الاستخراج بيختلف فلازم نوزن القهوة السايلة: وزن السايل هو "
+                    "المهم. لو ناقص نستخرج شوية كمان، و لو زاد ناخد المطلوب بس."
+                ),
+                "duration_mins": 8,
+                "scaling_mode": "Fixed",
+                "capture_type": "Number",
+                "capture_label": "Liquid coffee weighed (g)",
+                "requires_confirmation": 1,
+            },
+            {
+                "title": "Sweeten with powder sugar (liquid x 0.3)",
+                "instruction": (
+                    f"Dissolve {sugar} of powder sugar (liquid x 0.3) in the hot "
+                    "coffee, then cool.\n"
+                    f"يذوب {sugar} سكر بودر (وزن السايل × 0.3) في القهوة و هي "
+                    "سخنة ثم تبرد."
+                ),
+                "duration_mins": 5,
+                "scaling_mode": "Fixed",
+                "requires_confirmation": 1,
+            },
+            {
+                "title": "Make the tiramisu cream",
+                "instruction": (
+                    "Weigh {{item:Cheesecake Mix|grams}} of cheesecake mix and "
+                    f"fold in {sugar} of the sweetened coffee (the same weight as "
+                    f"the sugar). Each jar takes {cream} of cream.\n"
+                    "يوزن {{item:Cheesecake Mix|grams}} خليط تشيز كيك و يضاف "
+                    f"عليه {sugar} من القهوة المحلاة (نفس وزن السكر) و يقلب "
+                    f"برفق. كل برطمان ياخد {cream} كريمة."
+                ),
+                "duration_mins": 10,
+                "scaling_mode": "Fixed",
+                "requires_confirmation": 1,
+            },
+            {
+                "title": "Lay the savoiardi and soak with the rest of the coffee",
+                "instruction": (
+                    "Lay {{item:Savoiardi|grams}} of savoiardi "
+                    f"({savoiardi} per jar) and pour the rest of the sweetened "
+                    f"coffee over it: {liquid} in total ({syrup} per jar).\n"
+                    "يرص {{item:Savoiardi|grams}} سافوياردي "
+                    f"({savoiardi} لكل برطمان) و يصب عليه باقي القهوة المحلاة: "
+                    f"{liquid} إجمالي ({syrup} لكل برطمان)."
+                ),
+                "duration_mins": 1,
+                "scaling_mode": "Per Unit",
+                "requires_confirmation": 1,
+            },
+            {
+                "title": "Fill each jar with cream",
+                "instruction": (
+                    f"Fill each jar with {cream} of cream.\n"
+                    f"يتم ملء كل برطمان بـ {cream} كريمة."
+                ),
+                "duration_mins": 1,
+                "scaling_mode": "Per Unit",
+                "requires_confirmation": 1,
+            },
+            {
+                "title": "Dust with cocoa powder",
+                "instruction": (
+                    "Dust {{item:coco powder|grams}} of cocoa powder over the "
+                    f"jars ({cocoa} per jar).\n"
+                    "يرش {{item:coco powder|grams}} كاكاو بودرة علي وش "
+                    f"البرطمانات ({cocoa} لكل برطمان)."
+                ),
+                "duration_mins": 1,
+                "scaling_mode": "Per Unit",
+                "requires_confirmation": 1,
+            },
+            {
+                "title": "Lid and label each jar",
+                "instruction": (
+                    "Lid and label each jar.\n"
+                    "يتم تغطية كل برطمان و لصق الملصق."
+                ),
+                "duration_mins": 1,
+                "scaling_mode": "Per Unit",
+                "requires_confirmation": 1,
+            },
+        ],
+    }
+
+
+TIRAMISU_SOPS: List[Dict[str, Any]] = [
+    build_tiramisu_sop(item_code, portions)
+    for item_code, portions in TIRAMISU_JAR_PORTIONS.items()
+]
 
 RECIPES: List[Dict[str, Any]] = [
     CHEESECAKE_MIX,
@@ -584,7 +676,7 @@ RECIPES: List[Dict[str, Any]] = [
     RED_VELVET_CAKE,
     SAVOIARDI,
     SPONGE_CAKE,
-    TIRAMISU_ASSEMBLY,
+    *TIRAMISU_SOPS,
 ]
 
 
@@ -626,13 +718,44 @@ def _apply(doc, recipe: Dict[str, Any]) -> None:
         )
 
 
-def run(dry_run: Any = False) -> Dict[str, Any]:
-    """Create or refresh one SOP per recipe.  Reports before it writes."""
+def _parse_items(items: Any) -> Optional[List[str]]:
+    """``None``/blank -> no filter; else a de-duplicated list of item codes.
+
+    ``bench execute --kwargs`` hands over a string, a script may hand over a
+    list; a comma-separated string is the form a person types.
+    """
+    if items is None:
+        return None
+    if isinstance(items, str):
+        raw = items.split(",")
+    else:
+        raw = list(items)
+    codes: List[str] = []
+    for code in raw:
+        code = str(code).strip()
+        if code and code not in codes:
+            codes.append(code)
+    return codes or None
+
+
+def run(dry_run: Any = False, items: Any = None) -> Dict[str, Any]:
+    """Create or refresh one SOP per recipe.  Reports before it writes.
+
+    ``items`` (a list, or a comma-separated string of item codes) restricts the
+    run to those recipes; the default seeds everything.  A recipe with a newer
+    ``version`` than the one on the site is inserted as a new record, and the
+    Jarz SOP controller's ``on_update`` deactivates the older active version,
+    so seeding a v2 leaves v2 active and the v1 on file, inactive.
+    """
     created: List[str] = []
     updated: List[str] = []
     skipped: List[Dict[str, str]] = []
 
-    for recipe in RECIPES:
+    wanted = _parse_items(items)
+    recipes = [r for r in RECIPES if wanted is None or r["item_code"] in wanted]
+    unmatched = [] if wanted is None else [c for c in wanted if c not in {r["item_code"] for r in RECIPES}]
+
+    for recipe in recipes:
         item_code = recipe["item_code"]
         if not frappe.db.exists("Item", item_code):
             skipped.append({"item_code": item_code, "reason": "item not found"})
@@ -665,6 +788,7 @@ def run(dry_run: Any = False) -> Dict[str, Any]:
         "created": created,
         "updated": updated,
         "skipped": skipped,
+        "unmatched": unmatched,
     }
 
     print("=" * 78)
@@ -674,6 +798,8 @@ def run(dry_run: Any = False) -> Dict[str, Any]:
         print(f"{label}: {len(rows)}")
         for row in rows:
             print(f"   {row}")
+    if unmatched:
+        print(f"no recipe for: {', '.join(unmatched)}")
     if skipped:
         print(f"skipped: {len(skipped)}")
         for row in skipped:

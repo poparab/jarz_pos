@@ -376,6 +376,10 @@ jobs:
             test_sop_rendering
             test_api_sop
             test_doctype_jarz_sop
+            # The Tiramisu jar recipes: renders each seeded SOP through the pure
+            # renderer against the per-jar BOM figures, so a mistyped token or a
+            # drifted item code shows up here instead of on the kitchen's phone.
+            test_seed_recipe_sops
             test_purchase_warehouse_utils
             test_purchase_setup
             test_purchase_request_links

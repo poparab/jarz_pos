@@ -106,6 +106,22 @@ def _resolve_required_material_rows():
     return _get_required_material_rows
 
 
+def _resolve_direct_bom_lines(bom: str) -> List[Dict[str, Any]]:
+    """The BOM's own one-level ``BOM Item`` rows, phantom sub-assemblies intact.
+
+    Raises on a database failure; ``_build_component_maps`` owns the fallback so
+    the failure is logged once, under one title.
+    """
+    rows = frappe.get_all(
+        "BOM Item",
+        filters={"parent": bom, "parenttype": "BOM"},
+        fields=["item_code", "item_name", "stock_qty", "stock_uom"],
+        order_by="idx asc",
+        limit_page_length=0,
+    )
+    return [dict(r) for r in (rows or [])]
+
+
 def _resolve_strip_html():
     return frappe.utils.strip_html
 
@@ -238,10 +254,27 @@ def _build_component_maps(
     to empty maps: the tokens then come back verbatim and land in
     ``unresolved_tokens``, which is visibly broken rather than quietly wrong.
 
-    ``fetch_exploded=0``: an SOP is a set of instructions somebody follows with
-    their hands.  "Weigh 4 Kg of Savoiardi" is a step; "weigh 0.768 Kg of flour"
-    is a step in a *different* SOP, the one for making Savoiardi.  The tokens
-    have to name what the operator takes out of the freezer.
+    An SOP is a set of instructions somebody follows with their hands.  "Weigh
+    4 Kg of Savoiardi" is a step; "weigh 0.768 Kg of flour" is a step in a
+    *different* SOP, the one for making Savoiardi.  The tokens have to name what
+    the operator takes out of the freezer, so the maps are built in two layers:
+
+    1. **The BOM's direct lines** (``_resolve_direct_bom_lines``).  One batch is
+       ``BOM.quantity``, so the per-batch figure is simply the line's
+       ``stock_qty``.  A phantom sub-assembly such as Cheesecake Mix resolves
+       *as itself* here, and a code that is a direct line is quoted from that
+       line alone.
+    2. **The existing material reader**, added only for codes the direct lines
+       do not already carry.  ``fetch_exploded=0`` is not enough on its own:
+       ERPNext still recurses through a PHANTOM BOM, so reading only that way
+       replaces the Cheesecake Mix line with its raw ingredients (the token for
+       the mix goes unresolved) and merges the mix's *internal* 1.5 Kg of powder
+       sugar into the jar's own 7.2 g.  Layer 2 keeps the raw ingredients that
+       live only inside a phantom resolvable without letting them overwrite a
+       direct line.
+
+    If the direct read fails it is logged (distinct title) and layer 2 alone is
+    used, which is the behaviour before the direct reader existed.
     """
     qty_map: Dict[str, float] = {}
     uom_map: Dict[str, str] = {}
@@ -249,6 +282,26 @@ def _build_component_maps(
 
     if not bom:
         return qty_map, uom_map, name_map
+
+    try:
+        direct_rows = _resolve_direct_bom_lines(bom) or []
+    except Exception:
+        frappe.log_error(
+            title="JARZ SOP – BOM direct lines read failed",
+            message=f"bom={bom}\n{frappe.get_traceback()}",
+        )
+        direct_rows = []
+
+    for row in direct_rows:
+        code = str(_field(row, "item_code") or "").strip()
+        if not code:
+            continue
+        # Same duplicate-line rule as below: quote the total, not the last line.
+        qty_map[code] = qty_map.get(code, 0.0) + rendering.to_float(_field(row, "stock_qty"), 0.0)
+        uom_map[code] = _field(row, "stock_uom") or ""
+        name_map[code] = _field(row, "item_name") or code
+
+    direct_codes = set(qty_map)
 
     try:
         rows = _resolve_required_material_rows()(bom, company, bom_qty, fetch_exploded=0) or []
@@ -263,7 +316,7 @@ def _build_component_maps(
 
     for row in rows:
         code = str(_field(row, "item_code") or "").strip()
-        if not code:
+        if not code or code in direct_codes:
             continue
         # A BOM can list the same component twice (a duplicated item group has
         # done exactly that here); the instruction must quote the total, not
@@ -288,7 +341,15 @@ def _build_payload(
 ) -> Dict[str, Any]:
     sop = _sop_to_dict(doc)
 
-    resolved_bom = (bom or "").strip() or sop.get("bom") or _resolve_default_bom(item_code)
+    # BOM precedence: an explicit ``bom`` (the Work Order path passes the WO's
+    # own, so a batch is quoted against what it was actually made from) wins,
+    # then the item's CURRENT default BOM, and only then the BOM the SOP was
+    # authored against.  The SOP's ``bom`` link is a snapshot: when a BOM is
+    # re-versioned (Tiramisu Large -002 -> -003) it keeps pointing at the
+    # superseded one, and quoting that is quoting a recipe nobody makes any more.
+    resolved_bom = (
+        (bom or "").strip() or _resolve_default_bom(item_code) or sop.get("bom")
+    )
     bom_row = _resolve_bom_row(resolved_bom) or {}
     company = bom_row.get("company")
     bom_qty = rendering.to_float(bom_row.get("quantity"), 1.0) or 1.0
@@ -553,6 +614,25 @@ def record_sop_step_capture(
         "value_text": value_text,
         "attachment": attachment,
     }
+
+
+@frappe.whitelist()
+def list_items_with_sop() -> Dict[str, Any]:
+    """Item codes that currently have an active SOP.
+
+    One cheap call lets the app decide which product rows get a "Recipe" button
+    without asking ``get_sop_for_item`` per row.  The response shape
+    (``{"item_codes": [...]}``) is a contract with the Flutter client.
+    """
+    _ensure_production_view_access()
+
+    rows = frappe.get_all(
+        SOP_DOCTYPE,
+        filters={"is_active": 1},
+        pluck="item_code",
+        limit_page_length=0,
+    )
+    return {"item_codes": sorted({str(code).strip() for code in (rows or []) if code and str(code).strip()})}
 
 
 @frappe.whitelist()
