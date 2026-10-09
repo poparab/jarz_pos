@@ -147,6 +147,23 @@ except ImportError:
         return filter_conditions
 
 try:
+    from jarz_pos.utils.address_pins import get_address_pin_map, pin_fields_for
+except Exception:
+    # The map-pin badge is additive: losing it must never cost the board.
+    def get_address_pin_map(address_names: Any) -> Dict[str, Dict[str, Any]]:  # type: ignore
+        return {}
+
+    def pin_fields_for(address_name: Any, pin_map: Any) -> Dict[str, Any]:  # type: ignore
+        return {
+            "address_latitude": None,
+            "address_longitude": None,
+            "geo_source": "",
+            "geo_confidence": 0,
+            "has_location_pin": False,
+            "location_link": "",
+        }
+
+try:
     from jarz_pos.api.manager import (
         get_invoice_amendment_eligibility,
         get_invoice_cancellation_eligibility,
@@ -1740,6 +1757,17 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             # Fallback: empty addresses
             invoice_addresses = {inv.name: "" for inv in invoices}
 
+        # Map pins for the "Pinned / No map pin" badge and the Maps link: ONE
+        # Address query for the whole board. Never raises; a failure leaves
+        # every card with the empty pin keys.
+        try:
+            address_pins = get_address_pin_map(
+                inv.get("shipping_address_name") or inv.get("customer_address")
+                for inv in invoices
+            )
+        except Exception:
+            address_pins = {}
+
         # Batch fetch items for all invoices (avoid N+1 queries)
         invoice_items: Dict[str, List[Dict[str, Any]]] = {inv.name: [] for inv in invoices}
         try:
@@ -1957,6 +1985,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "woo_order_id": inv.get("woo_order_id") or None,
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
+            invoice_card.update(
+                pin_fields_for(
+                    inv.get("shipping_address_name") or inv.get("customer_address"),
+                    address_pins,
+                )
+            )
 
             # ── Sub-territory, trip & shipping override fields ──────────
             inv_territory = inv.territory or ""
@@ -2918,6 +2952,11 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         invoice = frappe.get_doc("Sales Invoice", invoice_id)
         _ensure_invoice_detail_access(invoice)
         data = format_invoice_data(invoice)
+        # format_invoice_data already carries the map-pin keys; this only covers
+        # the module-level fallback formatter, which does not.
+        if "has_location_pin" not in data:
+            address_name = invoice.get("shipping_address_name") or invoice.get("customer_address")
+            data.update(pin_fields_for(address_name, get_address_pin_map([address_name])))
         shipping = _get_invoice_shipping_values(invoice)
         data["shipping_income"] = float(shipping.get("income") or 0.0)
         data["shipping_expense"] = float(shipping.get("expense") or 0.0)

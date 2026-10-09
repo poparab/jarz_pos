@@ -7,6 +7,8 @@ import re
 import unicodedata
 from typing import Dict, List, Any, Optional, Union
 
+from jarz_pos.utils.address_pins import get_address_pin_map, pin_fields_for
+
 
 _PRINT_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B-\x1F\x7F-\x9F]")
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
@@ -780,6 +782,10 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
         "custom_delivery_income": invoice.get("custom_delivery_income"),
         "woo_order_id": invoice.get("woo_order_id"),
     }
+    # Map pin + tappable Maps link, the same keys the kanban card carries, so a
+    # card refreshed through get_invoice_details keeps its "Pinned" badge.
+    # get_address_pin_map never raises and skips the query for a blank name.
+    data.update(pin_fields_for(address_name, get_address_pin_map([address_name])))
     return data
 
 

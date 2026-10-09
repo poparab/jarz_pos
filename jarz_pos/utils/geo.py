@@ -216,6 +216,23 @@ def is_valid_coordinate(lat: object, lng: object) -> bool:
     return True
 
 
+#: Google Maps "search" URL. The documented, stable form for "drop a pin here":
+#: it opens the app on Android/iOS and the web map everywhere else.
+_MAPS_SEARCH_URL = "https://www.google.com/maps/search/?api=1&query={lat:.6f},{lng:.6f}"
+
+
+def maps_link_for(lat: object, lng: object) -> str:
+    """A tappable Google Maps link for *lat*/*lng*, or ``""`` when invalid.
+
+    Validity is :func:`is_valid_coordinate` — finite, in range, not Null Island
+    — so a half-written or zeroed Address can never produce a link to the Gulf
+    of Guinea. Six decimals is ~11 cm, finer than any source we store.
+    """
+    if not is_valid_coordinate(lat, lng):
+        return ""
+    return _MAPS_SEARCH_URL.format(lat=float(lat), lng=float(lng))
+
+
 def _coords(lat: object, lng: object, precision: str) -> Optional[Tuple[float, float, str]]:
     if not is_valid_coordinate(lat, lng):
         return None
