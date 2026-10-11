@@ -429,6 +429,9 @@ jobs:
             # the reason this must be in CI: the failure mode is somebody editing
             # one of the two _build_ofd_preview_errors copies.
             test_ofd_pin_gate
+            # The permanent "was out for delivery" lock that stops automated
+            # amendments. Moved here from the Woo repo, whose CI has no jarz_pos.
+            test_stamp_out_for_delivery_flag
             # Customer delivery tracking. test_tracking_public_status guards the
             # response allow-list on the app's ONLY guest-callable endpoint, so a
             # run without it is a run with no check on what leaks publicly.
