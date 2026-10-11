@@ -15,6 +15,11 @@
   "cant_lose_frequency_min",
   "lost_recency_min",
   "new_customer_recency_max",
+  "website_only",
+  "section_regular",
+  "regular_window_days",
+  "regular_frequency_min",
+  "high_value_order_min",
   "digest_email_recipients"
  ],
  "fields": [
@@ -68,7 +73,7 @@
    "label": "Can't Lose Them — Min Recency (Days)"
   },
   {
-   "default": "5",
+   "default": "4",
    "description": "Min lifetime order count to qualify as Can't Lose Them",
    "fieldname": "cant_lose_frequency_min",
    "fieldtype": "Int",
@@ -87,6 +92,38 @@
    "label": "New Customer — Max Days Since First Order"
   },
   {
+   "default": "1",
+   "description": "Only count orders that came from the website/delivery (Woo order id set). Turn off to include branch POS orders.",
+   "fieldname": "website_only",
+   "fieldtype": "Check",
+   "label": "Website Orders Only"
+  },
+  {
+   "fieldname": "section_regular",
+   "fieldtype": "Section Break",
+   "label": "Regular Customers and High-Value Orders"
+  },
+  {
+   "default": "60",
+   "description": "Window in which the retail orders are counted for the Regular flag",
+   "fieldname": "regular_window_days",
+   "fieldtype": "Int",
+   "label": "Regular - Window (Days)"
+  },
+  {
+   "default": "4",
+   "fieldname": "regular_frequency_min",
+   "fieldtype": "Int",
+   "label": "Regular - Min Orders In Window"
+  },
+  {
+   "default": "1000",
+   "description": "A single retail order at or above this amount marks a high-value order",
+   "fieldname": "high_value_order_min",
+   "fieldtype": "Currency",
+   "label": "High-Value Order - Min Amount"
+  },
+  {
    "description": "Comma-separated email addresses for the segment change alerts",
    "fieldname": "digest_email_recipients",
    "fieldtype": "Small Text",
@@ -96,7 +133,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-09 12:00:00",
+ "modified": "2026-10-12 12:00:00",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Segmentation Settings",

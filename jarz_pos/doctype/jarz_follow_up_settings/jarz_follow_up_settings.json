@@ -1,0 +1,209 @@
+{
+ "actions": [],
+ "creation": "2026-10-12 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "start_date",
+  "offer_text",
+  "column_break_a",
+  "quality_escalation_user",
+  "apology_discount_percent",
+  "apology_code_valid_days",
+  "section_hours",
+  "quiet_start",
+  "quiet_end",
+  "column_break_b",
+  "call_window_start",
+  "call_window_end",
+  "section_senders",
+  "sender_users",
+  "section_msgs",
+  "tpl_msg_3h",
+  "tpl_msg_day7",
+  "tpl_msg_day32",
+  "tpl_msg_day50",
+  "section_calls",
+  "tpl_call_3h",
+  "tpl_call_day2",
+  "tpl_call_day30",
+  "tpl_call_day45"
+ ],
+ "fields": [
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "0",
+   "description": "Master switch for the hourly generator and the daily push."
+  },
+  {
+   "fieldname": "start_date",
+   "fieldtype": "Date",
+   "label": "Start Date",
+   "default": "2026-10-15",
+   "description": "Only orders delivered on or after this date start a follow-up cycle."
+  },
+  {
+   "fieldname": "offer_text",
+   "fieldtype": "Data",
+   "label": "Offer Text",
+   "description": "Fills {offer} in the day-45 call and day-50 message. Leave blank until an offer exists."
+  },
+  {
+   "fieldname": "column_break_a",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "quality_escalation_user",
+   "fieldtype": "Link",
+   "label": "Quality Escalation User",
+   "options": "User",
+   "description": "Receives a task when a customer reports a quality problem."
+  },
+  {
+   "fieldname": "apology_discount_percent",
+   "fieldtype": "Percent",
+   "label": "Apology Discount %",
+   "default": "0",
+   "description": "0 = do not create a code when a delivery problem is logged."
+  },
+  {
+   "fieldname": "apology_code_valid_days",
+   "fieldtype": "Int",
+   "label": "Apology Code Valid (Days)",
+   "default": "30"
+  },
+  {
+   "fieldname": "section_hours",
+   "fieldtype": "Section Break",
+   "label": "Contact Hours"
+  },
+  {
+   "fieldname": "quiet_start",
+   "fieldtype": "Time",
+   "label": "Messages Quiet From",
+   "default": "22:00:00"
+  },
+  {
+   "fieldname": "quiet_end",
+   "fieldtype": "Time",
+   "label": "Messages Quiet Until",
+   "default": "11:00:00"
+  },
+  {
+   "fieldname": "column_break_b",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "call_window_start",
+   "fieldtype": "Time",
+   "label": "Calls From",
+   "default": "12:00:00"
+  },
+  {
+   "fieldname": "call_window_end",
+   "fieldtype": "Time",
+   "label": "Calls Until",
+   "default": "16:00:00"
+  },
+  {
+   "fieldname": "section_senders",
+   "fieldtype": "Section Break",
+   "label": "Daily Push"
+  },
+  {
+   "fieldname": "sender_users",
+   "fieldtype": "Table",
+   "label": "Sender Users",
+   "options": "Jarz Follow-up Sender",
+   "description": "Users who get the 12:00 push with today's follow-up count."
+  },
+  {
+   "fieldname": "section_msgs",
+   "fieldtype": "Section Break",
+   "label": "Message Templates",
+   "description": "Placeholders: {first_name}, {order_no}, {offer}"
+  },
+  {
+   "fieldname": "tpl_msg_3h",
+   "fieldtype": "Small Text",
+   "label": "Message - 3 hours after delivery"
+  },
+  {
+   "fieldname": "tpl_msg_day7",
+   "fieldtype": "Small Text",
+   "label": "Message - day 7"
+  },
+  {
+   "fieldname": "tpl_msg_day32",
+   "fieldtype": "Small Text",
+   "label": "Message - day 32"
+  },
+  {
+   "fieldname": "tpl_msg_day50",
+   "fieldtype": "Small Text",
+   "label": "Message - day 50"
+  },
+  {
+   "fieldname": "section_calls",
+   "fieldtype": "Section Break",
+   "label": "Call Scripts",
+   "description": "Placeholders: {first_name}, {order_no}, {offer}"
+  },
+  {
+   "fieldname": "tpl_call_3h",
+   "fieldtype": "Small Text",
+   "label": "Call - 3 hours after delivery"
+  },
+  {
+   "fieldname": "tpl_call_day2",
+   "fieldtype": "Small Text",
+   "label": "Call - day 2"
+  },
+  {
+   "fieldname": "tpl_call_day30",
+   "fieldtype": "Small Text",
+   "label": "Call - day 30"
+  },
+  {
+   "fieldname": "tpl_call_day45",
+   "fieldtype": "Small Text",
+   "label": "Call - day 45"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-12 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Follow-up Settings",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "issingle": 1,
+ "track_changes": 1,
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "role": "JARZ Manager"
+  }
+ ]
+}

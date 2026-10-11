@@ -1,0 +1,260 @@
+{
+ "actions": [],
+ "creation": "2026-10-12 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "customer",
+  "customer_name",
+  "phone",
+  "invoice",
+  "woo_order_id",
+  "column_break_a",
+  "step",
+  "channel",
+  "status",
+  "due_at",
+  "cycle_start",
+  "skip_if_reached",
+  "section_profile",
+  "customer_type",
+  "value_band",
+  "column_break_b",
+  "order_value",
+  "lifetime_orders",
+  "section_result",
+  "reached",
+  "outcome",
+  "notes",
+  "column_break_c",
+  "done_by",
+  "done_at",
+  "cancel_reason",
+  "apology_code",
+  "escalation_task"
+ ],
+ "fields": [
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Customer Name",
+   "fetch_from": "customer.customer_name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "phone",
+   "fieldtype": "Data",
+   "label": "Phone"
+  },
+  {
+   "fieldname": "invoice",
+   "fieldtype": "Link",
+   "label": "Invoice",
+   "options": "Sales Invoice",
+   "search_index": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "woo_order_id",
+   "fieldtype": "Int",
+   "label": "Woo Order ID"
+  },
+  {
+   "fieldname": "column_break_a",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "step",
+   "fieldtype": "Select",
+   "label": "Step",
+   "options": "3h\nday2\nday7\nday30\nday32\nday45\nday50",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "label": "Channel",
+   "options": "Message\nCall",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Pending\nDone\nSkipped\nCancelled",
+   "default": "Pending",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "due_at",
+   "fieldtype": "Datetime",
+   "label": "Due At",
+   "in_list_view": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "cycle_start",
+   "fieldtype": "Datetime",
+   "label": "Cycle Start (Delivered)"
+  },
+  {
+   "fieldname": "skip_if_reached",
+   "fieldtype": "Data",
+   "label": "Skip If Call Reached",
+   "description": "Step whose call being Reached makes this touch unnecessary."
+  },
+  {
+   "fieldname": "section_profile",
+   "fieldtype": "Section Break",
+   "label": "Customer Profile"
+  },
+  {
+   "fieldname": "customer_type",
+   "fieldtype": "Select",
+   "label": "Customer Type",
+   "options": "New\nRepeat"
+  },
+  {
+   "fieldname": "value_band",
+   "fieldtype": "Select",
+   "label": "Value Band",
+   "options": "High\nLow"
+  },
+  {
+   "fieldname": "column_break_b",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "order_value",
+   "fieldtype": "Currency",
+   "label": "Order Value"
+  },
+  {
+   "fieldname": "lifetime_orders",
+   "fieldtype": "Int",
+   "label": "Lifetime Orders"
+  },
+  {
+   "fieldname": "section_result",
+   "fieldtype": "Section Break",
+   "label": "Result"
+  },
+  {
+   "fieldname": "reached",
+   "fieldtype": "Select",
+   "label": "Reached",
+   "options": "\nReached\nNot Reached"
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Select",
+   "label": "Outcome",
+   "options": "\nHappy\nQuality\nDelivery\nNo Reply\nOpted Out"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "column_break_c",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "done_by",
+   "fieldtype": "Link",
+   "label": "Done By",
+   "options": "User"
+  },
+  {
+   "fieldname": "done_at",
+   "fieldtype": "Datetime",
+   "label": "Done At"
+  },
+  {
+   "fieldname": "cancel_reason",
+   "fieldtype": "Data",
+   "label": "Cancel Reason"
+  },
+  {
+   "fieldname": "apology_code",
+   "fieldtype": "Data",
+   "label": "Apology Code"
+  },
+  {
+   "fieldname": "escalation_task",
+   "fieldtype": "Link",
+   "label": "Escalation Task",
+   "options": "Jarz Task"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-12 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Follow-up Touch",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "autoname": "FUT-.#####",
+ "track_changes": 1,
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "report": 1,
+   "role": "jarz line manager"
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "report": 1,
+   "role": "JARZ line manager"
+  }
+ ]
+}

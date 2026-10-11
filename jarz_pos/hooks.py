@@ -588,6 +588,11 @@ scheduler_events = {
         # up, so it posts nothing until a new period starts. Never raises. See
         # jarz_pos.services.partner_recurring_fees.
         "jarz_pos.services.partner_recurring_fees.run_partner_recurring_fees",
+        # Customer follow-up cycle: open the 3h/day2/day7/... touches for every
+        # newly delivered retail order. Off until Jarz Follow-up Settings is
+        # enabled; idempotent per invoice; never raises. See
+        # jarz_pos.services.customer_followups.
+        "jarz_pos.services.customer_followups.generate_touches",
     ],
     "cron": {
         # Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,
@@ -599,6 +604,11 @@ scheduler_events = {
             # tagged [jarz:settlement] ToDo per customer. Bookkeeping on the
             # terms record makes a same-day re-run a no-op. Never raises.
             "jarz_pos.services.settlement_reminders.run_settlement_reminders",
+        ],
+        # Tell each configured sender how many follow-ups wait today (12:00 site
+        # time, the start of the call window). Never raises.
+        "0 12 * * *": [
+            "jarz_pos.services.customer_followups.send_daily_sender_push",
         ],
     },
 }
