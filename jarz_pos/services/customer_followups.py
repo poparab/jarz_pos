@@ -422,6 +422,10 @@ def generate_touches() -> Dict[str, Any]:
             INNER JOIN `tabCustomer` c ON c.name = si.customer
             WHERE si.custom_sales_invoice_state = 'Delivered'
               AND {delivered} >= %(since)s
+              -- Index-friendly floor, and it stops an old order whose
+              -- custom_delivered_at is empty from starting a cycle just because
+              -- a later save bumped `modified`.
+              AND si.posting_date >= DATE_SUB(DATE(%(since)s), INTERVAL 2 DAY)
               AND {scope} {opt_out}
               AND NOT EXISTS (SELECT 1 FROM `tabJarz Follow-up Touch` t WHERE t.invoice = si.name)
             ORDER BY {delivered} ASC
@@ -475,7 +479,7 @@ def _create_apology_code(doc: Any, settings: Dict[str, Any]) -> Optional[str]:
     """A single-use percentage code for the customer. None when it cannot be made."""
     from frappe.utils import add_days, now_datetime
 
-    percent = float(settings.get("apology_discount_percent") or 0)
+    percent = min(float(settings.get("apology_discount_percent") or 0), 100.0)
     if percent <= 0:
         return None
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I to dictate by phone

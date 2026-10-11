@@ -41,7 +41,7 @@ def get_followups_today():
     return svc.get_due_touches()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def log_touch(name, reached=None, outcome=None, notes=None):
     """Record a result. ``reached`` (Reached / Not Reached) is required for calls."""
     _gate()
@@ -50,7 +50,7 @@ def log_touch(name, reached=None, outcome=None, notes=None):
     return svc.log_touch(name, reached=reached, outcome=outcome, notes=notes)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def skip_touch(name, reason=None):
     """Drop a touch without contacting the customer."""
     _gate()
@@ -68,7 +68,7 @@ def get_followup_stats(from_date=None, to_date=None):
     return svc.get_followup_stats(from_date, to_date)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def run_generator_now():
     """Run the hourly generator immediately (manager)."""
     _gate(_MANAGER_ROLES)

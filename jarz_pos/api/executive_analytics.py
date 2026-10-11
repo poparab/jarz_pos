@@ -99,7 +99,8 @@ def get_executive_overview(
     # ── Customer segment mix ─────────────────────────────────────────────
     def _load_segments():
         from jarz_pos.services.rfm_segmentation import get_segment_summary
-        return get_segment_summary()
+        # Drop pseudo rows (Regular): they overlap the real segments.
+        return [r for r in get_segment_summary() if not r.get("pseudo")]
 
     segment_mix = _safe("segments", _load_segments, [])
     total_customers = sum(int(r.get("count") or 0) for r in segment_mix)
