@@ -671,6 +671,58 @@ def ensure_address_geo_fields() -> None:
         _log(f"ensure_address_geo_fields error: {e}")
 
 
+#: Sales Invoice per-order pin snapshot. Mirrors ``fixtures/custom_field.json``.
+#: ``(fieldname, label, fieldtype, insert_after, extra)``.
+#:
+#: Deliberately NOT ``custom_delivery_latitude`` / ``custom_delivery_longitude``:
+#: those already exist and hold the courier's proof-of-delivery GPS reading.
+#:
+#: No Data/Select/Link field anywhere in this block: ``tabSales Invoice`` is at
+#: MariaDB's 65,535-byte row limit and rejects any new varchar with error 1118.
+#: Float is a fixed 8 bytes; Small Text is TEXT (~20 inline bytes).
+INVOICE_DELIVERY_PIN_FIELDS = (
+    ("custom_delivery_pin_section", "Delivery Pin", "Section Break", "dispatch_address", {"collapsible": 1}),
+    ("custom_delivery_pin_latitude", "Pin Latitude", "Float", "custom_delivery_pin_section", {"precision": "6", "non_negative": 0}),
+    ("custom_delivery_pin_longitude", "Pin Longitude", "Float", "custom_delivery_pin_latitude", {"precision": "6", "non_negative": 0}),
+    ("custom_delivery_pin_source", "Pin Source", "Small Text", "custom_delivery_pin_longitude", {}),
+    ("custom_delivery_pin_flag", "Pin Flag", "Small Text", "custom_delivery_pin_source", {}),
+)
+
+
+def ensure_invoice_delivery_pin_fields() -> None:
+    """Ensure the per-order customer pin snapshot exists on Sales Invoice.
+
+    A Woo order's pin used to live only on the customer's shared Address, so the
+    next order that re-pinned that Address silently moved every earlier order's
+    map location. The snapshot freezes the pin on the invoice itself.
+
+    before_migrate rather than fixture-only for the same reason as
+    :func:`ensure_courier_delivery_fields`: fixtures sync at the very end of a
+    migrate while the writer is already serving. Create-only, never raises.
+
+    allow_on_submit: the snapshot can be written onto a submitted invoice.
+    no_copy: an amended invoice must not inherit a stale pin by copy.
+    """
+    try:
+        if not frappe:
+            return
+        for fieldname, label, fieldtype, insert_after, extra in INVOICE_DELIVERY_PIN_FIELDS:
+            _ensure_custom_field(
+                dt="Sales Invoice",
+                fieldname=fieldname,
+                label=label,
+                fieldtype=fieldtype,
+                insert_after=insert_after,
+                allow_on_submit=1,
+                no_copy=1,
+                read_only=1,
+                print_hide=1,
+                **extra,
+            )
+    except Exception as e:
+        _log(f"ensure_invoice_delivery_pin_fields error: {e}")
+
+
 def remove_required_delivery_datetime_field() -> None:
     """Remove legacy single datetime field if still present (safe no-op)."""
     try:

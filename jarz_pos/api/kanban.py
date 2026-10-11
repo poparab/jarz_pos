@@ -147,7 +147,12 @@ except ImportError:
         return filter_conditions
 
 try:
-    from jarz_pos.utils.address_pins import get_address_pin_map, pin_fields_for
+    from jarz_pos.utils.address_pins import (
+        get_address_pin_map,
+        invoice_pin_columns,
+        invoice_pin_override,
+        pin_fields_for,
+    )
 except Exception:
     # The map-pin badge is additive: losing it must never cost the board.
     def get_address_pin_map(address_names: Any) -> Dict[str, Dict[str, Any]]:  # type: ignore
@@ -161,7 +166,18 @@ except Exception:
             "geo_confidence": 0,
             "has_location_pin": False,
             "location_link": "",
+            "pin_source": "",
+            "pin_flag": "",
         }
+
+    def invoice_pin_columns() -> List[str]:  # type: ignore
+        return []
+
+    def invoice_pin_override(si_row: Any, address_fields: Any) -> Dict[str, Any]:  # type: ignore
+        out = dict(address_fields or {})
+        out.setdefault("pin_source", "")
+        out.setdefault("pin_flag", "")
+        return out
 
 try:
     from jarz_pos.api.manager import (
@@ -1671,6 +1687,12 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         except Exception:
             # If meta access fails, do not add optional fields
             pass
+        # Per-order pin snapshot (custom_delivery_pin_*): meta-guarded inside the
+        # helper, so an unmigrated site simply keeps the Address pin.
+        try:
+            fields.extend(invoice_pin_columns())
+        except Exception:
+            pass
 
         # Cap results to avoid large payloads; client can paginate via additional filters
         invoices = frappe.get_all(
@@ -1985,10 +2007,15 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
                 "woo_order_id": inv.get("woo_order_id") or None,
                 "_state_timestamp": str(state_change_ts) if state_change_ts else None,
             }
+            # The invoice's own pin snapshot beats the shared Address pin (a
+            # later order re-pins the Address); see invoice_pin_override.
             invoice_card.update(
-                pin_fields_for(
-                    inv.get("shipping_address_name") or inv.get("customer_address"),
-                    address_pins,
+                invoice_pin_override(
+                    inv,
+                    pin_fields_for(
+                        inv.get("shipping_address_name") or inv.get("customer_address"),
+                        address_pins,
+                    ),
                 )
             )
 
@@ -2956,7 +2983,11 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
         # the module-level fallback formatter, which does not.
         if "has_location_pin" not in data:
             address_name = invoice.get("shipping_address_name") or invoice.get("customer_address")
-            data.update(pin_fields_for(address_name, get_address_pin_map([address_name])))
+            data.update(
+                invoice_pin_override(
+                    invoice, pin_fields_for(address_name, get_address_pin_map([address_name]))
+                )
+            )
         shipping = _get_invoice_shipping_values(invoice)
         data["shipping_income"] = float(shipping.get("income") or 0.0)
         data["shipping_expense"] = float(shipping.get("expense") or 0.0)

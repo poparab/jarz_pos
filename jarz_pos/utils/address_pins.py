@@ -6,6 +6,12 @@ Website orders carry the customer's map pin on the order's Address
 its Google Maps link read a flat set of keys from each invoice dict; this module
 builds those keys in one batched query for the whole board.
 
+The Address pin is SHARED by every order of a customer, so a later order that
+re-pins it used to move every earlier order's map location. Each invoice may
+therefore carry its own snapshot (``custom_delivery_pin_*``, written by the Woo
+inbound sync); :func:`invoice_pin_override` lays that snapshot over the Address
+keys, and the board selects those columns in its existing single query.
+
 Three rules, all deliberate:
 
 * **Read only.** Nothing here writes to Address. ``address_line2`` in
@@ -22,11 +28,18 @@ Three rules, all deliberate:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import frappe
 
-from jarz_pos.utils.geo import extract_location_link, is_valid_coordinate, maps_link_for
+from jarz_pos.utils.geo import (
+    CONFIDENCE_RANK,
+    SOURCE_CUSTOMER_PIN,
+    distance_m_or_none,
+    extract_location_link,
+    is_valid_coordinate,
+    maps_link_for,
+)
 
 #: Optional Address columns carrying the pin. Selected only when present.
 GEO_COLUMNS = (
@@ -36,7 +49,28 @@ GEO_COLUMNS = (
     "custom_geo_confidence",
 )
 
+#: Optional Sales Invoice columns carrying THIS order's pin snapshot. The
+#: shared Address pin is re-pinned by every later order of the same customer,
+#: so an invoice that carries its own snapshot must show that, not the Address.
+#: (Not ``custom_delivery_latitude``: that is the courier's proof-of-delivery GPS.)
+INVOICE_PIN_COLUMNS = (
+    "custom_delivery_pin_latitude",
+    "custom_delivery_pin_longitude",
+    "custom_delivery_pin_source",
+    "custom_delivery_pin_flag",
+)
+
+#: Confidence a per-order snapshot is shown at: it is a customer's remote pin.
+SNAPSHOT_CONFIDENCE = CONFIDENCE_RANK[SOURCE_CUSTOMER_PIN]
+
+#: A higher-confidence Address pin (courier_verified / manual_override) within
+#: this distance of the snapshot is a verified refinement of the same door and
+#: wins over the snapshot. Farther away, it belongs to a different delivery.
+VERIFIED_NEAR_M = 150.0
+
 #: What a card carries when there is no address, no pin, or the lookup failed.
+#: ``pin_source`` / ``pin_flag`` come from the invoice snapshot only; the flag
+#: can be set even when no usable pin exists (``outside_egypt``).
 EMPTY_PIN_FIELDS: Dict[str, Any] = {
     "address_latitude": None,
     "address_longitude": None,
@@ -44,6 +78,8 @@ EMPTY_PIN_FIELDS: Dict[str, Any] = {
     "geo_confidence": 0,
     "has_location_pin": False,
     "location_link": "",
+    "pin_source": "",
+    "pin_flag": "",
 }
 
 
@@ -156,3 +192,74 @@ def pin_fields_for(address_name: Any, pin_map: Optional[Dict[str, Dict[str, Any]
     except Exception:
         found = None
     return dict(found) if found else empty_pin_fields()
+
+
+def invoice_pin_columns() -> List[str]:
+    """The :data:`INVOICE_PIN_COLUMNS` that exist on this site's Sales Invoice.
+
+    A site that has not migrated them yet gets ``[]`` (selecting a missing
+    column is an SQL error that would cost the whole board). Never raises.
+    """
+    try:
+        meta = frappe.get_meta("Sales Invoice")
+        return [column for column in INVOICE_PIN_COLUMNS if meta.has_field(column)]
+    except Exception:
+        return []
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _clean_flag(value: Any) -> str:
+    """Normalise a comma-separated flag string: trimmed tokens, no blanks."""
+    tokens = [t.strip() for t in str(value or "").split(",")]
+    return ",".join(t for t in tokens if t)
+
+
+def invoice_pin_override(si_row: Any, address_fields: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge THIS invoice's pin snapshot over the Address pin keys. Pure; never raises.
+
+    * The invoice carries a valid snapshot pin -> it wins, shown as
+      ``customer_pin`` at :data:`SNAPSHOT_CONFIDENCE` — UNLESS the Address
+      carries a higher-confidence pin (courier_verified / manual_override)
+      within :data:`VERIFIED_NEAR_M` of it, which is a verified refinement of
+      the same door and is kept.
+    * No usable snapshot (blank, ``0,0``, out of range, columns not migrated)
+      -> the Address pin exactly as before.
+
+    ``pin_source`` and ``pin_flag`` always come from the snapshot (``""`` when
+    absent); the flag passes through even when there is no usable pin.
+    """
+    base = dict(address_fields) if address_fields else empty_pin_fields()
+    base.setdefault("pin_source", "")
+    base.setdefault("pin_flag", "")
+    if not si_row:
+        return base
+    try:
+        getter = si_row.get
+        out = dict(base)
+        out["pin_source"] = _clean_text(getter("custom_delivery_pin_source"))
+        out["pin_flag"] = _clean_flag(getter("custom_delivery_pin_flag"))
+
+        lat = _finite_float(getter("custom_delivery_pin_latitude"))
+        lng = _finite_float(getter("custom_delivery_pin_longitude"))
+        if lat is None or lng is None or not is_valid_coordinate(lat, lng):
+            return out
+
+        if out.get("has_location_pin") and _safe_int(out.get("geo_confidence")) > SNAPSHOT_CONFIDENCE:
+            gap = distance_m_or_none(
+                out.get("address_latitude"), out.get("address_longitude"), lat, lng
+            )
+            if gap is not None and gap <= VERIFIED_NEAR_M:
+                return out
+
+        out["address_latitude"] = lat
+        out["address_longitude"] = lng
+        out["geo_source"] = SOURCE_CUSTOMER_PIN
+        out["geo_confidence"] = SNAPSHOT_CONFIDENCE
+        out["has_location_pin"] = True
+        out["location_link"] = maps_link_for(lat, lng)
+        return out
+    except Exception:
+        return base

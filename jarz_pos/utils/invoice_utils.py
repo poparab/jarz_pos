@@ -7,7 +7,11 @@ import re
 import unicodedata
 from typing import Dict, List, Any, Optional, Union
 
-from jarz_pos.utils.address_pins import get_address_pin_map, pin_fields_for
+from jarz_pos.utils.address_pins import (
+    get_address_pin_map,
+    invoice_pin_override,
+    pin_fields_for,
+)
 
 
 _PRINT_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B-\x1F\x7F-\x9F]")
@@ -785,7 +789,14 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
     # Map pin + tappable Maps link, the same keys the kanban card carries, so a
     # card refreshed through get_invoice_details keeps its "Pinned" badge.
     # get_address_pin_map never raises and skips the query for a blank name.
-    data.update(pin_fields_for(address_name, get_address_pin_map([address_name])))
+    # This invoice's own pin snapshot (custom_delivery_pin_*) beats the shared
+    # Address pin, which a later order of the same customer may have re-pinned.
+    # A Document's .get() returns None for a column the site has not migrated.
+    data.update(
+        invoice_pin_override(
+            invoice, pin_fields_for(address_name, get_address_pin_map([address_name]))
+        )
+    )
     return data
 
 

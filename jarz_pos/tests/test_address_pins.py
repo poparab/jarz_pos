@@ -26,6 +26,8 @@ PIN_KEYS = {
     "geo_confidence",
     "has_location_pin",
     "location_link",
+    "pin_source",
+    "pin_flag",
 }
 
 
@@ -249,6 +251,279 @@ class TestGetAddressPinMap(unittest.TestCase):
             pin_map = address_pins.get_address_pin_map(["A"])
         self.assertEqual(set(address_pins.pin_fields_for("A", pin_map)), PIN_KEYS)
         self.assertEqual(set(address_pins.pin_fields_for("Z", pin_map)), PIN_KEYS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-invoice pin snapshot (custom_delivery_pin_*) over the shared Address pin
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The snapshot this order was placed with.
+SNAP_LAT, SNAP_LNG = 30.0500, 31.2400
+#: ~2.2 km north: where a LATER order re-pinned the shared Address.
+FAR_LAT, FAR_LNG = 30.0700, 31.2400
+#: ~55 m north of the snapshot: a courier's refinement of the same door.
+NEAR_LAT, NEAR_LNG = 30.0505, 31.2400
+
+
+def _address(lat, lng, source="customer_pin", confidence=30):
+    return address_pins.pin_fields_from_address(
+        {
+            "custom_latitude": lat,
+            "custom_longitude": lng,
+            "custom_geo_source": source,
+            "custom_geo_confidence": confidence,
+        }
+    )
+
+
+def _invoice(lat=SNAP_LAT, lng=SNAP_LNG, source="customer_checkout", flag=""):
+    return {
+        "name": "ACC-SINV-1",
+        "custom_delivery_pin_latitude": lat,
+        "custom_delivery_pin_longitude": lng,
+        "custom_delivery_pin_source": source,
+        "custom_delivery_pin_flag": flag,
+    }
+
+
+class TestInvoicePinOverride(unittest.TestCase):
+    def test_snapshot_wins_over_a_different_address_pin(self):
+        """The bug: a later order re-pinned the Address and moved this order."""
+        out = address_pins.invoice_pin_override(_invoice(), _address(FAR_LAT, FAR_LNG))
+        self.assertTrue(out["has_location_pin"])
+        self.assertEqual(out["address_latitude"], SNAP_LAT)
+        self.assertEqual(out["address_longitude"], SNAP_LNG)
+        self.assertEqual(out["geo_source"], "customer_pin")
+        self.assertEqual(out["geo_confidence"], 30)
+        self.assertEqual(out["location_link"], geo.maps_link_for(SNAP_LAT, SNAP_LNG))
+        self.assertEqual(out["pin_source"], "customer_checkout")
+        self.assertEqual(out["pin_flag"], "")
+        self.assertEqual(set(out), PIN_KEYS)
+
+    def test_snapshot_wins_when_address_has_no_pin(self):
+        out = address_pins.invoice_pin_override(_invoice(), address_pins.empty_pin_fields())
+        self.assertTrue(out["has_location_pin"])
+        self.assertEqual(out["address_latitude"], SNAP_LAT)
+
+    def test_verified_address_pin_near_the_snapshot_wins(self):
+        for source, rank in (("courier_verified", 40), ("manual_override", 50)):
+            with self.subTest(source=source):
+                addr = _address(NEAR_LAT, NEAR_LNG, source, rank)
+                out = address_pins.invoice_pin_override(_invoice(), addr)
+                self.assertEqual(out["address_latitude"], NEAR_LAT)
+                self.assertEqual(out["geo_source"], source)
+                self.assertEqual(out["geo_confidence"], rank)
+                self.assertEqual(out["location_link"], geo.maps_link_for(NEAR_LAT, NEAR_LNG))
+                # Snapshot metadata still rides along.
+                self.assertEqual(out["pin_source"], "customer_checkout")
+
+    def test_far_verified_address_pin_loses_to_the_snapshot(self):
+        addr = _address(FAR_LAT, FAR_LNG, "courier_verified", 40)
+        out = address_pins.invoice_pin_override(_invoice(), addr)
+        self.assertEqual(out["address_latitude"], SNAP_LAT)
+        self.assertEqual(out["geo_source"], "customer_pin")
+        self.assertEqual(out["geo_confidence"], 30)
+
+    def test_near_pin_of_equal_confidence_does_not_beat_the_snapshot(self):
+        """Only a HIGHER-confidence pin is a refinement; a peer customer pin is not."""
+        out = address_pins.invoice_pin_override(_invoice(), _address(NEAR_LAT, NEAR_LNG))
+        self.assertEqual(out["address_latitude"], SNAP_LAT)
+
+    def test_no_snapshot_falls_back_to_the_address_pin_unchanged(self):
+        addr = _address(FAR_LAT, FAR_LNG, "courier_verified", 40)
+        for row in (
+            _invoice(lat=None, lng=None, source=""),
+            _invoice(lat=0, lng=0, source=""),
+            _invoice(lat=95, lng=31, source=""),
+            _invoice(lat="", lng="", source=""),
+        ):
+            with self.subTest(row=row):
+                out = address_pins.invoice_pin_override(row, addr)
+                self.assertEqual(out, addr)
+
+    def test_flag_passthrough_with_a_pin(self):
+        out = address_pins.invoice_pin_override(
+            _invoice(flag=" outside_area , area_mismatch ,"), _address(FAR_LAT, FAR_LNG)
+        )
+        self.assertTrue(out["has_location_pin"])
+        self.assertEqual(out["pin_flag"], "outside_area,area_mismatch")
+
+    def test_flag_passthrough_without_a_usable_pin(self):
+        """outside_egypt can arrive with no stored pin at all."""
+        out = address_pins.invoice_pin_override(
+            _invoice(lat=None, lng=None, source="maps_link", flag="outside_egypt"),
+            address_pins.empty_pin_fields(),
+        )
+        self.assertFalse(out["has_location_pin"])
+        self.assertIsNone(out["address_latitude"])
+        self.assertEqual(out["pin_flag"], "outside_egypt")
+        self.assertEqual(out["pin_source"], "maps_link")
+
+    def test_columns_missing_keeps_old_behaviour(self):
+        """An unmigrated site selects none of the columns: the row lacks the keys."""
+        addr = _address(FAR_LAT, FAR_LNG)
+        row = {"name": "ACC-SINV-1", "customer_address": "ADDR-1"}
+        out = address_pins.invoice_pin_override(row, addr)
+        self.assertEqual(out, addr)
+        self.assertEqual(out["pin_source"], "")
+        self.assertEqual(out["pin_flag"], "")
+
+    def test_none_row_and_none_address(self):
+        self.assertEqual(
+            address_pins.invoice_pin_override(None, None), address_pins.EMPTY_PIN_FIELDS
+        )
+
+    def test_does_not_mutate_the_address_fields(self):
+        addr = _address(FAR_LAT, FAR_LNG)
+        snapshot = dict(addr)
+        address_pins.invoice_pin_override(_invoice(), addr)
+        self.assertEqual(addr, snapshot)
+
+    def test_row_whose_get_raises_degrades_to_the_address_pin(self):
+        class Boom:
+            def get(self, key):
+                raise RuntimeError("boom")
+
+        addr = _address(FAR_LAT, FAR_LNG)
+        self.assertEqual(address_pins.invoice_pin_override(Boom(), addr), addr)
+
+
+class TestInvoicePinColumns(unittest.TestCase):
+    def _mf(self, present):
+        mf = MagicMock()
+        mf.get_meta.return_value.has_field.side_effect = lambda f: f in present
+        return mf
+
+    def test_all_columns_present(self):
+        mf = self._mf(set(address_pins.INVOICE_PIN_COLUMNS))
+        with patch.object(address_pins, "frappe", mf):
+            self.assertEqual(
+                address_pins.invoice_pin_columns(), list(address_pins.INVOICE_PIN_COLUMNS)
+            )
+        mf.get_meta.assert_called_once_with("Sales Invoice")
+
+    def test_unmigrated_site_selects_nothing(self):
+        mf = self._mf(set())
+        with patch.object(address_pins, "frappe", mf):
+            self.assertEqual(address_pins.invoice_pin_columns(), [])
+
+    def test_partial_migration_selects_only_existing(self):
+        mf = self._mf({"custom_delivery_pin_flag"})
+        with patch.object(address_pins, "frappe", mf):
+            self.assertEqual(address_pins.invoice_pin_columns(), ["custom_delivery_pin_flag"])
+
+    def test_meta_failure_selects_nothing(self):
+        mf = MagicMock()
+        mf.get_meta.side_effect = Exception("no meta")
+        with patch.object(address_pins, "frappe", mf):
+            self.assertEqual(address_pins.invoice_pin_columns(), [])
+
+    def test_never_reuses_the_courier_proof_of_delivery_columns(self):
+        """custom_delivery_latitude/longitude are the courier's GPS at delivery."""
+        self.assertNotIn("custom_delivery_latitude", address_pins.INVOICE_PIN_COLUMNS)
+        self.assertNotIn("custom_delivery_longitude", address_pins.INVOICE_PIN_COLUMNS)
+
+
+class TestInvoicePinSchema(unittest.TestCase):
+    """Fixture + before_migrate seeder for the snapshot fields."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        import os
+
+        import jarz_pos
+
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(jarz_pos.__file__)), "fixtures", "custom_field.json"
+        )
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        cls.fields = {
+            e.get("fieldname"): e for e in data if e.get("dt") == "Sales Invoice"
+        }
+        cls.data = data
+
+    def test_every_field_present_once_with_safe_types(self):
+        """No varchar: tabSales Invoice is at the 65,535-byte row limit."""
+        expected = {
+            "custom_delivery_pin_section": "Section Break",
+            "custom_delivery_pin_latitude": "Float",
+            "custom_delivery_pin_longitude": "Float",
+            "custom_delivery_pin_source": "Small Text",
+            "custom_delivery_pin_flag": "Small Text",
+        }
+        for fieldname, fieldtype in expected.items():
+            with self.subTest(field=fieldname):
+                matches = [
+                    e for e in self.data
+                    if e.get("dt") == "Sales Invoice" and e.get("fieldname") == fieldname
+                ]
+                self.assertEqual(len(matches), 1)
+                entry = matches[0]
+                self.assertEqual(entry["fieldtype"], fieldtype)
+                self.assertEqual(entry["name"], f"Sales Invoice-{fieldname}")
+                self.assertEqual(entry["module"], "jarz pos")
+                self.assertEqual(entry["allow_on_submit"], 1)
+                self.assertEqual(entry["no_copy"], 1)
+                self.assertEqual(entry["read_only"], 1)
+                self.assertEqual(entry["print_hide"], 1)
+
+    def test_section_is_collapsible_and_anchored_in_the_address_block(self):
+        section = self.fields["custom_delivery_pin_section"]
+        self.assertEqual(section["collapsible"], 1)
+        self.assertEqual(section["insert_after"], "dispatch_address")
+
+    def test_coordinates_signed_six_places(self):
+        for fieldname in ("custom_delivery_pin_latitude", "custom_delivery_pin_longitude"):
+            with self.subTest(field=fieldname):
+                self.assertEqual(self.fields[fieldname]["non_negative"], 0)
+                self.assertEqual(str(self.fields[fieldname]["precision"]), "6")
+
+    def test_seeder_mirrors_the_fixture(self):
+        from jarz_pos.utils import cleanup
+
+        created = []
+        fake = MagicMock()
+        fake.db.exists.return_value = False
+
+        def _capture(payload):
+            doc = MagicMock()
+            created.append((payload, doc))
+            return doc
+
+        fake.get_doc.side_effect = _capture
+        with patch.object(cleanup, "frappe", fake):
+            cleanup.ensure_invoice_delivery_pin_fields()
+
+        seeded = {}
+        for payload, doc in created:
+            attrs = dict(payload)
+            for call in doc.set.call_args_list:
+                if len(call.args) == 2:
+                    attrs[call.args[0]] = call.args[1]
+            seeded[payload["fieldname"]] = attrs
+
+        self.assertEqual(
+            set(seeded), {f for f in self.fields if f.startswith("custom_delivery_pin_")}
+        )
+        for fieldname, attrs in seeded.items():
+            with self.subTest(field=fieldname):
+                fixture = self.fields[fieldname]
+                self.assertEqual(attrs["dt"], "Sales Invoice")
+                self.assertEqual(attrs["fieldtype"], fixture["fieldtype"])
+                self.assertEqual(attrs["insert_after"], fixture["insert_after"])
+                for flag in ("allow_on_submit", "no_copy", "read_only", "print_hide"):
+                    self.assertEqual(attrs.get(flag), 1)
+
+    def test_seeder_registered_after_the_collision_sweep(self):
+        from jarz_pos import hooks
+
+        before = hooks.before_migrate
+        seeder = "jarz_pos.utils.cleanup.ensure_invoice_delivery_pin_fields"
+        sweep = "jarz_pos.utils.cleanup.remove_colliding_custom_fields_for_fixtures"
+        self.assertIn(seeder, before)
+        self.assertGreater(before.index(seeder), before.index(sweep))
 
 
 if __name__ == "__main__":  # pragma: no cover

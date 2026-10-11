@@ -63,6 +63,9 @@ before_migrate = [
     # COURIER_CONTRACTS §2 freezes that block at eight fields and a guard test
     # asserts the set.
     "jarz_pos.utils.cleanup.ensure_tracking_fields",
+    # Per-order customer pin snapshot on Sales Invoice (written by the Woo
+    # inbound sync). Before fixtures so the column exists while new code serves.
+    "jarz_pos.utils.cleanup.ensure_invoice_delivery_pin_fields",
     # Journal Entry provenance tag. MUST be before_migrate: the backfill patch
     # (post_model_sync) writes to this column, and post_model_sync runs long
     # before sync_fixtures(). A fixture here would create the field after the
