@@ -317,12 +317,42 @@ class TestInvoicePinOverride(unittest.TestCase):
                 # Snapshot metadata still rides along.
                 self.assertEqual(out["pin_source"], "customer_checkout")
 
-    def test_far_verified_address_pin_loses_to_the_snapshot(self):
-        addr = _address(FAR_LAT, FAR_LNG, "courier_verified", 40)
-        out = address_pins.invoice_pin_override(_invoice(), addr)
+    def test_far_staff_confirmed_address_pin_beats_the_snapshot(self):
+        """A far verified/override pin is staff correcting a wrong customer pin."""
+        for source, rank in (("courier_verified", 40), ("manual_override", 50)):
+            with self.subTest(source=source):
+                addr = _address(FAR_LAT, FAR_LNG, source, rank)
+                out = address_pins.invoice_pin_override(_invoice(flag="area_mismatch"), addr)
+                self.assertEqual(out["address_latitude"], FAR_LAT)
+                self.assertEqual(out["geo_source"], source)
+                self.assertEqual(out["pin_flag"], "area_mismatch")
+
+    def test_far_courier_web_pin_loses_to_the_snapshot(self):
+        """courier_web is unverified: only the 150 m refinement rule applies."""
+        out = address_pins.invoice_pin_override(_invoice(), _address(FAR_LAT, FAR_LNG, "courier_web", 35))
         self.assertEqual(out["address_latitude"], SNAP_LAT)
         self.assertEqual(out["geo_source"], "customer_pin")
         self.assertEqual(out["geo_confidence"], 30)
+
+    def test_flagged_order_without_a_pin_hides_another_orders_pin(self):
+        """outside_egypt + no snapshot: the shared Address pin is not this order's."""
+        out = address_pins.invoice_pin_override(
+            _invoice(lat=None, lng=None, source="", flag="outside_egypt"), _address(FAR_LAT, FAR_LNG)
+        )
+        self.assertFalse(out["has_location_pin"])
+        self.assertIsNone(out["address_latitude"])
+        self.assertEqual(out["location_link"], "")
+        self.assertEqual(out["pin_flag"], "outside_egypt")
+        self.assertEqual(set(out), PIN_KEYS)
+
+    def test_flagged_order_without_a_pin_keeps_a_staff_confirmed_pin(self):
+        addr = _address(FAR_LAT, FAR_LNG, "manual_override", 50)
+        out = address_pins.invoice_pin_override(
+            _invoice(lat=None, lng=None, source="", flag="outside_egypt"), addr
+        )
+        self.assertTrue(out["has_location_pin"])
+        self.assertEqual(out["address_latitude"], FAR_LAT)
+        self.assertEqual(out["pin_flag"], "outside_egypt")
 
     def test_near_pin_of_equal_confidence_does_not_beat_the_snapshot(self):
         """Only a HIGHER-confidence pin is a refinement; a peer customer pin is not."""

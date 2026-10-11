@@ -34,7 +34,9 @@ import frappe
 
 from jarz_pos.utils.geo import (
     CONFIDENCE_RANK,
+    SOURCE_COURIER_VERIFIED,
     SOURCE_CUSTOMER_PIN,
+    SOURCE_MANUAL_OVERRIDE,
     distance_m_or_none,
     extract_location_link,
     is_valid_coordinate,
@@ -67,6 +69,11 @@ SNAPSHOT_CONFIDENCE = CONFIDENCE_RANK[SOURCE_CUSTOMER_PIN]
 #: this distance of the snapshot is a verified refinement of the same door and
 #: wins over the snapshot. Farther away, it belongs to a different delivery.
 VERIFIED_NEAR_M = 150.0
+
+#: Staff-confirmed Address sources. They win over the snapshot at ANY distance:
+#: a far-away verified pin is precisely "the customer's pin was wrong and staff
+#: fixed it" (the area_mismatch case), not a different delivery.
+STAFF_CONFIRMED_SOURCES = frozenset({SOURCE_COURIER_VERIFIED, SOURCE_MANUAL_OVERRIDE})
 
 #: What a card carries when there is no address, no pin, or the lookup failed.
 #: ``pin_source`` / ``pin_flag`` come from the invoice snapshot only; the flag
@@ -225,8 +232,13 @@ def invoice_pin_override(si_row: Any, address_fields: Optional[Dict[str, Any]]) 
       carries a higher-confidence pin (courier_verified / manual_override)
       within :data:`VERIFIED_NEAR_M` of it, which is a verified refinement of
       the same door and is kept.
+      A staff-confirmed Address pin (:data:`STAFF_CONFIRMED_SOURCES`) wins at
+      any distance.
     * No usable snapshot (blank, ``0,0``, out of range, columns not migrated)
-      -> the Address pin exactly as before.
+      -> the Address pin exactly as before, EXCEPT when the snapshot carries a
+      flag (e.g. ``outside_egypt``): the website rejected this order's pin, so
+      the shared Address pin belongs to some other order and is blanked unless
+      staff confirmed it.
 
     ``pin_source`` and ``pin_flag`` always come from the snapshot (``""`` when
     absent); the flag passes through even when there is no usable pin.
@@ -242,9 +254,21 @@ def invoice_pin_override(si_row: Any, address_fields: Optional[Dict[str, Any]]) 
         out["pin_source"] = _clean_text(getter("custom_delivery_pin_source"))
         out["pin_flag"] = _clean_flag(getter("custom_delivery_pin_flag"))
 
+        staff_confirmed = bool(out.get("has_location_pin")) and (
+            _clean_text(out.get("geo_source")).lower() in STAFF_CONFIRMED_SOURCES
+        )
+
         lat = _finite_float(getter("custom_delivery_pin_latitude"))
         lng = _finite_float(getter("custom_delivery_pin_longitude"))
         if lat is None or lng is None or not is_valid_coordinate(lat, lng):
+            if out["pin_flag"] and not staff_confirmed:
+                blank = empty_pin_fields()
+                blank["pin_source"] = out["pin_source"]
+                blank["pin_flag"] = out["pin_flag"]
+                return blank
+            return out
+
+        if staff_confirmed:
             return out
 
         if out.get("has_location_pin") and _safe_int(out.get("geo_confidence")) > SNAPSHOT_CONFIDENCE:
