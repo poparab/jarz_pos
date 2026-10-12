@@ -851,6 +851,7 @@ def set_branch_access(
         # check is needed.
         now = _now()
         for grant in running:
+            _restore_roster_for_grant(grant["name"])
             _set_grant(grant["name"], {"status": STATUS_CANCELLED, "ended_at": now})
             _log(
                 user,
@@ -872,6 +873,7 @@ def set_branch_access(
     result["log"] = _log(user, profile, ACTION_REMOVED, source, notes=notes, changed_by=caller)
     now = _now()
     for grant in running:
+        _restore_roster_for_grant(grant["name"])
         _set_grant(grant["name"], {"status": STATUS_CANCELLED, "ended_at": now})
         _log(
             user,
@@ -1285,11 +1287,14 @@ def _move_roster_home(
         filters={"employee": employee, "enabled": 1},
         fields=["name", "shift_location"],
     ) or []:
-        if row.get("shift_location") != new_location:
-            # db.set_value, not save(): the schedule controller regenerates
-            # shifts on save, and the generated ones are moved below anyway.
-            frappe.db.set_value("Shift Schedule Assignment", row["name"], "shift_location", new_location)
-            out["schedules_updated"] += 1
+        location = row.get("shift_location") or None
+        if location == new_location or (location is not None and location not in old_locations):
+            # A schedule at a third branch is a deliberate second base.
+            continue
+        # db.set_value, not save(): the schedule controller regenerates
+        # shifts on save, and the generated ones are moved below anyway.
+        frappe.db.set_value("Shift Schedule Assignment", row["name"], "shift_location", new_location)
+        out["schedules_updated"] += 1
 
     rows = frappe.get_all(
         "Shift Assignment",
@@ -1361,9 +1366,13 @@ def move_branch(
     from_profile = _clean(from_pos_profile) or profile_for_shift_location(home_location)
     if from_profile == to_profile:
         frappe.throw(_("{0} is already based at {1}.").format(display, to_profile))
-    from_enabled = bool(from_profile) and from_profile in _enabled_profiles()
+    enabled = _enabled_profiles()
+    from_enabled = bool(from_profile) and from_profile in enabled
     if from_enabled:
         ensure_can_manage(from_profile, user)
+    home_profile = profile_for_shift_location(home_location)
+    if home_profile and home_profile != from_profile and home_profile in enabled:
+        ensure_can_manage(home_profile, user)
 
     removing = from_enabled and not keep and is_member(user, from_profile)
     # Both branches checked before anything is written, so a refusal on the
@@ -1391,6 +1400,12 @@ def move_branch(
     new_location = location_for_profile(to_profile)
     roster = _move_roster_home(employee, old_locations, new_location)
     roster["previous_location"] = home_location or roster.get("previous_location")
+    for grant_name in frappe.get_all(
+        DAY_ACCESS_DOCTYPE,
+        filters={"user": user, "status": ["in", [STATUS_SCHEDULED, STATUS_ACTIVE]], "roster_moved": 1},
+        pluck="name",
+    ) or []:
+        _set_grant(grant_name, {"roster_moved": 0})
 
     parts = [_("{0} now belongs to {1}.").format(display, to_profile)]
     if removed and removed.get("changed"):

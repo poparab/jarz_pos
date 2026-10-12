@@ -674,6 +674,15 @@ class TestDayAccessMovesTheRoster(unittest.TestCase):
         self.assertTrue(result["roster"]["restored"])
         self.assertEqual(world.shifts[("HR-EMP-1", TODAY)]["shift_location"], "Nasr City")
 
+    def test_removing_the_branch_moves_the_shift_back_too(self):
+        world = self._world()
+        with world.active():
+            name = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY)["day_access"]["name"]
+            svc.set_branch_access("ali@jarz.test", "Dokki", False)
+        self.assertEqual(world.shifts[("HR-EMP-1", TODAY)]["shift_location"], "Nasr City")
+        self.assertEqual(world.grants[name]["status"], svc.STATUS_CANCELLED)
+        self.assertEqual(world.grants[name]["roster_moved"], 0)
+
     def test_cancel_leaves_a_shift_somebody_moved_since(self):
         world = self._world()
         with world.active():
@@ -691,7 +700,7 @@ class TestMoveBranch(unittest.TestCase):
         world.add_member("ali@jarz.test", "Nasr city")
         return world
 
-    def _move(self, world, **kwargs):
+    def _move(self, world, home="Nasr City", **kwargs):
         roster = {
             "from_date": "2026-09-23",
             "shift_location": "Dokki",
@@ -701,9 +710,9 @@ class TestMoveBranch(unittest.TestCase):
             "reason": None,
         }
         with ExitStack() as stack:
-            homes = {"Nasr City": "Nasr city", "Dokki": "Dokki"}
+            homes = {"Nasr City": "Nasr city", "Dokki": "Dokki", "6th of October": "6th of october"}
             stack.enter_context(world.active(profile_for_location=homes))
-            stack.enter_context(patch.object(svc, "_home_locations", return_value={"HR-EMP-1": "Nasr City"}))
+            stack.enter_context(patch.object(svc, "_home_locations", return_value={"HR-EMP-1": home}))
             move = stack.enter_context(patch.object(svc, "_move_roster_home", return_value=dict(roster)))
             result = svc.move_branch("ali@jarz.test", "Dokki", **kwargs)
         return result, move
@@ -739,6 +748,15 @@ class TestMoveBranch(unittest.TestCase):
         self.assertFalse(world.is_member("ali@jarz.test", "Dokki"))
         self.assertEqual(world.logs, [])
 
+    def test_naming_another_old_branch_does_not_bypass_the_home_branchs_manager(self):
+        world = self._world()
+        world.caller = "lm@jarz.test"
+        world.roles = {"lm@jarz.test": {ROLES.JARZ_LINE_MANAGER}}
+        world.caller_profiles = ["Dokki", "Nasr city"]
+        with self.assertRaises(frappe.PermissionError):
+            self._move(world, home="6th of October", from_pos_profile="Nasr city")
+        self.assertFalse(world.is_member("ali@jarz.test", "Dokki"))
+
     def test_line_manager_of_only_the_new_branch_is_refused(self):
         world = self._world()
         world.caller = "lm@jarz.test"
@@ -755,6 +773,7 @@ class TestMoveRosterHome(unittest.TestCase):
         schedules = [
             {"name": "SSA-1", "shift_location": "Nasr City"},
             {"name": "SSA-2", "shift_location": "Nasr City"},
+            {"name": "SSA-3", "shift_location": "6th of October"},
         ]
         docs = {}
 
@@ -800,8 +819,8 @@ class TestMoveRosterHome(unittest.TestCase):
         self.assertIn(("Shift Schedule Assignment", "SSA-1", "shift_location", "Dokki"), writes)
         self.assertIn(("Shift Schedule Assignment", "SSA-2", "shift_location", "Dokki"), writes)
         self.assertIn(("Shift Assignment", "SA-2", "shift_location", "Dokki"), writes)
-        # The cover at a third branch is a deliberate one-off and stays.
-        self.assertFalse(any(w[1] == "SA-3" for w in writes))
+        # The cover and the schedule at a third branch are deliberate and stay.
+        self.assertFalse(any(w[1] in ("SA-3", "SSA-3") for w in writes))
         # SA-1 keeps its past at Nasr City; a tail from today sits at Dokki.
         self.assertEqual(str(docs["SA-1"].end_date), "2026-09-22")
         create.assert_called_once_with(
