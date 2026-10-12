@@ -575,7 +575,7 @@ def mark_invoice_delivered(
                 ),
             )
 
-        if not update_submitted_sales_invoice_fields(inv, updates):
+        if not update_submitted_sales_invoice_fields(inv, updates, source="courier_delivered"):
             return {
                 "success": False,
                 "error": _("Could not record the delivery on {0}").format(invoice_id),

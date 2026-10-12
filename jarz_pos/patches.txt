@@ -50,3 +50,8 @@ jarz_pos.Patches.v1_9.create_accrued_expenses_account
 # Jarz Follow-up Settings is a Single: its JSON defaults never reach an existing
 # site, so seed the Arabic templates, hours and start date once (blank fields only).
 jarz_pos.Patches.v1_9.seed_followup_settings
+# The kanban "Ready" column was removed (owner decision, 2026-10-13). Any order
+# still stored as Ready becomes In Progress (raw SQL, `modified` untouched) and
+# gets an Invoice State Log row. Without it such a row would match no column and
+# fail validation on its next full save. Idempotent.
+jarz_pos.Patches.v1_9.kanban_drop_ready_state

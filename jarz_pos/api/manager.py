@@ -92,13 +92,22 @@ from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 # Renders a Time column (a timedelta) as HH:MM:SS without treating 00:00 as unset.
 from jarz_pos.utils.posting_datetime import format_time_value
 from jarz_pos.utils.realtime import publish_invoice_event, publish_to_branches
+from jarz_pos.services.state_log import record_state_change
 
 
 # Allowed states for invoice transfer (normalized: lowercase, no extra spaces)
-# These match the actual field values: "Received", "In Progress", "Ready"
-# Note: "recieved" (misspelled) included for backward compatibility with existing data
-_ALLOWED_TRANSFER_STATES = {"received", "recieved", "in progress", "ready", "preparing"}
+# These match the actual field values: "Received", "In Progress"
+# Note: "recieved" (misspelled) included for backward compatibility with existing data.
+# The "Ready" stage was removed 2026-10-13; a legacy "Ready" row not yet converted by
+# the kanban_drop_ready_state patch is read as "In Progress" (see _normalize_prep_state).
+_ALLOWED_TRANSFER_STATES = {"received", "recieved", "in progress", "preparing"}
 _ALLOWED_AMENDMENT_STATES = _ALLOWED_TRANSFER_STATES
+
+
+def _normalize_prep_state(state: Any) -> str:
+    """Lower-cased state with the removed "Ready" stage read as "In Progress"."""
+    normalized = str(state or "").strip().lower()
+    return "in progress" if normalized == "ready" else normalized
 
 
 def _current_user_allowed_profiles() -> List[str]:
@@ -1320,7 +1329,7 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
     """Return whether a submitted POS invoice can start the ERP-first amendment flow."""
     invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
     current_state = str(inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "").strip()
-    normalized_state = current_state.lower()
+    normalized_state = _normalize_prep_state(current_state)
 
     def _blocked(code: str, reason: str, **extra: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -4878,7 +4887,18 @@ def update_cancelled_invoice_status_fields(
                 "no_change": True,
             }
 
+        previous_state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state")
         frappe.db.set_value("Sales Invoice", inv.name, updates, update_modified=True)
+        # set_value bypasses doc hooks, so a manager's state correction is logged
+        # explicitly (never raises).
+        if requested_state and "custom_sales_invoice_state" in updates:
+            record_state_change(
+                inv.name,
+                previous_state,
+                updates["custom_sales_invoice_state"],
+                "manager_correction",
+                pos_profile=inv.get("pos_profile"),
+            )
         inv.reload()
 
         try:
@@ -4968,11 +4988,11 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         )
         
         # Normalize the state for comparison (strip and lowercase)
-        normalized_state = str(current_state).strip().lower()
+        normalized_state = _normalize_prep_state(current_state)
         
         frappe.logger().info(f"Normalized state: '{normalized_state}', Allowed: {_ALLOWED_TRANSFER_STATES}")
         
-        # Only allow transfer from Received, In Progress, or Ready states
+        # Only allow transfer from Received or In Progress states
         if normalized_state not in _ALLOWED_TRANSFER_STATES:
             frappe.log_error(
                 f"Invoice {invoice_id} transfer blocked. State: '{current_state}' (normalized: '{normalized_state}'). Allowed: {_ALLOWED_TRANSFER_STATES}",
@@ -4980,7 +5000,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
             )
             return {
                 "success": False,
-                "error": f"Invoice can only be transferred when state is Received, In Progress, or Ready. Current state: {current_state}",
+                "error": f"Invoice can only be transferred when state is Received or In Progress. Current state: {current_state}",
             }
 
         existing_delivery_notes = _find_submitted_delivery_notes(inv.name)
@@ -5092,6 +5112,13 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
         try:
             for field, value in updates.items():
                 frappe.db.set_value("Sales Invoice", inv.name, field, value, update_modified=True)
+            # set_value bypasses doc hooks: log the reset to Received explicitly
+            # (never raises). An admin branch transfer is the one deliberate
+            # exception to "orders only move forward".
+            record_state_change(
+                inv.name, current_state, target_received, "transfer",
+                pos_profile=new_branch,
+            )
             for row in stock_rows:
                 if not getattr(row, "name", None):
                     raise frappe.ValidationError(_(f"Invoice row for item {getattr(row, 'item_code', '?')} is missing a name and cannot be moved."))

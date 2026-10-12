@@ -148,13 +148,13 @@ class TestSubmittedInvoiceStateUpdates(unittest.TestCase):
 
         inv = _mock_invoice(name="INV-TEST-001")
         inv.flags = MagicMock()
-        inv.custom_sales_invoice_state = "Ready"
-        inv.sales_invoice_state = "Ready"
+        inv.custom_sales_invoice_state = "In Progress"
+        inv.sales_invoice_state = "In Progress"
 
         fresh_inv = _mock_invoice(name="INV-TEST-001")
         fresh_inv.flags = MagicMock()
-        fresh_inv.custom_sales_invoice_state = "Ready"
-        fresh_inv.sales_invoice_state = "Ready"
+        fresh_inv.custom_sales_invoice_state = "In Progress"
+        fresh_inv.sales_invoice_state = "In Progress"
 
         mock_meta = MagicMock()
         mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {"custom_sales_invoice_state", "sales_invoice_state"} else None
@@ -183,15 +183,15 @@ class TestSubmittedInvoiceStateUpdates(unittest.TestCase):
 
         stale_inv = _mock_invoice(name="INV-TEST-002")
         stale_inv.flags = MagicMock()
-        stale_inv.custom_sales_invoice_state = "Ready"
+        stale_inv.custom_sales_invoice_state = "In Progress"
 
         first_fresh = _mock_invoice(name="INV-TEST-002")
         first_fresh.flags = MagicMock()
-        first_fresh.custom_sales_invoice_state = "Ready"
+        first_fresh.custom_sales_invoice_state = "In Progress"
 
         second_fresh = _mock_invoice(name="INV-TEST-002")
         second_fresh.flags = MagicMock()
-        second_fresh.custom_sales_invoice_state = "Ready"
+        second_fresh.custom_sales_invoice_state = "In Progress"
 
         timestamp_error = type("TimestampMismatchError", (Exception,), {})
         first_fresh.save.side_effect = timestamp_error("stale")

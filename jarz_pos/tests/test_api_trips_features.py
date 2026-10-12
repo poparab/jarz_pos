@@ -48,7 +48,7 @@ class TestTripsNewFeatures(unittest.TestCase):
                 sub_territory='Sub A',
                 grand_total=80,
                 shipping_expense=20,
-                invoice_status='Ready',
+                invoice_status='In Progress',
             )
         ]
 
@@ -57,10 +57,10 @@ class TestTripsNewFeatures(unittest.TestCase):
 
         def fake_db_get_value(doctype, name, field=None, as_dict=False):
             if doctype == 'Sales Invoice' and as_dict:
-                return {'custom_sales_invoice_state': 'Ready'}
+                return {'custom_sales_invoice_state': 'In Progress'}
             if doctype == 'Territory' and as_dict:
                 return {'territory_name': 'Main', 'custom_territory_name_ar': None}
-            return 'Ready'
+            return 'In Progress'
 
         mock_frappe.db.get_value.side_effect = fake_db_get_value
 
@@ -178,8 +178,8 @@ class TestTripsNewFeatures(unittest.TestCase):
         invoice.custom_sub_territory = ''
         invoice.custom_shipping_expense = 0
         invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'Ready',
-            'sales_invoice_state': 'Ready',
+            'custom_sales_invoice_state': 'In Progress',
+            'sales_invoice_state': 'In Progress',
         }.get(field)
 
         courier_txn = MagicMock()
@@ -266,8 +266,8 @@ class TestTripsNewFeatures(unittest.TestCase):
         invoice.custom_sub_territory = ''
         invoice.custom_shipping_expense = 0
         invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'Ready',
-            'sales_invoice_state': 'Ready',
+            'custom_sales_invoice_state': 'In Progress',
+            'sales_invoice_state': 'In Progress',
         }.get(field)
 
         mock_frappe.get_doc.side_effect = lambda doctype, name: trip if doctype == 'Delivery Trip' else invoice
@@ -327,8 +327,8 @@ class TestTripsNewFeatures(unittest.TestCase):
         invoice.custom_sub_territory = ''
         invoice.custom_shipping_expense = 0
         invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'Ready',
-            'sales_invoice_state': 'Ready',
+            'custom_sales_invoice_state': 'In Progress',
+            'sales_invoice_state': 'In Progress',
         }.get(field)
 
         courier_txn = MagicMock()
@@ -405,8 +405,8 @@ class TestTripsNewFeatures(unittest.TestCase):
         invoice.grand_total = 80
         invoice.custom_shipping_expense = 0
         invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'Ready',
-            'sales_invoice_state': 'Ready',
+            'custom_sales_invoice_state': 'In Progress',
+            'sales_invoice_state': 'In Progress',
         }.get(field)
 
         trip = MagicMock()

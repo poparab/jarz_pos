@@ -91,7 +91,7 @@ INVOICE_DOCTYPE = "Sales Invoice"
 #: the module docstring for why these are never imported from the migration
 #: script.
 TERMINAL_STATES = frozenset({"Delivered", "Cancelled", "Returned"})
-MID_STATES = frozenset({"Recieved", "Received", "In Progress", "Ready", "Out for Delivery"})
+MID_STATES = frozenset({"Recieved", "Received", "In Progress", "Out for Delivery"})
 
 #: Kept in step with the ``status`` Select options in the DocType JSON.
 STATUS_OPEN = "Open"

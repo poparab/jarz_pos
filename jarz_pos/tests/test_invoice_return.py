@@ -295,7 +295,7 @@ class TestReturnEligibility(unittest.TestCase):
     @patch.object(ir, "returns_enabled", return_value=True)
     def test_undispatched_invoice_is_not_returnable(self, _enabled, _dn):
         result = ir.get_invoice_return_eligibility(
-            _invoice(custom_sales_invoice_state="Ready", custom_was_out_for_delivery=0)
+            _invoice(custom_sales_invoice_state="In Progress", custom_was_out_for_delivery=0)
         )
         self.assertEqual(result["return_block_code"], "not_dispatched")
 

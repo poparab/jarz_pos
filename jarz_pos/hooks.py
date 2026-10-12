@@ -468,6 +468,9 @@ doc_events = {
         ],
     # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
     "on_submit": [
+        # State history (Invoice State Log): first entry of the invoice. First in
+        # the list so a later hook that raises can not skip it; never raises.
+        "jarz_pos.services.state_log.log_state_on_submit",
         "jarz_pos.events.sales_invoice.publish_new_invoice",
         # CRM bridge: link B2B sale to Opportunity (never raises, fast-exits Standard)
         "jarz_pos.crm.pos_bridge.link_b2b_sale_to_opportunity",
@@ -493,6 +496,10 @@ doc_events = {
     ],
     # Emit state-change events for already-submitted invoices edited elsewhere
     "on_update_after_submit": [
+        # State history (Invoice State Log): covers every writer that SAVES the
+        # invoice (kanban, delivery handling, ...). set_value / raw-SQL writers
+        # log explicitly instead. First so a later raise can not skip it.
+        "jarz_pos.services.state_log.log_state_on_update_after_submit",
         "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
         "jarz_pos.services.consumable_deduction.deduct_consumables_on_ofd",
         "jarz_pos.events.sales_invoice.stamp_out_for_delivery_flag",

@@ -96,7 +96,7 @@ def create_sales_invoice_state_field():
             "fieldname": "sales_invoice_state",
             "label": "State",
             "fieldtype": "Select",
-            "options": "\nReceived\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled",
+            "options": "\nReceived\nIn Progress\nOut for Delivery\nDelivered\nCancelled",
             "insert_after": "status",
             "in_list_view": 1,
             "in_standard_filter": 1,

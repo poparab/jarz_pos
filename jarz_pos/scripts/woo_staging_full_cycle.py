@@ -1947,11 +1947,10 @@ class FullCycleRunner:
         invoice_name = state_run["invoice_name"]
         self._record_created("Sales Invoice", invoice_name, note="EO-STATE-01 invoice")
 
-        # kanban.update_invoice_state enforces one stage at a time (_STATE_SEQUENCE recieved -> in_progress -> ready -> out_for_delivery -> delivered, server-side since 2026-09-05), so step through every stage. Woo status per stage was verified on staging.
+        # kanban.update_invoice_state enforces one stage at a time (_STATE_SEQUENCE recieved -> in_progress -> out_for_delivery -> delivered, server-side since 2026-09-05; the Ready stage was removed 2026-10-13), so step through every stage. Woo status per stage was verified on staging.
         steps = [
             # (kanban label, accepted invoice state keys, expected Woo status, slug)
             ("In Progress", {"in-progress"}, "processing", "in_progress"),
-            ("Ready", {"ready"}, "processing", "ready"),
             ("Out for Delivery", {"out-for-delivery"}, "out-for-delivery", "out_for_delivery"),
             ("Delivered", {"delivered", "completed"}, "completed", "delivered"),
         ]

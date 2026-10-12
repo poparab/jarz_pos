@@ -151,7 +151,7 @@ class TestCancellationEligibility(unittest.TestCase):
             "name": "ACC-SINV-2026-00001",
             "docstatus": 1,
             "is_return": 0,
-            "custom_sales_invoice_state": "Ready",
+            "custom_sales_invoice_state": "In Progress",
             "outstanding_amount": 100.0,
             "grand_total": 100.0,
         }

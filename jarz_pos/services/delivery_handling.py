@@ -344,8 +344,13 @@ def update_submitted_sales_invoice_state(
     target_state: str,
     *,
     field_names: tuple[str, ...] | list[str] | None = None,
+    source: str = "dispatch",
 ) -> bool:
-    """Persist Sales Invoice state changes via save() so update-after-submit hooks can run."""
+    """Persist Sales Invoice state changes via save() so update-after-submit hooks can run.
+
+    ``source`` names who moved the order; the hook that writes Invoice State Log
+    reads it. Every caller here is a dispatch, hence the default.
+    """
     resolved_fields = tuple(field_names or ("custom_sales_invoice_state",))
     target_state = (target_state or "").strip()
     if not target_state:
@@ -354,11 +359,22 @@ def update_submitted_sales_invoice_state(
     return update_submitted_sales_invoice_fields(
         inv,
         {field_name: target_state for field_name in resolved_fields},
+        source=source,
     )
 
 
-def update_submitted_sales_invoice_fields(inv, field_values: dict[str, object] | None) -> bool:
-    """Persist submitted Sales Invoice field changes via save() so hooks can run."""
+def update_submitted_sales_invoice_fields(
+    inv,
+    field_values: dict[str, object] | None,
+    *,
+    source: str | None = None,
+) -> bool:
+    """Persist submitted Sales Invoice field changes via save() so hooks can run.
+
+    ``source`` is stamped on the document as ``flags.jarz_state_source`` so the
+    on_update_after_submit hook can label the Invoice State Log row when the
+    save moves the order. Omitted, the row says "save".
+    """
     resolved_values = {
         str(field_name).strip(): value
         for field_name, value in (field_values or {}).items()
@@ -415,6 +431,8 @@ def update_submitted_sales_invoice_fields(inv, field_values: dict[str, object] |
 
         if getattr(working_inv, "docstatus", 0) == 1:
             working_inv.flags.ignore_validate_update_after_submit = True
+        if source:
+            working_inv.flags.jarz_state_source = source
 
         try:
             working_inv.save(ignore_permissions=True, ignore_version=True)

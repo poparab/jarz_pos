@@ -1167,7 +1167,9 @@ def _stamp_return_state(
     # prevent.
     board_updates = _returned_column_updates(inv) if fully else {}
     try:
-        update_submitted_sales_invoice_fields(inv, {**updates, **board_updates})
+        update_submitted_sales_invoice_fields(
+            inv, {**updates, **board_updates}, source="return"
+        )
     except Exception:
         if not board_updates:
             raise

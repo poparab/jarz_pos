@@ -259,7 +259,7 @@ def fulfil_at_branch(invoice_name: str, *, logger=None) -> dict:
         #    lives in one place and a future hook added to the OFD transition is
         #    picked up here for free.
         dispatched = update_submitted_sales_invoice_state(
-            inv, DISPATCH_STATE, field_names=STATE_FIELD_ALIASES
+            inv, DISPATCH_STATE, field_names=STATE_FIELD_ALIASES, source="branch_fulfilment"
         )
         if not dispatched:
             # The helper only returns False when nothing was written — i.e. the
@@ -303,7 +303,7 @@ def fulfil_at_branch(invoice_name: str, *, logger=None) -> dict:
         #    aliases are passed explicitly — the helper defaults to the first one
         #    only, and ``api/kanban`` reads whichever the site's meta carries.
         landed = update_submitted_sales_invoice_state(
-            inv, DELIVERED_STATE, field_names=STATE_FIELD_ALIASES
+            inv, DELIVERED_STATE, field_names=STATE_FIELD_ALIASES, source="branch_fulfilment"
         )
         if not landed:
             # Nothing written and the state is not already Delivered (checked at

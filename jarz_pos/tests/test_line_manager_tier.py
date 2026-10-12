@@ -86,8 +86,8 @@ class TestCancelGate(unittest.TestCase):
         invoice.docstatus = 1
         invoice.is_return = 0
         invoice.get.side_effect = lambda fieldname: {
-            "custom_sales_invoice_state": "Ready",
-            "sales_invoice_state": "Ready",
+            "custom_sales_invoice_state": "In Progress",
+            "sales_invoice_state": "In Progress",
         }.get(fieldname)
 
         with patch("jarz_pos.api.kanban.get_invoice_hard_mutation_blocker") as blocker, \

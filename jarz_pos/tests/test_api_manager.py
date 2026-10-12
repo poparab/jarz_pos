@@ -224,7 +224,7 @@ class TestManagerAPI(unittest.TestCase):
 			name="INV-SPT-001",
 			docstatus=1,
 			is_return=0,
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 		)
 
 		mock_frappe = MagicMock()
@@ -266,7 +266,7 @@ class TestManagerAPI(unittest.TestCase):
 			name="INV-JE-001",
 			docstatus=1,
 			is_return=0,
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 		)
 
 		def _get_all(doctype, **kwargs):
@@ -299,7 +299,7 @@ class TestManagerAPI(unittest.TestCase):
 			is_return=0,
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			sales_partner=None,
 			custom_payment_method="Cash",
 		)
@@ -334,7 +334,7 @@ class TestManagerAPI(unittest.TestCase):
 			is_return=0,
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			sales_partner=None,
 			custom_payment_method="Cash",
 		)
@@ -372,7 +372,7 @@ class TestManagerAPI(unittest.TestCase):
 			is_return=0,
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 		)
 		replacement_invoice = _FakeInvoice(name="INV-AMD-002-1")
 
@@ -403,7 +403,7 @@ class TestManagerAPI(unittest.TestCase):
 			is_return=0,
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			sales_partner=None,
 			custom_payment_method="Cash",
 		)
@@ -451,7 +451,7 @@ class TestManagerAPI(unittest.TestCase):
 			is_return=0,
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 		)
 
 		mock_frappe = MagicMock()
@@ -485,7 +485,7 @@ class TestManagerAPI(unittest.TestCase):
 			customer="CUST-003",
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			custom_payment_method="Cash",
 			woo_order_id=14500,
 		)
@@ -632,7 +632,7 @@ class TestManagerAPI(unittest.TestCase):
 			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]), \
 			 patch("jarz_pos.api.manager.notify_invoice_reassignment") as mock_notify, \
 			 patch("jarz_pos.api.manager.publish_to_branches") as mock_publish, \
-			 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress", "Ready"]):
+			 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]):
 			result = update_invoice_branch(invoice_id="INV-001", new_branch="Nasr city")
 
 		self.assertTrue(result.get("success"))
@@ -681,7 +681,7 @@ class TestManagerAPI(unittest.TestCase):
 			company="Jarz",
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			items=[item_row],
 		)
 		invoice.add_comment = MagicMock()
@@ -725,7 +725,7 @@ class TestManagerAPI(unittest.TestCase):
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
 				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki", "Nasr city"]), \
 				 patch("jarz_pos.api.manager.notify_invoice_reassignment"), \
-				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress", "Ready"]):
+				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]):
 			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-001", new_branch="Nasr city")
 
 		self.assertTrue(result.get("success"))
@@ -749,7 +749,7 @@ class TestManagerAPI(unittest.TestCase):
 			company="Jarz",
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			items=[item_row],
 		)
 		invoice.add_comment = MagicMock()
@@ -795,7 +795,7 @@ class TestManagerAPI(unittest.TestCase):
 				 patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
 				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]), \
 				 patch("jarz_pos.api.manager.notify_invoice_reassignment"), \
-				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress", "Ready"]):
+				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]):
 			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-002", new_branch="Nasr city")
 
 		self.assertTrue(result.get("success"))
@@ -825,7 +825,7 @@ class TestManagerAPI(unittest.TestCase):
 			company="Jarz",
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			items=[SimpleNamespace(name="SII-022", item_code="ITEM-001", warehouse="Stores - Dokki")],
 		)
 
@@ -887,7 +887,7 @@ class TestManagerAPI(unittest.TestCase):
 			company="Jarz",
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			items=[SimpleNamespace(name="SII-010", item_code="ITEM-001", warehouse="Stores - Dokki")],
 		)
 
@@ -929,7 +929,7 @@ class TestManagerAPI(unittest.TestCase):
 			company="Jarz",
 			pos_profile="Dokki",
 			custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			items=[SimpleNamespace(name="SII-011", item_code="ITEM-001", warehouse="Stores - Dokki")],
 		)
 
@@ -1077,7 +1077,7 @@ class TestManagerAPI(unittest.TestCase):
 		invoice = _FakeInvoice(
 			name="INV-OPEN-001",
 			docstatus=1,
-			custom_sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
 			custom_acceptance_status="Pending",
 		)
 
@@ -1112,9 +1112,9 @@ class TestManagerAPI(unittest.TestCase):
 
 		def _get_field(fieldname):
 			if fieldname == "custom_sales_invoice_state":
-				return SimpleNamespace(options="Received\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled")
+				return SimpleNamespace(options="Received\nIn Progress\nOut for Delivery\nDelivered\nCancelled")
 			if fieldname == "sales_invoice_state":
-				return SimpleNamespace(options="Received\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled")
+				return SimpleNamespace(options="Received\nIn Progress\nOut for Delivery\nDelivered\nCancelled")
 			if fieldname == "custom_acceptance_status":
 				return SimpleNamespace(options="Pending\nAccepted")
 			if fieldname in {"custom_accepted_by", "custom_accepted_on"}:
@@ -1140,13 +1140,13 @@ class TestManagerAPI(unittest.TestCase):
 				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
 			result = update_cancelled_invoice_status_fields(
 				invoice_id="INV-CANCELLED-001",
-				sales_invoice_state="Ready",
+				sales_invoice_state="In Progress",
 				acceptance_status="Accepted",
 			)
 
 		self.assertTrue(result.get("success"))
-		self.assertEqual(invoice.get("custom_sales_invoice_state"), "Ready")
-		self.assertEqual(invoice.get("sales_invoice_state"), "Ready")
+		self.assertEqual(invoice.get("custom_sales_invoice_state"), "In Progress")
+		self.assertEqual(invoice.get("sales_invoice_state"), "In Progress")
 		self.assertEqual(invoice.get("custom_acceptance_status"), "Accepted")
 		self.assertEqual(invoice.get("custom_accepted_by"), "manager@example.com")
 		self.assertEqual(invoice.get("custom_accepted_on"), "2026-05-04 15:00:00")

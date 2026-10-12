@@ -234,10 +234,10 @@ def _get_state_field_options() -> List[str]:
                     frappe.logger().info(f"Found state field: {field_name} with options: {options}")
                     return options
         frappe.logger().warning("No state field found, using default states")
-        return ["Received", "In Progress", "Ready", "Out for Delivery", "Delivered", "Cancelled"]
+        return ["Received", "In Progress", "Out for Delivery", "Delivered", "Cancelled"]
     except Exception as e:
         frappe.logger().error(f"Error getting state field options: {str(e)}")
-        return ["Received", "In Progress", "Ready", "Out for Delivery", "Delivered", "Cancelled"]
+        return ["Received", "In Progress", "Out for Delivery", "Delivered", "Cancelled"]
 
 def _coerce_bool(val: Any) -> bool:
     try:
@@ -1262,18 +1262,22 @@ def _state_key(label: str) -> str:
     return (label or "").strip().lower().replace(' ', '_')
 
 
-# The board's forward sequence. Moves are one stage at a time; the only
-# backward move is the kitchen correction Ready -> In Progress. Cancelled and
-# Returned are reached through their own actions, never by moving the card.
-# Until 2026-09-05 only the client enforced this, so Ready -> Delivered was
-# accepted server-side and produced orders with no Delivery Note that could
-# neither be cancelled nor returned.
-_STATE_SEQUENCE = ["recieved", "in_progress", "ready", "out_for_delivery", "delivered"]
-_STATE_ALIASES = {"received": "recieved", "processing": "in_progress"}
+# The board's forward sequence. Moves are one stage at a time and NEVER
+# backward. Cancelled and Returned are reached through their own actions, never
+# by moving the card. Until 2026-09-05 only the client enforced this, so a
+# skipped stage was accepted server-side and produced orders with no Delivery
+# Note that could neither be cancelled nor returned.
+#
+# 2026-10-13 (owner decision): the "Ready" stage was removed and the one
+# backward move (Ready -> In Progress) went with it. Every transition is now
+# timestamped in Invoice State Log so prep time can be measured. A legacy
+# "Ready" row that the migration has not converted yet is read as In Progress
+# through _STATE_ALIASES, so it can still be dispatched.
+_STATE_SEQUENCE = ["recieved", "in_progress", "out_for_delivery", "delivered"]
+_STATE_ALIASES = {"received": "recieved", "processing": "in_progress", "ready": "in_progress"}
 _STATE_LABELS = {
     "recieved": "Received",
     "in_progress": "In Progress",
-    "ready": "Ready",
     "out_for_delivery": "Out for Delivery",
     "delivered": "Delivered",
 }
@@ -1302,14 +1306,16 @@ def _transition_block_reason(old_state: Any, new_state: Any) -> Optional[str]:
         return None
     if new_idx == old_idx + 1:
         return None
-    if old_idx == 2 and new_idx == 1:
+    if new_idx == old_idx:
+        # Same stage under another spelling: a legacy "Ready" row going to
+        # "In Progress". Nothing is skipped and nothing goes backward.
         return None
     old_label = _STATE_LABELS[_STATE_SEQUENCE[old_idx]]
     new_label = _STATE_LABELS[_STATE_SEQUENCE[new_idx]]
-    if new_idx <= old_idx:
+    if new_idx < old_idx:
         return (
             f"Cannot move an order backward from '{old_label}' to '{new_label}'. "
-            "Only Ready can go back to In Progress."
+            "Orders only move forward."
         )
     next_label = _STATE_LABELS[_STATE_SEQUENCE[old_idx + 1]]
     return (
@@ -1376,7 +1382,8 @@ def _sort_kanban_columns(data: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Lis
     for state_key, cards in data.items():
         if not cards:
             continue
-        if state_key == "received":
+        # The stored spelling is "Recieved" (sic); "received" kept for safety.
+        if state_key in ("recieved", "received"):
             cards.sort(key=_received_sort_key, reverse=True)
         elif state_key == "in_progress":
             cards.sort(key=_delivery_sort_key)
@@ -1517,7 +1524,7 @@ def get_kanban_columns() -> Dict[str, Any]:
             return _failure("Field 'sales_invoice_state' not found or has no options on Sales Invoice")
         columns = []
         # Colour per state. NOTE: every key below except "Returned" is stale —
-        # the real options are "Recieved" (sic) / In Progress / Ready / Out for
+        # the real options are "Recieved" (sic) / In Progress / Out for
         # Delivery / Delivered / Cancelled, none of which match, so those columns
         # all fall through to the #F5F5F5 default. Left as-is rather than fixed
         # here: the client themes its own columns and re-colouring five live
@@ -1873,6 +1880,9 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
         for inv in invoices:
             state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"  # Default state
             state_key = state.lower().replace(' ', '_')
+            # A legacy "Ready" row (not yet converted by the migration) shows in
+            # the In Progress column instead of vanishing with its removed column.
+            state_key = _STATE_ALIASES.get(state_key, state_key)
             terr_ship = _get_territory_shipping(inv.get("territory") or "")
             # Prefer approved override > persisted SI value > territory
             override_status = inv.get("custom_shipping_override_status") or ""
@@ -2192,7 +2202,7 @@ def update_invoice_state(
         create_dn = normalized_target in {"out for delivery", "out_for_delivery"}
         # Dispatch moves stock (Delivery Note) and can raise a cash Payment Entry
         # against the branch account, so it belongs inside a shift window. Plain
-        # Received -> In Progress -> Ready moves stay open.
+        # Received -> In Progress moves stay open.
         if create_dn:
             ensure_open_shift_for_invoice(invoice, action_label="dispatching an order")
             # A pickup order is handed over at the counter: the goods leave with the
@@ -2569,6 +2579,8 @@ def update_invoice_state(
 
         try:
             invoice.flags.ignore_validate_update_after_submit = True
+            # Read by the on_update_after_submit hook that writes Invoice State Log.
+            invoice.flags.jarz_state_source = "kanban"
             invoice.save(ignore_permissions=True, ignore_version=True)
             print("invoice save successful")
         except Exception as save_ex:

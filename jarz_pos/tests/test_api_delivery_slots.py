@@ -854,7 +854,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 		source = SimpleNamespace(
 			name="INV-SLOT-001", docstatus=1, pos_profile="Dokki", custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="Ready", sales_partner=None, custom_payment_method="Cash",
+			custom_sales_invoice_state="In Progress", sales_partner=None, custom_payment_method="Cash",
 			custom_delivery_date="2030-01-06", custom_delivery_time_from="21:00:00",
 			custom_delivery_duration=5400,
 		)

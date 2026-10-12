@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import frappe
 
+from jarz_pos.services.state_log import record_state_change
+
 RETURNED_BOARD_STATE = "Returned"
 STATE_FIELD_ALIASES = (
     "custom_sales_invoice_state",
@@ -86,11 +88,16 @@ def ensure_returned_board_state() -> None:
 
     for name in stuck:
         try:
+            previous_state = frappe.db.get_value("Sales Invoice", name, fields[0])
             frappe.db.set_value(
                 "Sales Invoice",
                 name,
                 {field: RETURNED_BOARD_STATE for field in fields},
                 update_modified=False,
+            )
+            # set_value bypasses doc hooks, so log the move explicitly (never raises).
+            record_state_change(
+                name, previous_state, RETURNED_BOARD_STATE, "return_reconcile"
             )
         except Exception:
             frappe.log_error(

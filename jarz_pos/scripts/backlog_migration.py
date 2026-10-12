@@ -77,7 +77,7 @@ SNAPSHOT_FILE = "woo_snapshot.csv"
 #: ERPNext ops states that mean "not finished". Note ``Recieved`` -- the
 #: misspelling is the value actually stored in the database, and both spellings
 #: are accepted here so this keeps working if it is ever corrected.
-MID_STATES = frozenset({"Recieved", "Received", "In Progress", "Ready", "Out for Delivery"})
+MID_STATES = frozenset({"Recieved", "Received", "In Progress", "Out for Delivery"})
 
 #: Terminal states. An invoice already here is left alone.
 TERMINAL_STATES = frozenset({"Delivered", "Cancelled", "Returned"})

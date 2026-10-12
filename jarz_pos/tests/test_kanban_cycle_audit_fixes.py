@@ -23,8 +23,7 @@ class TestTransitionMatrix(unittest.TestCase):
 
 	def test_one_stage_forward_is_allowed(self):
 		self.assertIsNone(self._block("Recieved", "In Progress"))
-		self.assertIsNone(self._block("In Progress", "Ready"))
-		self.assertIsNone(self._block("Ready", "Out for Delivery"))
+		self.assertIsNone(self._block("In Progress", "Out for Delivery"))
 		self.assertIsNone(self._block("Out for Delivery", "Delivered"))
 
 	def test_empty_state_counts_as_received(self):
@@ -32,23 +31,23 @@ class TestTransitionMatrix(unittest.TestCase):
 		self.assertIsNotNone(self._block(None, "Delivered"))
 
 	def test_skipping_out_for_delivery_is_refused(self):
-		reason = self._block("Ready", "Delivered")
+		reason = self._block("In Progress", "Delivered")
 		self.assertIsNotNone(reason)
 		self.assertIn("one stage at a time", reason)
 
-	def test_only_ready_may_go_back_to_in_progress(self):
-		self.assertIsNone(self._block("Ready", "In Progress"))
-		self.assertIn("backward", self._block("Out for Delivery", "Ready") or "")
+	def test_no_backward_move_is_allowed(self):
+		# Ready was removed 2026-10-13: there is no longer any backward exception.
+		self.assertIn("backward", self._block("Out for Delivery", "In Progress") or "")
 		self.assertIn("backward", self._block("Delivered", "Out for Delivery") or "")
 		self.assertIn("backward", self._block("In Progress", "Recieved") or "")
 
 	def test_cancelled_and_returned_are_not_drag_targets(self):
-		self.assertIn("Cancel Order", self._block("Ready", "Cancelled") or "")
+		self.assertIn("Cancel Order", self._block("In Progress", "Cancelled") or "")
 		self.assertIn("Return Order", self._block("Delivered", "Returned") or "")
 
 	def test_unknown_labels_are_left_to_other_checks(self):
 		self.assertIsNone(self._block(MagicMock(), "Delivered"))
-		self.assertIsNone(self._block("Ready", "Something Else"))
+		self.assertIsNone(self._block("In Progress", "Something Else"))
 
 
 class TestPickupMustBePaid(unittest.TestCase):
@@ -59,13 +58,13 @@ class TestPickupMustBePaid(unittest.TestCase):
 	def test_unpaid_pickup_cannot_go_out_for_delivery(self, mock_frappe, mock_states, _scope, _shift):
 		from jarz_pos.api.kanban import update_invoice_state
 
-		mock_states.return_value = ["Ready", "Out for Delivery"]
+		mock_states.return_value = ["In Progress", "Out for Delivery"]
 		inv = MagicMock()
 		inv.name = "INV-PICKUP"
 		inv.docstatus = 1
 		inv.custom_is_pickup = 1
 		inv.get.side_effect = lambda f: {
-			"custom_sales_invoice_state": "Ready",
+			"custom_sales_invoice_state": "In Progress",
 			"outstanding_amount": 280.0,
 			"custom_return_status": "",
 		}.get(f)
@@ -114,7 +113,7 @@ class TestPartnerTransactionsBlockOnlyWhenSettled(unittest.TestCase):
 
 
 class TestAlreadyDispatchedGuard(unittest.TestCase):
-	def _inv(self, state="Ready", was_ofd=0):
+	def _inv(self, state="In Progress", was_ofd=0):
 		inv = MagicMock()
 		inv.name = "INV-G"
 		inv.get.side_effect = lambda f: {
@@ -134,7 +133,7 @@ class TestAlreadyDispatchedGuard(unittest.TestCase):
 	def test_stamped_order_is_refused(self, mock_frappe):
 		from jarz_pos.services.delivery_handling import assert_not_already_dispatched
 
-		assert_not_already_dispatched(self._inv(state="Ready", was_ofd=1))
+		assert_not_already_dispatched(self._inv(state="In Progress", was_ofd=1))
 		mock_frappe.throw.assert_called_once()
 
 	@patch("jarz_pos.services.delivery_handling.frappe")

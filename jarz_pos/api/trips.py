@@ -171,7 +171,7 @@ def create_delivery_trip(invoice_names, party_type: str, party: str, pos_profile
             "invoice_status": (
                 inv.get("custom_sales_invoice_state")
                 or inv.get("sales_invoice_state")
-                or "Ready"
+                or "In Progress"
             ),
         })
 
@@ -499,6 +499,7 @@ def send_trip_for_delivery(
                         shortage_approved=shortage_approved,
                     ),
                 },
+                source="trip_dispatch",
             )
 
             # Persist child row changes
@@ -601,6 +602,8 @@ def mark_trip_as_delivered(trip_name: str):
 
             if fields_updated:
                 inv.flags.ignore_validate_update_after_submit = True
+                # Read by the on_update_after_submit hook (Invoice State Log).
+                inv.flags.jarz_state_source = "trip_delivered"
                 inv.save(ignore_permissions=True, ignore_version=True)
 
             # Persist child row status
@@ -840,7 +843,7 @@ def sync_trip_status(invoice_name: str):
     for row in trip.invoices:
         st = (
             frappe.db.get_value("Sales Invoice", row.invoice, "custom_sales_invoice_state")
-            or "Ready"
+            or "In Progress"
         ).strip().lower()
         states.add(st)
         # Update child row status

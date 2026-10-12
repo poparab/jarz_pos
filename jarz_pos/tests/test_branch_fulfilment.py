@@ -279,7 +279,7 @@ class TestConstantsAgreeWithTheFrozenBoard(unittest.TestCase):
 
     #: Verbatim from ``tests/test_state_options_frozen`` — "Recieved" stays misspelled.
     FROZEN_OPTIONS = [
-        "Recieved", "In Progress", "Ready", "Out for Delivery",
+        "Recieved", "In Progress", "Out for Delivery",
         "Delivered", "Cancelled", "Returned",
     ]
 

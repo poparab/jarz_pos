@@ -28,8 +28,10 @@ margin or courier-fee figure, the courier's full name, and the raw internal
 board state.
 
 **4. The internal state string never leaves the building.**
-The board options are frozen at ``Recieved\\nIn Progress\\nReady\\nOut for
-Delivery\\nDelivered\\nCancelled\\nReturned`` (COURIER_CONTRACTS §1) — including
+The board options are frozen at ``Recieved\\nIn Progress\\nOut for
+Delivery\\nDelivered\\nCancelled\\nReturned`` (COURIER_CONTRACTS §1; the Ready
+stage was removed 2026-10-13, so the ``ready`` mapping below only serves a
+legacy row the migration has not converted yet) — including
 the live misspelling, which this project does not touch. Publishing those to
 customers would leak internal vocabulary *and* ship a typo to every buyer, so
 they are mapped to a small customer-facing vocabulary here.

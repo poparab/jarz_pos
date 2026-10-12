@@ -12,13 +12,15 @@ re-freezing and notifying every lane.
 ## 1. DO NOT EDIT — the Sales Invoice state options
 
 Settled 2026-08-05. The "Returned Kanban column" work landed, so the committed value on `main` is
-now **seven** options and `test_state_options_frozen.py` asserts exactly this string:
+now **six** options (the Kanban "Ready" state was removed 2026-10-13, see the note below) and `test_state_options_frozen.py` asserts exactly this string:
 
 ```
-Recieved\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled\nReturned
+Recieved\nIn Progress\nOut for Delivery\nDelivered\nCancelled\nReturned
 ```
 
 Stored on `Sales Invoice.custom_sales_invoice_state` as a Select.
+
+2026-10-13: Ready removed by owner decision; legacy rows migrated to In Progress; no backward moves.
 
 **The misspelling "Recieved" is live production data.** It is the stored value in every historical
 row, Kanban columns are derived from these options at runtime, and 274 references across 44 files
@@ -28,7 +30,7 @@ touch it.**
 **No new state is added by this project.** A failed delivery stays `Out for Delivery` and is
 expressed through `custom_delivery_failure_reason` + `custom_delivery_attempt_no`.
 
-Guard: `jarz_pos/tests/test_state_options_frozen.py` asserts the exact 7-option string.
+Guard: `jarz_pos/tests/test_state_options_frozen.py` asserts the exact 6-option string.
 The string `custom_sales_invoice_state` must not appear in any diff to
 `fixtures/custom_field.json` for the duration of this project.
 

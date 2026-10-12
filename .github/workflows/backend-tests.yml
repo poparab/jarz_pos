@@ -171,6 +171,11 @@ jobs:
             test_b2b_branch_invoice_persistence
             test_sales_partner_flow
             test_kanban_settlement
+            # Ready stage removed 2026-10-13: the forward-only transition matrix, the
+            # Invoice State Log service, and the Ready -> In Progress migration patch (pure mocks).
+            test_kanban_transition_matrix
+            test_state_log
+            test_kanban_drop_ready_patch
             # Board search. `test_kanban` itself touches the DB in setUpClass and
             # so can never run in this site-less gate, which is why every search
             # assertion it holds had never executed here. These are pure mocks.

@@ -138,8 +138,8 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_invoice.docstatus = 1
 		mock_invoice.is_return = 0
 		mock_invoice.get.side_effect = lambda fieldname: {
-			'custom_sales_invoice_state': 'Ready',
-			'sales_invoice_state': 'Ready',
+			'custom_sales_invoice_state': 'In Progress',
+			'sales_invoice_state': 'In Progress',
 		}.get(fieldname)
 
 		mock_frappe.session.user = 'manager@example.com'
@@ -270,15 +270,15 @@ class TestKanbanOperations(unittest.TestCase):
 		"""Kanban OFD should stop when shortage approval is required but no reason is supplied."""
 		from jarz_pos.api.kanban import update_invoice_state
 
-		mock_allowed_states.return_value = ["Ready", "Out for Delivery"]
+		mock_allowed_states.return_value = ["In Progress", "Out for Delivery"]
 
 		mock_inv = MagicMock()
 		mock_inv.name = "INV-200"
 		mock_inv.docstatus = 1
 		mock_inv.flags = MagicMock()
 		mock_inv.get.side_effect = lambda fieldname: {
-			"custom_sales_invoice_state": "Ready",
-			"sales_invoice_state": "Ready",
+			"custom_sales_invoice_state": "In Progress",
+			"sales_invoice_state": "In Progress",
 			"custom_state": None,
 			"state": None,
 			"territory": "",
@@ -333,15 +333,15 @@ class TestKanbanOperations(unittest.TestCase):
 		"""Approved OFD shortage should persist audit fields and use the shared Delivery Note helper."""
 		from jarz_pos.api.kanban import update_invoice_state
 
-		mock_allowed_states.return_value = ["Ready", "Out for Delivery"]
+		mock_allowed_states.return_value = ["In Progress", "Out for Delivery"]
 
 		mock_inv = MagicMock()
 		mock_inv.name = "INV-201"
 		mock_inv.docstatus = 1
 		mock_inv.flags = MagicMock()
 		mock_inv.get.side_effect = lambda fieldname: {
-			"custom_sales_invoice_state": "Ready",
-			"sales_invoice_state": "Ready",
+			"custom_sales_invoice_state": "In Progress",
+			"sales_invoice_state": "In Progress",
 			"custom_state": None,
 			"state": None,
 			"territory": "",

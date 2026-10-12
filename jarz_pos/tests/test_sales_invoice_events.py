@@ -34,8 +34,8 @@ class TestSalesInvoiceEvents(unittest.TestCase):
 
 		doc = SimpleNamespace(
 			name="ACC-SINV-TEST-001",
-			custom_sales_invoice_state="Ready",
-			sales_invoice_state="Ready",
+			custom_sales_invoice_state="In Progress",
+			sales_invoice_state="In Progress",
 			custom_acceptance_status="Pending",
 			custom_accepted_by=None,
 			custom_accepted_on=None,
@@ -66,10 +66,14 @@ class TestSalesInvoiceEvents(unittest.TestCase):
 
 		mock_frappe.db.set_value.side_effect = _set_value
 
-		with patch("jarz_pos.events.sales_invoice.frappe", mock_frappe):
+		with patch("jarz_pos.events.sales_invoice.frappe", mock_frappe), \
+				patch("jarz_pos.services.state_log.record_state_change") as mock_log:
 			mark_cancelled_invoice_workflow_fields(doc)
 
 		mock_frappe.db.set_value.assert_called_once()
+		# The raw set_value bypasses doc hooks, so the cancel is logged explicitly, once.
+		mock_log.assert_called_once()
+		self.assertEqual(mock_log.call_args.args[:4], ("ACC-SINV-TEST-001", "In Progress", "Cancelled", "cancel"))
 		self.assertEqual(doc.custom_sales_invoice_state, "Cancelled")
 		self.assertEqual(doc.sales_invoice_state, "Cancelled")
 		self.assertEqual(doc.custom_acceptance_status, "Accepted")

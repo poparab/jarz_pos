@@ -30,8 +30,8 @@ FIXTURE_PATH = os.path.join(
 
 STATE_FIELD = "custom_sales_invoice_state"
 
-#: The exact, frozen value on ``main``. Seven options, including the misspelling.
-FROZEN_OPTIONS = "Recieved\nIn Progress\nReady\nOut for Delivery\nDelivered\nCancelled\nReturned"
+#: The exact, frozen value on ``main``. Six options (Ready was removed 2026-10-13), including the misspelling.
+FROZEN_OPTIONS = "Recieved\nIn Progress\nOut for Delivery\nDelivered\nCancelled\nReturned"
 
 
 def _state_entries():
@@ -57,9 +57,9 @@ class TestStateOptionsFrozen(unittest.TestCase):
     def test_options_string_is_exactly_the_frozen_value(self):
         self.assertEqual(self.entry.get("options"), FROZEN_OPTIONS)
 
-    def test_there_are_exactly_seven_options(self):
-        self.assertEqual(len(FROZEN_OPTIONS.split("\n")), 7)
-        self.assertEqual(len(self.entry["options"].split("\n")), 7)
+    def test_there_are_exactly_six_options(self):
+        self.assertEqual(len(FROZEN_OPTIONS.split("\n")), 6)
+        self.assertEqual(len(self.entry["options"].split("\n")), 6)
 
     def test_the_misspelling_is_preserved(self):
         """'Recieved' is live production data, not a typo waiting to be fixed."""
@@ -73,7 +73,6 @@ class TestStateOptionsFrozen(unittest.TestCase):
             [
                 "Recieved",
                 "In Progress",
-                "Ready",
                 "Out for Delivery",
                 "Delivered",
                 "Cancelled",

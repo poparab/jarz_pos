@@ -221,7 +221,7 @@ class TestIsTerminalState(unittest.TestCase):
                 self.assertTrue(mod.is_terminal_state(state))
 
     def test_mid_states_are_not_terminal(self):
-        for state in ("Recieved", "Received", "In Progress", "Ready", "Out for Delivery", "", None):
+        for state in ("Recieved", "Received", "In Progress", "Out for Delivery", "", None):
             with self.subTest(state=state):
                 self.assertFalse(mod.is_terminal_state(state))
 
@@ -287,7 +287,7 @@ class TestIsStuck(unittest.TestCase):
         self.assertEqual(finish_by, self.NOW)
         stuck = mod.is_stuck(
             docstatus=1,
-            ops_state="Ready",
+            ops_state="In Progress",
             posting_date=datetime.date(2026, 9, 6),
             posting_time=datetime.timedelta(hours=12),
             now=self.NOW,
@@ -499,8 +499,8 @@ class TestCloseResolvedBacklogExceptions(unittest.TestCase):
 
     def test_a_still_stuck_order_stays_open_and_refreshes_its_snapshot(self):
         rows = [{"name": "WBLE-1", "sales_invoice": "SI-1"}]
-        invoices = {"SI-1": {"docstatus": 1, "custom_sales_invoice_state": "Ready",
-                              "sales_invoice_state": "Ready",
+        invoices = {"SI-1": {"docstatus": 1, "custom_sales_invoice_state": "In Progress",
+                              "sales_invoice_state": "In Progress",
                               "outstanding_amount": 350.0, "grand_total": 350.0}}
         summary, fake = self._run(rows, invoices)
 
@@ -515,8 +515,8 @@ class TestCloseResolvedBacklogExceptions(unittest.TestCase):
 
     def test_never_writes_to_the_invoice_itself(self):
         rows = [{"name": "WBLE-1", "sales_invoice": "SI-1"}]
-        invoices = {"SI-1": {"docstatus": 1, "custom_sales_invoice_state": "Ready",
-                              "sales_invoice_state": "Ready",
+        invoices = {"SI-1": {"docstatus": 1, "custom_sales_invoice_state": "In Progress",
+                              "sales_invoice_state": "In Progress",
                               "outstanding_amount": 350.0, "grand_total": 350.0}}
         _summary, fake = self._run(rows, invoices)
 

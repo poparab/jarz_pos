@@ -212,9 +212,26 @@ def mark_cancelled_invoice_workflow_fields(doc: Any, method: Optional[str] = Non
 		if not updates:
 			return
 
+		# Read the state being left BEFORE it is overwritten, for the state log.
+		previous_state = getattr(doc, "custom_sales_invoice_state", None)
+
 		frappe.db.set_value("Sales Invoice", doc.name, updates, update_modified=False)
 		for fieldname, value in updates.items():
 			setattr(doc, fieldname, value)
+
+		# set_value bypasses doc hooks, so the transition is logged explicitly. This
+		# is the single log point for every cancel path (kanban Cancel Order, Desk,
+		# scripts); never raises.
+		if "custom_sales_invoice_state" in updates:
+			from jarz_pos.services.state_log import record_state_change
+
+			record_state_change(
+				doc.name,
+				previous_state,
+				"Cancelled",
+				"cancel",
+				pos_profile=getattr(doc, "pos_profile", None),
+			)
 	except Exception:
 		if frappe:
 			frappe.log_error(frappe.get_traceback(), "mark_cancelled_invoice_workflow_fields failed")
