@@ -109,7 +109,7 @@ class _Harness:
         self._patches = []
 
     def __enter__(self):
-        def _capture(inv, values):
+        def _capture(inv, values, **_kwargs):
             self.updates.append(values)
             for key, value in (values or {}).items():
                 inv._data[key] = value
