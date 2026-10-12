@@ -14,12 +14,22 @@ Two kinds of writer exist, and each logs exactly once:
   calls :func:`record_state_change` explicitly.
 
 Logging must never stop an order from moving, so :func:`record_state_change`
-swallows every error.
+swallows every error -- except a deadlock or lock-wait timeout. InnoDB has
+already rolled back the whole transaction by then, so swallowing it would let
+the caller carry on and commit only the writes made after the rollback (half a
+dispatch). Those two are re-raised so the request fails as a whole.
+
+Rows are named by hash, not a naming series: a series takes a ``FOR UPDATE``
+lock on its ``tabSeries`` row inside every order move and holds it to commit.
 """
 
 from __future__ import annotations
 
 import frappe
+from frappe.exceptions import QueryDeadlockError, QueryTimeoutError
+
+# Errors after which the transaction is already gone; never swallow these.
+_TRANSACTION_LOST = (QueryDeadlockError, QueryTimeoutError)
 
 STATE_LOG_DOCTYPE = "Invoice State Log"
 STATE_FIELD = "custom_sales_invoice_state"
@@ -76,6 +86,8 @@ def record_state_change(
         )
         row.insert(ignore_permissions=True)
         return row.name
+    except _TRANSACTION_LOST:
+        raise
     except Exception:  # noqa: BLE001 - see module docstring
         _safe_log_error("Invoice State Log write failed")
         return None
@@ -83,6 +95,11 @@ def record_state_change(
 
 def _state_of(doc) -> str:
     return _clean(doc.get(STATE_FIELD))
+
+
+def _branch_of(doc):
+    """The branch whose board holds the order (follows a branch transfer)."""
+    return doc.get("custom_kanban_profile") or doc.get("pos_profile")
 
 
 def _is_credit_note(doc) -> bool:
@@ -104,8 +121,10 @@ def log_state_on_submit(doc, method=None):
             None,
             _state_of(doc),
             source,
-            pos_profile=doc.get("pos_profile"),
+            pos_profile=_branch_of(doc),
         )
+    except _TRANSACTION_LOST:
+        raise
     except Exception:  # noqa: BLE001 - never block a submit
         _safe_log_error("Invoice State Log on_submit failed")
 
@@ -126,7 +145,9 @@ def log_state_on_update_after_submit(doc, method=None):
             old_state,
             _state_of(doc),
             doc.flags.get("jarz_state_source") or DEFAULT_SOURCE,
-            pos_profile=doc.get("pos_profile"),
+            pos_profile=_branch_of(doc),
         )
+    except _TRANSACTION_LOST:
+        raise
     except Exception:  # noqa: BLE001 - never block a save
         _safe_log_error("Invoice State Log on_update_after_submit failed")

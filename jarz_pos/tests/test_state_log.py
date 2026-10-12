@@ -197,5 +197,45 @@ class TestUpdateAfterSubmitHook(unittest.TestCase):
             sl.log_state_on_update_after_submit(doc)
 
 
+class TestLostTransactionIsNotSwallowed(unittest.TestCase):
+    """A deadlock or lock-wait timeout means InnoDB already rolled the whole
+    transaction back; swallowing it would let the caller commit half a move."""
+
+    def test_record_reraises_a_deadlock(self):
+        fake, _ = _patched_frappe(insert_side_effect=sl.QueryDeadlockError("deadlock"))
+        with patch.object(sl, "frappe", fake):
+            with self.assertRaises(sl.QueryDeadlockError):
+                sl.record_state_change("SINV-1", "Recieved", "In Progress", "kanban")
+
+    def test_record_reraises_a_lock_wait_timeout(self):
+        fake, _ = _patched_frappe(insert_side_effect=sl.QueryTimeoutError("lock wait"))
+        with patch.object(sl, "frappe", fake):
+            with self.assertRaises(sl.QueryTimeoutError):
+                sl.record_state_change("SINV-1", "Recieved", "In Progress", "kanban")
+
+    def test_hooks_reraise_a_deadlock(self):
+        boom = sl.QueryDeadlockError("deadlock")
+        with patch.object(sl, "record_state_change", side_effect=boom):
+            with self.assertRaises(sl.QueryDeadlockError):
+                sl.log_state_on_submit(_Doc(state="Recieved"))
+            with self.assertRaises(sl.QueryDeadlockError):
+                sl.log_state_on_update_after_submit(
+                    _Doc(state="In Progress", before_state="Recieved"))
+
+
+class TestBranchFollowsTransfer(unittest.TestCase):
+    def test_hook_logs_the_board_branch_after_a_transfer(self):
+        doc = _Doc(state="Out for Delivery", before_state="In Progress", pos_profile="Dokki")
+        doc._data["custom_kanban_profile"] = "Nasr city"
+        with patch.object(sl, "record_state_change") as rec:
+            sl.log_state_on_update_after_submit(doc)
+        self.assertEqual(rec.call_args.kwargs["pos_profile"], "Nasr city")
+
+    def test_falls_back_to_pos_profile(self):
+        with patch.object(sl, "record_state_change") as rec:
+            sl.log_state_on_submit(_Doc(state="Recieved", pos_profile="Dokki"))
+        self.assertEqual(rec.call_args.kwargs["pos_profile"], "Dokki")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2135,6 +2135,10 @@ def update_invoice_state(
         allowed_states = _get_allowed_states()
         if not allowed_states:
             return _failure("No allowed states configured (Custom Field missing or empty)")
+        # Ready was removed 2026-10-13. A client still on the old build (or an
+        # offline move queued before the update) sends it; it means In Progress.
+        if (new_state or "").strip().lower() == "ready":
+            new_state = "In Progress"
         if new_state not in allowed_states:
             match_ci = next((s for s in allowed_states if s.lower() == (new_state or '').lower()), None)
             if match_ci:

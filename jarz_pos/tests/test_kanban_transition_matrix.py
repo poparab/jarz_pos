@@ -8,6 +8,7 @@ Pure ``unittest`` - no site, no DB, no ``erpnext.tests.utils``.
 """
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 from jarz_pos.api import kanban
 
@@ -101,6 +102,24 @@ class TestNonDragTargets(unittest.TestCase):
     def test_unknown_labels_are_left_to_other_checks(self):
         self.assertIsNone(block("In Progress", "Something Else"))
         self.assertIsNone(block("Something Else", "Delivered"))
+
+
+class TestOldClientSendsReady(unittest.TestCase):
+    """A client on the pre-2026-10-13 build, or an offline move queued before
+    the update, still sends "Ready"; it must mean In Progress, not be refused."""
+
+    def test_ready_request_passes_state_validation(self):
+        stop = RuntimeError("reached get_doc")
+        allowed = ["Recieved", "In Progress", "Out for Delivery", "Delivered"]
+        with patch.object(kanban, "_get_allowed_states", return_value=allowed), \
+                patch.object(kanban.frappe, "has_permission", return_value=True), \
+                patch.object(kanban.frappe, "logger", MagicMock()), \
+                patch.object(kanban.frappe.utils, "now", return_value="2026-10-13 12:00:00"), \
+                patch.object(kanban.frappe, "get_doc", side_effect=stop) as get_doc, \
+                patch.object(kanban.frappe, "log_error", MagicMock()):
+            result = kanban.update_invoice_state("SINV-1", "Ready")
+        get_doc.assert_called_once_with("Sales Invoice", "SINV-1")
+        self.assertNotIn("not a valid state", str(result))
 
 
 if __name__ == "__main__":
