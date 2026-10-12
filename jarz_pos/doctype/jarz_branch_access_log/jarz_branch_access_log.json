@@ -76,11 +76,11 @@
    "reqd": 1
   },
   {
-   "description": "Where the change came from. Scheduler means the hourly day-access job, not a person.",
+   "description": "Where the change came from. Scheduler means the hourly day-access job, not a person. Branch Move is the permanent move-to-another-branch action.",
    "fieldname": "source",
    "fieldtype": "Select",
    "label": "Source",
-   "options": "Branch Access Screen\nShift Assignment\nDay Off Cover\nScheduler"
+   "options": "Branch Access Screen\nShift Assignment\nDay Off Cover\nScheduler\nBranch Move"
   },
   {
    "fieldname": "day_access",
@@ -123,7 +123,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-23 00:00:00.000000",
+ "modified": "2026-10-12 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Branch Access Log",

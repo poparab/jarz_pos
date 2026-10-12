@@ -74,6 +74,11 @@ class World:
         self.frappe = None
         self.fail_load = set()
         self.disabled_users = set()
+        self.employees = {}  # user -> employee
+        self.shifts = {}  # (employee, day) -> {"shift_type", "shift_location"}
+        self.day_offs = set()  # (employee, day)
+        self.locations = {"Dokki": "Dokki", "Nasr city": "Nasr City", "6th of october": "6th of October"}
+        self.shift_writes = []
 
     # -- setup helpers -------------------------------------------------------
 
@@ -189,6 +194,15 @@ class World:
                 out.append(name)
         return out
 
+    def _assignment_on(self, employee, day):
+        shift = self.shifts.get((employee, day))
+        return frappe._dict(dict(shift, name=f"SA-{employee}-{day}")) if shift else None
+
+    def set_shift_for_day(self, employee, day, shift_type, shift_location=None, clear_conflicting_day_off=True):
+        self.shift_writes.append((employee, day, shift_type, shift_location, clear_conflicting_day_off))
+        self.shifts[(employee, day)] = {"shift_type": shift_type, "shift_location": shift_location}
+        return {"changed": True}
+
     @contextmanager
     def active(self, profile_for_location=None):
         with ExitStack() as stack:
@@ -222,7 +236,12 @@ class World:
                 },
             )
             p("_full_name", side_effect=lambda user: user.split("@")[0].title() if user else None)
-            p("_employee_for_user", return_value=(None, None))
+            p("_employee_for_user", side_effect=lambda user: (self.employees.get(user), None))
+            p("location_for_profile", side_effect=lambda profile: self.locations.get(profile))
+            p("_is_day_off", side_effect=lambda emp, day: (emp, day) in self.day_offs)
+            for name in ("_assignment_on", "set_shift_for_day"):
+                stack.enter_context(patch.object(roster_service, name, side_effect=getattr(self, name)))
+            stack.enter_context(patch.object(roster_service, "hrms_available", return_value=True))
             p("_invalidate")
             for name in (
                 "_membership_rows",
@@ -590,6 +609,217 @@ class TestGrantDayAccess(unittest.TestCase):
         with world.active():
             with self.assertRaises(frappe.ValidationError):
                 svc.cancel_day_access(name)
+
+
+class TestDayAccessMovesTheRoster(unittest.TestCase):
+    """A day access also moves that day's shift, or check-in is refused there."""
+
+    def _world(self, location="Nasr City"):
+        world = World()
+        world.employees["ali@jarz.test"] = "HR-EMP-1"
+        if location is not None:
+            world.shifts[("HR-EMP-1", TODAY)] = {"shift_type": "Branch Opening", "shift_location": location}
+        return world
+
+    def test_the_days_shift_moves_to_the_granted_branch(self):
+        world = self._world()
+        with world.active():
+            result = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY)
+        self.assertEqual(world.shift_writes, [("HR-EMP-1", TODAY, "Branch Opening", "Dokki", False)])
+        roster = result["roster"]
+        self.assertTrue(roster["moved"])
+        self.assertEqual(roster["previous_location"], "Nasr City")
+        grant = world.grants[result["day_access"]["name"]]
+        self.assertEqual(grant["roster_moved"], 1)
+        self.assertEqual(grant["roster_moved_from"], "Nasr City")
+        self.assertIn("check-in works there", result["message"])
+
+    def test_a_day_without_a_shift_is_not_invented(self):
+        world = self._world(location=None)
+        with world.active():
+            result = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY)
+        self.assertEqual(world.shift_writes, [])
+        self.assertFalse(result["roster"]["moved"])
+        self.assertIn("Shift distribution", result["roster"]["reason"])
+        self.assertEqual(result["day_access"]["status"], "Active")
+
+    def test_a_day_off_is_not_overwritten(self):
+        world = self._world()
+        world.day_offs.add(("HR-EMP-1", TODAY))
+        with world.active():
+            result = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY)
+        self.assertEqual(world.shift_writes, [])
+        self.assertIn("off", result["roster"]["reason"])
+
+    def test_already_at_that_branch_writes_nothing(self):
+        world = self._world(location="Dokki")
+        with world.active():
+            result = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY)
+        self.assertEqual(world.shift_writes, [])
+        self.assertFalse(result["roster"]["moved"])
+
+    def test_a_roster_sourced_grant_does_not_move_again(self):
+        world = self._world()
+        with world.active():
+            result = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY, source=svc.SOURCE_SHIFT)
+        self.assertEqual(world.shift_writes, [])
+        self.assertNotIn("roster", result)
+
+    def test_cancel_moves_the_shift_back(self):
+        world = self._world()
+        with world.active():
+            name = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY)["day_access"]["name"]
+            result = svc.cancel_day_access(name)
+        self.assertEqual(world.shift_writes[-1], ("HR-EMP-1", TODAY, "Branch Opening", "Nasr City", False))
+        self.assertTrue(result["roster"]["restored"])
+        self.assertEqual(world.shifts[("HR-EMP-1", TODAY)]["shift_location"], "Nasr City")
+
+    def test_cancel_leaves_a_shift_somebody_moved_since(self):
+        world = self._world()
+        with world.active():
+            name = svc.grant_day_access("ali@jarz.test", "Dokki", TODAY)["day_access"]["name"]
+            world.shifts[("HR-EMP-1", TODAY)]["shift_location"] = "6th of October"
+            result = svc.cancel_day_access(name)
+        self.assertEqual(len(world.shift_writes), 1)
+        self.assertFalse(result["roster"]["restored"])
+
+
+class TestMoveBranch(unittest.TestCase):
+    def _world(self):
+        world = World()
+        world.employees["ali@jarz.test"] = "HR-EMP-1"
+        world.add_member("ali@jarz.test", "Nasr city")
+        return world
+
+    def _move(self, world, **kwargs):
+        roster = {
+            "from_date": "2026-09-23",
+            "shift_location": "Dokki",
+            "previous_location": None,
+            "schedules_updated": 2,
+            "assignments_moved": 3,
+            "reason": None,
+        }
+        with ExitStack() as stack:
+            homes = {"Nasr City": "Nasr city", "Dokki": "Dokki"}
+            stack.enter_context(world.active(profile_for_location=homes))
+            stack.enter_context(patch.object(svc, "_home_locations", return_value={"HR-EMP-1": "Nasr City"}))
+            move = stack.enter_context(patch.object(svc, "_move_roster_home", return_value=dict(roster)))
+            result = svc.move_branch("ali@jarz.test", "Dokki", **kwargs)
+        return result, move
+
+    def test_moves_access_and_rota_from_the_home_branch(self):
+        world = self._world()
+        result, move = self._move(world)
+        self.assertTrue(world.is_member("ali@jarz.test", "Dokki"))
+        self.assertFalse(world.is_member("ali@jarz.test", "Nasr city"))
+        self.assertEqual(result["from_pos_profile"], "Nasr city")
+        move.assert_called_once_with("HR-EMP-1", {"Nasr City"}, "Dokki")
+        self.assertEqual(result["roster"]["previous_location"], "Nasr City")
+        self.assertEqual([e["source"] for e in world.logs], ["Branch Move", "Branch Move"])
+        self.assertEqual(world.actions(), ["Added", "Removed"])
+
+    def test_keep_old_access_leaves_the_old_branch(self):
+        world = self._world()
+        result, _move = self._move(world, keep_old_access=1)
+        self.assertTrue(world.is_member("ali@jarz.test", "Nasr city"))
+        self.assertTrue(world.is_member("ali@jarz.test", "Dokki"))
+        self.assertFalse(result["removed"])
+
+    def test_moving_to_the_same_branch_is_refused(self):
+        world = self._world()
+        with self.assertRaises(frappe.ValidationError):
+            self._move(world, from_pos_profile="Dokki")
+
+    def test_refused_up_front_when_the_old_branch_is_open(self):
+        world = self._world()
+        world.open_shifts["Nasr city"] = _open_shift()
+        with self.assertRaises(svc.BranchOpenError):
+            self._move(world)
+        self.assertFalse(world.is_member("ali@jarz.test", "Dokki"))
+        self.assertEqual(world.logs, [])
+
+    def test_line_manager_of_only_the_new_branch_is_refused(self):
+        world = self._world()
+        world.caller = "lm@jarz.test"
+        world.roles = {"lm@jarz.test": {ROLES.JARZ_LINE_MANAGER}}
+        world.caller_profiles = ["Dokki"]
+        with self.assertRaises(frappe.PermissionError):
+            self._move(world)
+
+
+class TestMoveRosterHome(unittest.TestCase):
+    """The rota half of a move, against a fake Shift Assignment table."""
+
+    def _run(self, assignments, checked_in=False):
+        schedules = [
+            {"name": "SSA-1", "shift_location": "Nasr City"},
+            {"name": "SSA-2", "shift_location": "Nasr City"},
+        ]
+        docs = {}
+
+        def get_all(doctype, **kwargs):
+            return schedules if doctype == "Shift Schedule Assignment" else assignments
+
+        def get_doc(doctype, name):
+            row = next(a for a in assignments if a["name"] == name)
+            doc = SimpleNamespace(
+                company="Jarz",
+                shift_type="Branch Opening",
+                status="Active",
+                shift_schedule_assignment="SSA-1",
+                end_date=row["end_date"],
+                flags=SimpleNamespace(),
+                save=MagicMock(),
+            )
+            doc.get = lambda key: getattr(doc, key, None)
+            docs[name] = doc
+            return doc
+
+        with ExitStack() as stack:
+            f = stack.enter_context(patch.object(svc, "frappe"))
+            stack.enter_context(patch.object(svc, "_now", return_value=NOW))
+            stack.enter_context(patch.object(svc, "_checked_in_today", return_value=checked_in))
+            stack.enter_context(patch.object(roster_service, "hrms_available", return_value=True))
+            create = stack.enter_context(
+                patch.object(roster_service, "_create_assignment", return_value="SA-NEW")
+            )
+            f.get_all.side_effect = get_all
+            f.get_doc.side_effect = get_doc
+            out = svc._move_roster_home("HR-EMP-1", {"Nasr City"}, "Dokki")
+            writes = [c.args for c in f.db.set_value.call_args_list]
+        return out, writes, create, docs
+
+    def test_schedules_and_future_shifts_move_and_a_straddling_one_splits(self):
+        assignments = [
+            {"name": "SA-1", "start_date": date(2026, 9, 1), "end_date": date(2026, 9, 30), "shift_location": "Nasr City"},
+            {"name": "SA-2", "start_date": date(2026, 10, 1), "end_date": date(2026, 10, 31), "shift_location": None},
+            {"name": "SA-3", "start_date": date(2026, 9, 25), "end_date": date(2026, 9, 25), "shift_location": "6th of October"},
+        ]
+        out, writes, create, docs = self._run(assignments)
+        self.assertIn(("Shift Schedule Assignment", "SSA-1", "shift_location", "Dokki"), writes)
+        self.assertIn(("Shift Schedule Assignment", "SSA-2", "shift_location", "Dokki"), writes)
+        self.assertIn(("Shift Assignment", "SA-2", "shift_location", "Dokki"), writes)
+        # The cover at a third branch is a deliberate one-off and stays.
+        self.assertFalse(any(w[1] == "SA-3" for w in writes))
+        # SA-1 keeps its past at Nasr City; a tail from today sits at Dokki.
+        self.assertEqual(str(docs["SA-1"].end_date), "2026-09-22")
+        create.assert_called_once_with(
+            "HR-EMP-1", "Jarz", "Branch Opening", date(2026, 9, 23), date(2026, 9, 30), "Active", "Dokki"
+        )
+        self.assertIn(("Shift Assignment", "SA-NEW", "shift_schedule_assignment", "SSA-1"), writes)
+        self.assertEqual(out["assignments_moved"], 2)
+        self.assertEqual(out["schedules_updated"], 2)
+        self.assertEqual(out["from_date"], "2026-09-23")
+
+    def test_already_checked_in_today_starts_tomorrow(self):
+        assignments = [
+            {"name": "SA-1", "start_date": date(2026, 9, 1), "end_date": date(2026, 9, 30), "shift_location": "Nasr City"},
+        ]
+        out, _writes, create, docs = self._run(assignments, checked_in=True)
+        self.assertEqual(out["from_date"], "2026-09-24")
+        self.assertEqual(str(docs["SA-1"].end_date), "2026-09-23")
+        self.assertEqual(create.call_args.args[3], date(2026, 9, 24))
 
 
 # ---------------------------------------------------------------------------

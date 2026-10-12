@@ -24,6 +24,8 @@
   "source",
   "column_break_origin",
   "roster_day_off",
+  "roster_moved",
+  "roster_moved_from",
   "section_break_note",
   "notes",
   "last_deferral",
@@ -162,6 +164,23 @@
    "options": "Jarz Roster Day Off"
   },
   {
+   "default": "0",
+   "description": "Ticked when this grant moved the person's Shift Assignment for the day to this branch, so the check-in geofence lets them in. Cancelling the grant moves it back.",
+   "fieldname": "roster_moved",
+   "fieldtype": "Check",
+   "label": "Roster Moved Here",
+   "read_only": 1
+  },
+  {
+   "depends_on": "roster_moved",
+   "description": "Where the person was rostered that day before this grant moved them.",
+   "fieldname": "roster_moved_from",
+   "fieldtype": "Link",
+   "label": "Roster Moved From",
+   "options": "Shift Location",
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_note",
    "fieldtype": "Section Break"
   },
@@ -202,7 +221,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-23 00:00:00.000000",
+ "modified": "2026-10-12 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Day Access",

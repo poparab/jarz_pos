@@ -82,6 +82,10 @@ SOURCE_SCREEN = "Branch Access Screen"
 SOURCE_SHIFT = "Shift Assignment"
 SOURCE_COVER = "Day Off Cover"
 SOURCE_SCHEDULER = "Scheduler"
+SOURCE_MOVE = "Branch Move"
+
+#: Realtime event sent to a user whose branch list changed.
+REALTIME_EVENT = "jarz_pos_branch_access_changed"
 
 STATUS_SCHEDULED = "Scheduled"
 STATUS_ACTIVE = "Active"
@@ -537,6 +541,26 @@ def _invalidate(user: str, pos_profile: Optional[str] = None) -> None:
             frappe.clear_document_cache(MEMBER_PARENTTYPE, pos_profile)
         except Exception:
             pass
+    _notify_user(user, pos_profile)
+
+
+def _notify_user(user: str, pos_profile: Optional[str]) -> None:
+    """Tell *user*'s open apps their branch list changed, once this commits.
+
+    Without it the app kept the branch list it loaded at sign-in, so a person
+    given day access saw no new branch until they closed and reopened it --
+    which is how "day access didn't work" was reported. ``after_commit`` keeps
+    a change that is rolled back from announcing itself.
+    """
+    try:
+        frappe.publish_realtime(
+            REALTIME_EVENT,
+            {"user": user, "pos_profile": pos_profile},
+            user=user,
+            after_commit=True,
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +618,9 @@ _GRANT_FIELDS = [
     "expires_at",
     "granted_by",
     "last_deferral",
+    "employee",
+    "roster_moved",
+    "roster_moved_from",
 ]
 
 
@@ -967,7 +994,161 @@ def grant_day_access(
             "{0} will get POS access to {1} on {2}, from when the branch is closed until {3}."
         ).format(display, profile, day, expires_at.strftime("%Y-%m-%d %H:%M"))
 
-    return {"day_access": grant_payload(grant), "message": message}
+    roster: Optional[Dict[str, Any]] = None
+    if source == SOURCE_SCREEN:
+        # A roster-sourced grant has already put the person at this branch;
+        # only a grant made on the access screen still needs the rota moved.
+        roster = _move_roster_for_grant(name, employee, profile, day)
+        if roster.get("moved"):
+            message = "\n".join(
+                [
+                    message,
+                    _("Their shift that day was moved to {0}, so check-in works there.").format(
+                        roster["shift_location"]
+                    ),
+                ]
+            )
+        elif roster.get("reason"):
+            message = "\n".join([message, roster["reason"]])
+
+    out = {"day_access": grant_payload(grant), "message": message}
+    if roster is not None:
+        out["roster"] = roster
+    return out
+
+
+def location_for_profile(pos_profile: Optional[str]) -> Optional[str]:
+    """The Shift Location a branch checks people in at, if it has one."""
+    if not pos_profile:
+        return None
+    for loc, profile in profiles_by_shift_location().items():
+        if profile == pos_profile:
+            return loc
+    return None
+
+
+def _is_day_off(employee: str, day: Any) -> bool:
+    return bool(
+        frappe.db.exists(roster_service.DAY_OFF_DOCTYPE, {"employee": employee, "off_date": getdate(day)})
+    )
+
+
+def _move_roster_for_grant(
+    grant_name: str, employee: Optional[str], pos_profile: str, day: Any
+) -> Dict[str, Any]:
+    """Move the person's shift on *day* to the branch they were given.
+
+    Day access used to change only the POS membership. The check-in geofence
+    reads the Shift Assignment's location, so the person reached the branch,
+    could open the POS, and was refused at check-in 200 m from their home
+    branch. The shift keeps its type; only the location moves.
+
+    Best-effort like ``grant_for_roster``: the grant is the decision, the rota
+    move a convenience on it. A day with no shift (or a day off) is NOT
+    invented into a shift here -- what they work is the manager's call in
+    Shift distribution, and the reason says so.
+    """
+    out: Dict[str, Any] = {
+        "moved": False,
+        "shift_type": None,
+        "shift_location": None,
+        "previous_location": None,
+        "reason": None,
+    }
+    location = location_for_profile(pos_profile)
+    if not location:
+        out["reason"] = _("{0} has no check-in location, so the roster was not changed.").format(pos_profile)
+        return out
+    out["shift_location"] = location
+    if not employee:
+        out["reason"] = _("They have no Employee record, so there is no shift to move.")
+        return out
+    try:
+        if not roster_service.hrms_available():
+            return out
+        if _is_day_off(employee, day):
+            out["reason"] = _(
+                "They are off on {0}. Put them on a shift in Shift distribution so they can check in."
+            ).format(day)
+            return out
+        existing = roster_service._assignment_on(employee, day)
+    except Exception:
+        _safe_log(f"Day access roster lookup failed for {employee}")
+        return out
+    if not existing:
+        out["reason"] = _(
+            "They have no shift on {0}. Put them on a shift in Shift distribution so they can check in."
+        ).format(day)
+        return out
+    out["shift_type"] = existing.shift_type
+    out["previous_location"] = existing.shift_location
+    if existing.shift_location == location:
+        return out
+
+    savepoint = "jarz_day_access_roster"
+    mark = _message_log_mark()
+    frappe.db.savepoint(savepoint)
+    try:
+        roster_service.set_shift_for_day(
+            employee, day, existing.shift_type, location, clear_conflicting_day_off=False
+        )
+        _set_grant(grant_name, {"roster_moved": 1, "roster_moved_from": existing.shift_location})
+    except Exception as exc:
+        frappe.db.rollback(save_point=savepoint)
+        _message_log_reset(mark)
+        if not isinstance(exc, (frappe.ValidationError, frappe.PermissionError)):
+            _safe_log(f"Day access roster move failed for {employee}")
+        out["reason"] = _("Their shift could not be moved: {0}").format(_exc_text(exc))
+        return out
+    out["moved"] = True
+    return out
+
+
+def _restore_roster_for_grant(grant_name: str) -> Optional[Dict[str, Any]]:
+    """Undo ``_move_roster_for_grant`` when its grant is cancelled.
+
+    Only while the day is today or later and the shift is still where the
+    grant put it: a past day is history, and a shift someone has since moved
+    again is their newer decision.
+    """
+    row = _load_grant(grant_name)
+    if not row or not cint(row.get("roster_moved")):
+        return None
+    out: Dict[str, Any] = {"restored": False, "shift_location": row.get("roster_moved_from"), "reason": None}
+    day = getdate(row["access_date"])
+    if day < _now().date():
+        out["reason"] = _("The day has passed, so the shift was left as it was.")
+        return out
+    moved_to = location_for_profile(row.get("pos_profile"))
+    try:
+        existing = roster_service._assignment_on(row["employee"], day) if row.get("employee") else None
+    except Exception:
+        existing = None
+    if not existing or existing.shift_location != moved_to:
+        out["reason"] = _("The shift was changed since, so it was left as it is.")
+        return out
+
+    savepoint = "jarz_day_access_roster_undo"
+    mark = _message_log_mark()
+    frappe.db.savepoint(savepoint)
+    try:
+        roster_service.set_shift_for_day(
+            row["employee"],
+            day,
+            existing.shift_type,
+            row.get("roster_moved_from") or roster_service._schedule_location(row["employee"]),
+            clear_conflicting_day_off=False,
+        )
+        _set_grant(grant_name, {"roster_moved": 0})
+    except Exception as exc:
+        frappe.db.rollback(save_point=savepoint)
+        _message_log_reset(mark)
+        if not isinstance(exc, (frappe.ValidationError, frappe.PermissionError)):
+            _safe_log(f"Day access roster restore failed for {grant_name}")
+        out["reason"] = _("Their shift could not be moved back: {0}").format(_exc_text(exc))
+        return out
+    out["restored"] = True
+    return out
 
 
 def cancel_day_access(name: str) -> Dict[str, Any]:
@@ -1015,7 +1196,226 @@ def cancel_day_access(name: str) -> Dict[str, Any]:
             _("This day access is already {0}.").format(str(grant["status"] or "").lower())
         )
 
-    return {"day_access": grant_payload(grant)}
+    out: Dict[str, Any] = {"day_access": grant_payload(grant)}
+    roster = _restore_roster_for_grant(grant["name"])
+    if roster is not None:
+        out["roster"] = roster
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Permanent branch move
+# ---------------------------------------------------------------------------
+
+
+def _home_locations(employees: List[str]) -> Dict[str, str]:
+    """{employee: Shift Location of their enabled baseline schedule}.
+
+    The schedule is where every future shift is generated from, so it is the
+    one place that says which branch somebody belongs to. ``Employee.branch``
+    is not maintained and nothing reads it.
+    """
+    employees = [e for e in employees if e]
+    if not employees:
+        return {}
+    try:
+        rows = frappe.get_all(
+            "Shift Schedule Assignment",
+            filters={"employee": ("in", employees), "enabled": 1, "shift_location": ("is", "set")},
+            fields=["employee", "shift_location"],
+            order_by="modified desc",
+        ) or []
+    except Exception:
+        return {}
+    out: Dict[str, str] = {}
+    for row in rows:
+        out.setdefault(row["employee"], row["shift_location"])
+    return out
+
+
+def _checked_in_today(employee: str) -> bool:
+    start = datetime.combine(_now().date(), time(0, 0))
+    try:
+        return bool(frappe.db.exists("Employee Checkin", {"employee": employee, "time": (">=", start)}))
+    except Exception:
+        return False
+
+
+def _move_roster_home(
+    employee: Optional[str], old_locations: set, new_location: Optional[str]
+) -> Dict[str, Any]:
+    """Re-home *employee*'s rota at *new_location* from today on.
+
+    * Every enabled Shift Schedule Assignment moves, so the shifts the
+      schedule generates later land at the new branch.
+    * Every already-generated shift from the start day on that sits at the
+      old branch (or nowhere) moves too; one that straddles the start day is
+      split so the past keeps its real location. Shifts at a third branch are
+      left alone -- those are one-off covers somebody chose deliberately.
+    * The start day is tomorrow when they already checked in today: moving
+      today's shift under an open check-in would refuse their check-out.
+
+    Not best-effort: the move is one decision, so a roster failure rolls the
+    POS change back with it rather than leaving the person half-moved.
+    """
+    out: Dict[str, Any] = {
+        "from_date": None,
+        "shift_location": new_location,
+        "previous_location": next(iter(sorted(old_locations)), None) if old_locations else None,
+        "schedules_updated": 0,
+        "assignments_moved": 0,
+        "reason": None,
+    }
+    if not employee:
+        out["reason"] = _("They have no Employee record, so only their POS access was moved.")
+        return out
+    if not new_location:
+        out["reason"] = _("The new branch has no check-in location, so their shifts were not moved.")
+        return out
+    if not roster_service.hrms_available():
+        return out
+
+    start = getdate(_now().date())
+    if _checked_in_today(employee):
+        start = getdate(add_days(start, 1))
+    out["from_date"] = _fmt(start)
+
+    for row in frappe.get_all(
+        "Shift Schedule Assignment",
+        filters={"employee": employee, "enabled": 1},
+        fields=["name", "shift_location"],
+    ) or []:
+        if row.get("shift_location") != new_location:
+            # db.set_value, not save(): the schedule controller regenerates
+            # shifts on save, and the generated ones are moved below anyway.
+            frappe.db.set_value("Shift Schedule Assignment", row["name"], "shift_location", new_location)
+            out["schedules_updated"] += 1
+
+    rows = frappe.get_all(
+        "Shift Assignment",
+        filters=dict(roster_service.ACTIVE_ASSIGNMENT_FILTERS, employee=employee),
+        or_filters=[["end_date", ">=", start], ["end_date", "is", "not set"]],
+        fields=["name", "start_date", "end_date", "shift_location"],
+        order_by="start_date asc",
+    ) or []
+    for row in rows:
+        location = row.get("shift_location") or None
+        if location == new_location or (location is not None and location not in old_locations):
+            continue
+        if getdate(row["start_date"]) < start:
+            doc = frappe.get_doc("Shift Assignment", row["name"])
+            old_end = doc.end_date
+            doc.end_date = add_days(start, -1)
+            doc.flags.ignore_permissions = True
+            doc.save(ignore_permissions=True)
+            tail = roster_service._create_assignment(
+                employee, doc.company, doc.shift_type, start, old_end, doc.status, new_location
+            )
+            if doc.get("shift_schedule_assignment"):
+                frappe.db.set_value(
+                    "Shift Assignment",
+                    tail,
+                    "shift_schedule_assignment",
+                    doc.shift_schedule_assignment,
+                    update_modified=False,
+                )
+        else:
+            # shift_location is not allow_on_submit; a direct write keeps the
+            # assignment, its name and its schedule link exactly as they were.
+            frappe.db.set_value("Shift Assignment", row["name"], "shift_location", new_location)
+        out["assignments_moved"] += 1
+    return out
+
+
+def move_branch(
+    user: str,
+    to_pos_profile: str,
+    from_pos_profile: Optional[str] = None,
+    keep_old_access: Any = False,
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Move *user* to another branch for good: POS access and rota together.
+
+    Before this, a permanent move was three separate jobs in three places --
+    add the new branch here, remove the old one, then re-roster every day in
+    Shift distribution -- and missing the last one left the person refused at
+    check-in at the branch they now work at.
+
+    *from_pos_profile* defaults to the branch their schedule puts them at.
+    ``keep_old_access`` keeps the old branch's POS access (somebody who will
+    still cover there now and then).
+    """
+    ensure_access()
+    target = _ensure_target_user(user, for_adding=True)
+    user = target["name"]
+    display = target.get("full_name") or user
+    to_profile = _clean(to_pos_profile)
+    if not to_profile:
+        frappe.throw(_("Pick the branch to move them to."))
+    ensure_can_manage(to_profile, user)
+    notes = _clean(notes)
+    keep = as_flag(keep_old_access)
+
+    employee, _employee_name = _employee_for_user(user)
+    home_location = _home_locations([employee]).get(employee) if employee else None
+    from_profile = _clean(from_pos_profile) or profile_for_shift_location(home_location)
+    if from_profile == to_profile:
+        frappe.throw(_("{0} is already based at {1}.").format(display, to_profile))
+    from_enabled = bool(from_profile) and from_profile in _enabled_profiles()
+    if from_enabled:
+        ensure_can_manage(from_profile, user)
+
+    removing = from_enabled and not keep and is_member(user, from_profile)
+    # Both branches checked before anything is written, so a refusal on the
+    # second cannot leave the first already changed.
+    if not is_member(user, to_profile):
+        ensure_branch_closed(to_profile)
+    if removing:
+        ensure_branch_closed(from_profile)
+
+    move_note = "\n".join(
+        filter(
+            None,
+            [
+                _("Moved from {0} to {1}.").format(from_profile or _("no branch"), to_profile),
+                notes,
+            ],
+        )
+    )
+    added = set_branch_access(user, to_profile, True, notes=move_note, source=SOURCE_MOVE)
+    removed = None
+    if removing:
+        removed = set_branch_access(user, from_profile, False, notes=move_note, source=SOURCE_MOVE)
+
+    old_locations = {loc for loc in (home_location, location_for_profile(from_profile)) if loc}
+    new_location = location_for_profile(to_profile)
+    roster = _move_roster_home(employee, old_locations, new_location)
+    roster["previous_location"] = home_location or roster.get("previous_location")
+
+    parts = [_("{0} now belongs to {1}.").format(display, to_profile)]
+    if removed and removed.get("changed"):
+        parts.append(_("Their access to {0} was removed.").format(from_profile))
+    elif from_profile and keep:
+        parts.append(_("They keep their access to {0}.").format(from_profile))
+    if roster.get("from_date") and (roster["schedules_updated"] or roster["assignments_moved"]):
+        parts.append(
+            _("Their shifts from {0} on now check in at {1}.").format(
+                roster["from_date"], roster["shift_location"]
+            )
+        )
+    elif roster.get("reason"):
+        parts.append(roster["reason"])
+
+    return {
+        "success": True,
+        "user": user,
+        "to_pos_profile": to_profile,
+        "from_pos_profile": from_profile,
+        "added": bool(added.get("changed")),
+        "removed": bool(removed and removed.get("changed")),
+        "message": " ".join(parts),
+        "roster": roster,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1126,6 +1526,9 @@ def get_branch_access() -> Dict[str, Any]:
                 }
             )
 
+    home_by_employee = _home_locations([e.get("name") for e in employees.values() if e.get("name")])
+    profile_by_location = profiles_by_shift_location()
+
     users: List[Dict[str, Any]] = []
     for uid in candidates:
         info = users_info.get(uid)
@@ -1137,6 +1540,7 @@ def get_branch_access() -> Dict[str, Any]:
         if uid not in memberships and not enabled_flag:
             continue
         emp = employees.get(uid) or {}
+        home_location = home_by_employee.get(emp.get("name")) if emp.get("name") else None
         users.append(
             {
                 "user": uid,
@@ -1148,6 +1552,8 @@ def get_branch_access() -> Dict[str, Any]:
                 "editable": can_edit_user(uid, caller),
                 "branches": sorted(memberships.get(uid, set())),
                 "day_access": grants_by_user.get(uid, []),
+                "home_location": home_location,
+                "home_branch": profile_by_location.get(home_location) if home_location else None,
             }
         )
     users.sort(key=lambda u: (str(u["full_name"] or "").lower(), u["user"]))

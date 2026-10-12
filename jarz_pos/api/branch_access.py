@@ -91,6 +91,28 @@ def cancel_day_access(name: str) -> Dict[str, Any]:
     return result
 
 
+@frappe.whitelist(methods=["POST"])
+def move_branch(
+    user: str,
+    to_pos_profile: str,
+    from_pos_profile: Optional[str] = None,
+    keep_old_access: Any = 0,
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Move somebody to another branch for good: POS access and future shifts.
+
+    ``from_pos_profile`` defaults to the branch their schedule puts them at;
+    ``keep_old_access=1`` keeps the old branch's POS access.
+    """
+    return service.move_branch(
+        _clean(user),
+        _clean(to_pos_profile),
+        from_pos_profile=_clean(from_pos_profile),
+        keep_old_access=service.as_flag(keep_old_access),
+        notes=_clean(notes),
+    )
+
+
 @frappe.whitelist()
 def get_access_log(
     pos_profile: Optional[str] = None,
