@@ -11,6 +11,7 @@
   "column_break_meta",
   "off_type",
   "shift_location",
+  "from_plan",
   "section_break_restore",
   "original_shift_type",
   "column_break_restore",
@@ -21,6 +22,7 @@
   "column_break_cover",
   "cover_shift_type",
   "cover_previous_shift_type",
+  "cover_previous_shift_location",
   "cover_shift_location",
   "section_break_note",
   "notes",
@@ -78,6 +80,14 @@
    "in_standard_filter": 1,
    "label": "Branch (Shift Location)",
    "options": "Shift Location",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "Written by the rota plan wizard. A later plan run may replace it; a day off without this tick counts as set by hand and is kept.",
+   "fieldname": "from_plan",
+   "fieldtype": "Check",
+   "label": "From rota plan",
    "read_only": 1
   },
   {
@@ -147,6 +157,13 @@
    "read_only": 1
   },
   {
+   "description": "The branch the covering colleague was rostered at BEFORE cover. Clearing the day off puts them back there, not at the branch they covered.",
+   "fieldname": "cover_previous_shift_location",
+   "fieldtype": "Data",
+   "label": "Cover previous location",
+   "read_only": 1
+  },
+  {
    "fieldname": "cover_shift_location",
    "fieldtype": "Link",
    "label": "Cover Shift Location",
@@ -187,7 +204,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-29 00:00:00.000000",
+ "modified": "2026-10-12 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Roster Day Off",

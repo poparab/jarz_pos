@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import getdate
+from frappe.utils import add_days, getdate, nowdate
 
 from jarz_pos.services import branch_access as branch_access_service
 from jarz_pos.services import roster as roster_service
@@ -140,6 +140,34 @@ def get_month_hours(
     """Per-employee hours and overtime for the month, ready for payroll."""
     _ensure_access()
     data = roster_service.month_hours(month=_clean(month), shift_location=_clean(shift_location))
+    data["success"] = True
+    return data
+
+
+def _ensure_location_allowed(shift_location: Optional[str]) -> None:
+    """Refuse a branch outside the caller's scope.
+
+    The plan names its branch per person, so without this a manager could
+    roster their own staff onto -- and give them POS access at -- a branch
+    they do not run.
+    """
+    if not shift_location:
+        return
+    allowed = roster_service.allowed_shift_locations()
+    if allowed is not None and shift_location not in allowed:
+        frappe.throw(
+            _("{0} is not one of your branches.").format(shift_location),
+            frappe.PermissionError,
+        )
+
+
+@frappe.whitelist()
+def get_plan_defaults(shift_location: Optional[str] = None) -> Dict[str, Any]:
+    """Pre-fill for the rota plan wizard: everybody's current week."""
+    _ensure_access()
+    shift_location = _clean(shift_location)
+    _ensure_location_allowed(shift_location)
+    data = roster_service.plan_defaults(shift_location=shift_location)
     data["success"] = True
     return data
 
@@ -361,3 +389,185 @@ def bulk_assign(payload: Any) -> Dict[str, Any]:
         "applied_count": len(applied),
         "failed_count": len(failed),
     }
+
+
+def _coerce_plan(payload: Any) -> Dict[str, Any]:
+    plan = payload
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except Exception:
+            frappe.throw(_("Invalid JSON payload."))
+    if not isinstance(plan, dict):
+        frappe.throw(_("The plan must be an object."))
+    plan = dict(plan)
+    plan["start"] = _coerce_date(plan.get("start"), _("Start date"))
+    plan["end"] = _coerce_date(plan.get("end"), _("End date"))
+    rows = plan.get("rows")
+    if not isinstance(rows, list) or not rows:
+        frappe.throw(_("Pick at least one person."))
+    return plan
+
+
+#: How far back an assignment still makes a branch somebody's "home" for the
+#: plan's scope test. Matches the window ``plan_defaults`` lists people from.
+PLAN_HOME_LOOKBACK_DAYS = 60
+
+
+def _ensure_plan_home_in_scope(employee: str) -> None:
+    """Stricter scope test for a person whose standing rota the plan replaces.
+
+    ``_ensure_employee_in_scope`` passes anybody who has EVER had an Active
+    assignment at one of the caller's branches. That is fine for one day's
+    edit, but the plan disables the person's standing rota and writes a new
+    one, so a manager who once borrowed a Dokki cashier for a day could
+    otherwise rewrite that cashier's whole Dokki rota. So:
+
+    * every enabled Shift Schedule Assignment must sit at one of the caller's
+      branches; one outside is refused by name;
+    * with no standing rota, an Active assignment in the last 60 days (or
+      ahead) must be at one of them.
+    """
+    allowed = roster_service.allowed_shift_locations()
+    if allowed is None:
+        return
+    name = frappe.db.get_value("Employee", employee, "employee_name") or employee
+
+    try:
+        schedule_locations = [
+            row.get("shift_location")
+            for row in frappe.get_all(
+                "Shift Schedule Assignment",
+                filters={"employee": employee, "enabled": 1},
+                fields=["shift_location"],
+            )
+        ]
+    except Exception:
+        schedule_locations = []
+    for location in schedule_locations:
+        if location and location not in allowed:
+            frappe.throw(
+                _("{0}'s standing rota is at {1}, outside your branches.").format(name, location),
+                frappe.PermissionError,
+            )
+    if any(schedule_locations):
+        return
+
+    since = add_days(nowdate(), -PLAN_HOME_LOOKBACK_DAYS)
+    recent = {
+        row.get("shift_location")
+        for row in frappe.get_all(
+            "Shift Assignment",
+            filters={"employee": employee, "docstatus": 1, "status": "Active"},
+            or_filters=[["end_date", ">=", since], ["end_date", "is", "not set"]],
+            fields=["shift_location"],
+        )
+        if row.get("shift_location")
+    }
+    if not recent.intersection(allowed):
+        frappe.throw(
+            _("{0} is not at one of your branches.").format(name),
+            frappe.PermissionError,
+        )
+
+
+def _check_plan_scope(plan: Dict[str, Any]) -> None:
+    """Every person, coverer and branch in the plan must be the caller's.
+
+    The service writes with ``ignore_permissions``, so this is the whole
+    authorisation for a request that can rewrite a branch's month. People the
+    plan replaces get the stricter home test; coverers, whose own rota is not
+    replaced, get the usual one.
+    """
+    checked = set()
+
+    def check(employee: Optional[str], planned: bool = False) -> None:
+        if not employee:
+            return
+        if employee not in checked:
+            checked.add(employee)
+            _ensure_employee_active(employee)
+            _ensure_employee_in_scope(employee)
+        if planned:
+            _ensure_plan_home_in_scope(employee)
+
+    for row in plan["rows"]:
+        if not isinstance(row, dict):
+            frappe.throw(_("Malformed plan row."))
+        check(_clean(row.get("employee")), planned=True)
+        _ensure_location_allowed(_clean(row.get("shift_location")))
+        for cover in row.get("covers") or []:
+            if isinstance(cover, dict):
+                check(_clean(cover.get("covered_by")))
+
+
+def _wants_apply(dry_run: Any) -> bool:
+    """Only an explicit "no dry run" writes.
+
+    ``as_flag`` would read "", "null" or "none" as false, and a client that
+    sends one of those by accident must get a preview, never a rewritten month.
+    """
+    if dry_run is False:
+        return True
+    if isinstance(dry_run, (int, float)) and not isinstance(dry_run, bool):
+        return dry_run == 0
+    if isinstance(dry_run, str):
+        return dry_run.strip().lower() in ("0", "false", "no")
+    return False
+
+
+@frappe.whitelist()
+def apply_plan(payload: Any, dry_run: Any = 1) -> Dict[str, Any]:
+    """Preview (``dry_run=1``, the default) or write a rota plan.
+
+    The default is the preview so that a client which forgets the flag gets a
+    harmless answer instead of a rewritten month. ``grant_pos_access`` in the
+    payload gives every coverer POS day access at the branch the cover landed
+    on; best-effort, as in ``set_day_off`` -- a refused grant never undoes the
+    rota, it is listed under ``pos_access_failed``.
+    """
+    _ensure_access()
+    plan = _coerce_plan(payload)
+    _check_plan_scope(plan)
+
+    if not _wants_apply(dry_run):
+        result = roster_service.plan_preview(plan)
+        # People outside the plan whose day would change are checked here too,
+        # so the manager learns about a refusal at preview, not at Apply.
+        for employee in result.get("touched_outside") or []:
+            _ensure_employee_in_scope(employee)
+        result["success"] = True
+        return result
+
+    result = roster_service.apply_plan(plan, check_employee=_ensure_employee_in_scope)
+    result["success"] = True
+    result["pos_access"] = []
+    result["pos_access_failed"] = []
+    if not branch_access_service.as_flag(plan.get("grant_pos_access")):
+        return result
+
+    names: Dict[str, str] = {}
+    for cover in result.get("created_covers") or []:
+        employee = cover["employee"]
+        if employee not in names:
+            names[employee] = frappe.db.get_value("Employee", employee, "employee_name") or employee
+        try:
+            grant = branch_access_service.grant_for_roster(
+                cover["covered_by"],
+                cover["date"],
+                cover.get("cover_shift_location"),
+                source=branch_access_service.SOURCE_COVER,
+                roster_day_off=cover.get("day_off"),
+                notes=_("Covering for {0}.").format(names[employee]),
+            )
+        except Exception as exc:
+            grant = None
+            reason = str(exc)
+        else:
+            reason = (grant or {}).get("reason")
+        result["pos_access"].append(dict(cover, result=grant))
+        if not grant or not (grant.get("granted") or grant.get("already_member")):
+            result["pos_access_failed"].append(
+                {"covered_by": cover["covered_by"], "date": cover["date"], "reason": reason}
+            )
+    return result

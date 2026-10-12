@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 from frappe.utils import getdate
 
+from jarz_pos.api import roster as roster_api
 from jarz_pos.constants import ROLES
 from jarz_pos.services import roster as roster_service
 from jarz_pos.events import employee_checkin as checkin_guard
@@ -672,6 +673,834 @@ class TestHoursSummaryArithmetic(unittest.TestCase):
         self.assertEqual(row["overtime_hours"], 0.0)
         self.assertEqual(row["base_hours"], 6.0)
         self.assertEqual(row["credited_hours"], 6.0)
+
+
+# ---------------------------------------------------------------------------
+# Rota plan wizard
+# ---------------------------------------------------------------------------
+
+
+class _PlanError(Exception):
+    """Stands in for ``frappe.throw`` so validation failures are catchable."""
+
+
+def _raise(message=None, *args, **kwargs):
+    raise _PlanError(message)
+
+
+PLAN_TODAY = date(2026, 10, 12)
+# Monday 2 Nov 2026 .. Sunday 8 Nov 2026: one week, one of each weekday.
+WEEK_START = date(2026, 11, 2)
+WEEK_END = date(2026, 11, 8)
+FRIDAY_DATE = date(2026, 11, 6)
+KNOWN_TYPES = {"Morning", "Morning - Friday", "Evening", "Full Day"}
+
+
+def _types():
+    return roster_service._ShiftTypes(known=KNOWN_TYPES)
+
+
+def _row(employee, shift_type="Morning", location="Nasr City", off_days=(), covers=(), variant=True):
+    return {
+        "employee": employee,
+        "shift_type": shift_type,
+        "shift_location": location,
+        "off_days": list(off_days),
+        "use_friday_variant": variant,
+        "covers": [
+            {"weekday": weekday, "covered_by": by, "cover_shift_type": "Full Day"}
+            for weekday, by in covers
+        ],
+    }
+
+
+def _payload(rows, start=WEEK_START, end=WEEK_END, replace_manual=False):
+    return {
+        "start": str(start),
+        "end": str(end),
+        "replace_manual": replace_manual,
+        "rows": rows,
+    }
+
+
+def _state(**kwargs):
+    kwargs.setdefault("employee_names", {"A": "Ali", "B": "Omar", "C": "Mona", "X": "Ziad"})
+    return roster_service._PlanState(**kwargs)
+
+
+def _full_week_rota(location="Nasr City"):
+    return {weekday: ("Morning", location) for weekday in roster_service.WEEKDAYS}
+
+
+class _PlanTestCase(unittest.TestCase):
+    """Patches ``frappe.throw`` to raise and ``_`` to identity for each test."""
+
+    def setUp(self):
+        self.assertEqual(WEEK_START.weekday(), 0)
+        frappe_patch = patch.object(roster_service, "frappe")
+        self.mock_frappe = frappe_patch.start()
+        self.mock_frappe.throw.side_effect = _raise
+        self.addCleanup(frappe_patch.stop)
+        translate_patch = patch.object(roster_service, "_", side_effect=lambda text: text)
+        translate_patch.start()
+        self.addCleanup(translate_patch.stop)
+
+    def normalize(self, rows, **kwargs):
+        return roster_service._normalize_plan(_payload(rows, **kwargs), _types(), today=PLAN_TODAY)
+
+    def compute(self, rows, state=None, **kwargs):
+        plan = self.normalize(rows, **kwargs)
+        return roster_service._compute_plan(plan, state or _state())
+
+    @staticmethod
+    def codes(response):
+        return [issue["code"] for issue in response["issues"]]
+
+
+class TestRotaPlanExpansion(_PlanTestCase):
+    """Weekdays become days, and Friday picks up its own shift type."""
+
+    def test_friday_variant_on(self):
+        plan = self.normalize([_row("A", off_days=["Sunday"])])
+        row = plan["rows"][0]
+        self.assertEqual(row["friday_shift_type"], "Morning - Friday")
+        days = dict(roster_service._expand_plan(row, WEEK_START, WEEK_END))
+        self.assertEqual(days[FRIDAY_DATE], "Morning - Friday")
+        self.assertEqual(days[WEEK_START], "Morning")
+        self.assertIsNone(days[WEEK_END])
+
+    def test_friday_variant_off(self):
+        plan = self.normalize([_row("A", off_days=["Sunday"], variant=False)])
+        row = plan["rows"][0]
+        self.assertIsNone(row["friday_shift_type"])
+        days = dict(roster_service._expand_plan(row, WEEK_START, WEEK_END))
+        self.assertEqual(days[FRIDAY_DATE], "Morning")
+
+    def test_variant_used_for_planned_shift_on_friday_off(self):
+        plan = self.normalize([_row("A", off_days=["Friday"])])
+        row = plan["rows"][0]
+        self.assertEqual(roster_service._planned_shift(row, "Friday"), "Morning - Friday")
+        self.assertEqual(roster_service._planned_shift(row, "Monday"), "Morning")
+
+    def test_weekday_names_are_canonicalised(self):
+        plan = self.normalize([_row("A", off_days=["friday", "Sun"])])
+        self.assertEqual(plan["rows"][0]["off_days"], ["Friday", "Sunday"])
+
+
+class TestRotaPlanRanges(unittest.TestCase):
+    """One assignment per run, not one per day."""
+
+    def _entries(self, pattern):
+        return [
+            (WEEK_START + timedelta(days=i), shift, "Nasr City")
+            for i, shift in enumerate(pattern)
+            if shift
+        ]
+
+    def test_plain_week_is_one_range(self):
+        ranges = roster_service._contiguous_ranges(self._entries(["Morning"] * 7))
+        self.assertEqual(ranges, [(WEEK_START, WEEK_END, "Morning", "Nasr City")])
+
+    def test_off_day_splits_the_range(self):
+        pattern = ["Morning", "Morning", "Morning", None, "Morning", "Morning", "Morning"]
+        ranges = roster_service._contiguous_ranges(self._entries(pattern))
+        self.assertEqual(
+            [(r[0], r[1]) for r in ranges],
+            [(WEEK_START, date(2026, 11, 4)), (date(2026, 11, 6), WEEK_END)],
+        )
+
+    def test_friday_variant_splits_the_range(self):
+        pattern = ["Morning"] * 4 + ["Morning - Friday", "Morning", None]
+        ranges = roster_service._contiguous_ranges(self._entries(pattern))
+        self.assertEqual(
+            ranges,
+            [
+                (WEEK_START, date(2026, 11, 5), "Morning", "Nasr City"),
+                (FRIDAY_DATE, FRIDAY_DATE, "Morning - Friday", "Nasr City"),
+                (date(2026, 11, 7), date(2026, 11, 7), "Morning", "Nasr City"),
+            ],
+        )
+
+    def test_location_change_splits_the_range(self):
+        entries = [
+            (WEEK_START, "Morning", "Nasr City"),
+            (WEEK_START + timedelta(days=1), "Morning", "Dokki"),
+        ]
+        self.assertEqual(len(roster_service._contiguous_ranges(entries)), 2)
+
+
+class TestRotaPlanManualDays(_PlanTestCase):
+    """Which days count as "changed by hand" -- the days a plan keeps."""
+
+    def _manual(self, state, planned=("A",)):
+        days = roster_service._days_between(WEEK_START, WEEK_END)
+        return roster_service._manual_days("A", days, state, set(planned))
+
+    def _linked_week(self):
+        return {
+            "A": [
+                {
+                    "name": "SA-1",
+                    "shift_type": "Morning",
+                    "shift_location": "Nasr City",
+                    "start_date": WEEK_START,
+                    "end_date": WEEK_END,
+                    "shift_schedule_assignment": "SSA-1",
+                }
+            ]
+        }
+
+    def test_hand_made_day_off_is_manual(self):
+        state = _state(
+            assignments=self._linked_week(),
+            day_offs=[{"name": "D1", "employee": "A", "off_date": WEEK_START, "from_plan": 0}],
+        )
+        manual = self._manual(state)
+        self.assertEqual(manual[WEEK_START]["kind"], roster_service.KIND_DAY_OFF)
+
+    def test_plan_day_off_is_not_manual(self):
+        state = _state(
+            assignments=self._linked_week(),
+            day_offs=[{"name": "D1", "employee": "A", "off_date": WEEK_START, "from_plan": 1}],
+        )
+        self.assertEqual(self._manual(state), {})
+
+    def test_unlinked_assignment_matching_rota_is_not_manual(self):
+        # The tail a single-day edit splits off loses its schedule link but
+        # still says exactly what the rota says.
+        assignments = self._linked_week()
+        assignments["A"][0]["shift_schedule_assignment"] = None
+        state = _state(assignments=assignments, rota={"A": _full_week_rota()})
+        self.assertEqual(self._manual(state), {})
+
+    def test_unlinked_assignment_differing_from_rota_is_manual(self):
+        assignments = self._linked_week()
+        assignments["A"].append(
+            {
+                "name": "SA-2",
+                "shift_type": "Evening",
+                "shift_location": "Nasr City",
+                "start_date": date(2026, 11, 5),
+                "end_date": date(2026, 11, 5),
+                "shift_schedule_assignment": None,
+            }
+        )
+        state = _state(assignments=assignments, rota={"A": _full_week_rota()})
+        manual = self._manual(state)
+        self.assertEqual(list(manual), [date(2026, 11, 5)])
+        self.assertEqual(manual[date(2026, 11, 5)]["kind"], roster_service.KIND_SHIFT)
+        self.assertEqual(manual[date(2026, 11, 5)]["current"], "Evening")
+
+    def test_no_rota_means_no_shift_manual_days(self):
+        assignments = self._linked_week()
+        assignments["A"][0]["shift_schedule_assignment"] = None
+        assignments["A"][0]["shift_type"] = "Evening"
+        self.assertEqual(self._manual(_state(assignments=assignments)), {})
+
+    def test_emptied_day_inside_horizon_is_manual(self):
+        assignments = {
+            "A": [
+                {
+                    "name": "SA-1",
+                    "shift_type": "Morning",
+                    "shift_location": "Nasr City",
+                    "start_date": WEEK_START,
+                    "end_date": date(2026, 11, 7),
+                    "shift_schedule_assignment": "SSA-1",
+                }
+            ]
+        }
+        state = _state(
+            assignments=assignments,
+            rota={"A": _full_week_rota()},
+            rota_horizon={"A": date(2026, 12, 31)},
+        )
+        manual = self._manual(state)
+        self.assertEqual(manual[WEEK_END]["kind"], roster_service.KIND_EMPTY)
+
+    def test_day_past_horizon_is_not_empty(self):
+        state = _state(rota={"A": _full_week_rota()}, rota_horizon={"A": date(2026, 11, 1)})
+        self.assertEqual(self._manual(state), {})
+
+    def test_hand_made_cover_is_manual(self):
+        state = _state(
+            assignments=self._linked_week(),
+            day_offs=[
+                {"name": "D1", "employee": "X", "off_date": FRIDAY_DATE, "covered_by": "A", "from_plan": 0}
+            ],
+        )
+        manual = self._manual(state)
+        self.assertEqual(manual[FRIDAY_DATE]["kind"], roster_service.KIND_COVER)
+        self.assertEqual(manual[FRIDAY_DATE]["current"], "Covering Ziad")
+
+    def test_plan_cover_of_replanned_person_is_not_manual(self):
+        state = _state(
+            assignments=self._linked_week(),
+            day_offs=[
+                {"name": "D1", "employee": "C", "off_date": FRIDAY_DATE, "covered_by": "A", "from_plan": 1}
+            ],
+        )
+        self.assertEqual(self._manual(state, planned=("A", "C")), {})
+
+
+class TestRotaPlanPreview(_PlanTestCase):
+    """Counts, kept days and the issue list."""
+
+    def test_counts_for_a_simple_week(self):
+        response = self.compute([_row("A", off_days=["Friday"], covers=[("Friday", "B")])])["response"]
+        row = response["rows"][0]
+        self.assertEqual((row["shift_days"], row["day_offs"], row["covers"]), (6, 1, 1))
+        self.assertEqual(response["summary"]["errors"], 0)
+        self.assertTrue(response["dry_run"])
+        self.assertFalse(response["applied"])
+
+    def test_manual_days_are_kept_and_not_counted(self):
+        state = _state(
+            day_offs=[{"name": "D1", "employee": "A", "off_date": WEEK_START, "from_plan": 0}]
+        )
+        response = self.compute([_row("A")], state=state)["response"]
+        row = response["rows"][0]
+        self.assertEqual(row["shift_days"], 6)
+        self.assertEqual(row["manual_days"], [{"date": str(WEEK_START), "current": "Off", "kind": "day_off"}])
+        self.assertEqual(response["summary"]["manual_kept"], 1)
+        self.assertEqual(response["summary"]["manual_replaced"], 0)
+
+    def test_replace_manual_rewrites_manual_days(self):
+        state = _state(
+            day_offs=[{"name": "D1", "employee": "A", "off_date": WEEK_START, "from_plan": 0}]
+        )
+        computed = self.compute([_row("A")], state=state, replace_manual=True)
+        row = computed["response"]["rows"][0]
+        self.assertEqual(row["shift_days"], 7)
+        self.assertEqual(len(row["manual_days"]), 1)
+        self.assertEqual(computed["response"]["summary"]["manual_kept"], 0)
+        self.assertEqual(computed["response"]["summary"]["manual_replaced"], 1)
+        self.assertEqual(computed["rows"]["A"]["kept"], set())
+
+    def test_cover_is_off_when_coverer_planned_off(self):
+        rows = [
+            _row("A", off_days=["Friday"], covers=[("Friday", "B")]),
+            _row("B", off_days=["Friday"]),
+        ]
+        response = self.compute(rows)["response"]
+        self.assertIn("cover_is_off", self.codes(response))
+        self.assertGreaterEqual(response["summary"]["errors"], 1)
+        self.assertEqual(response["rows"][0]["covers"], 0)
+
+    def test_cover_is_off_when_outside_coverer_has_a_day_off(self):
+        state = _state(
+            day_offs=[{"name": "D1", "employee": "X", "off_date": FRIDAY_DATE, "from_plan": 0}]
+        )
+        response = self.compute(
+            [_row("A", off_days=["Friday"], covers=[("Friday", "X")])], state=state
+        )["response"]
+        self.assertEqual(self.codes(response), ["cover_is_off"])
+
+    def test_cover_double(self):
+        rows = [
+            _row("A", off_days=["Friday"], covers=[("Friday", "B")]),
+            _row("C", off_days=["Friday"], covers=[("Friday", "B")]),
+            _row("B"),
+        ]
+        response = self.compute(rows)["response"]
+        doubles = [i for i in response["issues"] if i["code"] == "cover_double"]
+        self.assertEqual({i["employee"] for i in doubles}, {"A", "C"})
+        self.assertTrue(all(i["severity"] == "error" for i in doubles))
+
+    def test_cover_day_manual_skips_the_cover(self):
+        state = _state(
+            assignments={
+                "B": [
+                    {
+                        "name": "SA-B",
+                        "shift_type": "Evening",
+                        "shift_location": "Nasr City",
+                        "start_date": FRIDAY_DATE,
+                        "end_date": FRIDAY_DATE,
+                        "shift_schedule_assignment": None,
+                    }
+                ]
+            },
+            rota={"B": _full_week_rota()},
+        )
+        rows = [_row("A", off_days=["Friday"], covers=[("Friday", "B")]), _row("B")]
+        response = self.compute(rows, state=state)["response"]
+        self.assertEqual(self.codes(response), ["cover_day_manual"])
+        self.assertEqual(response["rows"][0]["covers"], 0)
+        self.assertEqual(response["summary"]["warnings"], 1)
+
+    def test_same_day_off_once_per_pair_on_first_date(self):
+        rows = [
+            _row("A", off_days=["Wednesday"]),
+            _row("C", off_days=["Wednesday"]),
+        ]
+        two_weeks_end = WEEK_END + timedelta(days=7)
+        response = self.compute(rows, end=two_weeks_end)["response"]
+        same = [i for i in response["issues"] if i["code"] == "same_day_off"]
+        self.assertEqual(len(same), 1)
+        self.assertEqual(same[0]["date"], "2026-11-04")
+        self.assertEqual(same[0]["severity"], "warning")
+
+    def test_same_day_off_ignored_across_branches_or_when_both_covered(self):
+        rows = [
+            _row("A", off_days=["Wednesday"]),
+            _row("C", location="Dokki", off_days=["Wednesday"]),
+        ]
+        self.assertNotIn("same_day_off", self.codes(self.compute(rows)["response"]))
+        rows = [
+            _row("A", off_days=["Wednesday"], covers=[("Wednesday", "B")]),
+            _row("C", off_days=["Wednesday"], covers=[("Wednesday", "X")]),
+        ]
+        self.assertNotIn("same_day_off", self.codes(self.compute(rows)["response"]))
+
+    def test_no_friday_variant_is_info(self):
+        response = self.compute([_row("A", shift_type="Evening")])["response"]
+        issues = [i for i in response["issues"] if i["code"] == "no_friday_variant"]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "info")
+        self.assertEqual(issues[0]["date"], str(FRIDAY_DATE))
+        self.assertEqual(response["summary"]["errors"], 0)
+
+    def test_no_friday_variant_silent_when_friday_is_off(self):
+        response = self.compute([_row("A", shift_type="Evening", off_days=["Friday"])])["response"]
+        self.assertNotIn("no_friday_variant", self.codes(response))
+
+
+class TestRotaPlanValidation(_PlanTestCase):
+    """Hard errors: thrown before anything is read or written."""
+
+    def assertRefused(self, rows, **kwargs):
+        with self.assertRaises(_PlanError):
+            self.normalize(rows, **kwargs)
+
+    def test_start_in_the_past(self):
+        self.assertRefused([_row("A")], start=PLAN_TODAY - timedelta(days=1))
+
+    def test_today_is_allowed(self):
+        plan = self.normalize([_row("A")], start=PLAN_TODAY, end=PLAN_TODAY)
+        self.assertEqual(plan["start"], PLAN_TODAY)
+
+    def test_end_before_start(self):
+        self.assertRefused([_row("A")], start=WEEK_END, end=WEEK_START)
+
+    def test_more_than_62_days(self):
+        self.assertRefused([_row("A")], end=WEEK_START + timedelta(days=62))
+
+    def test_62_days_is_allowed(self):
+        self.normalize([_row("A")], end=WEEK_START + timedelta(days=61))
+
+    def test_cover_weekday_must_be_an_off_day(self):
+        self.assertRefused([_row("A", off_days=["Sunday"], covers=[("Friday", "B")])])
+
+    def test_duplicate_employee(self):
+        self.assertRefused([_row("A"), _row("A", shift_type="Evening")])
+
+    def test_cannot_cover_yourself(self):
+        self.assertRefused([_row("A", off_days=["Friday"], covers=[("Friday", "A")])])
+
+    def test_unknown_shift_type(self):
+        self.assertRefused([_row("A", shift_type="Night")])
+
+    def test_unknown_cover_shift_type(self):
+        row = _row("A", off_days=["Friday"], covers=[("Friday", "B")])
+        row["covers"][0]["cover_shift_type"] = "Night"
+        self.assertRefused([row])
+
+    def test_off_every_day(self):
+        self.assertRefused([_row("A", off_days=list(roster_service.WEEKDAYS))])
+
+    def test_blank_cover_is_ignored(self):
+        row = _row("A", off_days=["Friday"])
+        row["covers"] = [{"weekday": "Friday", "covered_by": "", "cover_shift_type": None}]
+        plan = self.normalize([row])
+        self.assertEqual(plan["rows"][0]["covers"], {})
+
+
+class TestRotaPlanApply(_PlanTestCase):
+    """``apply_plan`` must refuse a plan its own preview calls broken."""
+
+    def _patches(self, state):
+        stack = [
+            patch.object(roster_service, "hrms_available", return_value=True),
+            patch.object(roster_service, "_today", return_value=PLAN_TODAY),
+            patch.object(roster_service, "_ShiftTypes", return_value=_types()),
+            patch.object(roster_service, "_load_plan_state", return_value=state),
+            patch.object(roster_service, "_apply_row"),
+            patch.object(roster_service, "set_day_off", return_value={"day_off": "D-NEW", "cover_shift_location": "Nasr City"}),
+        ]
+        mocks = [p.start() for p in stack]
+        for p in stack:
+            self.addCleanup(p.stop)
+        return mocks[4], mocks[5]
+
+    def test_apply_throws_on_error_issue(self):
+        apply_row, set_day_off = self._patches(_state())
+        rows = [
+            _row("A", off_days=["Friday"], covers=[("Friday", "B")]),
+            _row("C", off_days=["Friday"], covers=[("Friday", "B")]),
+            _row("B"),
+        ]
+        with self.assertRaises(_PlanError):
+            roster_service.apply_plan(_payload(rows))
+        apply_row.assert_not_called()
+        set_day_off.assert_not_called()
+        self.mock_frappe.db.savepoint.assert_not_called()
+
+    def test_apply_writes_rows_then_plan_day_offs(self):
+        apply_row, set_day_off = self._patches(_state())
+        rows = [_row("A", off_days=["Friday"], covers=[("Friday", "B")]), _row("B")]
+        result = roster_service.apply_plan(_payload(rows))
+        self.assertTrue(result["applied"])
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(apply_row.call_count, 2)
+        set_day_off.assert_called_once()
+        args, kwargs = set_day_off.call_args
+        self.assertEqual(args[:3], ("A", FRIDAY_DATE, "Weekly Off"))
+        self.assertEqual(kwargs["covered_by"], "B")
+        self.assertEqual(kwargs["cover_shift_type"], "Full Day")
+        self.assertEqual(kwargs["original_shift_type"], "Morning - Friday")
+        self.assertEqual(kwargs["original_shift_location"], "Nasr City")
+        self.assertTrue(kwargs["from_plan"])
+        self.assertEqual(
+            result["created_covers"],
+            [
+                {
+                    "employee": "A",
+                    "covered_by": "B",
+                    "date": str(FRIDAY_DATE),
+                    "day_off": "D-NEW",
+                    "cover_shift_location": "Nasr City",
+                }
+            ],
+        )
+
+    def test_failed_row_aborts_the_whole_plan(self):
+        """All or nothing: a failure throws (Frappe rolls the request back)."""
+        apply_row, set_day_off = self._patches(_state())
+        apply_row.side_effect = [None, RuntimeError("overlap")]
+        rows = [_row("B"), _row("A", off_days=["Friday"])]
+        with self.assertRaises(_PlanError) as caught:
+            roster_service.apply_plan(_payload(rows))
+        self.assertIn("Ali", str(caught.exception))
+        self.assertIn("overlap", str(caught.exception))
+        set_day_off.assert_not_called()
+        self.mock_frappe.db.savepoint.assert_not_called()
+        self.mock_frappe.db.rollback.assert_not_called()
+
+    def test_failed_day_off_aborts_with_name_and_date(self):
+        _apply_row, set_day_off = self._patches(_state())
+        set_day_off.side_effect = RuntimeError("linked check-in")
+        with self.assertRaises(_PlanError) as caught:
+            roster_service.apply_plan(_payload([_row("A", off_days=["Friday"])]))
+        message = str(caught.exception)
+        self.assertIn("Ali", message)
+        self.assertIn(str(FRIDAY_DATE), message)
+        self.mock_frappe.db.savepoint.assert_not_called()
+
+    def test_response_has_no_failed_list(self):
+        self._patches(_state())
+        result = roster_service.apply_plan(_payload([_row("A")]))
+        self.assertNotIn("failed", result)
+
+    def test_people_touched_outside_the_plan_are_checked_before_writing(self):
+        state = _state(
+            day_offs=[
+                {"name": "D1", "employee": "A", "off_date": FRIDAY_DATE, "covered_by": "X", "from_plan": 1}
+            ]
+        )
+        apply_row, _set_day_off = self._patches(state)
+        check = MagicMock(side_effect=_PlanError("outside"))
+        with self.assertRaises(_PlanError):
+            roster_service.apply_plan(_payload([_row("A")]), check_employee=check)
+        check.assert_called_once_with("X")
+        apply_row.assert_not_called()
+
+
+class TestRotaPlanTouchedOutside(_PlanTestCase):
+    """People whose day changes although they are not in the payload."""
+
+    def test_coverer_of_dropped_plan_day_off(self):
+        state = _state(
+            day_offs=[
+                {"name": "D1", "employee": "A", "off_date": FRIDAY_DATE, "covered_by": "X", "from_plan": 1},
+                {"name": "D2", "employee": "C", "off_date": FRIDAY_DATE, "covered_by": "B", "from_plan": 1},
+            ]
+        )
+        response = self.compute([_row("A"), _row("B")], state=state)["response"]
+        # D2 belongs to C, who is not re-planned, so it is not dropped.
+        self.assertEqual(response["touched_outside"], ["X"])
+
+    def test_replace_manual_adds_hand_cover_absentee_and_hand_coverer(self):
+        state = _state(
+            day_offs=[
+                {"name": "D1", "employee": "X", "off_date": WEEK_START, "covered_by": "A", "from_plan": 0},
+                {"name": "D2", "employee": "A", "off_date": FRIDAY_DATE, "covered_by": "C", "from_plan": 0},
+            ]
+        )
+        kept = self.compute([_row("A")], state=state)["response"]
+        self.assertEqual(kept["touched_outside"], [])
+        replaced = self.compute([_row("A")], state=state, replace_manual=True)["response"]
+        self.assertEqual(replaced["touched_outside"], ["C", "X"])
+
+
+class TestRotaPlanAfterEnd(_PlanTestCase):
+    """After ``end`` nothing may block HRMS's first generated range.
+
+    Invariant: once the cuts are written and (end, horizon] is filled, no
+    assignment of this person reaches past ``horizon`` and none is
+    open-ended, so ``create_shifts(horizon + 1)`` starts on empty days.
+    """
+
+    NOV_END = date(2026, 11, 30)
+
+    def _final_segments(self, assignments, cuts, fills):
+        segments = []
+        for assignment in assignments:
+            cut = cuts.get(assignment["name"])
+            if cut is None:
+                segments.append((assignment["start_date"], assignment["end_date"]))
+                continue
+            if cut["head_end"]:
+                segments.append((assignment["start_date"], cut["head_end"]))
+            segments.extend(cut["keep_runs"])
+        segments.extend((s, e) for s, e, _t, _l in roster_service._contiguous_ranges(fills))
+        return segments
+
+    def _run(self, assignments, start, end, old_rota, old_after, pattern, off_after=(), protected=()):
+        cuts = {}
+        for assignment in assignments:
+            cut = roster_service._plan_cut(assignment, start, end, set(), old_rota, set(protected))
+            if cut:
+                cuts[assignment["name"]] = cut
+        remaining = roster_service._remaining_after_end(assignments, cuts, end)
+        horizon = roster_service._plan_horizon(end, old_after, remaining, off_after)
+        fills = roster_service._fill_entries(end, horizon, pattern, "Nasr City", remaining, off_after)
+        segments = self._final_segments(assignments, cuts, fills)
+        for seg_start, seg_end in segments:
+            self.assertIsNotNone(seg_end, "an open-ended assignment survived the plan")
+            self.assertLessEqual(seg_end, horizon, f"{seg_start}..{seg_end} is past horizon {horizon}")
+        return cuts, horizon, fills
+
+    @staticmethod
+    def _assignment(name, shift_type, first, last, link=None):
+        return {
+            "name": name,
+            "employee": "A",
+            "shift_type": shift_type,
+            "shift_location": "Nasr City",
+            "start_date": first,
+            "end_date": last,
+            "shift_schedule_assignment": link,
+        }
+
+    def test_no_rota_and_open_ended_assignment(self):
+        assignments = [self._assignment("SA-1", "Morning", date(2026, 10, 1), None)]
+        pattern = roster_service._row_pattern("Evening", ["Friday"], None)
+        cuts, horizon, fills = self._run(assignments, WEEK_START, WEEK_END, {}, [], pattern)
+        self.assertEqual(cuts["SA-1"]["head_end"], date(2026, 11, 1))
+        self.assertEqual(cuts["SA-1"]["keep_runs"], [])
+        self.assertEqual(horizon, WEEK_END)
+        self.assertEqual(fills, [])
+
+    def test_open_ended_assignment_starting_after_end_is_removed(self):
+        assignments = [self._assignment("SA-1", "Morning", date(2026, 12, 1), None)]
+        pattern = roster_service._row_pattern("Evening", [], None)
+        cuts, horizon, _fills = self._run(assignments, WEEK_START, WEEK_END, {}, [], pattern)
+        self.assertEqual(cuts["SA-1"], {"name": "SA-1", "head_end": None, "keep_runs": []})
+        self.assertEqual(horizon, WEEK_END)
+
+    def test_hand_rostered_december(self):
+        old_rota = _full_week_rota()
+        assignments = [
+            self._assignment("SA-1", "Morning", date(2026, 11, 1), self.NOV_END, "SSA-OLD"),
+            # Hand edit: differs from the old rota, so it stays.
+            self._assignment("SA-2", "Evening", date(2026, 12, 1), date(2026, 12, 5)),
+            # Fragment _break_assignment split off the old rota (unlinked, matches it).
+            self._assignment("SA-3", "Morning", date(2026, 12, 6), date(2026, 12, 9)),
+            # Generated by the old schedule.
+            self._assignment("SA-4", "Morning", date(2026, 12, 10), date(2026, 12, 31), "SSA-OLD"),
+        ]
+        pattern = roster_service._row_pattern("Evening", ["Friday"], None)
+        cuts, horizon, fills = self._run(
+            assignments, WEEK_START, self.NOV_END, old_rota, [date(2026, 12, 31)], pattern
+        )
+        self.assertNotIn("SA-2", cuts)
+        self.assertEqual(cuts["SA-3"]["keep_runs"], [])
+        self.assertEqual(cuts["SA-4"]["keep_runs"], [])
+        self.assertEqual(horizon, date(2026, 12, 31))
+        filled = {day: shift for day, shift, _loc in fills}
+        # Tuesday 8 Dec was left on the old shift before; now it is the new rota.
+        self.assertEqual(filled[date(2026, 12, 8)], "Evening")
+        self.assertFalse(any(date(2026, 12, 1) <= d <= date(2026, 12, 5) for d in filled))
+        self.assertNotIn(date(2026, 12, 11), filled)  # a Friday: off in the new rota
+
+    def test_horizon_covers_hand_edits_and_day_offs_past_old_horizon(self):
+        assignments = [self._assignment("SA-1", "Evening", date(2027, 1, 3), date(2027, 1, 4))]
+        pattern = roster_service._row_pattern("Morning", [], None)
+        cuts, horizon, fills = self._run(
+            assignments,
+            WEEK_START,
+            WEEK_END,
+            _full_week_rota(),
+            [date(2026, 11, 30)],
+            pattern,
+            off_after=[date(2027, 1, 10)],
+        )
+        self.assertEqual(cuts, {})
+        self.assertEqual(horizon, date(2027, 1, 10))
+        filled = {day for day, _s, _l in fills}
+        self.assertNotIn(date(2027, 1, 3), filled)
+        self.assertNotIn(date(2027, 1, 10), filled)
+        self.assertIn(date(2027, 1, 9), filled)
+
+    def test_cover_day_after_end_is_kept_even_when_it_matches_the_rota(self):
+        assignments = [self._assignment("SA-1", "Morning", date(2026, 11, 20), date(2026, 11, 20))]
+        pattern = roster_service._row_pattern("Morning", [], None)
+        cuts, horizon, _fills = self._run(
+            assignments,
+            WEEK_START,
+            WEEK_END,
+            _full_week_rota(),
+            [],
+            pattern,
+            protected=[date(2026, 11, 20)],
+        )
+        self.assertEqual(cuts, {})
+        self.assertEqual(horizon, date(2026, 11, 20))
+
+    def test_kept_in_period_day_survives_the_cut(self):
+        assignment = self._assignment("SA-1", "Evening", WEEK_START, WEEK_END)
+        cut = roster_service._plan_cut(
+            assignment, WEEK_START, WEEK_END, {FRIDAY_DATE}, _full_week_rota(), set()
+        )
+        self.assertEqual(cut["head_end"], None)
+        self.assertEqual(cut["keep_runs"], [(FRIDAY_DATE, FRIDAY_DATE)])
+
+    def test_horizon_refuses_open_ended_leftover(self):
+        with self.assertRaises(_PlanError):
+            roster_service._plan_horizon(WEEK_END, [], [(date(2026, 12, 1), None)], [])
+
+
+class TestCoverPreviousLocation(unittest.TestCase):
+    """Undoing a cover puts the coverer back at THEIR branch, not the one covered."""
+
+    def test_set_day_off_records_the_coverers_previous_branch(self):
+        def fake_assignment_on(employee, _day):
+            if employee == "ABSENT":
+                return MagicMock(name_="SA-1", shift_type="Branch Opening", shift_location="Nasr City")
+            return MagicMock(shift_type="Branch Closing", shift_location="Dokki")
+
+        doc = MagicMock()
+        with patch.object(roster_service, "frappe") as mock_frappe, patch.object(
+            roster_service, "_", side_effect=lambda t: t
+        ), patch.object(roster_service, "_assignment_on", side_effect=fake_assignment_on), patch.object(
+            roster_service, "_break_assignment"
+        ), patch.object(
+            roster_service, "set_shift_for_day", return_value={"shift_location": "Nasr City"}
+        ):
+            mock_frappe.new_doc.return_value = doc
+            roster_service.set_day_off("ABSENT", "2026-11-06", covered_by="COVER", cover_shift_type="Full Day")
+        self.assertEqual(doc.cover_previous_shift_location, "Dokki")
+        self.assertEqual(doc.cover_shift_location, "Nasr City")
+
+    def _clear(self, previous_location):
+        doc = MagicMock()
+        doc.name = "D1"
+        doc.original_shift_type = None
+        doc.covered_by = "COVER"
+        doc.cover_previous_shift_type = "Branch Closing"
+        doc.cover_shift_location = "Nasr City"
+        doc.get.side_effect = lambda key, default=None: (
+            previous_location if key == "cover_previous_shift_location" else default
+        )
+        with patch.object(roster_service, "frappe") as mock_frappe, patch.object(
+            roster_service, "_", side_effect=lambda t: t
+        ), patch.object(roster_service, "_release_pos_access"), patch.object(
+            roster_service, "set_shift_for_day"
+        ) as write:
+            mock_frappe.db.exists.return_value = "D1"
+            mock_frappe.get_doc.return_value = doc
+            roster_service.clear_day_off("ABSENT", "2026-11-06")
+        return write.call_args
+
+    def test_clear_day_off_restores_to_previous_branch(self):
+        args, kwargs = self._clear("Dokki")
+        self.assertEqual(args[0], "COVER")
+        self.assertEqual(args[2], "Branch Closing")
+        self.assertEqual(args[3], "Dokki")
+        self.assertFalse(kwargs["clear_conflicting_day_off"])
+
+    def test_clear_day_off_falls_back_for_old_rows(self):
+        args, _kwargs = self._clear(None)
+        self.assertEqual(args[3], "Nasr City")
+
+    def test_restore_coverer_uses_previous_branch(self):
+        record = {
+            "covered_by": "COVER",
+            "off_date": FRIDAY_DATE,
+            "cover_previous_shift_type": "Branch Closing",
+            "cover_previous_shift_location": "Dokki",
+            "cover_shift_location": "Nasr City",
+        }
+        with patch.object(roster_service, "set_shift_for_day") as write:
+            roster_service._restore_coverer(record)
+        write.assert_called_once_with(
+            "COVER", FRIDAY_DATE, "Branch Closing", "Dokki", clear_conflicting_day_off=False
+        )
+
+    def test_restore_coverer_with_no_previous_shift_empties_the_day(self):
+        record = {"covered_by": "COVER", "off_date": FRIDAY_DATE, "cover_shift_location": "Nasr City"}
+        with patch.object(roster_service, "set_shift_for_day") as write:
+            roster_service._restore_coverer(record)
+        self.assertIsNone(write.call_args[0][2])
+
+
+class TestPlanApiGuards(unittest.TestCase):
+    """dry_run parsing and the stricter scope test for re-planned people."""
+
+    def test_only_explicit_false_applies(self):
+        for value in (0, "0", False, "false", "False", "no", " NO "):
+            self.assertTrue(roster_api._wants_apply(value), value)
+        for value in (None, "", "null", "none", "off", 1, "1", True, "true", "yes", "maybe"):
+            self.assertFalse(roster_api._wants_apply(value), value)
+
+    def _home(self, schedules, recent, allowed=frozenset({"Nasr City"})):
+        def get_all(doctype, **_kwargs):
+            if doctype == "Shift Schedule Assignment":
+                return [{"shift_location": loc} for loc in schedules]
+            return [{"shift_location": loc} for loc in recent]
+
+        with patch.object(roster_api, "frappe") as mock_frappe, patch.object(
+            roster_api, "_", side_effect=lambda t: t
+        ), patch.object(roster_api, "nowdate", return_value="2026-10-12"), patch.object(
+            roster_api.roster_service, "allowed_shift_locations", return_value=set(allowed)
+        ):
+            mock_frappe.throw.side_effect = _raise
+            mock_frappe.get_all.side_effect = get_all
+            mock_frappe.db.get_value.return_value = "Ali"
+            roster_api._ensure_plan_home_in_scope("A")
+
+    def test_standing_rota_outside_scope_is_refused_by_name(self):
+        with self.assertRaises(_PlanError) as caught:
+            self._home(["Nasr City", "Dokki"], ["Nasr City"])
+        self.assertIn("Ali's standing rota is at Dokki", str(caught.exception))
+
+    def test_standing_rota_inside_scope_passes(self):
+        self._home(["Nasr City"], [])
+
+    def test_no_rota_needs_a_recent_assignment_in_scope(self):
+        self._home([], ["Nasr City"])
+        with self.assertRaises(_PlanError):
+            self._home([], ["Dokki"])
+        with self.assertRaises(_PlanError):
+            self._home([], [])
+
+    def test_unrestricted_caller_skips_the_check(self):
+        with patch.object(roster_api.roster_service, "allowed_shift_locations", return_value=None), patch.object(
+            roster_api, "frappe"
+        ) as mock_frappe:
+            roster_api._ensure_plan_home_in_scope("A")
+            mock_frappe.get_all.assert_not_called()
 
 
 if __name__ == "__main__":
