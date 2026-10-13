@@ -1212,7 +1212,7 @@ def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, Any]:
     override_amount = float(invoice.get("custom_shipping_override") or 0)
     persisted_expense = float(invoice.get("custom_shipping_expense") or 0)
 
-    if override_status == "Approved" and override_amount > 0:
+    if override_status == "Approved" and override_amount >= 0:
         shipping["expense"] = override_amount
     elif persisted_expense > 0:
         shipping["expense"] = persisted_expense
@@ -1888,7 +1888,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
             override_status = inv.get("custom_shipping_override_status") or ""
             override_amount = float(inv.get("custom_shipping_override") or 0)
             si_shipping_expense = float(inv.get("custom_shipping_expense") or 0)
-            if override_status == "Approved" and override_amount > 0:
+            if override_status == "Approved" and override_amount >= 0:
                 terr_ship["expense"] = override_amount
             elif si_shipping_expense > 0:
                 terr_ship["expense"] = si_shipping_expense

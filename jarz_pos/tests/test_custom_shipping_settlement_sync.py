@@ -110,6 +110,21 @@ class ApprovedOverrideReachesSettlement(unittest.TestCase):
         self.assertEqual(freight["credit_in_account_currency"], 60.0)
         self.assertEqual(payable["debit_in_account_currency"], 60.0)
 
+    def test_zero_override_clears_the_whole_accrual(self):
+        """Free delivery: approving 0 zeroes the CT and reverses all 85 accrued."""
+        cts = [{
+            "name": "CT-1", "amount": 0.0, "shipping_amount": 85.0,
+            "party_type": "Employee", "party": "HR-EMP-000002",
+            "is_partner_order": 0, "delivery_partner": None, "status": "Unsettled",
+        }]
+        _result, m, je = self._run(cts, 0.0)
+
+        m.db.set_value.assert_any_call(
+            "Courier Transaction", "CT-1", "shipping_amount", 0.0, update_modified=True,
+        )
+        freight = next(a for a in je.accounts if a["account"] == "Freight - J")
+        self.assertEqual(freight["credit_in_account_currency"], 85.0)
+
     def test_partner_order_adjusts_the_partner_payable_not_creditors(self):
         """A partner order was accrued against the partner's own settlement account.
 
@@ -233,6 +248,24 @@ class RequestGate(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             request_custom_shipping("SINV-1", 160, "Far area with a much longer route today")
         self.assertIn("already settled", str(ctx.exception))
+
+
+class ApprovedZeroOverrideIsAnAmount(unittest.TestCase):
+    """An approved override of 0 must win over the territory rate, not fall back to it."""
+
+    def test_expense_resolver_returns_zero(self):
+        from jarz_pos.services import delivery_handling as dh
+
+        inv = MagicMock()
+        inv.name = "SINV-1"
+        inv.custom_shipping_override_status = "Approved"
+        inv.custom_shipping_override = 0
+        m = MagicMock()
+        m.db.get_value.side_effect = lambda dt, name, field=None, **kw: (
+            "Approved" if field == "custom_shipping_override_status" else 0
+        )
+        with patch.object(dh, "frappe", m):
+            self.assertEqual(dh._get_delivery_expense_amount(inv), 0.0)
 
 
 if __name__ == "__main__":

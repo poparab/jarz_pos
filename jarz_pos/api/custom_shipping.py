@@ -57,8 +57,9 @@ def request_custom_shipping(invoice_name: str, amount: float, reason: str):
     amount = float(amount or 0)
     reason = (reason or "").strip()
 
-    if amount <= 0:
-        frappe.throw(_("Requested amount must be greater than zero"))
+    # 0 is a valid request: the order is delivered at no courier cost.
+    if amount < 0:
+        frappe.throw(_("Requested amount cannot be negative"))
     if len(reason) < 10:
         frappe.throw(_("Please provide a reason of at least 10 characters"))
     if not frappe.db.exists("Sales Invoice", invoice_name):

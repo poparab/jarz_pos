@@ -1111,7 +1111,10 @@ def _attach_custom_shipping_requests(
         "custom_shipping_override": carried["override"],
         "custom_shipping_override_status": carried["status"],
     }
-    if carried["override"] > _PAYMENT_TOLERANCE and carried["status"] != "Rejected":
+    # An approved 0 (free delivery) must still overwrite the territory rate.
+    if carried["status"] == "Approved" or (
+        carried["override"] > _PAYMENT_TOLERANCE and carried["status"] != "Rejected"
+    ):
         invoice_updates["custom_shipping_expense"] = carried["override"]
     frappe.db.set_value(
         "Sales Invoice", replacement_invoice_name, invoice_updates, update_modified=False

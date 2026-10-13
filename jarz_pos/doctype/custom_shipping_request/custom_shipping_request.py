@@ -4,8 +4,8 @@ from frappe.model.document import Document
 
 class CustomShippingRequest(Document):
     def validate(self):
-        if self.requested_amount is not None and float(self.requested_amount or 0) <= 0:
-            frappe.throw("Requested amount must be greater than zero")
+        if self.requested_amount is not None and float(self.requested_amount or 0) < 0:
+            frappe.throw("Requested amount cannot be negative")
 
     def before_submit(self):
         self.status = "Approved"

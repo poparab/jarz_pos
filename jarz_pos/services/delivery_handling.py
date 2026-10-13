@@ -6116,6 +6116,7 @@ def _get_delivery_expense_amount(inv):
     Genuine no-cost cases (handled below) are the ONLY reasons to return 0.0:
       - Pickup (``custom_is_pickup`` / ``is_pickup`` / ``pickup`` / ``[PICKUP]``)
       - ``custom_no_courier`` commercial policies (Employee / Sample-No-Courier)
+      - An approved Custom Shipping Request for 0
       These mean "no courier is involved", hence no expense.
 
     Default strategy when no no-courier case applies:
@@ -6176,7 +6177,8 @@ def _get_delivery_expense_amount(inv):
                 or frappe.db.get_value("Sales Invoice", inv.name, "custom_shipping_override")
                 or 0
             )
-            if override_amt > 0:
+            # An approved 0 is a real amount (free delivery), not "no override".
+            if override_amt >= 0:
                 return override_amt
     except Exception:
         pass
