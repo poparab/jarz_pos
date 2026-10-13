@@ -601,29 +601,38 @@ def _pick_pos_profile() -> str:
 
 
 def _pick_sellable_items(pos_profile: str, count: int = 2) -> list[str]:
-    """Pick a couple of enabled, stock, sellable items (read dynamically)."""
-    company = frappe.db.get_value("POS Profile", pos_profile, "company")
-    items = frappe.get_all(
-        "Item",
-        filters={"disabled": 0, "is_sales_item": 1, "has_variants": 0},
-        fields=["name"],
-        order_by="modified desc",
-        limit=50,
+    """Pick a couple of enabled, sellable items priced on the POS profile's own list.
+
+    WHY: this used to accept any item with a selling Item Price on ANY list. On
+    staging it picked 'Tiramisu Small', priced only on the B2B list, and
+    create_pos_invoice refuses an item the invoice's price list does not price — so
+    every harness using this picker crashed at its first Standard invoice. Requiring
+    a positive rate on the profile's list is what create_pos_invoice itself checks.
+    Policy-purpose cases (B2B/Employee/Sample) still work: _ensure_item_prices seeds
+    those lists for whatever is picked here.
+    """
+    price_list = (
+        frappe.db.get_value("POS Profile", pos_profile, "selling_price_list")
+        or "Standard Selling"
     )
-    picked: list[str] = []
-    for it in items:
-        code = it["name"]
-        # Require a sellable price somewhere so the invoice has a non-zero total.
-        has_price = frappe.db.exists("Item Price", {"item_code": code, "selling": 1})
-        if has_price:
-            picked.append(code)
-        if len(picked) >= count:
-            break
+    picked = [
+        r[0]
+        for r in frappe.db.sql(
+            """SELECT ip.item_code FROM `tabItem Price` ip
+               JOIN `tabItem` i ON i.name = ip.item_code
+               WHERE ip.price_list = %s AND ip.selling = 1 AND ip.price_list_rate > 0
+                 AND i.disabled = 0 AND i.is_sales_item = 1 AND i.has_variants = 0
+               GROUP BY ip.item_code
+               ORDER BY MAX(i.is_stock_item) DESC, MAX(i.modified) DESC
+               LIMIT %s""",
+            (price_list, count),
+        )
+    ]
     if not picked:
-        # Fall back to any sales item even without an explicit price (rate provided in cart).
-        picked = [it["name"] for it in items[:count]]
-    if not picked:
-        frappe.throw("No sellable items found — cannot run validation harness")
+        frappe.throw(
+            f"No enabled sales item has a positive selling price on {price_list!r} "
+            f"(POS Profile {pos_profile}) — cannot run validation harness"
+        )
     return picked
 
 
