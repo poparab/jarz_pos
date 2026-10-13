@@ -1024,7 +1024,9 @@ def _resolve_carried_shipping_override(
     * any approved request (docstatus 1) -> the most recently APPROVED one's
       amount, as that was the last ``on_submit`` to write the invoice;
     * a draft still Pending -> status Pending, which keeps the OFD gate;
-    * only rejected drafts -> the source's status, override 0.
+    * only rejected drafts -> the source's status, override 0 — but never
+      "Approved": with no approved request behind it, an Approved/0 would now
+      read as free delivery instead of the territory rate.
     """
     def _approved_key(row: Dict[str, Any]) -> str:
         return str(row.get("approved_on") or row.get("creation") or "")
@@ -1044,6 +1046,8 @@ def _resolve_carried_shipping_override(
         status = "Approved"
     else:
         status = str(source_override.get("status") or "").strip() or "Rejected"
+        if status == "Approved":
+            status = "Rejected"
     return {"status": status, "override": override}
 
 

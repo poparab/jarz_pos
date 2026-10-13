@@ -268,5 +268,69 @@ class ApprovedZeroOverrideIsAnAmount(unittest.TestCase):
             self.assertEqual(dh._get_delivery_expense_amount(inv), 0.0)
 
 
+class ZeroFeePositionPicksTheRightRow(ApprovedOverrideReachesSettlement):
+    """With no row carrying a fee, the target must be the courier's own row."""
+
+    def test_return_row_is_never_the_target(self):
+        cts = [
+            {"name": "CT-RET", "amount": -500.0, "shipping_amount": 0.0, "party_type": "Employee",
+             "party": "E1", "is_partner_order": 0, "delivery_partner": None,
+             "status": "Unsettled", "idempotency_token": "RET::SINV-RET-1"},
+            {"name": "CT-1", "amount": 500.0, "shipping_amount": 0.0, "party_type": "Employee",
+             "party": "E1", "is_partner_order": 0, "delivery_partner": None,
+             "status": "Unsettled", "idempotency_token": "OFD::SINV-1"},
+        ]
+        result, _m, _je = self._run(cts, 60.0)
+        self.assertEqual(result["courier_transaction"], "CT-1")
+
+    def test_two_couriers_at_zero_is_refused(self):
+        cts = [
+            {"name": "CT-1", "amount": 0.0, "shipping_amount": 0.0, "party_type": "Employee",
+             "party": "E1", "is_partner_order": 0, "delivery_partner": None, "status": "Unsettled"},
+            {"name": "CT-2", "amount": 0.0, "shipping_amount": 0.0, "party_type": "Employee",
+             "party": "E2", "is_partner_order": 0, "delivery_partner": None, "status": "Unsettled"},
+        ]
+        with self.assertRaises(ValueError):
+            self._run(cts, 60.0)
+
+    def test_only_return_rows_is_refused(self):
+        cts = [
+            {"name": "CT-RET", "amount": -500.0, "shipping_amount": 0.0, "party_type": "Employee",
+             "party": "E1", "is_partner_order": 0, "delivery_partner": None,
+             "status": "Unsettled", "idempotency_token": "RET::SINV-RET-1"},
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            self._run(cts, 60.0)
+        self.assertIn("return entries", str(ctx.exception))
+
+
+class NoExpenseMessage(unittest.TestCase):
+
+    def test_approved_zero_says_free_delivery(self):
+        from jarz_pos.services import delivery_handling as dh
+
+        inv = MagicMock()
+        inv.name = "SINV-1"
+        inv.custom_shipping_override_status = "Approved"
+        m = MagicMock()
+        m.throw.side_effect = _raise
+        with patch.object(dh, "frappe", m), patch.object(dh, "_", lambda s: s):
+            with self.assertRaises(ValueError) as ctx:
+                dh._throw_no_delivery_expense(inv)
+        self.assertIn("free delivery", str(ctx.exception))
+
+
+class CarriedOverrideNeverInventsAnApproval(unittest.TestCase):
+
+    def test_stale_approved_field_without_request_is_not_carried(self):
+        from jarz_pos.api.manager import _resolve_carried_shipping_override
+
+        carried = _resolve_carried_shipping_override(
+            {"override": 0, "status": "Approved"},
+            [{"docstatus": 0, "status": "Rejected", "requested_amount": 0}],
+        )
+        self.assertEqual(carried["status"], "Rejected")
+
+
 if __name__ == "__main__":
     unittest.main()

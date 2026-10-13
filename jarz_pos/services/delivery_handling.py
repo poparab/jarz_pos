@@ -3154,7 +3154,7 @@ def pay_delivery_expense(invoice_name: str, pos_profile: str):
     stored = _safe_float(getattr(inv, "custom_shipping_expense", 0))
     amount = stored if stored > 0 else (_get_delivery_expense_amount(inv) or 0.0)
     if amount <= 0:
-        frappe.throw("No delivery expense configured for the invoice territory.")
+        _throw_no_delivery_expense(inv)
 
     # Only persist if the field was previously empty
     if stored <= 0:
@@ -3221,7 +3221,7 @@ def courier_delivery_expense_only(invoice_name: str, courier: str, party_type: s
     stored_exp = _safe_float(getattr(inv, "custom_shipping_expense", 0))
     amount = stored_exp if stored_exp > 0 else (_get_delivery_expense_amount(inv) or 0.0)
     if amount <= 0:
-        frappe.throw("No delivery expense configured for the invoice territory.")
+        _throw_no_delivery_expense(inv)
 
     # Only persist if the field was previously empty
     if stored_exp <= 0:
@@ -7857,6 +7857,23 @@ def _post_shipping_override_delta_je(
     return je.name
 
 
+def _throw_no_delivery_expense(inv) -> None:
+    """Refuse a courier-expense payment for an order that has no expense to pay.
+
+    An approved custom shipping of 0 is free delivery, not a missing territory
+    rate, and saying "not configured" there sends staff to fix the wrong thing.
+    """
+    status = str(getattr(inv, "custom_shipping_override_status", "") or "").strip()
+    if status == "Approved":
+        frappe.throw(
+            _(
+                "Custom shipping for {0} was approved at 0 (free delivery), so there is "
+                "no courier expense to pay."
+            ).format(inv.name)
+        )
+    frappe.throw(_("No delivery expense configured for the invoice territory."))
+
+
 def apply_shipping_override_to_courier_position(
     invoice_name: str,
     new_amount: float,
@@ -7885,6 +7902,7 @@ def apply_shipping_override_to_courier_position(
         fields=[
             "name", "amount", "shipping_amount", "party_type", "party",
             "is_partner_order", "delivery_partner", "partner_fee",
+            "idempotency_token",
         ],
         order_by="creation desc",
     )
@@ -7917,7 +7935,31 @@ def apply_shipping_override_to_courier_position(
             ).format(invoice_name, len(with_shipping))
         )
 
-    target = with_shipping[0] if with_shipping else cts[0]
+    if with_shipping:
+        target = with_shipping[0]
+    else:
+        # Nothing carries a fee yet (the order went out at 0). Never fall back to a
+        # return's compensating row (`RET::<credit note>`), and refuse to guess
+        # between two couriers' rows — the adjustment JE is booked to the party.
+        candidates = [
+            c for c in cts if "RET::" not in str(c.get("idempotency_token") or "")
+        ]
+        parties = {(c.get("party_type"), c.get("party")) for c in candidates}
+        if not candidates:
+            frappe.throw(
+                _(
+                    "Invoice {0} only has return entries left on its courier position, "
+                    "so the shipping amount can no longer be changed."
+                ).format(invoice_name)
+            )
+        if len(parties) > 1:
+            frappe.throw(
+                _(
+                    "Invoice {0} has unsettled courier transactions for {1} different "
+                    "couriers. Resolve them before approving a custom shipping amount."
+                ).format(invoice_name, len(parties))
+            )
+        target = candidates[0]
     fee_field = _fee_field(target)
     previous = round(float(target.get(fee_field) or 0), 2)
     if abs(previous - new_amount) <= 0.005:
