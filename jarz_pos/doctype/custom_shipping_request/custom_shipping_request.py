@@ -32,6 +32,23 @@ class CustomShippingRequest(Document):
 
     def on_cancel(self):
         self.status = "Rejected"
+        # An earlier approval on the same invoice still stands: go back to it.
+        # Falling to "Rejected" would make an approved 0 read as "not set", and
+        # dispatch would then accrue the territory rate.
+        standing = standing_approval(self.invoice, exclude=self.name)
+        if standing:
+            amount = float(standing.requested_amount or 0)
+            frappe.db.set_value(
+                "Sales Invoice", self.invoice,
+                {
+                    "custom_shipping_override": amount,
+                    "custom_shipping_override_status": "Approved",
+                    "custom_shipping_expense": amount,
+                },
+                update_modified=True,
+            )
+            self._sync_courier_position(amount, reverting=True)
+            return
         # Revert override on linked invoice – restore territory-based expense
         original = float(self.original_amount or 0)
         frappe.db.set_value(
@@ -58,3 +75,18 @@ class CustomShippingRequest(Document):
         )
         # Surfaced on the approval response so the manager sees what moved.
         self.flags.courier_position_sync = result
+
+
+def standing_approval(invoice: str, *, exclude: str | None = None):
+    """The most recent approved request still in force on ``invoice``, if any."""
+    filters = {"invoice": invoice, "docstatus": 1, "status": "Approved"}
+    if exclude:
+        filters["name"] = ["!=", exclude]
+    rows = frappe.get_all(
+        "Custom Shipping Request",
+        filters=filters,
+        fields=["name", "requested_amount"],
+        order_by="approved_on desc, creation desc",
+        limit=1,
+    )
+    return rows[0] if rows else None

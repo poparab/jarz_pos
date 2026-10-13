@@ -8,6 +8,9 @@ import frappe
 from frappe import _
 from jarz_pos.constants import ROLES, WS_EVENTS
 from jarz_pos.services.delivery_handling import _get_delivery_expense_amount
+from jarz_pos.doctype.custom_shipping_request.custom_shipping_request import (
+    standing_approval,
+)
 
 
 def _can_approve_shipping() -> bool:
@@ -222,14 +225,23 @@ def reject_custom_shipping(request_name: str, rejection_reason: str = ""):
         # Draft → just cancel (save rejection + set status)
         csr.status = "Rejected"
         csr.save(ignore_permissions=True)
-        # Revert override on invoice
-        frappe.db.set_value(
-            "Sales Invoice", csr.invoice,
-            {
+        # Revert override on invoice — back to an earlier approval if one still
+        # stands, so an approved 0 is not lost to "Rejected".
+        standing = standing_approval(csr.invoice, exclude=csr.name)
+        if standing:
+            amount = float(standing.requested_amount or 0)
+            invoice_values = {
+                "custom_shipping_override": amount,
+                "custom_shipping_override_status": "Approved",
+                "custom_shipping_expense": amount,
+            }
+        else:
+            invoice_values = {
                 "custom_shipping_override": 0,
                 "custom_shipping_override_status": "Rejected",
-            },
-            update_modified=True,
+            }
+        frappe.db.set_value(
+            "Sales Invoice", csr.invoice, invoice_values, update_modified=True,
         )
     else:
         # Submitted → cancel

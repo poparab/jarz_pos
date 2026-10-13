@@ -1845,7 +1845,15 @@ def _accrue_courier_freight_only(
         stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
         freight_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
 
-    if not (freight_amount and freight_amount > 0):
+    # An approved free delivery (Custom Shipping Request of 0) still gets a
+    # courier position at 0, so a later corrected amount has a row to move and
+    # an accrual to post against; without it the correction is a silent no-op.
+    approved_free_delivery = (
+        not _dp_probe
+        and freight_amount <= 0
+        and str(getattr(inv, "custom_shipping_override_status", "") or "").strip() == "Approved"
+    )
+    if not (freight_amount and freight_amount > 0) and not approved_free_delivery:
         return freight_ct, freight_je, 0.0
 
     # Persist the resolved expense on the SI only when it was previously
@@ -1900,7 +1908,9 @@ def _accrue_courier_freight_only(
 
     # Fee accrual JE (idempotent via user_remark tag — see FIX 3). An ordinary
     # courier is owed it personally; a partner rider's company is.
-    if dp_link:
+    if approved_free_delivery:
+        freight_je = None  # nothing to accrue at 0
+    elif dp_link:
         freight_je = create_partner_fee_accrual_je(
             inv, delivery_partner=dp_link, fee=float(freight_amount)
         )
