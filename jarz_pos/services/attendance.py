@@ -122,6 +122,7 @@ from frappe import _
 from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_day, getdate
 
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
+from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER
 from jarz_pos.services import roster as roster_service
 from jarz_pos.utils.settings_utils import single_flag, single_int
 
@@ -535,6 +536,8 @@ def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict
                 "offshift": False,
                 "coords": [],
                 "rows": [],
+                "device_flags": set(),
+                "device_details": [],
             }
             groups[key] = group
 
@@ -552,6 +555,10 @@ def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict
             group["shift"] = row["shift"]
         if row.get("offshift"):
             group["offshift"] = True
+        if row.get("custom_device_flag"):
+            group["device_flags"].add(row["custom_device_flag"])
+            if row.get("custom_device_flag_detail"):
+                group["device_details"].append(row["custom_device_flag_detail"])
 
         lat = _float_or_none(row.get("latitude"))
         lng = _float_or_none(row.get("longitude"))
@@ -559,6 +566,21 @@ def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict
             group["coords"].append((lat, lng))
 
     return groups
+
+
+def device_flags_for(group: Optional[Dict[str, Any]]) -> List[str]:
+    """Distinct non-empty device flags among a day's check-ins, worst first."""
+    if not group:
+        return []
+    found = set(group.get("device_flags") or ())
+    ordered = [flag for flag in FLAG_ORDER if flag in found]
+    return ordered + sorted(found - set(FLAG_ORDER))
+
+
+def device_detail_for(group: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The flagged check-ins' explanations joined into one line, or ``None``."""
+    details = list(dict.fromkeys((group or {}).get("device_details") or []))
+    return " | ".join(details) if details else None
 
 
 def late_minutes_for(group: Optional[Dict[str, Any]]) -> Optional[int]:
@@ -689,6 +711,9 @@ def build_cell(
             else None
         ),
         "is_cover": bool(is_cover),
+        # Additive (buddy-punch flagging); old clients ignore unknown keys.
+        "device_flags": device_flags_for(group),
+        "device_flag_detail": device_detail_for(group),
     }
 
 
@@ -831,10 +856,16 @@ def _fetch_checkins(employees: List[str], start: date_cls, end: date_cls) -> Lis
         f"{add_days(end, 2)} 00:00:00",
     ]
     filters = {"employee": ("in", employees), "time": ("between", window)}
+    # Device-flag columns exist only once the after_migrate seeder has run; ask
+    # for them only when present so an un-migrated site keeps every other field.
+    fields = list(CHECKIN_FIELDS)
     try:
-        return frappe.get_all(
-            CHECKIN_DOCTYPE, filters=filters, fields=CHECKIN_FIELDS, order_by="time asc"
-        )
+        meta = frappe.get_meta(CHECKIN_DOCTYPE)
+        fields += [f for f in CHECKIN_FLAG_FIELDS if meta.has_field(f)]
+    except Exception:
+        pass
+    try:
+        return frappe.get_all(CHECKIN_DOCTYPE, filters=filters, fields=fields, order_by="time asc")
     except Exception:
         try:
             return frappe.get_all(
@@ -1283,6 +1314,8 @@ _DAY_ROW_KEYS = (
     "geo_ok",
     "day_off",
     "is_cover",
+    "device_flags",
+    "device_flag_detail",
 )
 
 
@@ -1457,6 +1490,8 @@ def get_employee(
                     "log_type": raw.get("log_type") or None,
                     "shift": raw.get("shift") or None,
                     "offshift": bool(raw.get("offshift")),
+                    "device_flag": raw.get("custom_device_flag") or None,
+                    "device_flag_detail": raw.get("custom_device_flag_detail") or None,
                     "latitude": lat,
                     "longitude": lng,
                     "geo_ok": _geo_ok([(lat, lng)] if lat is not None and lng is not None else [], location_row),

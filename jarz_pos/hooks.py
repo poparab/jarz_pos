@@ -193,6 +193,9 @@ after_migrate = [
     # the box. Guarded on HRMS being installed, never raises. Deliberately last:
     # it reads POS Profiles, which earlier seeders may create.
     "jarz_pos.setup.roster_setup.ensure_roster_setup",
+    # Employee Checkin device-flag columns + Employee.custom_checkin_device. After
+    # ensure_roster_setup: it anchors on custom_roster_checkin_exempt.
+    "jarz_pos.setup.checkin_device_setup.ensure_checkin_device_fields",
     # Task Board: seed the full-access list with the owner account, only while
     # the list is empty and only if that User exists. Create-only, never raises.
     "jarz_pos.setup.task_board_setup.ensure_task_board_settings",
@@ -380,6 +383,9 @@ doc_events = {
     # already resolved and can be trusted.
     "Employee Checkin": {
         "validate": "jarz_pos.events.employee_checkin.enforce_roster_on_checkin",
+        # Buddy-punch flagging: stamps the phone cookie token and flags a new or
+        # shared device. FLAG ONLY -- never raises, never refuses.
+        "before_insert": "jarz_pos.services.checkin_device.stamp_device",
     },
     # Staff-order picker: keep one staff Customer per Active employee as people
     # are hired or reactivated, so the POS never has to create one mid-order.
