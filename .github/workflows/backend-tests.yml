@@ -710,9 +710,6 @@ jobs:
             # cancelled same-customer source, that coverage counts a deal, and
             # that ending a deal which already priced orders keeps its history.
             test_customer_deals
-          )
-          rc=0
-          for m in "${MODULES[@]}"; do
             # Courier launch backend (pin required, delivery code, ETA). Mocked.
             # Pins that the 4-digit code is a pure function of the tracking
             # token, that wrong codes are counted before the compare and the
@@ -721,6 +718,9 @@ jobs:
             # then nothing and never raises, and that the pin gate is off by
             # default, refuses a centroid and exempts Woo/pickup/branch orders.
             test_courier_launch
+          )
+          rc=0
+          for m in "${MODULES[@]}"; do
             echo "::group::${m}"
             docker exec "${CONTAINER}" bench --site frontend run-tests \
               --app jarz_pos --module "jarz_pos.tests.${m}" --skip-before-tests --failfast || rc=1
