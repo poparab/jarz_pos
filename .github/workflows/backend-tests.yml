@@ -485,6 +485,9 @@ jobs:
             # horizon is not_rostered, NOT absent" case is the difference between
             # an ungenerated rota and a screen reporting a company-wide walkout.
             test_attendance
+            # Buddy-punch flagging on check-ins. FLAG ONLY: the pin that matters is
+            # that fingerprinting never raises inside a check-in insert.
+            test_checkin_device
             # Module history (Stock Transfer, Cash Transfer, Inventory Count,
             # Shift). Two reasons this must be in CI: the cash transfer history
             # has no marker to filter on and recognises a transfer purely by
