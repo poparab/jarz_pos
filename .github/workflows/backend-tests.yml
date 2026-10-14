@@ -713,6 +713,14 @@ jobs:
           )
           rc=0
           for m in "${MODULES[@]}"; do
+            # Courier launch backend (pin required, delivery code, ETA). Mocked.
+            # Pins that the 4-digit code is a pure function of the tracking
+            # token, that wrong codes are counted before the compare and the
+            # fifth locks the order, that the code is only enforced when the
+            # caller asks AND the switch is on, that the ETA is live then slot
+            # then nothing and never raises, and that the pin gate is off by
+            # default, refuses a centroid and exempts Woo/pickup/branch orders.
+            test_courier_launch
             echo "::group::${m}"
             docker exec "${CONTAINER}" bench --site frontend run-tests \
               --app jarz_pos --module "jarz_pos.tests.${m}" --skip-before-tests --failfast || rc=1

@@ -100,6 +100,27 @@ def _ensure_tracking_link_permission() -> None:
     frappe.has_permission("Sales Invoice", ptype="read", throw=True)
 
 
+def _tracking_customer_phone(invoice_id: str) -> Optional[str]:
+    """Customer's phone for the "send the link on WhatsApp" button, or None.
+
+    Best effort and read-only: the order's own contact number first, then the
+    same Customer to Contact to Address chain the Kanban uses. Never raises -- a
+    missing phone must not cost the staff their link.
+    """
+    try:
+        row = frappe.db.get_value(
+            "Sales Invoice", invoice_id, ["customer", "contact_mobile", "contact_phone"], as_dict=True
+        ) or {}
+        phone = str(row.get("contact_mobile") or row.get("contact_phone") or "").strip()
+        if not phone and row.get("customer"):
+            from jarz_pos.api.kanban import _resolve_customer_phone
+
+            phone = str(_resolve_customer_phone(row.get("customer")) or "").strip()
+        return phone or None
+    except Exception:
+        return None
+
+
 @frappe.whitelist(allow_guest=True)
 @_rate_limited
 def get_public_status(token: Optional[str] = None) -> Dict[str, Any]:
@@ -195,6 +216,11 @@ def get_tracking_link(invoice_id: str) -> Dict[str, Any]:
             "url": _tracking.get_tracking_url(name, ensure=dispatched),
             "enabled": _tracking.tracking_enabled(),
             "dispatched": dispatched,
+            # Staff-only: the same four digits the customer's page shows, so the
+            # POS can read them out when the customer cannot open the link.
+            "delivery_code": _tracking.delivery_code_for_invoice(name, ensure=dispatched),
+            "code_required": _tracking.delivery_code_required(),
+            "customer_phone": _tracking_customer_phone(name),
         }
     except frappe.PermissionError:
         raise

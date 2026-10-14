@@ -124,6 +124,23 @@
 		}
 		#status-label { font-size: 20px; font-weight: 700; line-height: 1.3; }
 		#status-note { color: var(--muted); font-size: 13px; margin-top: 4px; }
+		#eta { display: none; margin-top: 14px; font-size: 16px; font-weight: 700; }
+		#code-box {
+			display: none;
+			margin-top: 14px;
+			padding: 14px 16px;
+			border: 2px dashed var(--accent);
+			border-radius: 12px;
+			text-align: center;
+		}
+		#code-box .hint { color: var(--muted); font-size: 13px; }
+		#code-box .digits {
+			margin-top: 6px;
+			font-size: 34px;
+			font-weight: 800;
+			letter-spacing: .3em;
+			direction: ltr;
+		}
 		.rows { margin-top: 16px; border-top: 1px solid var(--line); }
 		.row {
 			display: flex;
@@ -183,6 +200,12 @@
 					<div id="status-label">&nbsp;</div>
 					<div id="status-note"></div>
 				</div>
+			</div>
+
+			<div id="eta"></div>
+			<div id="code-box">
+				<div class="hint" id="code-hint"></div>
+				<div class="digits" id="code-digits"></div>
 			</div>
 
 			<div class="rows">
@@ -254,7 +277,14 @@
 				noMap: "The map could not load, but your order status above is up to date.",
 				waitingForCourier: "We will show the courier on the map as soon as the order leaves the branch.",
 				liveNote: "Live position, refreshed every few seconds.",
-				noLive: "The courier is on the way. Live position is not available right now."
+				noLive: "The courier is on the way. Live position is not available right now.",
+				etaIn: function (minutes, clock) {
+					return "Arriving in ~" + minutes + " min" + (clock ? " (around " + clock + ")" : "");
+				},
+				etaWindow: function (from, to) {
+					return "Expected between " + from + " and " + to;
+				},
+				codeHint: "Give this code to the courier:"
 			},
 			ar: {
 				brand: "تتبع طلبك",
@@ -275,7 +305,14 @@
 				noMap: "لم يتم تحميل الخريطة، لكن حالة طلبك بالأعلى محدّثة.",
 				waitingForCourier: "سنعرض المندوب على الخريطة بمجرد خروج الطلب من الفرع.",
 				liveNote: "الموقع مباشر ويتم تحديثه كل عدة ثوانٍ.",
-				noLive: "المندوب في الطريق. الموقع المباشر غير متاح حاليًا."
+				noLive: "المندوب في الطريق. الموقع المباشر غير متاح حاليًا.",
+				etaIn: function (minutes, clock) {
+					return "سيصل خلال ~" + minutes + " دقيقة" + (clock ? " (حوالي " + clock + ")" : "");
+				},
+				etaWindow: function (from, to) {
+					return "الوصول المتوقع بين " + from + " و " + to;
+				},
+				codeHint: "أعطِ هذا الكود للمندوب:"
 			}
 		};
 
@@ -333,6 +370,36 @@
 		function clearError() {
 			el("card").style.display = "block";
 			el("error").style.display = "none";
+		}
+
+		// "HH:MM" straight from the server's ISO string. Not routed through Date:
+		// the server stamps site-local time with no zone, and re-parsing it in the
+		// customer's browser would shift it for anyone not in the shop's zone.
+		function clockOf(iso) {
+			var m = /[T ](\d{2}):(\d{2})/.exec(String(iso || ""));
+			if (!m) { return ""; }
+			var text = m[1] + ":" + m[2];
+			return lang === "ar" ? text.replace(/\d/g, function (d) { return "٠١٢٣٤٥٦٧٨٩".charAt(d); }) : text;
+		}
+
+		function renderEta(data) {
+			var text = "";
+			if (TERMINAL[data.status]) {
+				text = "";
+			} else if (data.eta_minutes != null) {
+				text = t().etaIn(data.eta_minutes, clockOf(data.eta_at));
+			} else if (data.eta_window && data.eta_window.from && data.eta_window.to) {
+				text = t().etaWindow(clockOf(data.eta_window.from), clockOf(data.eta_window.to));
+			}
+			el("eta").style.display = text ? "block" : "none";
+			el("eta").textContent = text;
+		}
+
+		function renderCode(data) {
+			var code = !TERMINAL[data.status] && data.delivery_code ? String(data.delivery_code) : "";
+			el("code-box").style.display = code ? "block" : "none";
+			el("code-hint").textContent = code ? t().codeHint : "";
+			el("code-digits").textContent = code;
 		}
 
 		function formatMoney(value, currency) {
@@ -468,6 +535,8 @@
 			show(el("row-total"), Number(data.order_total || 0) > 0);
 			el("v-total").textContent = formatMoney(data.order_total, data.currency);
 
+			renderEta(data);
+			renderCode(data);
 			updateMap(data);
 		}
 

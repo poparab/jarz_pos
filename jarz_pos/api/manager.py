@@ -3265,6 +3265,12 @@ def submit_invoice_amendment(
             "amendment_block_code": eligibility.get("amendment_block_code"),
         }
 
+    # F1: refuse an edit that leaves a delivery order without a pin-grade address,
+    # synchronously, so the app gets a real AddressPinRequired (switch off by default).
+    from jarz_pos.services.delivery_pin_requirement import assert_amendment_pin
+
+    assert_amendment_pin(source_invoice, shipping_address_name, pickup)
+
     return frappe.enqueue(
         "jarz_pos.api.manager._run_invoice_amendment_job",
         queue="short",

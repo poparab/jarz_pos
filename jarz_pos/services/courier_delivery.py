@@ -43,6 +43,7 @@ silent failure mode:
 
 from __future__ import annotations
 
+import hmac
 import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -53,6 +54,7 @@ from frappe.utils import flt, now_datetime
 from jarz_pos.constants import WS_EVENTS
 from jarz_pos.services import courier_identity, delivery_leg
 from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_fields
+from jarz_pos.utils.settings_utils import single_flag
 from jarz_pos.utils.access_control import (
     ShiftRequiredError,
     ensure_open_shift_for_invoice,
@@ -68,6 +70,18 @@ class CourierSchemaError(frappe.ValidationError):
     business rejection, and so the envelope wrapper below knows to let it
     propagate instead of flattening it into ``{"success": False}``.
     """
+
+
+class DeliveryCodeRequired(frappe.ValidationError):
+    """``require_delivery_code`` is on and the courier sent no code."""
+
+
+class DeliveryCodeWrong(frappe.ValidationError):
+    """The code did not match; the message says how many attempts are left."""
+
+
+class DeliveryCodeLocked(frappe.ValidationError):
+    """Five wrong codes. Only staff (the Kanban) can mark this order delivered now."""
 
 
 ACTION_ARRIVED = "arrived"
@@ -127,6 +141,25 @@ _REQUIRED_FIELDS: Dict[str, Tuple[str, ...]] = {
 REPLAY_TTL_SEC = 36 * 3600
 
 _REPLAY_CACHE_PREFIX = "jarz_courier_delivery::"
+
+#: Wrong delivery codes allowed per invoice before it locks, and how long the
+#: counter lives. The counter is a Redis integer, not a document field:
+#: ``tabSales Invoice`` has no room for a column.
+DELIVERY_CODE_MAX_ATTEMPTS = 5
+DELIVERY_CODE_ATTEMPTS_TTL_SEC = 24 * 3600
+_CODE_ATTEMPTS_KEY_PREFIX = "jarz:delivery_code_attempts:"
+
+#: Arabic-Indic and Extended (Persian) digits -> ASCII. A customer reading the
+#: code aloud from an Arabic-locale phone, or a keyboard typing it, may produce
+#: either; both are the same four digits.
+_DIGIT_TRANSLATION = {
+    **{0x0660 + i: ord("0") + i for i in range(10)},
+    **{0x06F0 + i: ord("0") + i for i in range(10)},
+}
+#: Invisible direction marks that an RTL keyboard or a pasted message can carry.
+_INVISIBLE_MARKS = dict.fromkeys(
+    [0x200B, 0x200E, 0x200F, 0x061C, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0xFEFF]
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,6 +383,98 @@ def _assert_actionable(inv: Any) -> Optional[str]:
     return None
 
 
+def delivery_code_required() -> bool:
+    """``Jarz POS Settings.require_delivery_code``. Off unless somebody saved it on."""
+    return single_flag("Jarz POS Settings", "require_delivery_code", False)
+
+
+def normalize_delivery_code(value: Any) -> str:
+    """The typed code as ASCII digits only: whitespace, direction marks stripped,
+    Arabic-Indic digits mapped to 0-9. Anything else is left in, so it simply fails
+    to match."""
+    text = str(value or "").translate(_INVISIBLE_MARKS).translate(_DIGIT_TRANSLATION)
+    return "".join(ch for ch in text if not ch.isspace())
+
+
+def _code_attempts_key(cache: Any, invoice_id: str) -> str:
+    # incrby/get/delete come from the raw redis client and do NOT site-namespace
+    # the key; make_key is what keeps two sites on one Redis apart.
+    return cache.make_key(f"{_CODE_ATTEMPTS_KEY_PREFIX}{invoice_id}")
+
+
+def _assert_delivery_code(invoice_id: str, supplied: Any) -> None:
+    """Raise unless *supplied* is this order's delivery code.
+
+    The counter is bumped BEFORE the comparison (``incrby`` is atomic), so ten
+    parallel guesses cannot all read "attempt 1" and slip past the lock. A correct
+    code clears the counter. If the code cannot be derived (no tracking token on a
+    site that has not migrated it) or the cache is down, the check degrades to
+    "not enforced" or "no counter" and logs, rather than stranding a courier at
+    the door.
+    """
+    from jarz_pos.services import tracking
+
+    expected = tracking.delivery_code_for_invoice(invoice_id, ensure=True)
+    if not expected:
+        _log(
+            title="Courier: delivery code unavailable",
+            message=f"No tracking token for {invoice_id}; delivery code not enforced.",
+        )
+        return
+
+    cache = None
+    key = ""
+    try:
+        cache = frappe.cache()
+        key = _code_attempts_key(cache, invoice_id)
+        used = int(cache.get(key) or 0)
+    except Exception:
+        cache, used = None, 0
+
+    if used >= DELIVERY_CODE_MAX_ATTEMPTS:
+        frappe.throw(
+            _("Too many wrong delivery codes. Ask the branch to mark this order delivered."),
+            DeliveryCodeLocked,
+        )
+
+    given = normalize_delivery_code(supplied)
+    if not given:
+        frappe.throw(_("Ask the customer for the 4-digit delivery code."), DeliveryCodeRequired)
+
+    attempt = 1
+    if cache is not None:
+        try:
+            attempt = int(cache.incrby(key, 1))
+            if attempt == 1:
+                cache.expire(key, DELIVERY_CODE_ATTEMPTS_TTL_SEC)
+        except Exception:
+            attempt = 1
+    if attempt > DELIVERY_CODE_MAX_ATTEMPTS:
+        frappe.throw(
+            _("Too many wrong delivery codes. Ask the branch to mark this order delivered."),
+            DeliveryCodeLocked,
+        )
+
+    if hmac.compare_digest(given.encode(), expected.encode()):
+        if cache is not None:
+            try:
+                cache.delete(key)
+            except Exception:
+                pass
+        return
+
+    left = DELIVERY_CODE_MAX_ATTEMPTS - attempt
+    if left <= 0:
+        frappe.throw(
+            _("Too many wrong delivery codes. Ask the branch to mark this order delivered."),
+            DeliveryCodeLocked,
+        )
+    frappe.throw(
+        _("Wrong delivery code. {0} attempts left.").format(left),
+        DeliveryCodeWrong,
+    )
+
+
 def _geo_updates(
     latitude: Any, longitude: Any, accuracy_m: Any
 ) -> Dict[str, Any]:
@@ -483,8 +608,17 @@ def mark_invoice_delivered(
     recipient_name: Optional[str] = None,
     is_mocked: bool = False,
     request_id: Optional[str] = None,
+    delivery_code: Optional[str] = None,
+    enforce_code: bool = False,
 ) -> dict:
     """Record a successful hand-over and move the invoice to ``Delivered``.
+
+    ``delivery_code`` / ``enforce_code`` are additive. The code is checked only
+    when the caller passes ``enforce_code=True`` (the courier app does; the
+    Kanban and every older caller leave it False, so staff can always deliver)
+    AND ``require_delivery_code`` is on. A refusal is a structured
+    ``DeliveryCodeRequired`` / ``DeliveryCodeWrong`` / ``DeliveryCodeLocked``
+    that propagates; it is never flattened into ``{"success": False}``.
 
     ``collected_amount``, ``recipient_name`` and ``is_mocked`` are **recorded as
     an operational note, not as accounting and not as schema**. The contract
@@ -543,6 +677,11 @@ def mark_invoice_delivered(
             )
             _replay_store(invoice_id, ACTION_DELIVERED, request_id, result)
             return result
+
+        # After the idempotent return: a repeat of a delivery that already
+        # happened must not cost the courier an attempt or ask for a code again.
+        if enforce_code and delivery_code_required():
+            _assert_delivery_code(invoice_id, delivery_code)
 
         updates: Dict[str, Any] = {
             "custom_delivered_at": now_datetime(),
@@ -616,7 +755,14 @@ def mark_invoice_delivered(
         _publish(WS_EVENTS.COURIER_STOP_DELIVERED, inv, dict(result))
         return result
 
-    except (frappe.PermissionError, ShiftRequiredError, CourierSchemaError):
+    except (
+        frappe.PermissionError,
+        ShiftRequiredError,
+        CourierSchemaError,
+        DeliveryCodeRequired,
+        DeliveryCodeWrong,
+        DeliveryCodeLocked,
+    ):
         raise
     except Exception as exc:
         _log(frappe.get_traceback(), f"mark_invoice_delivered failed: {invoice_id}")

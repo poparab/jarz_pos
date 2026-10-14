@@ -16,6 +16,7 @@ from jarz_pos.services import promo_codes as _promo_codes
 from jarz_pos.services import commercial_policy as _commercial_policy
 from jarz_pos.services import customer_deals as _customer_deals
 from jarz_pos.services import branch_fulfilment as _branch_fulfilment
+from jarz_pos.services import delivery_pin_requirement as _delivery_pin
 from jarz_pos.utils.validation_utils import (
     validate_cart_data, 
     validate_customer, 
@@ -2410,6 +2411,16 @@ def create_pos_invoice(
                 invoice_doc.shipping_address_name = resolved_shipping_address_name
                 invoice_doc.customer_address = resolved_shipping_address_name
                 print(f"   📍 Shipping address set: {resolved_shipping_address_name}")
+
+        # F1: a POS delivery order needs a pin-grade address (switch off by
+        # default). Woo-origin, pickup and deliver-at-branch orders are exempt;
+        # this runs before anything is inserted, so a refusal leaves no trace.
+        _delivery_pin.assert_delivery_pin(
+            resolved_shipping_address_name or shipping_address_name,
+            pickup=bool(pickup),
+            woo_order_id=woo_order_id,
+            deliver_at_branch=getattr(policy_decision, "deliver_at_branch", False) is True,
+        )
 
         effective_order_territory = resolve_order_territory(
             customer_doc.name,

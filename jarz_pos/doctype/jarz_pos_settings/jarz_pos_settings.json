@@ -44,6 +44,14 @@
   "allow_live_map_without_leg",
   "column_break_tracking",
   "tracking_link_ttl_hours",
+  "courier_launch_section",
+  "require_address_pin_for_delivery",
+  "require_delivery_code",
+  "enforce_courier_action_gate",
+  "column_break_courier_launch",
+  "courier_action_radius_m",
+  "courier_action_max_fix_age_sec",
+  "courier_eta_dwell_minutes",
   "production_section",
   "production_max_backdate_days",
   "production_operator_batch_value_limit",
@@ -373,6 +381,61 @@
    "fieldname": "tracking_link_ttl_hours",
    "fieldtype": "Int",
    "label": "Tracking Link TTL (hours)",
+   "non_negative": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "courier_launch_section",
+   "fieldtype": "Section Break",
+   "label": "Courier Launch Controls"
+  },
+  {
+   "default": "0",
+   "description": "Refuse a POS-created delivery order (not Woo, not pickup) whose shipping address has no pin-grade location. Enforced in the POS order create/edit endpoints, never in a Sales Invoice hook, so Woo sync is unaffected. Singles ignore JSON defaults: every reader passes its own, and unset reads as off.",
+   "fieldname": "require_address_pin_for_delivery",
+   "fieldtype": "Check",
+   "label": "Require Address Pin For Delivery Orders"
+  },
+  {
+   "default": "0",
+   "description": "The courier must type the customer's 4-digit delivery code to mark an order Delivered. Five wrong attempts lock the code for the courier; staff can still deliver from the Kanban. Instant rollback lever: no deploy, no restart.",
+   "fieldname": "require_delivery_code",
+   "fieldtype": "Check",
+   "label": "Require Delivery Code To Mark Delivered"
+  },
+  {
+   "default": "0",
+   "description": "Courier Arrived / Delivered / Failed actions must be taken near the stop, on a fresh server-side position fix. Read by the courier app backend.",
+   "fieldname": "enforce_courier_action_gate",
+   "fieldtype": "Check",
+   "label": "Enforce Courier Action Gate"
+  },
+  {
+   "fieldname": "column_break_courier_launch",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "300",
+   "description": "How close (metres) the courier's server-side fix must be to the stop pin for the action gate to allow Arrived / Delivered / Failed.",
+   "fieldname": "courier_action_radius_m",
+   "fieldtype": "Int",
+   "label": "Courier Action Radius (m)",
+   "non_negative": 1
+  },
+  {
+   "default": "300",
+   "description": "Oldest server-side position fix (seconds) the action gate will trust.",
+   "fieldname": "courier_action_max_fix_age_sec",
+   "fieldtype": "Int",
+   "label": "Courier Action Max Fix Age (sec)",
+   "non_negative": 1
+  },
+  {
+   "default": "4",
+   "description": "Minutes added to the customer ETA for each other stop the courier makes before this one.",
+   "fieldname": "courier_eta_dwell_minutes",
+   "fieldtype": "Int",
+   "label": "ETA Minutes Per Intermediate Stop",
    "non_negative": 1
   },
   {
@@ -792,7 +855,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-09-23 12:00:00.000000",
+ "modified": "2026-10-14 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Settings",

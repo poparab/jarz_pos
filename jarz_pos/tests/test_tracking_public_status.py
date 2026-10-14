@@ -57,6 +57,11 @@ EXPECTED_KEYS = {
     "order_total",
     "currency",
     "poll_interval_sec",
+    "eta_minutes",
+    "eta_at",
+    "eta_window",
+    "eta_basis",
+    "delivery_code",
 }
 
 #: The seven frozen board states (COURIER_CONTRACTS §1), including the live

@@ -52,6 +52,8 @@ background caller or a harness bypasses.
 
 from __future__ import annotations
 
+import datetime as _dt
+import hashlib
 import json
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
@@ -59,7 +61,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import frappe
 from frappe.utils import cint, flt, get_datetime, get_url, now_datetime
 from jarz_pos.services import delivery_leg
-from jarz_pos.utils.settings_utils import single_int
+from jarz_pos.utils.settings_utils import single_flag, single_int
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema / routing constants
@@ -124,6 +126,29 @@ _TOKEN_INDEX_TTL_SEC = 30 * 24 * 3600
 #: string is accepted too, because guessing wrong about a not-yet-written
 #: producer should degrade to "no live position", never to an exception.
 COURIER_LOCATION_KEY_TEMPLATE = "courier:loc:{branch}:{party}"
+
+#: Salt that turns the tracking token into the 4-digit delivery code. The code is
+#: a pure function of the token, so no schema is needed (``tabSales Invoice`` has
+#: no room for a column) and the customer's page and the staff link always agree.
+DELIVERY_CODE_SALT = ":delivery-code"
+
+#: Customer ETA. The live estimate is cached per invoice so a 15 s poll from
+#: several phones costs one OSRM call a minute, not one per poll.
+_ETA_KEY_PREFIX = "jarz_pos:track:eta:"
+ETA_CACHE_TTL_SEC = 60
+
+#: A courier fix older than this is not a position, it is a memory. The page falls
+#: back to the delivery slot instead of promising a minute count from it.
+ETA_MAX_FIX_AGE_SEC = 15 * 60
+
+#: Other stops of the same courier considered for the live estimate. OSRM's table
+#: is quadratic, and a courier carrying more than this is not a normal run.
+ETA_MAX_OTHER_STOPS = 12
+
+DEFAULT_ETA_DWELL_MINUTES = 4
+
+#: Board state that means "on a courier's run" (the stored, misspelling-free one).
+_STATE_OUT_FOR_DELIVERY = "Out for Delivery"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,6 +240,11 @@ PUBLIC_STATUS_KEYS: Tuple[str, ...] = (
     "order_total",
     "currency",
     "poll_interval_sec",
+    "eta_minutes",
+    "eta_at",
+    "eta_window",
+    "eta_basis",
+    "delivery_code",
 )
 
 #: The single public failure payload. One string for "no such token", "expired",
@@ -283,6 +313,23 @@ def tracking_link_ttl_hours() -> int:
     return max(0, single_int("Jarz POS Settings", "tracking_link_ttl_hours", DEFAULT_TTL_HOURS))
 
 
+def delivery_code_required() -> bool:
+    """Whether the courier must type the customer's code (``require_delivery_code``).
+
+    ``single_flag`` with an explicit default: Singles ignore JSON defaults, and a
+    guest-facing page must read "off" for a field nobody has ever saved.
+    """
+    return single_flag("Jarz POS Settings", "require_delivery_code", False)
+
+
+def eta_dwell_minutes() -> int:
+    """Minutes added per intermediate stop (``courier_eta_dwell_minutes``)."""
+    return max(
+        0,
+        single_int("Jarz POS Settings", "courier_eta_dwell_minutes", DEFAULT_ETA_DWELL_MINUTES),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -308,6 +355,22 @@ def _state_fields_present() -> List[str]:
         return [_STATE_FIELD_ALIASES[0]]
     present = [name for name in _STATE_FIELD_ALIASES if meta.get_field(name)]
     return present or [_STATE_FIELD_ALIASES[0]]
+
+
+SLOT_FIELDS = (
+    "custom_delivery_date",
+    "custom_delivery_time_from",
+    "custom_delivery_duration",
+)
+
+
+def _slot_fields_present() -> List[str]:
+    """The delivery-slot columns this site carries. ``get_all`` throws on a missing one."""
+    try:
+        meta = frappe.get_meta("Sales Invoice")
+        return [name for name in SLOT_FIELDS if meta.get_field(name)]
+    except Exception:
+        return []
 
 
 def _state_key(value: Any) -> str:
@@ -429,6 +492,30 @@ def get_tracking_url(invoice_name: str, *, ensure: bool = False) -> Optional[str
     return f"{base}{TRACKING_ROUTE_PREFIX}/{token}"
 
 
+def delivery_code_for_token(token: Any) -> Optional[str]:
+    """The 4-digit delivery code for *token*, or ``None`` for a blank token.
+
+    ``sha256(token + ":delivery-code") mod 10000``, zero-padded. The token is a
+    128-bit secret, so the code cannot be worked out from an invoice number; it
+    can only be read off the customer's own link, which is the point.
+    """
+    text = str(token or "").strip()
+    if not text:
+        return None
+    digest = hashlib.sha256((text + DELIVERY_CODE_SALT).encode()).hexdigest()
+    return "%04d" % (int(digest, 16) % 10000)
+
+
+def delivery_code_for_invoice(invoice_name: str, ensure: bool = True) -> Optional[str]:
+    """The delivery code for *invoice_name*; mints the token when ``ensure``.
+
+    ``None`` when the invoice has no token and ``ensure`` is false, or on a site
+    that has not migrated the token field. Never raises (see
+    :func:`get_tracking_token`).
+    """
+    return delivery_code_for_token(get_tracking_token(invoice_name, ensure=ensure))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Token index + rate limit (both cache-backed, both best-effort)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -516,6 +603,7 @@ def _invoice_fields() -> List[str]:
     # get_all would throw on an unmigrated column and take the page down.
     if delivery_leg.leg_fields_present():
         fields.extend(delivery_leg.LEG_FIELDS)
+    fields.extend(_slot_fields_present())
     fields.extend(_state_fields_present())
     # De-duplicate while keeping order; a site carrying only the custom alias
     # would otherwise ask for the same column twice.
@@ -782,6 +870,213 @@ def courier_last_known_position(branch: str, party: str) -> Dict[str, Any]:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Customer ETA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _empty_eta() -> Dict[str, Any]:
+    return {"eta_minutes": None, "eta_at": None, "eta_window": None, "eta_basis": None}
+
+
+def _slot_window(row: Dict[str, Any]) -> Optional[Tuple[_dt.datetime, _dt.datetime]]:
+    """The order's delivery slot as ``(start, end)``, or ``None`` without one.
+
+    ``custom_delivery_time_from`` is a Time (arrives as ``timedelta`` from the
+    DB) and ``custom_delivery_duration`` a Duration stored in seconds; a blank or
+    zero duration is read as the one-hour default the order form writes.
+    """
+    day = row.get("custom_delivery_date")
+    start_time = row.get("custom_delivery_time_from")
+    if not day or start_time in (None, ""):
+        return None
+    try:
+        midnight = get_datetime(day).replace(hour=0, minute=0, second=0, microsecond=0)
+        if isinstance(start_time, _dt.timedelta):
+            start = midnight + start_time
+        elif isinstance(start_time, _dt.time):
+            start = midnight.replace(
+                hour=start_time.hour, minute=start_time.minute, second=start_time.second
+            )
+        else:
+            start = get_datetime(f"{midnight.date()} {start_time}")
+        duration = row.get("custom_delivery_duration")
+        if isinstance(duration, _dt.timedelta):
+            seconds = duration.total_seconds()
+        else:
+            seconds = flt(duration)
+        if seconds <= 0:
+            seconds = 3600
+        return (start, start + _dt.timedelta(seconds=seconds))
+    except Exception:
+        return None
+
+
+def _fix_is_fresh(updated_at: Any) -> bool:
+    """False only when the fix carries a readable timestamp older than the cap.
+
+    A missing or unreadable timestamp is accepted: the producer's shape is
+    tolerated everywhere else in this module and the ETA must not be stricter
+    than the marker.
+    """
+    if not updated_at:
+        return True
+    try:
+        age = (now_datetime() - get_datetime(updated_at)).total_seconds()
+    except Exception:
+        return True
+    return age <= ETA_MAX_FIX_AGE_SEC
+
+
+def _other_open_stops(row: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """Pins of the courier's OTHER Out-for-Delivery orders (pinned ones only)."""
+    party = str(row.get("custom_courier_party") or "").strip()
+    if not party:
+        return []
+    try:
+        stops = frappe.get_all(
+            "Sales Invoice",
+            filters={
+                "docstatus": 1,
+                "custom_courier_party": party,
+                _state_fields_present()[0]: _STATE_OUT_FOR_DELIVERY,
+                "name": ["!=", str(row.get("name") or "")],
+            },
+            fields=["name", "shipping_address_name", "customer_address"],
+            limit_page_length=ETA_MAX_OTHER_STOPS,
+        )
+    except Exception:
+        return []
+    pins: List[Tuple[float, float]] = []
+    for stop in stops or []:
+        lat, lng = _destination_pin(stop)
+        if lat is not None and lng is not None:
+            pins.append((lat, lng))
+    return pins
+
+
+def _live_eta(
+    row: Dict[str, Any], destination: Tuple[Optional[float], Optional[float]], fix: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """OSRM drive time courier -> nearer open stops -> this door, or ``None``.
+
+    Greedy nearest-first: from wherever the courier is "now", take the closest
+    other open stop while it is closer than this destination, charging
+    ``courier_eta_dwell_minutes`` at each; then drive to the destination. One
+    OSRM ``table`` call covers all of it.
+    """
+    from jarz_pos.services import osrm_client
+    from jarz_pos.services.route_planner import RoutePoint
+
+    dest_lat, dest_lng = destination
+    if dest_lat is None or dest_lng is None:
+        return None
+    if not osrm_client.is_enabled():
+        return None
+
+    points = [
+        RoutePoint(key="courier", lat=fix["latitude"], lng=fix["longitude"]),
+        RoutePoint(key="destination", lat=dest_lat, lng=dest_lng),
+    ]
+    for index, (lat, lng) in enumerate(_other_open_stops(row)):
+        points.append(RoutePoint(key=f"stop{index}", lat=lat, lng=lng))
+
+    matrix = osrm_client.table(points)
+    if not matrix:
+        return None
+    seconds = matrix.durations_s
+
+    here, total = 0, 0.0
+    remaining = list(range(2, len(points)))
+    dwell_sec = eta_dwell_minutes() * 60
+    while remaining:
+        nearest = min(remaining, key=lambda i: seconds[here][i])
+        if seconds[here][nearest] >= seconds[here][1]:
+            break
+        total += seconds[here][nearest] + dwell_sec
+        here = nearest
+        remaining.remove(nearest)
+    total += seconds[here][1]
+
+    minutes = max(1, int(round(total / 60.0)))
+    arrival = now_datetime() + _dt.timedelta(minutes=minutes)
+    return {
+        "eta_minutes": minutes,
+        "eta_at": arrival.isoformat(),
+        "eta_window": None,
+        "eta_basis": "live",
+    }
+
+
+def resolve_eta(
+    row: Dict[str, Any],
+    status: str,
+    destination: Tuple[Optional[float], Optional[float]],
+    fix: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The four ``eta_*`` keys for one order. Never raises.
+
+    ``live`` while the order is out and the courier has a fresh server-side fix
+    and OSRM answers; otherwise ``slot`` (the delivery window, while it has not
+    already ended); otherwise all ``None``. A delivered / cancelled / returned
+    order has no ETA. The live result is cached :data:`ETA_CACHE_TTL_SEC` per
+    invoice.
+
+    The courier's fix is read here even when the live map is withheld from this
+    customer (the leg gate): a drive-time that includes the courier's other
+    stops is exactly what a customer who is not next in line needs, and a number
+    of minutes does not disclose a position.
+    """
+    empty = _empty_eta()
+    try:
+        if status in TERMINAL_STATUSES:
+            return empty
+        name = str(row.get("name") or "")
+
+        if status == STATUS_ON_THE_WAY and name:
+            cache = frappe.cache()
+            cached = None
+            try:
+                cached = cache.get_value(f"{_ETA_KEY_PREFIX}{name}")
+            except Exception:
+                cached = None
+            if isinstance(cached, dict) and cached.get("eta_basis") == "live":
+                return {**empty, **cached}
+
+            if not fix:
+                fix = courier_last_known_position(
+                    str(row.get("custom_kanban_profile") or row.get("pos_profile") or ""),
+                    str(row.get("custom_courier_party") or ""),
+                )
+            if fix and fix.get("latitude") is not None and _fix_is_fresh(fix.get("updated_at")):
+                live = _live_eta(row, destination, fix)
+                if live:
+                    try:
+                        cache.set_value(
+                            f"{_ETA_KEY_PREFIX}{name}", live, expires_in_sec=ETA_CACHE_TTL_SEC
+                        )
+                    except Exception:
+                        pass
+                    return live
+
+        window = _slot_window(row)
+        if window and window[1] > now_datetime():
+            return {
+                "eta_minutes": None,
+                "eta_at": None,
+                "eta_window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
+                "eta_basis": "slot",
+            }
+        return empty
+    except Exception:
+        # The ETA is garnish on a public page; whatever went wrong, the page
+        # still renders its status. log_error itself can raise, so it is wrapped.
+        try:
+            frappe.log_error(frappe.get_traceback(), "tracking: resolve_eta failed")
+        except Exception:
+            pass
+        return empty
+
+
 def resolve_public_status(token: Any) -> Dict[str, Any]:
     """Everything the customer page may know about one order.
 
@@ -868,7 +1163,15 @@ def resolve_public_status(token: Any) -> Dict[str, Any]:
         "order_total": flt(row.get("grand_total")),
         "currency": str(row.get("currency") or "") or None,
         "poll_interval_sec": DEFAULT_POLL_INTERVAL_SEC,
+        # The code is derived from the presented token, so it needs no lookup,
+        # and exists only while the order can still be handed over.
+        "delivery_code": (
+            delivery_code_for_token(presented)
+            if status not in TERMINAL_STATUSES and delivery_code_required()
+            else None
+        ),
     }
+    payload.update(resolve_eta(row, status, (destination_lat, destination_lng), position or None))
 
     # Belt and braces on the allow-list. If a future edit adds a key to the
     # literal above without adding it to PUBLIC_STATUS_KEYS, it is dropped here
