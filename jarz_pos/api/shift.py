@@ -1034,6 +1034,9 @@ def _close_shift(
             frappe.throw(_("Closing cash count is required for {0}.").format(row.mode_of_payment))
         row.expected_amount = system_expected
         row.closing_amount = flt(closing_map[row.mode_of_payment])
+        # Stored as well, so Desk and any SQL reading the column see the
+        # variance. Readers still compute it: older closings hold 0 here.
+        row.difference = round(flt(row.closing_amount) - flt(row.expected_amount), 2)
 
     try:
         closing.insert(ignore_permissions=True)
@@ -1480,6 +1483,14 @@ def _user_can_see_all_shifts() -> bool:
     return bool(set(frappe.get_roles()).intersection(ROLES.MANAGER))
 
 
+def _row_difference(row: dict[str, Any]) -> float:
+    """Counted minus expected for one reconciliation row (over > 0, short < 0).
+
+    `round`, not `flt(..., 2)` — see the note in list_shifts.
+    """
+    return round(flt(row.get("closing_amount")) - flt(row.get("expected_amount")), 2)
+
+
 @frappe.whitelist(allow_guest=False)
 def list_shifts(
     limit: Any = 30,
@@ -1604,14 +1615,18 @@ def list_shifts(
                 # site bound that lookup raises inside flt and is swallowed,
                 # so flt(-50.0, 2) answers 0.0. Every unit test of this
                 # endpoint would then be asserting against a silent zero.
-                "difference": round(sum(flt(r.get("difference")) for r in rows), 2),
+                #
+                # Computed from counted - expected rather than read from the
+                # stored `difference` column: closings before 2026-10-15 never
+                # had it written, so it reads 0 on every one of them.
+                "difference": round(sum(_row_difference(r) for r in rows), 2),
                 "payment_reconciliation": [
                     {
                         "mode_of_payment": r.get("mode_of_payment"),
                         "opening_amount": flt(r.get("opening_amount")),
                         "expected_amount": flt(r.get("expected_amount")),
                         "closing_amount": flt(r.get("closing_amount")),
-                        "difference": flt(r.get("difference")),
+                        "difference": _row_difference(r),
                     }
                     for r in rows
                 ],

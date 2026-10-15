@@ -658,8 +658,38 @@ def _conversion(params: Dict[str, str]) -> Dict[str, Any]:
         as_dict=True,
     )[0]["n"]
 
-    opportunities = int(opportunities or 0)
-    won = int(won or 0)
+    # The B2B pipeline runs on Leads; production has no B2B Opportunity at all,
+    # so counting Opportunities alone pinned this card at 0 / 0 / 0%. A lead is
+    # won once a Customer carries its name in ``lead_name`` (the standard Lead
+    # conversion, see crm._resolve_lead_customer) or the Lead points at one.
+    leads = frappe.db.sql(
+        """
+        SELECT COUNT(*) AS n
+        FROM `tabLead`
+        WHERE custom_b2b_stage IS NOT NULL AND custom_b2b_stage != ''
+          AND DATE(creation) BETWEEN %(fd)s AND %(td)s
+        """,
+        params,
+        as_dict=True,
+    )[0]["n"]
+
+    leads_won = frappe.db.sql(
+        """
+        SELECT COUNT(*) AS n
+        FROM `tabLead` l
+        WHERE l.custom_b2b_stage IS NOT NULL AND l.custom_b2b_stage != ''
+          AND DATE(l.creation) BETWEEN %(fd)s AND %(td)s
+          AND (
+              IFNULL(l.customer, '') != ''
+              OR EXISTS (SELECT 1 FROM `tabCustomer` c WHERE c.lead_name = l.name)
+          )
+        """,
+        params,
+        as_dict=True,
+    )[0]["n"]
+
+    opportunities = int(opportunities or 0) + int(leads or 0)
+    won = int(won or 0) + int(leads_won or 0)
     conversion_rate = round(won / opportunities * 100, 1) if opportunities else 0.0
 
     return {"opportunities": opportunities, "won": won, "conversion_rate": conversion_rate}

@@ -396,6 +396,15 @@ class TestShiftHistory(unittest.TestCase):
 		self.assertEqual(row["closing_entry"], "POS-CLOSE-1")
 		self.assertFalse(row["is_open"])
 
+	def test_variance_is_computed_not_read_from_the_stored_column(self):
+		# Production shape: end_shift never wrote `difference`, so it is 0 on
+		# every closing entry before 2026-10-15 even when the drawer was off.
+		self.RECON = [dict(r, difference=0.0) for r in type(self).RECON]
+		result, _ = self._call(is_manager=True)
+		row = result["shifts"][0]
+		self.assertEqual(row["difference"], -50.0)
+		self.assertEqual(row["payment_reconciliation"][0]["difference"], -50.0)
+
 	def test_non_manager_gets_own_shifts_without_money(self):
 		result, filters = self._call(is_manager=False)
 		self.assertEqual(filters.get("user"), "cashier@example.com",

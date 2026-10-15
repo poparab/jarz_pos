@@ -805,7 +805,10 @@ def get_cash_over_short(date_from=None, date_to=None, branch=None):
             SELECT parent,
                    SUM(expected_amount) AS expected,
                    SUM(closing_amount) AS counted,
-                   SUM(difference) AS difference
+                   -- Computed, never the stored column: end_shift never wrote
+                   -- `difference`, so it is 0 on every closing entry and the
+                   -- report's cards read EGP0 while the GL held -1,138.
+                   SUM(closing_amount - expected_amount) AS difference
             FROM `tabPOS Closing Entry Detail`
             WHERE parenttype = 'POS Closing Entry'
             GROUP BY parent
