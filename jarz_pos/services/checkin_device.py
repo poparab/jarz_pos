@@ -68,6 +68,35 @@ CHECKIN_FLAG_FIELDS = ("custom_device_flag", "custom_device_flag_detail")
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
+#: How many trailing characters of a device token a flag detail may show.
+TOKEN_VISIBLE_TAIL = 6
+
+#: A token as older details printed it: ``token (<full token>)``. Anchored on the
+#: word "token" so an employee name in parentheses is never touched.
+_DETAIL_TOKEN_RE = re.compile(r"(token \()([A-Za-z0-9_-]{8,64})(\))")
+
+
+def mask_token(token: Any) -> str:
+    """``…`` plus the last few characters: enough to tell two phones apart, not
+    enough to forge the cookie. The full value stays on the check-in's
+    ``custom_device_token`` field (Desk only) for the manager who approves it."""
+    value = str(token or "")
+    if len(value) <= TOKEN_VISIBLE_TAIL:
+        return "…" if value else ""
+    return "…" + value[-TOKEN_VISIBLE_TAIL:]
+
+
+def mask_tokens_in_detail(detail: Any) -> Any:
+    """Mask a full token inside a stored flag detail.
+
+    New details are written masked; this covers rows stamped before that, which
+    the attendance service still reads. Anything that is not a string is
+    returned unchanged.
+    """
+    if not isinstance(detail, str) or not detail:
+        return detail
+    return _DETAIL_TOKEN_RE.sub(lambda m: m.group(1) + mask_token(m.group(2)) + m.group(3), detail)
+
 
 def _safe_log(title: str) -> None:
     """``frappe.log_error`` can itself raise (e.g. DB gone); never let it."""
@@ -213,8 +242,9 @@ def _stamp(doc) -> None:
     elif flag == FLAG_NEW:
         doc.custom_device_flag = flag
         doc.custom_device_flag_detail = (
-            "Different phone from the one registered for this employee. Paste this "
-            f"token ({token}) into the employee's Check-in Device to approve it."
+            f"Different phone from the one registered for this employee (device "
+            f"token ({mask_token(token)})). To approve it, copy the Device Token from "
+            "this check-in into the employee's Check-in Device."
         )
     elif not registered:
         frappe.db.set_value(

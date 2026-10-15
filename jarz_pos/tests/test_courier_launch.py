@@ -621,6 +621,44 @@ class StaffLinkTests(unittest.TestCase):
         with patch.object(api_tracking, "frappe", fake):
             self.assertIsNone(api_tracking._tracking_customer_phone(INVOICE))
 
+    def _link_as(self, roles, user="someone@x.com"):
+        """Call get_tracking_link as a user holding *roles*; return the payload."""
+        from jarz_pos.api import tracking as api_tracking
+
+        fake = MagicMock()
+        fake.PermissionError = frappe.PermissionError
+        fake.session.user = user
+        fake.get_roles.return_value = roles
+        fake.db.get_value.return_value = 1  # custom_was_out_for_delivery
+        service = MagicMock()
+        service.delivery_code_for_invoice.return_value = "4821"
+        with patch.object(api_tracking, "frappe", fake), patch.object(
+            api_tracking, "_tracking", service
+        ), patch.object(api_tracking, "_tracking_customer_phone", return_value=None):
+            return api_tracking.get_tracking_link(INVOICE)
+
+    def test_the_courier_does_not_get_the_delivery_code(self):
+        for roles in (["Courier"], ["Jarz POS Staff"], ["Courier", "Sales User"], []):
+            with self.subTest(roles=roles):
+                result = self._link_as(roles)
+                self.assertTrue(result["success"])
+                self.assertIsNone(result["delivery_code"])
+
+    def test_moderator_and_line_manager_tier_get_it(self):
+        for roles in (["Moderator"], ["JARZ line manager"], ["JARZ Manager"], ["System Manager"]):
+            with self.subTest(roles=roles):
+                self.assertEqual(self._link_as(roles)["delivery_code"], "4821")
+        self.assertEqual(self._link_as([], user="Administrator")["delivery_code"], "4821")
+
+    def test_a_role_lookup_failure_hides_the_code(self):
+        from jarz_pos.api import tracking as api_tracking
+
+        fake = MagicMock()
+        fake.session.user = "x@x.com"
+        fake.get_roles.side_effect = RuntimeError("db gone")
+        with patch.object(api_tracking, "frappe", fake):
+            self.assertFalse(api_tracking._may_see_delivery_code())
+
     def test_the_staff_payload_keys_are_declared_in_source(self):
         from jarz_pos.api import tracking as api_tracking
 
@@ -751,6 +789,45 @@ class AssertDeliveryPinTests(unittest.TestCase):
             h.fake_frappe.log_error.assert_called_once()
 
 
+class PinExemptionRuleTests(unittest.TestCase):
+    """The one exemption rule shared by order creation and the amendment pre-check."""
+
+    exempt = staticmethod(delivery_pin_requirement.pin_exempt)
+
+    def test_the_exemptions(self):
+        self.assertTrue(self.exempt(pickup=True))
+        self.assertTrue(self.exempt(pickup="1"))
+        self.assertTrue(self.exempt(woo_order_id="12345"))
+        self.assertTrue(self.exempt(deliver_at_branch=True))
+
+    def test_everything_else_needs_the_pin(self):
+        self.assertFalse(self.exempt())
+        self.assertFalse(self.exempt(pickup=0, woo_order_id="  ", deliver_at_branch=False))
+        # Undecided (None) is not an exemption.
+        self.assertFalse(self.exempt(deliver_at_branch=None))
+
+    def test_policy_lookup(self):
+        lookup = delivery_pin_requirement.policy_delivers_at_branch
+        with _PinHarness(address=None) as h:
+            self.assertIs(lookup(""), False)
+            self.assertIs(lookup(None), False)
+            h.fake_frappe.db.get_value.assert_not_called()
+            h.fake_frappe.db.get_value.return_value = {"name": "P", "fulfilment_behavior": "Deliver at Branch"}
+            self.assertIs(lookup("P"), True)
+            h.fake_frappe.db.get_value.return_value = {"name": "P", "fulfilment_behavior": "Normal"}
+            self.assertIs(lookup("P"), False)
+            h.fake_frappe.db.get_value.return_value = None
+            self.assertIsNone(lookup("P"))
+            h.fake_frappe.db.get_value.side_effect = RuntimeError("unknown column")
+            self.assertIsNone(lookup("P"))
+
+    def test_both_gates_decide_through_the_helper(self):
+        self.assertIn("pin_exempt(", inspect.getsource(delivery_pin_requirement.assert_delivery_pin))
+        precheck = inspect.getsource(delivery_pin_requirement.assert_amendment_pin)
+        self.assertIn("deliver_at_branch=", precheck)
+        self.assertNotIn("EMPLOYEE_ORDER_PURPOSE", precheck)
+
+
 class AmendmentPinPrecheckTests(unittest.TestCase):
     precheck = staticmethod(delivery_pin_requirement.assert_amendment_pin)
 
@@ -769,12 +846,63 @@ class AmendmentPinPrecheckTests(unittest.TestCase):
             self.precheck({"shipping_address_name": "OLD"}, shipping_address_name="NEW")
             self.assertEqual(h.fake_frappe.db.get_value.call_args.args[1], "NEW")
 
-    def test_pickup_woo_and_policy_orders_are_exempt(self):
+    def test_pickup_and_woo_orders_are_exempt(self):
         with _PinHarness(address=None):
             self.precheck({"shipping_address_name": "A"}, pickup="1")
             self.precheck({"shipping_address_name": "A", "custom_is_pickup": 1})
             self.precheck({"shipping_address_name": "A", "woo_order_id": "991"})
+
+    @staticmethod
+    def _policy_then_address(fulfilment, address):
+        """get_value side effect: the policy row for the policy, else the address row."""
+
+        def _get_value(doctype, *args, **kwargs):
+            if doctype == "Jarz Commercial Policy":
+                return {"name": args[0], "fulfilment_behavior": fulfilment}
+            return address
+
+        return _get_value
+
+    def test_a_deliver_at_branch_policy_is_exempt(self):
+        with _PinHarness(address=None) as h:
+            h.fake_frappe.db.get_value.side_effect = self._policy_then_address("Deliver at Branch", None)
             self.precheck({"shipping_address_name": "A", "custom_commercial_policy": "Employee Cash"})
+
+    def test_a_b2b_or_sample_policy_still_needs_the_pin(self):
+        """Same rule as order creation: only Deliver at Branch exempts a policy."""
+        for fulfilment in ("Normal", "", None):
+            with self.subTest(fulfilment=fulfilment):
+                with _PinHarness(address=None) as h:
+                    h.fake_frappe.db.get_value.side_effect = self._policy_then_address(
+                        fulfilment, _address(custom_geo_source="territory_centroid")
+                    )
+                    with self.assertRaises(delivery_pin_requirement.AddressPinRequired):
+                        self.precheck(
+                            {
+                                "shipping_address_name": "A",
+                                "custom_commercial_policy": "B2B Supply",
+                                "custom_order_purpose": "B2B Supply",
+                            }
+                        )
+
+    def test_a_pinned_policy_order_passes(self):
+        with _PinHarness(address=None) as h:
+            h.fake_frappe.db.get_value.side_effect = self._policy_then_address(
+                "Normal", _address(custom_geo_source="pos_link")
+            )
+            self.precheck({"shipping_address_name": "A", "custom_commercial_policy": "Sample - Courier"})
+
+    def test_an_unreadable_policy_defers_to_the_in_job_check(self):
+        with _PinHarness(address=None) as h:
+            h.fake_frappe.db.get_value.side_effect = RuntimeError("no such table")
+            self.precheck({"shipping_address_name": "A", "custom_commercial_policy": "X"})
+        with _PinHarness(address=None):  # policy record gone: get_value returns None
+            self.precheck({"shipping_address_name": "A", "custom_commercial_policy": "X"})
+
+    def test_a_legacy_non_standard_purpose_without_a_policy_defers(self):
+        with _PinHarness(address=None) as h:
+            self.precheck({"shipping_address_name": "A", "custom_order_purpose": "B2B Supply"})
+            h.fake_frappe.db.get_value.assert_not_called()
 
     def test_the_precheck_is_wired_into_the_amendment_endpoint(self):
         from jarz_pos.api import manager

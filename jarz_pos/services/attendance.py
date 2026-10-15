@@ -122,7 +122,7 @@ from frappe import _
 from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_day, getdate
 
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
-from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER
+from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER, mask_tokens_in_detail
 from jarz_pos.services import roster as roster_service
 from jarz_pos.utils.settings_utils import single_flag, single_int
 
@@ -558,7 +558,7 @@ def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict
         if row.get("custom_device_flag"):
             group["device_flags"].add(row["custom_device_flag"])
             if row.get("custom_device_flag_detail"):
-                group["device_details"].append(row["custom_device_flag_detail"])
+                group["device_details"].append(mask_tokens_in_detail(row["custom_device_flag_detail"]))
 
         lat = _float_or_none(row.get("latitude"))
         lng = _float_or_none(row.get("longitude"))
@@ -1491,7 +1491,7 @@ def get_employee(
                     "shift": raw.get("shift") or None,
                     "offshift": bool(raw.get("offshift")),
                     "device_flag": raw.get("custom_device_flag") or None,
-                    "device_flag_detail": raw.get("custom_device_flag_detail") or None,
+                    "device_flag_detail": mask_tokens_in_detail(raw.get("custom_device_flag_detail")) or None,
                     "latitude": lat,
                     "longitude": lng,
                     "geo_ok": _geo_ok([(lat, lng)] if lat is not None and lng is not None else [], location_row),

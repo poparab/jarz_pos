@@ -29,7 +29,14 @@ from typing import Any, Callable, Dict, Optional
 
 import frappe
 
+from jarz_pos.constants import ROLES
 from jarz_pos.services import tracking as _tracking
+
+#: Who may read an order's delivery code: the floor tiers that hand it to the
+#: customer. Deliberately NOT everyone with Sales Invoice read -- that includes
+#: the courier, and a courier who can read the code can close a stop without
+#: the customer, which is the one thing the code exists to stop.
+DELIVERY_CODE_ROLES = frozenset(ROLES.LINE_MANAGER_TIER | {"Moderator"})
 
 try:  # pragma: no cover - import shape depends on the Frappe build
     from frappe.rate_limiter import rate_limit as _frappe_rate_limit
@@ -98,6 +105,16 @@ def _ensure_tracking_link_permission() -> None:
     link for an order in another branch.
     """
     frappe.has_permission("Sales Invoice", ptype="read", throw=True)
+
+
+def _may_see_delivery_code() -> bool:
+    """True when the session user holds a role in :data:`DELIVERY_CODE_ROLES`."""
+    try:
+        if frappe.session.user == ROLES.ADMINISTRATOR:
+            return True
+        return bool(DELIVERY_CODE_ROLES.intersection(frappe.get_roles() or []))
+    except Exception:
+        return False
 
 
 def _tracking_customer_phone(invoice_id: str) -> Optional[str]:
@@ -216,9 +233,15 @@ def get_tracking_link(invoice_id: str) -> Dict[str, Any]:
             "url": _tracking.get_tracking_url(name, ensure=dispatched),
             "enabled": _tracking.tracking_enabled(),
             "dispatched": dispatched,
-            # Staff-only: the same four digits the customer's page shows, so the
-            # POS can read them out when the customer cannot open the link.
-            "delivery_code": _tracking.delivery_code_for_invoice(name, ensure=dispatched),
+            # Moderator tier and up only: the same four digits the customer's
+            # page shows, so the POS can read them out when the customer cannot
+            # open the link. ``None`` for anyone else (the courier included);
+            # the app's share text already leaves the code out when it is absent.
+            "delivery_code": (
+                _tracking.delivery_code_for_invoice(name, ensure=dispatched)
+                if _may_see_delivery_code()
+                else None
+            ),
             "code_required": _tracking.delivery_code_required(),
             "customer_phone": _tracking_customer_phone(name),
         }

@@ -67,7 +67,11 @@ class TestDeviceRules(unittest.TestCase):
     def test_different_device_flags_new_and_does_not_reregister(self):
         doc, set_value, _ = _run(registered="SomeOtherToken123")
         self.assertEqual(doc.custom_device_flag, dev.FLAG_NEW)
-        self.assertIn(TOKEN, doc.custom_device_flag_detail)
+        # The detail is shown on the attendance board: masked, never the cookie.
+        self.assertNotIn(TOKEN, doc.custom_device_flag_detail)
+        self.assertIn("…" + TOKEN[-dev.TOKEN_VISIBLE_TAIL:], doc.custom_device_flag_detail)
+        # The full token stays on the check-in record for the approving manager.
+        self.assertEqual(doc.custom_device_token, TOKEN)
         set_value.assert_not_called()
 
     def test_shared_device_outranks_new_device(self):
@@ -113,6 +117,29 @@ class TestDeviceRules(unittest.TestCase):
         self.assertNotEqual(manager.set_cookie.call_args[0][1], "x;drop table")
 
 
+class TestTokenMasking(unittest.TestCase):
+    def test_mask_keeps_only_the_tail(self):
+        self.assertEqual(dev.mask_token(TOKEN), "…" + TOKEN[-6:])
+        self.assertEqual(dev.mask_token("abc"), "…")
+        self.assertEqual(dev.mask_token(None), "")
+        self.assertEqual(dev.mask_token(""), "")
+
+    def test_a_legacy_detail_with_the_full_token_is_masked(self):
+        legacy = (
+            f"Different phone from the one registered for this employee (device token ({TOKEN})). "
+            "To approve it, copy the Device Token from this check-in."
+        )
+        masked = dev.mask_tokens_in_detail(legacy)
+        self.assertNotIn(TOKEN, masked)
+        self.assertIn(f"token (…{TOKEN[-6:]})", masked)
+
+    def test_names_in_parentheses_and_non_strings_are_untouched(self):
+        shared = "Same phone checked in HR-EMP-7 (AhmedMohamedAli) at 12:00 today"
+        self.assertEqual(dev.mask_tokens_in_detail(shared), shared)
+        self.assertIsNone(dev.mask_tokens_in_detail(None))
+        self.assertEqual(dev.mask_tokens_in_detail(""), "")
+
+
 class TestNeverRaises(unittest.TestCase):
     def test_exception_inside_fingerprinting_is_swallowed(self):
         doc = _doc()
@@ -152,6 +179,14 @@ class TestAttendanceCarriesFlags(unittest.TestCase):
         )
         self.assertEqual(attendance_service.device_flags_for(group), ["Shared Device", "New Device"])
         self.assertEqual(attendance_service.device_detail_for(group), "new phone | same as EMP-7")
+
+    def test_a_legacy_full_token_detail_is_masked_on_the_board(self):
+        group = self._group(
+            {"custom_device_flag": "New Device", "custom_device_flag_detail": f"device token ({TOKEN})"},
+        )
+        detail = attendance_service.device_detail_for(group)
+        self.assertNotIn(TOKEN, detail)
+        self.assertIn(TOKEN[-6:], detail)
 
     def test_cell_carries_new_keys_and_old_keys_survive(self):
         group = self._group({"custom_device_flag": "New Device", "custom_device_flag_detail": "d"})

@@ -12,8 +12,15 @@ POS create endpoint AND the amendment job) and, for a synchronous refusal, in
 ``api.manager.submit_invoice_amendment``. It is deliberately NOT a Sales Invoice
 doc_event: a doc_event also fires for the Woo sync, and Woo orders arrive with
 whatever address the shop gave us -- refusing them would drop customer orders.
-Woo-origin orders, pickup/takeaway orders and deliver-at-branch (staff) orders
-are exempt.
+
+**Exemptions -- one rule, :func:`pin_exempt`.** An order is exempt when nobody
+drives it to a door the POS chose: Woo-origin, pickup/takeaway, or a commercial
+policy whose ``fulfilment_behavior`` is "Deliver at Branch" (the Employee Order
+policy). Every other commercial policy -- B2B Supply, Sample - Courier, Sample -
+No Courier, Free Shipping Waiver -- still sends the goods to the customer's
+address, so it needs the pin like a Standard order: the courier navigates to it
+and the arrival gate measures against it whoever pays for the trip. Order
+creation and the amendment pre-check both decide through this one function.
 
 **Pin-grade** follows the existing geo ladder (``utils.geo``): a valid
 coordinate whose recorded source ranks at least ``pos_link``. A
@@ -37,6 +44,11 @@ from frappe import _
 from jarz_pos.utils.settings_utils import single_flag
 
 SETTING_FIELDNAME = "require_address_pin_for_delivery"
+
+#: ``Jarz Commercial Policy.fulfilment_behavior`` value for goods handed over at
+#: the counter. The same literal ``commercial_policy`` resolves into
+#: ``CommercialPolicyDecision.deliver_at_branch``.
+DELIVER_AT_BRANCH = "Deliver at Branch"
 
 
 class AddressPinRequired(frappe.ValidationError):
@@ -97,6 +109,36 @@ def pin_missing_message() -> str:
     )
 
 
+def pin_exempt(*, pickup: Any = False, woo_order_id: Any = None, deliver_at_branch: Any = False) -> bool:
+    """True when an order needs no pin: it never travels to an address the POS set.
+
+    The single exemption rule (see the module docstring). A commercial policy by
+    itself exempts nothing; only its "Deliver at Branch" fulfilment does.
+    """
+    return bool(_truthy(pickup) or deliver_at_branch is True or str(woo_order_id or "").strip())
+
+
+def policy_delivers_at_branch(policy_name: Any) -> Optional[bool]:
+    """Whether the named Commercial Policy hands the goods over at the branch.
+
+    ``False`` for no policy (a Standard order). ``None`` when it cannot be told
+    (record missing, schema behind the code): the caller defers to the check
+    inside invoice creation, which resolves the policy itself.
+    """
+    name = str(policy_name or "").strip()
+    if not name:
+        return False
+    try:
+        row = frappe.db.get_value(
+            "Jarz Commercial Policy", name, ["name", "fulfilment_behavior"], as_dict=True
+        )
+    except Exception:
+        return None
+    if not row:
+        return None
+    return str(row.get("fulfilment_behavior") or "").strip() == DELIVER_AT_BRANCH
+
+
 def assert_amendment_pin(
     source_invoice: Any,
     shipping_address_name: Optional[str] = None,
@@ -106,10 +148,11 @@ def assert_amendment_pin(
 
     The amendment runs as a job, and a refusal raised inside it is easy to lose
     on the way back to the app; refusing here, before anything is enqueued, hands
-    the client a real ``AddressPinRequired``. Mirrors the exemptions of
-    :func:`assert_delivery_pin` from the SOURCE invoice's fields. An order with a
-    commercial policy (staff/employee and other non-standard purposes) is left to
-    the check inside invoice creation, which sees the resolved policy.
+    the client a real ``AddressPinRequired``. Applies :func:`pin_exempt` to the
+    SOURCE invoice's fields -- the job carries its order purpose and commercial
+    policy over unchanged. A non-Standard order with no stamped policy name (a
+    legacy row) cannot be told here, so it is left to the check inside invoice
+    creation, which sees the resolved policy.
     """
     if not pin_required_enabled():
         return
@@ -120,17 +163,28 @@ def assert_amendment_pin(
         except Exception:
             return None
 
-    from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
-
-    if _get("custom_commercial_policy") or str(_get("custom_order_purpose") or "").strip() == EMPLOYEE_ORDER_PURPOSE:
+    policy = str(_get("custom_commercial_policy") or "").strip()
+    purpose = str(_get("custom_order_purpose") or "").strip()
+    if policy:
+        at_branch = policy_delivers_at_branch(policy)
+    elif purpose in ("", "Standard"):
+        at_branch = False
+    else:
+        at_branch = None
+    if at_branch is None:
         return
-    is_pickup = _truthy(pickup) or _truthy(_get("custom_is_pickup"))
+
     address = (
         str(shipping_address_name or "").strip()
         or str(_get("shipping_address_name") or "").strip()
         or str(_get("customer_address") or "").strip()
     )
-    assert_delivery_pin(address, pickup=is_pickup, woo_order_id=_get("woo_order_id"))
+    assert_delivery_pin(
+        address,
+        pickup=_truthy(pickup) or _truthy(_get("custom_is_pickup")),
+        woo_order_id=_get("woo_order_id"),
+        deliver_at_branch=at_branch,
+    )
 
 
 def _truthy(value: Any) -> bool:
@@ -148,12 +202,12 @@ def assert_delivery_pin(
 ) -> None:
     """Raise :class:`AddressPinRequired` when a POS delivery order has no pin.
 
-    No-op when the switch is off, or the order is Woo-origin (*woo_order_id*
-    set), a pickup/takeaway, or handed over at the branch. A lookup failure
+    No-op when the switch is off, or :func:`pin_exempt` says the order never
+    travels to a POS-chosen address. A lookup failure
     (schema behind the code) logs and lets the order through: a quality gate
     must not take order-taking down.
     """
-    if pickup or deliver_at_branch or woo_order_id:
+    if pin_exempt(pickup=pickup, woo_order_id=woo_order_id, deliver_at_branch=deliver_at_branch):
         return
     if not pin_required_enabled():
         return
