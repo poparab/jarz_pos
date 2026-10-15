@@ -13,6 +13,17 @@ Product types:
 Cancelled invoice filter: docstatus = 1 (Submitted).
   docstatus=0 = Draft, docstatus=1 = Submitted, docstatus=2 = Cancelled.
   is_return = 0 additionally excludes credit notes/returns.
+
+Cost of goods (since 2026-10): the cost actually posted for the line —
+``Sales Invoice Item.incoming_rate × stock_qty`` on an ``update_stock`` invoice,
+else the Delivery Note Item made against it (see
+``financial_report.actual_line_cost_sql``). Only a line with no posted cost
+falls back to the default BOM's cost per unit × stock qty. Each product row says
+which source dominated (``cost_source``) and the response carries
+``cost_coverage_pct`` = share of revenue costed from posted cost of goods.
+
+Aggregation is done in SQL (two GROUP BY queries over the classified lines);
+Python only shapes the aggregated rows.
 """
 
 from __future__ import annotations
@@ -58,39 +69,199 @@ def _get_bundle_item_codes() -> Set[str]:
 
 
 def _get_bom_costs(item_codes: List[str]) -> Dict[str, float]:
+    """Default BOM cost per unit (``total_cost / quantity``) per item.
+
+    No longer used by :func:`get_product_analytics` (the BOM fallback is joined
+    in SQL); kept for callers that import it.
+    """
     if not item_codes:
         return {}
     boms = frappe.db.sql(
         """
-        SELECT item, total_cost
+        SELECT item, total_cost, quantity
         FROM `tabBOM`
         WHERE is_active = 1
           AND is_default = 1
           AND item IN %(codes)s
         """,
-        {"codes": item_codes},
+        {"codes": tuple(item_codes)},
         as_dict=True,
     )
-    return {b["item"]: float(b["total_cost"] or 0) for b in boms}
+    out: Dict[str, float] = {}
+    for b in boms:
+        qty = float(b.get("quantity") or 0) or 1.0
+        out[b["item"]] = float(b.get("total_cost") or 0) / qty
+    return out
+
+
+_TYPE_ORDER = [_TYPE_BUNDLE, _TYPE_SMALL, _TYPE_MEDIUM, _TYPE_LARGE]
+_ALL_SIZE_GROUPS = tuple(sorted(_SMALL_GROUPS | _MEDIUM_GROUPS | _LARGE_GROUPS))
+# ``IN ()`` is a syntax error, so an empty bundle list is sent as a code no item has.
+_NO_CODE = "__jarz_no_item__"
+
+
+def _lines_sql(branch: Optional[str]) -> str:
+    """Classified invoice lines in the range, with their actual and BOM cost.
+
+    One row per Sales Invoice Item that the report counts: a bundle header, any
+    line on an invoice that has one, or a line whose group is a jar size.
+    ``actual_cost`` is the posted cost of goods (see
+    ``financial_report.actual_line_cost_sql``) or NULL; ``bom_unit`` is the
+    default BOM's cost per unit of stock UOM (``total_cost / quantity``).
+    """
+    from jarz_pos.api.financial_report import actual_line_cost_sql
+
+    dn_join, cost_expr = actual_line_cost_sql("fd", "td")
+    branch_cond = "AND si.pos_profile = %(branch)s" if branch else ""
+    return f"""
+        SELECT sii.item_code,
+               sii.item_name,
+               TRIM(IFNULL(sii.item_group, '')) AS item_group,
+               IFNULL(sii.qty, 0) AS qty,
+               IFNULL(sii.stock_qty, 0) AS stock_qty,
+               -- Net of the invoice-level discount, so product revenue agrees with
+               -- the Sales ledger (Sep 2026: gross line amounts overstated it by 816).
+               IFNULL(sii.base_net_amount, 0) AS amount,
+               si.name AS invoice,
+               COALESCE(NULLIF(si.territory, ''), 'Unassigned') AS territory,
+               si.posting_date,
+               CASE WHEN sii.item_code IN %(bundles)s THEN 1 ELSE 0 END AS is_header,
+               CASE WHEN bi.parent IS NULL THEN 0 ELSE 1 END AS in_bundle,
+               {cost_expr} AS actual_cost,
+               bom.unit_cost AS bom_unit
+        FROM `tabSales Invoice Item` sii
+        JOIN `tabSales Invoice` si
+          ON si.name = sii.parent AND sii.parenttype = 'Sales Invoice'
+        LEFT JOIN (
+            SELECT DISTINCT b.parent
+            FROM `tabSales Invoice Item` b
+            JOIN `tabSales Invoice` bsi ON bsi.name = b.parent
+            WHERE b.parenttype = 'Sales Invoice'
+              AND b.item_code IN %(bundles)s
+              AND bsi.docstatus = 1
+              AND bsi.posting_date BETWEEN %(fd)s AND %(td)s
+        ) bi ON bi.parent = si.name
+        LEFT JOIN (
+            SELECT item, MAX(total_cost / NULLIF(quantity, 0)) AS unit_cost
+            FROM `tabBOM`
+            WHERE is_active = 1 AND is_default = 1
+            GROUP BY item
+        ) bom ON bom.item = sii.item_code
+        {dn_join}
+        WHERE si.docstatus = 1
+          AND si.is_return = 0
+          AND si.posting_date BETWEEN %(fd)s AND %(td)s
+          {branch_cond}
+          AND (
+              sii.item_code IN %(bundles)s
+              OR bi.parent IS NOT NULL
+              OR TRIM(IFNULL(sii.item_group, '')) IN %(groups)s
+          )
+    """
+
+
+# Line cost: the posted cost of goods, else BOM × stock qty, else nothing.
+_LINE_COST = "COALESCE(l.actual_cost, l.bom_unit * l.stock_qty, 0)"
+
+
+def _product_rows(params: Dict[str, Any], lines: str) -> List[Dict[str, Any]]:
+    return frappe.db.sql(
+        f"""
+        SELECT l.item_code,
+               MAX(l.item_name) AS item_name,
+               l.item_group,
+               l.is_header,
+               l.in_bundle,
+               SUM(l.qty) AS qty,
+               SUM(l.amount) AS amount,
+               SUM({_LINE_COST}) AS cost,
+               SUM(IFNULL(l.actual_cost, 0)) AS actual_cost,
+               SUM(CASE WHEN l.actual_cost IS NOT NULL THEN l.qty ELSE 0 END) AS actual_qty,
+               SUM(CASE WHEN l.actual_cost IS NOT NULL THEN l.amount ELSE 0 END) AS actual_amount,
+               SUM(CASE WHEN l.actual_cost IS NULL AND IFNULL(l.bom_unit, 0) > 0
+                        THEN l.qty ELSE 0 END) AS bom_qty,
+               SUM(CASE WHEN l.actual_cost IS NULL AND IFNULL(l.bom_unit, 0) > 0
+                        THEN l.amount ELSE 0 END) AS bom_amount,
+               MAX(IFNULL(l.bom_unit, 0)) AS bom_unit
+        FROM ({lines}) l
+        GROUP BY l.item_code, l.item_group, l.is_header, l.in_bundle
+        """,
+        params,
+        as_dict=True,
+    ) or []
+
+
+def _territory_day_rows(params: Dict[str, Any], lines: str) -> List[Dict[str, Any]]:
+    # An invoice has one territory and one posting date, so distinct counts per
+    # (territory, day) add up to distinct counts per territory, per day, and overall.
+    return frappe.db.sql(
+        f"""
+        SELECT l.territory,
+               l.posting_date,
+               COUNT(DISTINCT l.invoice) AS orders,
+               SUM(CASE WHEN l.is_header = 0 THEN l.amount ELSE 0 END) AS revenue,
+               SUM(CASE WHEN l.is_header = 0 THEN {_LINE_COST} ELSE 0 END) AS cost
+        FROM ({lines}) l
+        GROUP BY l.territory, l.posting_date
+        """,
+        params,
+        as_dict=True,
+    ) or []
+
+
+def _intrinsic_type(item_group: str) -> Optional[str]:
+    if item_group in _SMALL_GROUPS:
+        return _TYPE_SMALL
+    if item_group in _MEDIUM_GROUPS:
+        return _TYPE_MEDIUM
+    if item_group in _LARGE_GROUPS:
+        return _TYPE_LARGE
+    return None
+
+
+def _cost_source(actual_qty: float, bom_qty: float) -> str:
+    """Where most of a product's cost came from."""
+    if actual_qty > 0 and actual_qty >= bom_qty:
+        return "actual"
+    if bom_qty > 0:
+        return "bom"
+    return "none"
+
+
+def _pct(part: float, whole: float) -> float:
+    return round(part / whole * 100, 1) if whole else 0.0
+
+
+def _f(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @frappe.whitelist()
 def get_product_analytics(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    branch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Return aggregated product analytics for the given date range.
 
+    ``branch`` (optional POS Profile) limits it to invoices of that branch.
+
     Response shape:
     {
       "period": {"date_from": str, "date_to": str},
+      "filters": {"date_from": str, "date_to": str, "branch": str|null},
       "summary": {
         "total_revenue": float, "total_orders": int,
         "total_gross_profit": float, "avg_order_value": float,
         "best_selling_product": {"item_name": str, "total_qty": float},
         "top_territory": {"territory": str, "revenue": float}
       },
+      "cost_coverage_pct": float,          # revenue costed from posted COGS, %
+      "cost_sources": {"actual": float, "bom": float, "none": float},  # revenue by cost source
       "by_product_type": [
         {"type": str, "units": int, "revenue": float,
          "cost": float, "profit": float, "margin_pct": float}
@@ -99,7 +270,9 @@ def get_product_analytics(
         {"item_code": str, "item_name": str, "type": str,
          "total_qty": float, "total_revenue": float,
          "bom_cost_per_unit": float, "total_cost": float,
-         "gross_profit": float, "margin_pct": float}
+         "gross_profit": float, "margin_pct": float,
+         "cost_source": "actual"|"bom"|"none",
+         "actual_cost_per_unit": float|null, "cost_coverage_pct": float}
       ],
       "by_territory": [
         {"territory": str, "orders": int, "revenue": float, "profit": float}
@@ -115,224 +288,180 @@ def get_product_analytics(
 
     if not date_from or not date_to:
         date_from, date_to = _default_dates()
+    branch = (branch or "").strip() or None
 
     bundle_item_codes = _get_bundle_item_codes()
-
-    # ── Fetch invoice line items in date range ───────────────────────────
-    rows = frappe.db.sql(
-        """
-        SELECT
-            sii.item_code,
-            sii.item_name,
-            sii.item_group,
-            sii.qty,
-            -- Net of the invoice-level discount, so product revenue agrees with
-            -- the Sales ledger (Sep 2026: gross line amounts overstated it by 816).
-            sii.base_net_amount AS amount,
-            si.name   AS invoice_name,
-            si.territory,
-            si.posting_date
-        FROM `tabSales Invoice Item` sii
-        JOIN `tabSales Invoice` si ON si.name = sii.parent
-        WHERE si.docstatus = 1
-          AND si.is_return = 0
-          AND si.posting_date BETWEEN %(date_from)s AND %(date_to)s
-        ORDER BY si.posting_date ASC
-        """,
-        {"date_from": date_from, "date_to": date_to},
-        as_dict=True,
-    )
-
-    if not rows:
-        return _empty_response(date_from, date_to)
-
-    # ── Find invoices that contain a bundle header ───────────────────────
-    bundle_invoice_set: Set[str] = set()
-    if bundle_item_codes:
-        for row in rows:
-            if row["item_code"] in bundle_item_codes:
-                bundle_invoice_set.add(row["invoice_name"])
-
-    # ── BOM cost lookup ──────────────────────────────────────────────────
-    all_item_codes = list({row["item_code"] for row in rows})
-    bom_cost_map = _get_bom_costs(all_item_codes)
+    params: Dict[str, Any] = {
+        "fd": date_from,
+        "td": date_to,
+        "branch": branch,
+        "bundles": tuple(sorted(bundle_item_codes)) or (_NO_CODE,),
+        "groups": _ALL_SIZE_GROUPS,
+    }
+    lines = _lines_sql(branch)
+    product_rows = _product_rows(params, lines)
+    if not product_rows:
+        return _empty_response(date_from, date_to, branch)
+    territory_day_rows = _territory_day_rows(params, lines)
 
     # ── Aggregation accumulators ─────────────────────────────────────────
-    type_agg: Dict[str, Dict[str, Any]] = {
-        _TYPE_BUNDLE: {"units": 0.0, "revenue": 0.0, "cost": 0.0},
-        _TYPE_SMALL:  {"units": 0.0, "revenue": 0.0, "cost": 0.0},
-        _TYPE_MEDIUM: {"units": 0.0, "revenue": 0.0, "cost": 0.0},
-        _TYPE_LARGE:  {"units": 0.0, "revenue": 0.0, "cost": 0.0},
+    type_agg: Dict[str, Dict[str, float]] = {
+        t: {"units": 0.0, "revenue": 0.0, "cost": 0.0} for t in _TYPE_ORDER
     }
     product_agg: Dict[str, Dict[str, Any]] = {}
-    territory_agg: Dict[str, Dict[str, Any]] = {}
-    trend_agg: Dict[str, Dict[str, Any]] = {}
     bundle_comp: Dict[str, Dict[str, Any]] = {}
+    sources = {"actual": 0.0, "bom": 0.0, "none": 0.0}
 
-    for row in rows:
-        item_code = row["item_code"] or ""
-        item_name = (row["item_name"] or item_code).strip()
-        item_group = (row["item_group"] or "").strip()
-        qty = float(row["qty"] or 0)
-        amount = float(row["amount"] or 0)
-        invoice = row["invoice_name"] or ""
-        territory = (row["territory"] or "Unassigned").strip()
-        posting_date = str(row["posting_date"])
+    for row in product_rows:
+        item_code = row.get("item_code") or ""
+        item_name = (row.get("item_name") or item_code).strip()
+        item_group = (row.get("item_group") or "").strip()
+        qty = _f(row.get("qty"))
+        amount = _f(row.get("amount"))
+        cost = _f(row.get("cost"))
+        is_bundle_header = bool(int(row.get("is_header") or 0))
+        in_bundle_invoice = bool(int(row.get("in_bundle") or 0))
 
-        in_bundle_invoice = invoice in bundle_invoice_set
-        is_bundle_header = item_code in bundle_item_codes
-
-        # ── Intrinsic type: derived from item_group, never changes ────────
-        # Used for the per-product table so an item isn't mis-labelled as
-        # "Bundle" just because it happened to be sold inside a bundle once.
-        if item_group in _SMALL_GROUPS:
-            intrinsic_type = _TYPE_SMALL
-        elif item_group in _MEDIUM_GROUPS:
-            intrinsic_type = _TYPE_MEDIUM
-        elif item_group in _LARGE_GROUPS:
-            intrinsic_type = _TYPE_LARGE
-        else:
-            intrinsic_type = None  # will be determined by context below
-
-        # ── Context type: used for by_product_type revenue attribution ────
-        if is_bundle_header:
+        # Intrinsic type (item group) labels the product; context type (bundle
+        # or not) attributes its revenue — same rules as before the SQL rewrite.
+        intrinsic_type = _intrinsic_type(item_group)
+        if is_bundle_header or in_bundle_invoice:
             item_type = _TYPE_BUNDLE
-        elif in_bundle_invoice:
-            item_type = _TYPE_BUNDLE   # child item sold as part of a bundle
         elif intrinsic_type:
             item_type = intrinsic_type
         else:
-            # Skip items we don't recognise (shipping fees, etc.)
-            continue
+            continue  # unrecognised (shipping fees, etc.) — the SQL already drops these
 
-        # For items without a recognised item_group that appear in a bundle
-        # invoice (edge case), fall back to Bundle as context type.
-        if intrinsic_type is None:
-            intrinsic_type = _TYPE_BUNDLE
-
-        bom_unit = bom_cost_map.get(item_code, 0.0)
-        item_cost = bom_unit * qty
-
-        # ── Type-level aggregation ────────────────────────────────────────
         if is_bundle_header:
             # Only count units from the header; revenue comes from child rows
             type_agg[_TYPE_BUNDLE]["units"] += qty
-        else:
-            type_agg[item_type]["revenue"] += amount
-            type_agg[item_type]["cost"] += item_cost
-            if not in_bundle_invoice:
-                # Count individual units for non-bundle products
-                type_agg[item_type]["units"] += qty
+            continue
 
-        # ── Per-product aggregation (skip bundle headers) ─────────────────
-        if not is_bundle_header:
-            if item_code not in product_agg:
-                product_agg[item_code] = {
-                    "item_code": item_code,
-                    "item_name": item_name,
-                    "type": intrinsic_type,  # intrinsic, not first-seen context
-                    "total_qty": 0.0,
-                    "total_revenue": 0.0,
-                    "total_cost": 0.0,
-                    "bom_cost_per_unit": bom_unit,
-                }
-            product_agg[item_code]["total_qty"] += qty
-            product_agg[item_code]["total_revenue"] += amount
-            product_agg[item_code]["total_cost"] += item_cost
+        type_agg[item_type]["revenue"] += amount
+        type_agg[item_type]["cost"] += cost
+        if not in_bundle_invoice:
+            type_agg[item_type]["units"] += qty
 
-        # ── Bundle composition ────────────────────────────────────────────
-        if in_bundle_invoice and not is_bundle_header:
-            if item_code not in bundle_comp:
-                bundle_comp[item_code] = {
-                    "item_code": item_code,
-                    "item_name": item_name,
-                    "item_group": item_group,
-                    "times_in_bundle": 0.0,
-                    "revenue": 0.0,
-                }
-            bundle_comp[item_code]["times_in_bundle"] += qty
-            bundle_comp[item_code]["revenue"] += amount
+        actual_amount = _f(row.get("actual_amount"))
+        bom_amount = _f(row.get("bom_amount"))
+        sources["actual"] += actual_amount
+        sources["bom"] += bom_amount
+        sources["none"] += amount - actual_amount - bom_amount
 
-        # ── Territory aggregation ─────────────────────────────────────────
-        if territory not in territory_agg:
-            territory_agg[territory] = {"invoices": set(), "revenue": 0.0, "cost": 0.0}
-        if not is_bundle_header:
-            territory_agg[territory]["revenue"] += amount
-            territory_agg[territory]["cost"] += item_cost
-        territory_agg[territory]["invoices"].add(invoice)
+        p = product_agg.get(item_code)
+        if p is None:
+            p = product_agg[item_code] = {
+                "item_code": item_code,
+                "item_name": item_name,
+                "type": intrinsic_type,
+                "total_qty": 0.0,
+                "total_revenue": 0.0,
+                "total_cost": 0.0,
+                "bom_cost_per_unit": 0.0,
+                "actual_cost": 0.0,
+                "actual_qty": 0.0,
+                "actual_amount": 0.0,
+                "bom_qty": 0.0,
+            }
+        elif p["type"] is None and intrinsic_type:
+            p["type"] = intrinsic_type
+        p["total_qty"] += qty
+        p["total_revenue"] += amount
+        p["total_cost"] += cost
+        p["bom_cost_per_unit"] = max(p["bom_cost_per_unit"], _f(row.get("bom_unit")))
+        p["actual_cost"] += _f(row.get("actual_cost"))
+        p["actual_qty"] += _f(row.get("actual_qty"))
+        p["actual_amount"] += actual_amount
+        p["bom_qty"] += _f(row.get("bom_qty"))
 
-        # ── Trend aggregation ─────────────────────────────────────────────
-        if posting_date not in trend_agg:
-            trend_agg[posting_date] = {"revenue": 0.0, "invoices": set()}
-        if not is_bundle_header:
-            trend_agg[posting_date]["revenue"] += amount
-        trend_agg[posting_date]["invoices"].add(invoice)
+        if in_bundle_invoice:
+            comp = bundle_comp.setdefault(item_code, {
+                "item_code": item_code,
+                "item_name": item_name,
+                "item_group": item_group,
+                "times_in_bundle": 0.0,
+                "revenue": 0.0,
+            })
+            comp["times_in_bundle"] += qty
+            comp["revenue"] += amount
 
-    # ── Build output: by_product_type ────────────────────────────────────
+    # ── by_product_type ──────────────────────────────────────────────────
     by_product_type = []
-    for ptype in [_TYPE_BUNDLE, _TYPE_SMALL, _TYPE_MEDIUM, _TYPE_LARGE]:
+    for ptype in _TYPE_ORDER:
         agg = type_agg[ptype]
         revenue = agg["revenue"]
         cost = agg["cost"]
         profit = revenue - cost
-        margin_pct = (profit / revenue * 100) if revenue > 0 else 0.0
         by_product_type.append({
             "type": ptype,
             "units": int(agg["units"]),
             "revenue": round(revenue, 2),
             "cost": round(cost, 2),
             "profit": round(profit, 2),
-            "margin_pct": round(margin_pct, 1),
+            "margin_pct": round((profit / revenue * 100) if revenue > 0 else 0.0, 1),
         })
 
-    # ── Build output: top_products ────────────────────────────────────────
+    # ── top_products ─────────────────────────────────────────────────────
     top_products = []
     for p in sorted(product_agg.values(), key=lambda x: -x["total_revenue"]):
         revenue = p["total_revenue"]
         cost = p["total_cost"]
         profit = revenue - cost
-        margin_pct = (profit / revenue * 100) if revenue > 0 else 0.0
         top_products.append({
             "item_code": p["item_code"],
             "item_name": p["item_name"],
-            "type": p["type"],
+            # Lines without a size group only ever appear inside bundles.
+            "type": p["type"] or _TYPE_BUNDLE,
             "total_qty": round(p["total_qty"], 2),
             "total_revenue": round(revenue, 2),
             "bom_cost_per_unit": round(p["bom_cost_per_unit"], 2),
             "total_cost": round(cost, 2),
             "gross_profit": round(profit, 2),
-            "margin_pct": round(margin_pct, 1),
+            "margin_pct": round((profit / revenue * 100) if revenue > 0 else 0.0, 1),
+            "cost_source": _cost_source(p["actual_qty"], p["bom_qty"]),
+            "actual_cost_per_unit": (
+                round(p["actual_cost"] / p["actual_qty"], 2) if p["actual_qty"] else None
+            ),
+            "cost_coverage_pct": _pct(p["actual_amount"], revenue),
         })
 
-    # ── Build output: by_territory ────────────────────────────────────────
+    # ── by_territory / trend (from the territory × day aggregate) ────────
+    territory_agg: Dict[str, Dict[str, float]] = {}
+    trend_agg: Dict[str, Dict[str, float]] = {}
+    for row in territory_day_rows:
+        territory = (row.get("territory") or "Unassigned").strip()
+        day = str(row.get("posting_date"))
+        orders = int(row.get("orders") or 0)
+        revenue = _f(row.get("revenue"))
+        cost = _f(row.get("cost"))
+        t = territory_agg.setdefault(territory, {"orders": 0, "revenue": 0.0, "cost": 0.0})
+        t["orders"] += orders
+        t["revenue"] += revenue
+        t["cost"] += cost
+        d = trend_agg.setdefault(day, {"orders": 0, "revenue": 0.0})
+        d["orders"] += orders
+        d["revenue"] += revenue
+
     # Territories are *named* by their WooCommerce area code, so the raw group
     # key is "EGNASRCITY" — a chart axis full of those is unreadable. Group on
     # the key, label with the Arabic name.
     by_territory = [
         {
             "territory": get_area_label(t),
-            "orders": len(agg["invoices"]),
+            "orders": int(agg["orders"]),
             "revenue": round(agg["revenue"], 2),
             "profit": round(agg["revenue"] - agg["cost"], 2),
         }
         for t, agg in sorted(territory_agg.items(), key=lambda x: -x[1]["revenue"])
     ]
-
-    # ── Build output: trend ───────────────────────────────────────────────
     trend = [
-        {
-            "date": d,
-            "revenue": round(agg["revenue"], 2),
-            "orders": len(agg["invoices"]),
-        }
+        {"date": d, "revenue": round(agg["revenue"], 2), "orders": int(agg["orders"])}
         for d, agg in sorted(trend_agg.items())
     ]
 
-    # ── Summary ───────────────────────────────────────────────────────────
-    # Count only invoices that had at least one classified line item.
-    # territory_agg tracks every invoice that passed the classification
-    # filter (bundle headers are included via invoices.add() unconditionally).
-    total_orders = len({inv for agg in territory_agg.values() for inv in agg["invoices"]})
+    # ── Summary ──────────────────────────────────────────────────────────
+    # Orders = invoices with at least one classified line (headers included).
+    total_orders = sum(int(agg["orders"]) for agg in territory_agg.values())
     total_revenue = sum(p["total_revenue"] for p in top_products)
     total_cost = sum(p["total_cost"] for p in top_products)
     total_gross_profit = total_revenue - total_cost
@@ -358,7 +487,10 @@ def get_product_analytics(
 
     return {
         "period": {"date_from": date_from, "date_to": date_to},
+        "filters": {"date_from": date_from, "date_to": date_to, "branch": branch},
         "summary": summary,
+        "cost_coverage_pct": _pct(sources["actual"], total_revenue),
+        "cost_sources": {k: round(v, 2) for k, v in sources.items()},
         "by_product_type": by_product_type,
         "top_products": top_products,
         "by_territory": by_territory,
@@ -369,9 +501,10 @@ def get_product_analytics(
     }
 
 
-def _empty_response(date_from: str, date_to: str) -> Dict[str, Any]:
+def _empty_response(date_from: str, date_to: str, branch: Optional[str] = None) -> Dict[str, Any]:
     return {
         "period": {"date_from": date_from, "date_to": date_to},
+        "filters": {"date_from": date_from, "date_to": date_to, "branch": branch},
         "summary": {
             "total_revenue": 0.0,
             "total_orders": 0,
@@ -380,6 +513,8 @@ def _empty_response(date_from: str, date_to: str) -> Dict[str, Any]:
             "best_selling_product": {"item_name": "", "total_qty": 0.0},
             "top_territory": {"territory": "", "revenue": 0.0},
         },
+        "cost_coverage_pct": 0.0,
+        "cost_sources": {"actual": 0.0, "bom": 0.0, "none": 0.0},
         "by_product_type": [],
         "top_products": [],
         "by_territory": [],

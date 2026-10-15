@@ -46,17 +46,36 @@ def _safe(label: str, fn, default):
 def get_executive_overview(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    branch: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Composed executive roll-up across the four analytics domains."""
+    """Composed executive roll-up across the four analytics domains.
+
+    ``branch`` (optional POS Profile name) is passed to product, P&L, shipping
+    and inventory. With a branch:
+
+    * revenue, gross profit and orders come from that branch's row of the P&L
+      ``branches`` split (invoice net sales, actual cost of goods);
+    * shipping expense / income / net come from the branch's invoices
+      (shipping summary KPIs), not the company-wide ledger;
+    * critical / watch stock are the branch's restock statuses (its warehouse,
+      its own sales);
+    * net profit and net margin stay company-wide (overheads are not split by
+      branch) and the customer segment mix stays company-wide — both listed in
+      ``scope_notes``.
+
+    Additive keys: ``filters`` and ``scope_notes``.
+    """
     _ensure_jarz_manager()
 
     if not date_from or not date_to:
         date_from, date_to = _default_dates()
 
+    branch = (branch or "").strip() or None
+
     # ── Product / sales (revenue, margin, mix, trend, territory) ─────────
     def _load_product():
         from jarz_pos.api.product_analytics import get_product_analytics
-        return get_product_analytics(date_from=date_from, date_to=date_to)
+        return get_product_analytics(date_from=date_from, date_to=date_to, branch=branch)
 
     product = _safe("product", _load_product, {})
     p_summary = product.get("summary", {}) if isinstance(product, dict) else {}
@@ -71,14 +90,32 @@ def get_executive_overview(
     # September 2026 on production by 3,844 (270,945 vs the ledger's 267,101).
     def _load_pnl():
         from jarz_pos.api.financial_report import get_profit_and_loss
+        if branch:
+            return get_profit_and_loss(date_from=date_from, date_to=date_to, branch=branch)
         return get_profit_and_loss(date_from=date_from, date_to=date_to)
 
     pnl = _safe("pnl", _load_pnl, {})
     pnl_summary = pnl.get("summary", {}) if isinstance(pnl, dict) else {}
     pnl_shipping = pnl.get("shipping", {}) if isinstance(pnl, dict) else {}
     pnl_quality = pnl.get("data_quality", {}) if isinstance(pnl, dict) else {}
+    pnl_branches = pnl.get("branches", []) if isinstance(pnl, dict) else []
 
-    if pnl_summary:
+    branch_row = None
+    if branch:
+        branch_row = next((r for r in pnl_branches or [] if r.get("branch") == branch), None)
+
+    if branch:
+        if branch_row:
+            total_revenue = float(branch_row.get("revenue") or 0)
+            gross_profit = float(branch_row.get("gross_profit") or 0)
+            orders = int(branch_row.get("orders") or 0)
+        else:
+            # No P&L row: the branch had no invoices, or the P&L failed; fall
+            # back to the branch-filtered product breakdown.
+            total_revenue = float(p_summary.get("total_revenue") or 0)
+            gross_profit = float(p_summary.get("total_gross_profit") or 0)
+            orders = int(p_summary.get("total_orders") or 0)
+    elif pnl_summary:
         total_revenue = float(pnl_summary.get("sales") or 0)
         gross_profit = float(pnl_summary.get("gross_profit") or 0)
         orders = int(pnl_summary.get("orders") or 0)
@@ -92,9 +129,15 @@ def get_executive_overview(
     # ── Shipping (courier-side KPIs: unsettled balances, pending overrides) ──
     def _load_shipping():
         from jarz_pos.api.shipping_analytics import get_summary_kpis
+        if branch:
+            return get_summary_kpis(from_date=date_from, to_date=date_to, branch=branch)
         return get_summary_kpis(from_date=date_from, to_date=date_to)
 
     shipping = _safe("shipping", _load_shipping, {})
+    if branch:
+        # The ledger's shipping lines are company-wide; a branch reads its own
+        # invoices' courier cost and billed shipping instead.
+        pnl_shipping = {}
 
     # ── Customer segment mix ─────────────────────────────────────────────
     def _load_segments():
@@ -107,6 +150,26 @@ def get_executive_overview(
 
     # ── Inventory alerts ─────────────────────────────────────────────────
     def _load_inventory():
+        if branch:
+            # The branch's own restock statuses, in the alert-list row shape.
+            from jarz_pos.api.inventory_analytics import get_restock
+
+            restock = get_restock(branch).get("restock", [])
+
+            def _as_alert(r):
+                return {
+                    "item_code": r.get("item_code"),
+                    "item_name": r.get("item_name"),
+                    "item_group": r.get("item_group"),
+                    "daily_velocity": r.get("velocity_30d"),
+                    "stock_on_hand": r.get("stock"),
+                    "days_remaining": r.get("days_cover"),
+                }
+
+            return {
+                "critical": [_as_alert(r) for r in restock if r.get("status") == "critical"],
+                "watch_list": [_as_alert(r) for r in restock if r.get("status") == "watch"],
+            }
         from jarz_pos.services.demand_forecasting import build_alert_data, get_settings
         return build_alert_data(get_settings())
 
@@ -117,6 +180,8 @@ def get_executive_overview(
     # ── Consolidated alerts (shipping + inventory critical) ──────────────
     def _load_ship_alerts():
         from jarz_pos.api.shipping_analytics import get_alerts_data
+        if branch:
+            return get_alerts_data(from_date=date_from, to_date=date_to, branch=branch)
         return get_alerts_data(from_date=date_from, to_date=date_to)
 
     # Incomplete books first: they qualify every number below them.
@@ -181,4 +246,10 @@ def get_executive_overview(
         "segment_mix": segment_mix,
         "top_territories": top_territories,
         "alerts": alerts,
+        "filters": {"date_from": date_from, "date_to": date_to, "branch": branch},
+        "scope_notes": (
+            ["net_profit_company_wide", "segment_mix_company_wide", "unsettled_courier_total_current"]
+            if branch
+            else []
+        ),
     }

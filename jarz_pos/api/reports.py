@@ -98,11 +98,59 @@ def _expand_item_groups(roots: tuple) -> List[str]:
     return names
 
 
+def branch_warehouse(branch: Optional[str]) -> Optional[str]:
+    """The stock warehouse of a branch (POS Profile), or None when no branch.
+
+    Raises a clear ValidationError when the branch has no warehouse, rather than
+    silently reporting company-wide stock under a branch's name.
+    """
+    branch = (branch or "").strip()
+    if not branch:
+        return None
+    warehouse = (frappe.db.get_value("POS Profile", branch, "warehouse") or "").strip()
+    if not warehouse:
+        frappe.throw(
+            _("Branch {0} has no stock warehouse configured on its POS Profile.").format(branch),
+            frappe.ValidationError,
+        )
+    return warehouse
+
+
+def _bin_maps(item_codes: List[str], warehouse: Optional[str]):
+    """``(qty_map, value_map)``: item → {warehouse: qty} and item → {warehouse: value}."""
+    filters: Dict[str, Any] = {"item_code": ["in", item_codes], "actual_qty": ["!=", 0]}
+    if warehouse:
+        filters["warehouse"] = warehouse
+    bins = frappe.get_all(
+        "Bin",
+        filters=filters,
+        fields=["item_code", "warehouse", "actual_qty", "stock_value"],
+    )
+    qty_map: Dict[str, Dict[str, float]] = {}
+    value_map: Dict[str, Dict[str, float]] = {}
+    for b in bins:
+        qty_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
+        value_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b.get("stock_value") or 0)
+    return qty_map, value_map
+
+
+def _totals(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    return {
+        "qty": round(sum(float(r.get("total_qty") or 0) for r in rows), 3),
+        "stock_value": round(sum(float(r.get("stock_value") or 0) for r in rows), 2),
+    }
+
+
 @frappe.whitelist()
-def get_final_products_report() -> Dict[str, Any]:
+def get_final_products_report(branch: Optional[str] = None) -> Dict[str, Any]:
     """
     Return stock balances for items in the "Small", "Medium" and "Large" item
     groups, pivoted by warehouse.
+
+    ``branch`` (optional POS Profile): only that branch's warehouse is read and
+    it is the only column. Each item row carries ``stock_value`` (sum of
+    ``Bin.stock_value`` over the columns shown) and ``warehouse_value``; each
+    group carries ``totals: {"qty", "stock_value"}`` and so does the response.
 
     Every table carries the *same* warehouse columns — see
     ``_finished_goods_warehouses`` — and every active size gets a row whether or
@@ -126,6 +174,9 @@ def get_final_products_report() -> Dict[str, Any]:
     }
     """
     _ensure_jarz_manager()
+    branch = (branch or "").strip() or None
+    warehouse = branch_warehouse(branch)
+    filters_echo = {"branch": branch, "warehouse": warehouse}
 
     group_aliases = {
         "Small": {"Small"},
@@ -143,7 +194,7 @@ def get_final_products_report() -> Dict[str, Any]:
     )
 
     if not items:
-        return {"groups": []}
+        return {"groups": [], "totals": {"qty": 0.0, "stock_value": 0.0}, "filters": filters_echo}
 
     item_codes = [it["item_code"] for it in items]
 
@@ -151,16 +202,7 @@ def get_final_products_report() -> Dict[str, Any]:
     # ``> 0``, which dropped a branch's oversold bin and so read the total
     # HIGH: on production Chocolate Hazelnut Medium showed 74 while the ledger
     # said 70, because Dokki's -4 was simply not fetched.
-    bins = frappe.get_all(
-        "Bin",
-        filters={"item_code": ["in", item_codes], "actual_qty": ["!=", 0]},
-        fields=["item_code", "warehouse", "actual_qty"],
-    )
-
-    # Build per-item warehouse map
-    item_wh_map: Dict[str, Dict[str, float]] = {}
-    for b in bins:
-        item_wh_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
+    item_wh_map, item_value_map = _bin_maps(item_codes, warehouse)
 
     # One column set for the whole report. What this guarantees is that the
     # Company's FG warehouse is ALWAYS a column, and that Small, Medium and
@@ -172,10 +214,14 @@ def get_final_products_report() -> Dict[str, Any]:
     # counts negatives, an oversold bin now grows one too). The report that
     # sprouted a "Raw Material" column was cured by repairing the phantom bins,
     # not by this line.
-    warehouse_set: set = set(_finished_goods_warehouses())
-    for wh_qty in item_wh_map.values():
-        warehouse_set.update(wh_qty.keys())
-    warehouses = sorted(warehouse_set)
+    if warehouse:
+        # A branch view shows that branch's store and nothing else.
+        warehouses = [warehouse]
+    else:
+        warehouse_set: set = set(_finished_goods_warehouses())
+        for wh_qty in item_wh_map.values():
+            warehouse_set.update(wh_qty.keys())
+        warehouses = sorted(warehouse_set)
 
     # Build separate tables per group, smallest jar first.
     groups_order = ["Small", "Medium", "Large"]
@@ -191,6 +237,7 @@ def get_final_products_report() -> Dict[str, Any]:
         group_result_items = []
         for it in group_items:
             wh_qty = item_wh_map.get(it["item_code"], {})
+            wh_value = item_value_map.get(it["item_code"], {})
             total = sum(wh_qty.values())
             group_result_items.append({
                 "item_code": it["item_code"],
@@ -199,23 +246,48 @@ def get_final_products_report() -> Dict[str, Any]:
                 "stock_uom": it["stock_uom"],
                 "warehouse_qty": wh_qty,
                 "total_qty": total,
+                "warehouse_value": {wh: round(v, 2) for wh, v in wh_value.items()},
+                "stock_value": round(sum(wh_value.values()), 2),
             })
 
         result_groups.append({
             "group_name": group_name,
             "warehouses": warehouses,
             "items": group_result_items,
+            "totals": _totals(group_result_items),
         })
 
-    return {"groups": result_groups}
+    all_rows = [row for group in result_groups for row in group["items"]]
+    return {"groups": result_groups, "totals": _totals(all_rows), "filters": filters_echo}
+
+
+def _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo) -> Dict[str, Any]:
+    bucket_totals = {
+        "raw_materials": _totals(raw_materials),
+        "sub_assemblies": _totals(sub_assemblies),
+        "consumables": _totals(consumables),
+    }
+    return {
+        "raw_materials": raw_materials,
+        "sub_assemblies": sub_assemblies,
+        "consumables": consumables,
+        "bucket_totals": bucket_totals,
+        "totals": _totals(raw_materials + sub_assemblies + consumables),
+        "filters": filters_echo,
+    }
 
 
 @frappe.whitelist()
-def get_materials_report() -> Dict[str, Any]:
+def get_materials_report(branch: Optional[str] = None) -> Dict[str, Any]:
     """
     Return stock balances for the material, sub-assembly and consumable item
     groups — each expanded to its descendants, so the report follows the Item
     Group tree rather than a fixed list of leaf names.
+
+    ``branch`` (optional POS Profile): only that branch's warehouse is read.
+    Each row carries ``stock_value`` (sum of ``Bin.stock_value``) and
+    ``warehouse_value``; ``bucket_totals`` gives ``{"qty", "stock_value"}`` per
+    bucket and ``totals`` the grand total (qty mixes UOMs — use the value).
 
     Response shape:
     {
@@ -236,6 +308,9 @@ def get_materials_report() -> Dict[str, Any]:
     }
     """
     _ensure_materials_report_access()
+    branch = (branch or "").strip() or None
+    warehouse = branch_warehouse(branch)
+    filters_echo = {"branch": branch, "warehouse": warehouse}
 
     # Previously a literal ["Raw Material", "Sub Assembly", "Consumable"]. The
     # middle name never matched anything — the group is "Sub Assemblies", plural
@@ -245,7 +320,7 @@ def get_materials_report() -> Dict[str, Any]:
     consumable_groups = _expand_item_groups(_CONSUMABLE_ROOTS)
     target_groups = material_groups + sub_assembly_groups + consumable_groups
     if not target_groups:
-        return {"raw_materials": [], "sub_assemblies": [], "consumables": []}
+        return _materials_payload([], [], [], filters_echo)
 
     items = frappe.get_all(
         "Item",
@@ -255,7 +330,7 @@ def get_materials_report() -> Dict[str, Any]:
     )
 
     if not items:
-        return {"raw_materials": [], "sub_assemblies": [], "consumables": []}
+        return _materials_payload([], [], [], filters_echo)
 
     item_codes = [it["item_code"] for it in items]
 
@@ -266,15 +341,7 @@ def get_materials_report() -> Dict[str, Any]:
     # this screen disagreeing was worse than either rule on its own, because
     # the same item in the same condition read differently depending on which
     # tab you opened.
-    bins = frappe.get_all(
-        "Bin",
-        filters={"item_code": ["in", item_codes], "actual_qty": ["!=", 0]},
-        fields=["item_code", "warehouse", "actual_qty"],
-    )
-
-    item_wh_map: Dict[str, Dict[str, float]] = {}
-    for b in bins:
-        item_wh_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
+    item_wh_map, item_value_map = _bin_maps(item_codes, warehouse)
 
     raw_materials = []
     sub_assemblies = []
@@ -287,6 +354,7 @@ def get_materials_report() -> Dict[str, Any]:
         if not wh_qty:
             continue
         total = sum(wh_qty.values())
+        wh_value = item_value_map.get(it["item_code"], {})
         entry = {
             "item_code": it["item_code"],
             "item_name": it["item_name"],
@@ -295,6 +363,8 @@ def get_materials_report() -> Dict[str, Any]:
             "warehouse_qty": wh_qty,
             "total_qty": total,
             "warehouse_count": len(wh_qty),
+            "warehouse_value": {wh: round(v, 2) for wh, v in wh_value.items()},
+            "stock_value": round(sum(wh_value.values()), 2),
         }
         if it["item_group"] in sub_assembly_set:
             sub_assemblies.append(entry)
@@ -306,8 +376,4 @@ def get_materials_report() -> Dict[str, Any]:
     # Sort consumables: items in more warehouses first
     consumables.sort(key=lambda x: (-x["warehouse_count"], x["item_name"]))
 
-    return {
-        "raw_materials": raw_materials,
-        "sub_assemblies": sub_assemblies,
-        "consumables": consumables,
-    }
+    return _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo)

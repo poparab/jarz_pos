@@ -962,39 +962,28 @@ class TestManagerAPI(unittest.TestCase):
 		"""Admin report should surface submitted invoices whose stock rows still point to the old warehouse."""
 		from jarz_pos.api.manager import get_invoice_warehouse_alignment_report
 
-		invoice = _FakeInvoice(
-			name="INV-004",
-			docstatus=1,
-			is_pos=1,
-			company="Jarz",
-			customer="CUST-004",
-			pos_profile="Dokki",
-			custom_kanban_profile="Nasr city",
-			items=[SimpleNamespace(name="SII-020", item_code="ITEM-001", warehouse="Stores - Dokki")],
-		)
-
 		mock_frappe = MagicMock()
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.get_roles.return_value = ["System Manager"]
 		mock_frappe.has_permission.return_value = True
-		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 
-		def _get_all(doctype, **kwargs):
-			if doctype == "Sales Invoice":
-				return [{"name": "INV-004"}]
-			if doctype == "Delivery Note Item":
-				return []
+		# The report is set-based: one query for candidate invoices (profile,
+		# warehouse and Delivery Note checks joined in), one for their stock rows.
+		def _sql(query, params=None, as_dict=False, **kwargs):
+			if "FROM `tabSales Invoice` si" in query:
+				return [{
+					"name": "INV-004", "company": "Jarz", "customer": "CUST-004",
+					"posting_date": None, "grand_total": 0,
+					"operational_profile": "Nasr city", "profile_found": "Nasr city",
+					"profile_warehouse": "Stores - Nasr city",
+					"warehouse_found": "Stores - Nasr city", "warehouse_company": "Jarz",
+				}]
+			if "FROM `tabSales Invoice Item` sii" in query:
+				return [{"parent": "INV-004", "name": "SII-020", "item_code": "ITEM-001",
+						 "warehouse": "Stores - Dokki"}]
 			return []
 
-		mock_frappe.get_all.side_effect = _get_all
-		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
-				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.sql.side_effect = _sql
 
 		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
 			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
@@ -1047,6 +1036,23 @@ class TestManagerAPI(unittest.TestCase):
 			if doctype == "Sales Invoice" and name == "INV-005" and field == "set_warehouse":
 				invoice._data[field] = value
 
+		# The alignment report feeding the repair is set-based (frappe.db.sql):
+		# one query for candidate invoices, one for their stock rows.
+		def _sql(query, params=None, as_dict=False, **kwargs):
+			if "FROM `tabSales Invoice` si" in query:
+				return [{
+					"name": "INV-005", "company": "Jarz", "customer": "CUST-005",
+					"posting_date": None, "grand_total": 0,
+					"operational_profile": "Nasr city", "profile_found": "Nasr city",
+					"profile_warehouse": "Stores - Nasr city",
+					"warehouse_found": "Stores - Nasr city", "warehouse_company": "Jarz",
+				}]
+			if "FROM `tabSales Invoice Item` sii" in query:
+				return [{"parent": "INV-005", "name": "SII-021", "item_code": "ITEM-001",
+						 "warehouse": "Stores - Dokki"}]
+			return []
+
+		mock_frappe.db.sql.side_effect = _sql
 		mock_frappe.get_all.side_effect = _get_all
 		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
 		mock_frappe.get_meta.return_value = meta

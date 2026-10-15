@@ -64,8 +64,19 @@ def _segment_sort_key(segment: str) -> int:
 def get_customer_analytics(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    branch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Aggregated customer / RFM analytics for the given date range.
+
+    ``branch`` (optional POS Profile name) scopes every invoice-based figure to
+    that branch's invoices (``si.pos_profile``). The current-state RFM snapshot
+    and the needs-attention list keep the stored company-wide RFM metrics, but
+    only for customers who have ever ordered at that branch; "new customers"
+    become customers whose first order *at that branch* falls in the range.
+
+    Additive keys: ``segments_summary`` (exactly what
+    ``segmentation.get_segment_summary`` returns: company-wide counts per
+    segment plus the overlapping ``Regular`` pseudo-row) and ``filters``.
 
     Response shape:
     {
@@ -92,28 +103,47 @@ def get_customer_analytics(
     if not date_from or not date_to:
         date_from, date_to = _default_dates()
 
-    params = {"fd": date_from, "td": date_to}
+    branch = (branch or "").strip() or None
+    params = {"fd": date_from, "td": date_to, "branch": branch, "segs": tuple(AT_RISK_SEGMENTS)}
+
+    # Branch conditions ("" without a branch, so the queries are unchanged).
+    si_branch = "AND si.pos_profile = %(branch)s" if branch else ""
+    plain_branch = "AND pos_profile = %(branch)s" if branch else ""
+    # Customers of a branch = customers with at least one submitted invoice there.
+    customer_branch = (
+        """AND EXISTS (
+            SELECT 1 FROM `tabSales Invoice` bx
+            WHERE bx.customer = c.name
+              AND bx.docstatus = 1
+              AND bx.is_return = 0
+              AND bx.pos_profile = %(branch)s
+        )"""
+        if branch
+        else ""
+    )
 
     # ── Snapshot: customer count + avg RFM metrics per segment ───────────
     snapshot_rows = frappe.db.sql(
-        """
+        f"""
         SELECT
-            COALESCE(customer_segment, 'Unclassified') AS segment,
-            COUNT(*)                     AS customers,
-            AVG(rfm_recency_days)        AS avg_recency,
-            AVG(rfm_frequency_count)     AS avg_frequency,
-            AVG(rfm_avg_order_value)     AS avg_aov
-        FROM `tabCustomer`
-        WHERE disabled = 0
+            COALESCE(c.customer_segment, 'Unclassified') AS segment,
+            COUNT(*)                       AS customers,
+            AVG(c.rfm_recency_days)        AS avg_recency,
+            AVG(c.rfm_frequency_count)     AS avg_frequency,
+            AVG(c.rfm_avg_order_value)     AS avg_aov
+        FROM `tabCustomer` c
+        WHERE c.disabled = 0
+          {customer_branch}
         GROUP BY segment
         """,
+        params,
         as_dict=True,
     )
     snapshot_map = {r["segment"]: r for r in snapshot_rows}
 
     # ── Date-scoped revenue per segment ──────────────────────────────────
     revenue_rows = frappe.db.sql(
-        """
+        f"""
         SELECT
             COALESCE(c.customer_segment, 'Unclassified') AS segment,
             COUNT(*)                        AS orders,
@@ -124,6 +154,7 @@ def get_customer_analytics(
         WHERE si.docstatus = 1
           AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
+          {si_branch}
         GROUP BY segment
         """,
         params,
@@ -155,7 +186,7 @@ def get_customer_analytics(
 
     # ── Top customers by revenue in range ────────────────────────────────
     top_customers = frappe.db.sql(
-        """
+        f"""
         SELECT
             si.customer,
             c.customer_name,
@@ -168,6 +199,7 @@ def get_customer_analytics(
         WHERE si.docstatus = 1
           AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
+          {si_branch}
         GROUP BY si.customer, c.customer_name, c.customer_segment, c.rfm_recency_days
         ORDER BY revenue DESC
         LIMIT 20
@@ -182,22 +214,23 @@ def get_customer_analytics(
 
     # ── Customers needing attention (current snapshot) ───────────────────
     at_risk_customers = frappe.db.sql(
-        """
+        f"""
         SELECT
-            name           AS customer,
-            customer_name,
-            customer_segment AS segment,
-            rfm_recency_days   AS recency_days,
-            rfm_frequency_count AS frequency,
-            rfm_avg_order_value AS avg_aov,
-            territory
-        FROM `tabCustomer`
-        WHERE disabled = 0
-          AND customer_segment IN %(segs)s
-        ORDER BY rfm_avg_order_value DESC
+            c.name                AS customer,
+            c.customer_name,
+            c.customer_segment    AS segment,
+            c.rfm_recency_days    AS recency_days,
+            c.rfm_frequency_count AS frequency,
+            c.rfm_avg_order_value AS avg_aov,
+            c.territory
+        FROM `tabCustomer` c
+        WHERE c.disabled = 0
+          AND c.customer_segment IN %(segs)s
+          {customer_branch}
+        ORDER BY c.rfm_avg_order_value DESC
         LIMIT 50
         """,
-        {"segs": tuple(AT_RISK_SEGMENTS)},
+        params,
         as_dict=True,
     )
     for r in at_risk_customers:
@@ -209,12 +242,13 @@ def get_customer_analytics(
 
     # ── New-customer acquisition in range (first-ever order in window) ────
     acquisition_trend = frappe.db.sql(
-        """
+        f"""
         SELECT f.first_date AS date, COUNT(*) AS new_customers
         FROM (
             SELECT customer, MIN(posting_date) AS first_date
             FROM `tabSales Invoice`
             WHERE docstatus = 1 AND is_return = 0 AND customer IS NOT NULL
+              {plain_branch}
             GROUP BY customer
         ) f
         WHERE f.first_date BETWEEN %(fd)s AND %(td)s
@@ -232,7 +266,7 @@ def get_customer_analytics(
 
     # ── Period totals ────────────────────────────────────────────────────
     totals = frappe.db.sql(
-        """
+        f"""
         SELECT
             COUNT(*)                        AS orders,
             COALESCE(SUM(grand_total), 0)    AS revenue,
@@ -241,6 +275,7 @@ def get_customer_analytics(
         WHERE docstatus = 1
           AND is_return = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
+          {plain_branch}
         """,
         params,
         as_dict=True,
@@ -280,4 +315,22 @@ def get_customer_analytics(
         "top_customers": top_customers,
         "at_risk_customers": at_risk_customers,
         "acquisition_trend": acquisition_trend,
+        "segments_summary": _segments_summary(),
+        "filters": {"date_from": date_from, "date_to": date_to, "branch": branch},
     }
+
+
+def _segments_summary():
+    """What ``segmentation.get_segment_summary`` returns, so one call feeds the
+    merged customers + segments screen. A failure leaves the rest of the report
+    intact and returns an empty list."""
+    try:
+        from jarz_pos.services.rfm_segmentation import get_segment_summary
+
+        return get_segment_summary()
+    except Exception:
+        try:
+            frappe.log_error(frappe.get_traceback(), "customer_analytics: segment summary failed")
+        except Exception:
+            pass
+        return []

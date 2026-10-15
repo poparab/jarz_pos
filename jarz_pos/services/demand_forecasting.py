@@ -213,10 +213,11 @@ def build_alert_data(settings):
             i.jarz_velocity_60d AS daily_velocity,
             COALESCE(b.stock, 0) AS stock_on_hand,
             i.jarz_days_of_stock AS days_remaining,
-            ROUND(COALESCE(b.stock, 0) * i.valuation_rate, 0) AS stock_value
+            -- The ledger's own Bin value, not stock x the stale Item.valuation_rate.
+            ROUND(COALESCE(b.stock_value, 0), 0) AS stock_value
         FROM `tabItem` i
         LEFT JOIN (
-            SELECT item_code, SUM(actual_qty) AS stock
+            SELECT item_code, SUM(actual_qty) AS stock, SUM(stock_value) AS stock_value
             FROM `tabBin` GROUP BY item_code
         ) b ON b.item_code = i.name
         WHERE i.is_stock_item = 1

@@ -4621,6 +4621,16 @@ def get_invoice_warehouse_alignment_report(
     for. ``repair_invoice_warehouse_alignment`` — the endpoint that actually
     rewrites invoice/item warehouses — keeps the stricter admin gate; only the
     report moved.
+
+    Set-based since 2026-10: one query selects the candidate invoices with the
+    ``branch`` (operational profile = ``custom_kanban_profile`` or
+    ``pos_profile``), "no submitted Delivery Note" and "something is out of
+    line" conditions applied in SQL **before** ``LIMIT``, and one more query
+    loads the stock rows of just those invoices. Previously the limit was taken
+    over every POS invoice first and then filtered in Python with a
+    ``get_doc`` per row, so a branch filter could return nothing even when that
+    branch had misaligned invoices. ``limit`` (1..500) now caps the misaligned
+    invoices returned. Messages and the response shape are unchanged.
     """
     _ensure_manager_dashboard_access()
     frappe.has_permission("Sales Invoice", throw=True)
@@ -4630,99 +4640,152 @@ def get_invoice_warehouse_alignment_report(
     except Exception:
         limit_value = 100
 
-    filters: Dict[str, Any] = {"docstatus": 1, "is_pos": 1}
+    branch = str(branch or "").strip() or None
+    profile_expr = "COALESCE(NULLIF(si.custom_kanban_profile, ''), si.pos_profile)"
+    conditions = ["si.docstatus = 1", "si.is_pos = 1"]
+    params: Dict[str, Any] = {"limit": limit_value}
     if company:
-        filters["company"] = company
+        conditions.append("si.company = %(company)s")
+        params["company"] = company
+    if branch:
+        conditions.append(f"{profile_expr} = %(branch)s")
+        params["branch"] = branch
 
-    report_rows = frappe.get_all(
-        "Sales Invoice",
-        filters=filters,
-        fields=[
-            "name",
-            "company",
-            "customer",
-            "posting_date",
-            "grand_total",
-            "custom_kanban_profile",
-            "pos_profile",
-        ],
-        order_by="modified desc",
-        limit_page_length=limit_value,
+    # The OR-block is a superset of what the Python pass below reports, so the
+    # LIMIT counts candidate problems, and the exact messages still come from
+    # one place.
+    candidates = frappe.db.sql(
+        f"""
+        SELECT si.name, si.company, si.customer, si.posting_date, si.grand_total,
+               {profile_expr} AS operational_profile,
+               pp.name AS profile_found,
+               pp.warehouse AS profile_warehouse,
+               wh.name AS warehouse_found,
+               wh.company AS warehouse_company
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabPOS Profile` pp ON pp.name = {profile_expr}
+        LEFT JOIN `tabWarehouse` wh ON wh.name = TRIM(pp.warehouse)
+        WHERE {" AND ".join(conditions)}
+          AND NOT EXISTS (
+              SELECT 1 FROM `tabDelivery Note Item` dni
+              WHERE dni.against_sales_invoice = si.name AND dni.docstatus = 1
+          )
+          AND (
+              IFNULL({profile_expr}, '') = ''
+              OR TRIM(IFNULL(pp.warehouse, '')) = ''
+              OR wh.name IS NULL
+              OR (IFNULL(si.company, '') != '' AND IFNULL(wh.company, '') != ''
+                  AND si.company != wh.company)
+              OR EXISTS (
+                  SELECT 1
+                  FROM `tabSales Invoice Item` sii
+                  JOIN `tabItem` it ON it.name = sii.item_code AND it.is_stock_item = 1
+                  WHERE sii.parent = si.name AND sii.parenttype = 'Sales Invoice'
+                    AND TRIM(IFNULL(sii.warehouse, '')) != TRIM(pp.warehouse)
+              )
+          )
+        ORDER BY si.modified DESC
+        LIMIT %(limit)s
+        """,
+        params,
+        as_dict=True,
     ) or []
 
+    invoice_names = [str(r.get("name")) for r in candidates if r.get("name")]
+    stock_rows_by_invoice: Dict[str, List[Dict[str, Any]]] = {}
+    if invoice_names:
+        for item_row in frappe.db.sql(
+            """
+            SELECT sii.parent, sii.name, sii.item_code, sii.warehouse
+            FROM `tabSales Invoice Item` sii
+            JOIN `tabItem` it ON it.name = sii.item_code AND it.is_stock_item = 1
+            WHERE sii.parent IN %(invoices)s AND sii.parenttype = 'Sales Invoice'
+            ORDER BY sii.parent, sii.idx
+            """,
+            {"invoices": tuple(invoice_names)},
+            as_dict=True,
+        ) or []:
+            stock_rows_by_invoice.setdefault(str(item_row.get("parent")), []).append(item_row)
+
     misaligned_invoices: List[Dict[str, Any]] = []
-    for row in report_rows:
-        invoice_name = row.get("name") if isinstance(row, dict) else getattr(row, "name", None)
+    for row in candidates:
+        invoice_name = row.get("name")
         if not invoice_name:
             continue
-
-        inv = frappe.get_doc("Sales Invoice", invoice_name)
-        operational_profile = inv.get("custom_kanban_profile") or inv.get("pos_profile")
-        if branch and operational_profile != branch:
-            continue
-
-        submitted_delivery_notes = _find_submitted_delivery_notes(inv.name)
-        if submitted_delivery_notes:
-            continue
-
-        posting_date = inv.get("posting_date")
-        amount = float(inv.get("grand_total") or 0)
+        operational_profile = row.get("operational_profile") or None
+        posting_date = row.get("posting_date")
+        base = {
+            "invoice_id": invoice_name,
+            "company": row.get("company"),
+            "customer": row.get("customer"),
+        }
+        tail = {
+            "posting_date": str(posting_date) if posting_date else None,
+            "amount": float(row.get("grand_total") or 0),
+            "delivery_notes": [],
+        }
 
         if not operational_profile:
-            misaligned_invoices.append(
-                {
-                    "invoice_id": inv.name,
-                    "company": inv.get("company"),
-                    "customer": inv.get("customer"),
-                    "operational_profile": None,
-                    "target_warehouse": None,
-                    "posting_date": str(posting_date) if posting_date else None,
-                    "amount": amount,
-                    "delivery_notes": [],
-                    "issue": "Invoice has no operational POS Profile configured.",
-                    "mismatches": [],
-                }
-            )
+            misaligned_invoices.append({
+                **base,
+                "operational_profile": None,
+                "target_warehouse": None,
+                **tail,
+                "issue": "Invoice has no operational POS Profile configured.",
+                "mismatches": [],
+            })
             continue
 
-        try:
-            expected_warehouse = _resolve_pos_profile_warehouse(operational_profile)
-            _validate_transfer_target_warehouse(inv, expected_warehouse)
-        except frappe.ValidationError as validation_error:
-            misaligned_invoices.append(
-                {
-                    "invoice_id": inv.name,
-                    "company": inv.get("company"),
-                    "customer": inv.get("customer"),
-                    "operational_profile": operational_profile,
-                    "target_warehouse": None,
-                    "posting_date": str(posting_date) if posting_date else None,
-                    "amount": amount,
-                    "delivery_notes": [],
-                    "issue": str(validation_error),
-                    "mismatches": [],
-                }
+        # Same checks and wording as _resolve_pos_profile_warehouse and
+        # _validate_transfer_target_warehouse, read from the joined columns.
+        expected_warehouse = str(row.get("profile_warehouse") or "").strip()
+        issue = None
+        if not expected_warehouse:
+            issue = f"Target POS Profile {operational_profile} has no warehouse configured."
+        elif not row.get("warehouse_found"):
+            issue = (
+                f"Configured warehouse {expected_warehouse} for POS Profile "
+                f"{operational_profile} was not found."
             )
+        else:
+            invoice_company = str(row.get("company") or "").strip()
+            warehouse_company = str(row.get("warehouse_company") or "").strip()
+            if invoice_company and warehouse_company and invoice_company != warehouse_company:
+                issue = f"Target warehouse {expected_warehouse} belongs to a different company."
+        if issue:
+            misaligned_invoices.append({
+                **base,
+                "operational_profile": operational_profile,
+                "target_warehouse": None,
+                **tail,
+                "issue": issue,
+                "mismatches": [],
+            })
             continue
 
-        mismatches = _get_invoice_warehouse_mismatches(inv, expected_warehouse)
+        mismatches: List[Dict[str, str]] = []
+        for item_row in stock_rows_by_invoice.get(str(invoice_name), []):
+            item_code = str(item_row.get("item_code") or "").strip()
+            if not item_code:
+                continue
+            row_warehouse = str(item_row.get("warehouse") or "").strip()
+            if row_warehouse != expected_warehouse:
+                mismatches.append({
+                    "row_name": str(item_row.get("name") or "").strip(),
+                    "item_code": item_code,
+                    "warehouse": row_warehouse or "blank",
+                })
         if mismatches:
             actual_warehouses = sorted({m.get("warehouse") for m in mismatches if m.get("warehouse")})
-            misaligned_invoices.append(
-                {
-                    "invoice_id": inv.name,
-                    "company": inv.get("company"),
-                    "customer": inv.get("customer"),
-                    "operational_profile": operational_profile,
-                    "target_warehouse": expected_warehouse,
-                    "actual_warehouses": actual_warehouses,
-                    "posting_date": str(posting_date) if posting_date else None,
-                    "amount": amount,
-                    "delivery_notes": [],
-                    "issue": "Invoice item warehouses do not match the operational branch warehouse.",
-                    "mismatches": mismatches,
-                }
-            )
+            misaligned_invoices.append({
+                **base,
+                "operational_profile": operational_profile,
+                "target_warehouse": expected_warehouse,
+                "actual_warehouses": actual_warehouses,
+                **tail,
+                "issue": "Invoice item warehouses do not match the operational branch warehouse.",
+                "mismatches": mismatches,
+            })
 
     return {"success": True, "count": len(misaligned_invoices), "invoices": misaligned_invoices}
 

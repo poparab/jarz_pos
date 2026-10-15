@@ -38,6 +38,43 @@ def _raise_frappe(message, exc=None, title=None):
 	raise Exception(message)
 
 
+def _alignment_frappe(profile_warehouse="Stores - Nasr city", warehouse_found="Stores - Nasr city"):
+	"""A frappe mock answering the report's two set-based queries.
+
+	INV-006 was taken at Dokki but moved to Nasr city on the Kanban, and its one
+	stock row still points at the Dokki store.
+	"""
+	mock_frappe = MagicMock()
+	mock_frappe.logger.return_value = MagicMock()
+	mock_frappe.has_permission.return_value = True
+	mock_frappe.PermissionError = PermissionError
+	mock_frappe.throw.side_effect = _raise_frappe
+
+	candidate = {
+		"name": "INV-006",
+		"company": "Jarz",
+		"customer": "CUST-006",
+		"posting_date": "2026-09-01",
+		"grand_total": 123.45,
+		"operational_profile": "Nasr city",
+		"profile_found": "Nasr city",
+		"profile_warehouse": profile_warehouse,
+		"warehouse_found": warehouse_found,
+		"warehouse_company": "Jarz" if warehouse_found else None,
+	}
+	stock_row = {"parent": "INV-006", "name": "SII-030", "item_code": "ITEM-001", "warehouse": "Stores - Dokki"}
+
+	def _sql(query, params=None, as_dict=False, **kwargs):
+		if "FROM `tabSales Invoice` si" in query:
+			return [dict(candidate)]
+		if "FROM `tabSales Invoice Item` sii" in query:
+			return [dict(stock_row)]
+		return []
+
+	mock_frappe.db.sql.side_effect = _sql
+	return mock_frappe
+
+
 class TestWarehouseAlignmentAccess(unittest.TestCase):
 	"""Tests for the manager/line-manager vs admin access tiers on the
 	invoice warehouse alignment report and repair endpoints."""
@@ -53,42 +90,9 @@ class TestWarehouseAlignmentAccess(unittest.TestCase):
 		"""
 		from jarz_pos.api.manager import get_invoice_warehouse_alignment_report
 
-		invoice = _FakeInvoice(
-			name="INV-006",
-			docstatus=1,
-			is_pos=1,
-			company="Jarz",
-			customer="CUST-006",
-			pos_profile="Dokki",
-			custom_kanban_profile="Nasr city",
-			posting_date="2026-09-01",
-			grand_total=123.45,
-			items=[SimpleNamespace(name="SII-030", item_code="ITEM-001", warehouse="Stores - Dokki")],
-		)
-
-		mock_frappe = MagicMock()
-		mock_frappe.logger.return_value = MagicMock()
+		mock_frappe = _alignment_frappe()
 		# Deliberately NOT an admin role — only the manager/line-manager tier.
 		mock_frappe.get_roles.return_value = ["JARZ line manager"]
-		mock_frappe.has_permission.return_value = True
-		mock_frappe.db.exists.side_effect = lambda doctype, name: True
-
-		def _get_all(doctype, **kwargs):
-			if doctype == "Sales Invoice":
-				return [{"name": "INV-006"}]
-			if doctype == "Delivery Note Item":
-				return []
-			return []
-
-		mock_frappe.get_all.side_effect = _get_all
-		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
-				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-			}.get((doctype, name, field))
-		)
 
 		# _ensure_manager_dashboard_access runs for REAL here (not patched away) so the
 		# widened gate is actually exercised, not just assumed.
@@ -99,10 +103,47 @@ class TestWarehouseAlignmentAccess(unittest.TestCase):
 		self.assertEqual(result.get("count"), 1)
 		row = result["invoices"][0]
 		self.assertEqual(row["invoice_id"], "INV-006")
+		self.assertEqual(row["operational_profile"], "Nasr city")
 		self.assertEqual(row["target_warehouse"], "Stores - Nasr city")
 		self.assertEqual(row["actual_warehouses"], ["Stores - Dokki"])
 		self.assertEqual(row["posting_date"], "2026-09-01")
 		self.assertEqual(row["amount"], 123.45)
+		self.assertEqual(
+			row["mismatches"],
+			[{"row_name": "SII-030", "item_code": "ITEM-001", "warehouse": "Stores - Dokki"}],
+		)
+		# Set-based: no per-invoice get_doc.
+		mock_frappe.get_doc.assert_not_called()
+
+	def test_branch_filter_and_limit_are_applied_in_sql(self):
+		"""The branch condition must sit in the SQL, before LIMIT, not in a Python pass after it."""
+		from jarz_pos.api.manager import get_invoice_warehouse_alignment_report
+
+		mock_frappe = _alignment_frappe()
+		mock_frappe.get_roles.return_value = ["JARZ line manager"]
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe):
+			get_invoice_warehouse_alignment_report(branch="Nasr city", limit=999)
+
+		query, params = mock_frappe.db.sql.call_args_list[0][0][:2]
+		self.assertIn("%(branch)s", query)
+		self.assertIn("NOT EXISTS", query)
+		self.assertLess(query.index("%(branch)s"), query.index("LIMIT"))
+		self.assertEqual(params["branch"], "Nasr city")
+		self.assertEqual(params["limit"], 500)  # clamped
+
+	def test_profile_without_warehouse_is_reported_with_the_old_message(self):
+		from jarz_pos.api.manager import get_invoice_warehouse_alignment_report
+
+		mock_frappe = _alignment_frappe(profile_warehouse=None, warehouse_found=None)
+		mock_frappe.get_roles.return_value = ["JARZ line manager"]
+
+		with patch("jarz_pos.api.manager.frappe", mock_frappe):
+			result = get_invoice_warehouse_alignment_report()
+
+		row = result["invoices"][0]
+		self.assertIsNone(row["target_warehouse"])
+		self.assertEqual(row["issue"], "Target POS Profile Nasr city has no warehouse configured.")
 
 	def test_repair_invoice_warehouse_alignment_still_requires_admin_tier(self):
 		"""The bulk repair endpoint must stay stricter than the report: a line manager

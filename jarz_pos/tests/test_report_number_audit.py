@@ -26,7 +26,9 @@ def _function(src, name):
 class TestProductRevenueIsNetOfInvoiceDiscounts(unittest.TestCase):
     def test_line_amount_is_base_net_amount(self):
         src = _src("product_analytics")
-        self.assertIn("sii.base_net_amount AS amount", src)
+        # Optionally NULL-guarded since the 2026-10 SQL rewrite:
+        # ``IFNULL(sii.base_net_amount, 0) AS amount``.
+        self.assertRegex(src, r"(IFNULL\(\s*)?sii\.base_net_amount(\s*,\s*0\s*\))?\s+AS amount")
         self.assertNotRegex(src, r"sii\.amount\s*,")
 
 

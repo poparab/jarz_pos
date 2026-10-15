@@ -253,6 +253,62 @@ class TestBuckets(unittest.TestCase):
         )
 
 
+class TestBranchSplit(unittest.TestCase):
+    def test_without_a_branch_the_payload_gains_only_additive_keys(self):
+        r = build(*september())
+        self.assertEqual(r["branches"], [])
+        self.assertEqual(r["filters"]["branch"], None)
+        self.assertEqual(r["data_quality"]["gl_scope"], "company")
+        self.assertEqual(r["data_quality"]["notes"], [])
+
+    def test_branch_filters_channels_but_leaves_the_ledger_alone(self):
+        gl_rows, invoice_rows, shipping_rows = september()
+        company = build(gl_rows, invoice_rows, shipping_rows)
+        r = fr.build_report(
+            fd=date(2026, 9, 1), td=date(2026, 9, 3), gl_rows=gl_rows, invoice_rows=invoice_rows,
+            shipping_rows=shipping_rows, shipping_account=SHIP, freight_account=FREIGHT,
+            recurring=RECURRING, due={}, order_basis=ORDER_BASIS,
+            branch="Dokki",
+            branch_rows=[{"branch": "Dokki", "orders": 2, "revenue": 500.0, "cogs": 200.0,
+                          "gross_profit": 300.0, "shipping_income": 0.0}],
+            branch_invoice_rows=[inv("B2B Supply", 2, 500, orders=2)],
+            branch_shipping_rows=[],
+        )
+        # Ledger-based figures are identical to the company-wide report.
+        for key in ("total_revenue", "total_expenses", "net_profit", "gross_profit"):
+            self.assertEqual(r["summary"][key], company["summary"][key])
+        self.assertTrue(r["reconciliation"]["matches"])
+        # Channels are the branch's invoices, with no ledger "adjustments" row.
+        self.assertFalse([c for c in r["channels"] if c["channel"] == "adjustments"])
+        b2b = next(c for c in r["channels"] if c["channel"] == "b2b")
+        self.assertEqual(b2b["revenue"], 500.0)
+        self.assertEqual(b2b["share_pct"], 100.0)
+        self.assertEqual(r["summary"]["orders"], 2)
+        self.assertIn("gl_company_wide", r["data_quality"]["notes"])
+        self.assertEqual(r["branches"][0]["branch"], "Dokki")
+        self.assertEqual(r["filters"]["branch"], "Dokki")
+
+    def test_assemble_branch_rows(self):
+        rows = fr.assemble_branch_rows(
+            [{"branch": "Dokki", "orders": 3, "revenue": 900}, {"branch": "Nasr", "orders": 1, "revenue": 100}],
+            [{"branch": "Dokki", "cogs": 300, "stock_sales": 900, "costed_sales": 450}],
+            [{"branch": "Dokki", "amount": 60}],
+        )
+        self.assertEqual([r["branch"] for r in rows], ["Dokki", "Nasr"])
+        d = rows[0]
+        self.assertEqual((d["orders"], d["revenue"], d["cogs"], d["gross_profit"]), (3, 900.0, 300.0, 600.0))
+        self.assertEqual(d["shipping_income"], 60.0)
+        self.assertEqual(d["cogs_coverage_pct"], 50.0)
+        self.assertEqual(rows[1]["cogs"], 0.0)
+
+    def test_actual_cost_reads_incoming_rate_and_delivery_notes(self):
+        join_sql, cost = fr.actual_line_cost_sql()
+        self.assertIn("incoming_rate * sii.stock_qty", cost)
+        self.assertIn("si.update_stock = 1", cost)
+        self.assertIn("dni.si_detail", join_sql)
+        self.assertIn("%(fd)s", join_sql)
+
+
 class TestLedgerQuery(unittest.TestCase):
     def test_period_closing_vouchers_are_excluded(self):
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -280,6 +336,47 @@ class TestShippingAnalyticsSource(unittest.TestCase):
         for q in self.queries:
             if "FROM `tabSales Invoice`" in q:
                 self.assertIn("is_return = 0", q, msg=q[:120])
+
+
+class TestUnsettledCourierBalancesAsOf(unittest.TestCase):
+    """Unsettled courier balances can be read as they stood at ``to_date``."""
+
+    def _run(self, **kwargs):
+        from unittest.mock import MagicMock, patch
+
+        from jarz_pos.api import shipping_analytics as sa
+
+        fake = MagicMock()
+        seen = []
+
+        def _sql(query, params=None, as_dict=False, **kw):
+            seen.append((query, params))
+            return [{"party_type": "Employee", "party": "EMP-1", "order_count": 2,
+                     "total_owed": 120, "oldest_date": "2026-09-20 10:00:00"}]
+
+        fake.db.sql.side_effect = _sql
+        with patch.object(sa, "frappe", fake), patch.object(sa, "_ensure_jarz_manager"), patch.object(
+            sa, "_party_label", side_effect=lambda t, p: p
+        ), patch.object(sa, "nowdate", return_value="2026-10-15"):
+            rows = sa.get_unsettled_courier_balances(**kwargs)
+        return rows, seen
+
+    def test_no_as_of_is_todays_unsettled_balance(self):
+        rows, seen = self._run()
+        query, _params = seen[0]
+        self.assertIn("ct.status = 'Unsettled'", query)
+        self.assertNotIn("as_of_end", query)
+        self.assertEqual(25, rows[0]["days_aged"])
+
+    def test_as_of_counts_rows_settled_after_that_day(self):
+        rows, seen = self._run(as_of="2026-09-30", branch="Dokki")
+        query, params = seen[0]
+        self.assertIn("ct.date <= %(as_of_end)s", query)
+        self.assertIn("COALESCE(ct.settled_at, ct.modified) > %(as_of_end)s", query)
+        self.assertIn("bsi.pos_profile = %(branch)s", query)
+        self.assertEqual("2026-09-30 23:59:59", params["as_of_end"])
+        # Aged to the as-of date, not today.
+        self.assertEqual(10, rows[0]["days_aged"])
 
 
 if __name__ == "__main__":

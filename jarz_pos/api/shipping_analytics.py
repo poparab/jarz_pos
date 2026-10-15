@@ -32,6 +32,31 @@ _BILLED_SHIPPING_INCOME = """(
 )"""
 
 
+# Optional branch (POS Profile) scoping. Each is spliced in only when a branch
+# is given, so without one every query is exactly what it was.
+# Invoices: the invoice's own POS Profile.
+_SI_BRANCH = "AND si.pos_profile = %(branch)s"
+_PLAIN_BRANCH = "AND pos_profile = %(branch)s"
+# Courier Transactions and Custom Shipping Requests carry no branch of their
+# own; they belong to the branch of the invoice they reference.
+_CT_BRANCH = """AND EXISTS (
+    SELECT 1 FROM `tabSales Invoice` bsi
+    WHERE bsi.name = ct.reference_invoice AND bsi.pos_profile = %(branch)s
+)"""
+_CSR_BRANCH = """AND EXISTS (
+    SELECT 1 FROM `tabSales Invoice` bsi
+    WHERE bsi.name = csr.invoice AND bsi.pos_profile = %(branch)s
+)"""
+
+
+def _norm_branch(branch):
+    return (branch or "").strip() or None
+
+
+def _when(branch, condition):
+    return condition if branch else ""
+
+
 def _party_label(party_type, party):
     """A courier's name for display. Couriers are Employees (or Suppliers), and
     the raw link value is an id: the dashboard showed "HR-EMP-000002" beside a
@@ -71,39 +96,58 @@ def _safe(label, fn, default):
 
 
 @frappe.whitelist()
-def get_shipping_analytics(from_date=None, to_date=None):
+def get_shipping_analytics(from_date=None, to_date=None, branch=None):
     """Composed shipping dashboard payload.
 
     Assembles the twelve existing shipping helpers into the single dict the
     mobile Shipping Analytics screen consumes. Each sub-call is wrapped
     defensively: a failure returns that key's empty default instead of failing
-    the entire response. The twelve underlying methods are unchanged.
+    the entire response.
+
+    ``branch`` (optional POS Profile name) scopes every invoice-based section to
+    that branch's invoices, and courier transactions / override requests to the
+    branch of the invoice they reference. ``double_shipping_impact`` reads
+    Delivery Trips, which carry no branch, and stays company-wide.
+
+    ``unsettled_courier_balances`` is the balance owed **as of ``to_date``**
+    (end of day): transactions dated on or before it that were not yet settled
+    then. ``unsettled_as_of`` (new key) names that date. The
+    ``summary_kpis.unsettled_courier_total`` figure is still today's balance.
     """
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
     return {
         "summary_kpis": _safe(
-            "summary_kpis", lambda: get_summary_kpis(from_date=fd, to_date=td), {}
+            "summary_kpis", lambda: get_summary_kpis(from_date=fd, to_date=td, branch=branch), {}
         ),
         "alerts": _safe(
-            "alerts", lambda: get_alerts_data(from_date=fd, to_date=td), []
+            "alerts", lambda: get_alerts_data(from_date=fd, to_date=td, branch=branch), []
         ),
         "cost_by_territory": _safe(
-            "cost_by_territory", lambda: get_cost_by_territory(from_date=fd, to_date=td), []
+            "cost_by_territory",
+            lambda: get_cost_by_territory(from_date=fd, to_date=td, branch=branch),
+            [],
         ),
         "cost_by_sub_territory": _safe(
-            "cost_by_sub_territory", lambda: get_cost_by_sub_territory(from_date=fd, to_date=td), []
+            "cost_by_sub_territory",
+            lambda: get_cost_by_sub_territory(from_date=fd, to_date=td, branch=branch),
+            [],
         ),
         "cost_by_pos_profile": _safe(
-            "cost_by_pos_profile", lambda: get_cost_by_pos_profile(from_date=fd, to_date=td), []
+            "cost_by_pos_profile",
+            lambda: get_cost_by_pos_profile(from_date=fd, to_date=td, branch=branch),
+            [],
         ),
         "cost_by_courier": _safe(
-            "cost_by_courier", lambda: get_cost_by_courier(from_date=fd, to_date=td), []
+            "cost_by_courier",
+            lambda: get_cost_by_courier(from_date=fd, to_date=td, branch=branch),
+            [],
         ),
         "custom_shipping_breakdown": _safe(
             "custom_shipping_breakdown",
-            lambda: get_custom_shipping_breakdown(from_date=fd, to_date=td),
+            lambda: get_custom_shipping_breakdown(from_date=fd, to_date=td, branch=branch),
             {"summary": {"total": 0, "approved": 0, "rejected": 0, "pending": 0, "approval_rate": 0}, "rows": []},
         ),
         "double_shipping_impact": _safe(
@@ -112,27 +156,35 @@ def get_shipping_analytics(from_date=None, to_date=None):
             {"trips": [], "total_double_trips": 0, "total_extra_cost": 0.0},
         ),
         "daily_trend": _safe(
-            "daily_trend", lambda: get_daily_trend(from_date=fd, to_date=td), []
+            "daily_trend", lambda: get_daily_trend(from_date=fd, to_date=td, branch=branch), []
         ),
         "pickup_vs_delivery_split": _safe(
             "pickup_vs_delivery_split",
-            lambda: get_pickup_vs_delivery_split(from_date=fd, to_date=td),
+            lambda: get_pickup_vs_delivery_split(from_date=fd, to_date=td, branch=branch),
             {"pickup": 0, "delivery": 0},
         ),
         "unsettled_courier_balances": _safe(
-            "unsettled_courier_balances", get_unsettled_courier_balances, []
+            "unsettled_courier_balances",
+            lambda: get_unsettled_courier_balances(as_of=td, branch=branch),
+            [],
         ),
+        "unsettled_as_of": td,
         "pickup_delivery_trend": _safe(
-            "pickup_delivery_trend", lambda: get_pickup_delivery_trend(from_date=fd, to_date=td), []
+            "pickup_delivery_trend",
+            lambda: get_pickup_delivery_trend(from_date=fd, to_date=td, branch=branch),
+            [],
         ),
+        "filters": {"from_date": fd, "to_date": td, "branch": branch},
     }
 
 
 @frappe.whitelist()
-def get_summary_kpis(from_date=None, to_date=None):
+def get_summary_kpis(from_date=None, to_date=None, branch=None):
     """Eight headline KPIs covering the selected date range."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
+    params = {"fd": fd, "td": td, "branch": branch}
 
     row = frappe.db.sql(f"""
         SELECT
@@ -148,15 +200,27 @@ def get_summary_kpis(from_date=None, to_date=None):
         WHERE si.docstatus = 1
           AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
-    """, {"fd": fd, "td": td}, as_dict=True)[0]
+          {_when(branch, _SI_BRANCH)}
+    """, params, as_dict=True)[0]
 
-    pending_csr = frappe.db.count("Custom Shipping Request", {"status": "Pending"})
+    if branch:
+        pending_csr = frappe.db.sql(f"""
+            SELECT COUNT(*) AS n
+            FROM `tabCustom Shipping Request` csr
+            WHERE csr.status = 'Pending'
+              {_CSR_BRANCH}
+        """, params, as_dict=True)[0]["n"]
+    else:
+        pending_csr = frappe.db.count("Custom Shipping Request", {"status": "Pending"})
 
-    unsettled_row = frappe.db.sql("""
-        SELECT COALESCE(SUM(shipping_amount), 0) AS total
-        FROM `tabCourier Transaction`
-        WHERE status = 'Unsettled'
-    """, as_dict=True)[0]
+    # Today's balance (current state); the dashboard's as-of-to_date figure is
+    # ``get_unsettled_courier_balances(as_of=...)``.
+    unsettled_row = frappe.db.sql(f"""
+        SELECT COALESCE(SUM(ct.shipping_amount), 0) AS total
+        FROM `tabCourier Transaction` ct
+        WHERE ct.status = 'Unsettled'
+          {_when(branch, _CT_BRANCH)}
+    """, params, as_dict=True)[0]
 
     return {
         "total_orders": int(row.total_orders or 0),
@@ -172,10 +236,11 @@ def get_summary_kpis(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_cost_by_territory(from_date=None, to_date=None):
+def get_cost_by_territory(from_date=None, to_date=None, branch=None):
     """Shipping expense, income, order count and average cost grouped by territory."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
     rows = frappe.db.sql(f"""
         SELECT
@@ -191,9 +256,10 @@ def get_cost_by_territory(from_date=None, to_date=None):
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           AND si.territory IS NOT NULL
           AND si.territory != ''
+          {_when(branch, _SI_BRANCH)}
         GROUP BY si.territory
         ORDER BY SUM(si.custom_shipping_expense) DESC
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td, "branch": branch}, as_dict=True)
 
     for r in rows:
         r["total_expense"] = float(r["total_expense"] or 0)
@@ -210,12 +276,13 @@ def get_cost_by_territory(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_cost_by_sub_territory(from_date=None, to_date=None):
+def get_cost_by_sub_territory(from_date=None, to_date=None, branch=None):
     """Shipping expense grouped by sub-territory (top 20 by cost)."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
             COALESCE(custom_sub_territory, '(None)')                                    AS sub_territory,
             COUNT(*)                                                                    AS order_count,
@@ -226,10 +293,11 @@ def get_cost_by_sub_territory(from_date=None, to_date=None):
         WHERE docstatus = 1
           AND is_return = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
+          {_when(branch, _PLAIN_BRANCH)}
         GROUP BY custom_sub_territory
         ORDER BY total_expense DESC
         LIMIT 20
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td, "branch": branch}, as_dict=True)
 
     for r in rows:
         r["total_expense"] = float(r["total_expense"] or 0)
@@ -240,10 +308,14 @@ def get_cost_by_sub_territory(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_cost_by_pos_profile(from_date=None, to_date=None):
-    """Shipping expense and income grouped by POS Profile (branch)."""
+def get_cost_by_pos_profile(from_date=None, to_date=None, branch=None):
+    """Shipping expense and income grouped by POS Profile (branch).
+
+    With ``branch`` the list holds only that branch's row.
+    """
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
     rows = frappe.db.sql(f"""
         SELECT
@@ -257,9 +329,10 @@ def get_cost_by_pos_profile(from_date=None, to_date=None):
         WHERE si.docstatus = 1
           AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
+          {_when(branch, _SI_BRANCH)}
         GROUP BY si.pos_profile
         ORDER BY SUM(si.custom_shipping_expense) DESC
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td, "branch": branch}, as_dict=True)
 
     for r in rows:
         r["total_expense"] = float(r["total_expense"] or 0)
@@ -271,23 +344,25 @@ def get_cost_by_pos_profile(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_cost_by_courier(from_date=None, to_date=None):
+def get_cost_by_courier(from_date=None, to_date=None, branch=None):
     """Shipping amounts per courier, split by settled vs unsettled."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
-            party_type,
-            party,
-            status,
+            ct.party_type,
+            ct.party,
+            ct.status,
             COUNT(*)                               AS order_count,
-            COALESCE(SUM(shipping_amount), 0)      AS total_amount
-        FROM `tabCourier Transaction`
-        WHERE date BETWEEN %(fd)s AND %(td)s
-        GROUP BY party_type, party, status
+            COALESCE(SUM(ct.shipping_amount), 0)   AS total_amount
+        FROM `tabCourier Transaction` ct
+        WHERE DATE(ct.date) BETWEEN %(fd)s AND %(td)s
+          {_when(branch, _CT_BRANCH)}
+        GROUP BY ct.party_type, ct.party, ct.status
         ORDER BY total_amount DESC
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td, "branch": branch}, as_dict=True)
 
     couriers = {}
     for r in rows:
@@ -311,12 +386,15 @@ def get_cost_by_courier(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_custom_shipping_breakdown(from_date=None, to_date=None):
+def get_custom_shipping_breakdown(from_date=None, to_date=None, branch=None):
     """Custom Shipping Request list with delta analysis and approval rate."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
+    params = {"fd": fd, "td": td, "branch": branch}
+    csr_branch = _when(branch, _CSR_BRANCH)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
             csr.name,
             csr.invoice,
@@ -330,9 +408,10 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None):
             csr.creation
         FROM `tabCustom Shipping Request` csr
         WHERE DATE(csr.creation) BETWEEN %(fd)s AND %(td)s
+          {csr_branch}
         ORDER BY csr.creation DESC
         LIMIT 200
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, params, as_dict=True)
 
     total = len(rows)
     approved = sum(1 for r in rows if r["status"] == "Approved")
@@ -344,41 +423,45 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None):
     # only APPROVED ones changed what was paid. An increase is extra cost, a
     # decrease a saving. Computed over every request in range, not the 200
     # rows returned for listing.
-    money = frappe.db.sql("""
+    money = frappe.db.sql(f"""
         SELECT
-            COUNT(*)                                                           AS n,
-            COALESCE(SUM(GREATEST(requested_amount - original_amount, 0)), 0)  AS extra,
-            COALESCE(SUM(GREATEST(original_amount - requested_amount, 0)), 0)  AS saved,
-            COALESCE(SUM(original_amount), 0)                                  AS standard,
-            SUM(requested_amount > original_amount)                            AS increases,
-            SUM(requested_amount < original_amount)                            AS decreases,
-            MAX(CASE WHEN original_amount > 0
-                     THEN (requested_amount - original_amount) / original_amount END) AS max_pct
-        FROM `tabCustom Shipping Request`
-        WHERE status = 'Approved'
-          AND DATE(creation) BETWEEN %(fd)s AND %(td)s
-    """, {"fd": fd, "td": td}, as_dict=True)[0]
-    pending_extra = frappe.db.sql("""
-        SELECT COALESCE(SUM(requested_amount - original_amount), 0) AS x
-        FROM `tabCustom Shipping Request`
-        WHERE status = 'Pending' AND DATE(creation) BETWEEN %(fd)s AND %(td)s
-    """, {"fd": fd, "td": td}, as_dict=True)[0]["x"]
-    delivery_orders = frappe.db.sql("""
+            COUNT(*)                                                                   AS n,
+            COALESCE(SUM(GREATEST(csr.requested_amount - csr.original_amount, 0)), 0)  AS extra,
+            COALESCE(SUM(GREATEST(csr.original_amount - csr.requested_amount, 0)), 0)  AS saved,
+            COALESCE(SUM(csr.original_amount), 0)                                      AS standard,
+            SUM(csr.requested_amount > csr.original_amount)                            AS increases,
+            SUM(csr.requested_amount < csr.original_amount)                            AS decreases,
+            MAX(CASE WHEN csr.original_amount > 0
+                     THEN (csr.requested_amount - csr.original_amount) / csr.original_amount END) AS max_pct
+        FROM `tabCustom Shipping Request` csr
+        WHERE csr.status = 'Approved'
+          AND DATE(csr.creation) BETWEEN %(fd)s AND %(td)s
+          {csr_branch}
+    """, params, as_dict=True)[0]
+    pending_extra = frappe.db.sql(f"""
+        SELECT COALESCE(SUM(csr.requested_amount - csr.original_amount), 0) AS x
+        FROM `tabCustom Shipping Request` csr
+        WHERE csr.status = 'Pending' AND DATE(csr.creation) BETWEEN %(fd)s AND %(td)s
+          {csr_branch}
+    """, params, as_dict=True)[0]["x"]
+    delivery_orders = frappe.db.sql(f"""
         SELECT COUNT(*) AS n FROM `tabSales Invoice`
         WHERE docstatus = 1 AND is_return = 0 AND IFNULL(custom_is_pickup, 0) = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
-    """, {"fd": fd, "td": td}, as_dict=True)[0]["n"]
-    area_rows = frappe.db.sql("""
-        SELECT territory,
-               COUNT(*)                                                     AS count,
-               COALESCE(SUM(requested_amount - original_amount), 0)         AS net,
-               COALESCE(SUM(GREATEST(requested_amount - original_amount, 0)), 0) AS extra
-        FROM `tabCustom Shipping Request`
-        WHERE status = 'Approved' AND DATE(creation) BETWEEN %(fd)s AND %(td)s
-        GROUP BY territory
+          {_when(branch, _PLAIN_BRANCH)}
+    """, params, as_dict=True)[0]["n"]
+    area_rows = frappe.db.sql(f"""
+        SELECT csr.territory,
+               COUNT(*)                                                             AS count,
+               COALESCE(SUM(csr.requested_amount - csr.original_amount), 0)         AS net,
+               COALESCE(SUM(GREATEST(csr.requested_amount - csr.original_amount, 0)), 0) AS extra
+        FROM `tabCustom Shipping Request` csr
+        WHERE csr.status = 'Approved' AND DATE(csr.creation) BETWEEN %(fd)s AND %(td)s
+          {csr_branch}
+        GROUP BY csr.territory
         ORDER BY net DESC
         LIMIT 5
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, params, as_dict=True)
     extra = float(money.get("extra") or 0)
     saved = float(money.get("saved") or 0)
     standard = float(money.get("standard") or 0)
@@ -476,10 +559,11 @@ def get_double_shipping_impact(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_daily_trend(from_date=None, to_date=None):
+def get_daily_trend(from_date=None, to_date=None, branch=None):
     """Daily order count, shipping expense, and delivery income for trend charts."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
     rows = frappe.db.sql(f"""
         SELECT
@@ -491,9 +575,10 @@ def get_daily_trend(from_date=None, to_date=None):
         WHERE si.docstatus = 1
           AND si.is_return = 0
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
+          {_when(branch, _SI_BRANCH)}
         GROUP BY si.posting_date
         ORDER BY si.posting_date ASC
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td, "branch": branch}, as_dict=True)
 
     for r in rows:
         r["posting_date"] = str(r["posting_date"])
@@ -505,12 +590,13 @@ def get_daily_trend(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_pickup_vs_delivery_split(from_date=None, to_date=None):
+def get_pickup_vs_delivery_split(from_date=None, to_date=None, branch=None):
     """Pickup vs delivery order counts for the donut chart."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
             custom_is_pickup,
             COUNT(*) AS order_count
@@ -518,8 +604,9 @@ def get_pickup_vs_delivery_split(from_date=None, to_date=None):
         WHERE docstatus = 1
           AND is_return = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
+          {_when(branch, _PLAIN_BRANCH)}
         GROUP BY custom_is_pickup
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td, "branch": branch}, as_dict=True)
 
     result = {"pickup": 0, "delivery": 0}
     for r in rows:
@@ -531,11 +618,39 @@ def get_pickup_vs_delivery_split(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_unsettled_courier_balances():
-    """All unsettled courier balances with age in days (not date-range scoped)."""
-    _ensure_jarz_manager()
+def get_unsettled_courier_balances(as_of=None, branch=None):
+    """Courier balances still owed, with age in days.
 
-    rows = frappe.db.sql("""
+    Without ``as_of``: every transaction unsettled right now (unchanged).
+
+    With ``as_of`` (a date): the balance as it stood at the end of that day —
+    transactions dated on or before it that were either still unsettled, or
+    settled only after it. When a settled row has no ``settled_at`` (legacy
+    rows) its ``modified`` time stands in. ``days_aged`` is measured to the
+    earlier of ``as_of`` and today.
+
+    ``branch`` (optional POS Profile) keeps transactions whose reference
+    invoice belongs to that branch.
+    """
+    _ensure_jarz_manager()
+    branch = _norm_branch(branch)
+    today = getdate(nowdate())
+    params = {"branch": branch}
+
+    if as_of:
+        as_of_date = getdate(as_of)
+        params["as_of_end"] = f"{as_of_date} 23:59:59"
+        scope = """ct.date <= %(as_of_end)s
+          AND (
+              ct.status = 'Unsettled'
+              OR (ct.status = 'Settled' AND COALESCE(ct.settled_at, ct.modified) > %(as_of_end)s)
+          )"""
+        reference = min(as_of_date, today)
+    else:
+        scope = "ct.status = 'Unsettled'"
+        reference = today
+
+    rows = frappe.db.sql(f"""
         SELECT
             ct.party_type,
             ct.party,
@@ -543,30 +658,35 @@ def get_unsettled_courier_balances():
             COALESCE(SUM(ct.shipping_amount), 0)   AS total_owed,
             MIN(ct.date)                           AS oldest_date
         FROM `tabCourier Transaction` ct
-        WHERE ct.status = 'Unsettled'
+        WHERE {scope}
+          {_when(branch, _CT_BRANCH)}
         GROUP BY ct.party_type, ct.party
         ORDER BY total_owed DESC
-    """, as_dict=True)
+    """, params, as_dict=True)
 
-    today = getdate(nowdate())
     for r in rows:
         r["party"] = _party_label(r["party_type"], r["party"])
         r["total_owed"] = float(r["total_owed"] or 0)
         r["order_count"] = int(r["order_count"] or 0)
         r["oldest_date"] = str(r["oldest_date"]) if r["oldest_date"] else None
-        r["days_aged"] = int(date_diff(today, r["oldest_date"])) if r["oldest_date"] else 0
+        r["days_aged"] = max(0, int(date_diff(reference, r["oldest_date"]))) if r["oldest_date"] else 0
 
     return rows
 
 
 @frappe.whitelist()
-def get_alerts_data(from_date=None, to_date=None):
+def get_alerts_data(from_date=None, to_date=None, branch=None):
     """
     Return structured alert conditions for the Discrepancies panel.
     Each item: {type: 'danger'|'warning'|'info', message: str}
+
+    ``branch`` (optional POS Profile) scopes every alert except the
+    double-shipping count (Delivery Trips carry no branch).
     """
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
+    params = {"fd": fd, "td": td, "branch": branch}
 
     alerts = []
 
@@ -584,11 +704,12 @@ def get_alerts_data(from_date=None, to_date=None):
               AND si.is_return = 0
               AND si.posting_date BETWEEN %(fd)s AND %(td)s
               AND si.territory IS NOT NULL AND si.territory != ''
+              {_when(branch, _SI_BRANCH)}
             GROUP BY si.territory
         ) sub
         WHERE expense > 0 AND income < expense
         ORDER BY (expense - income) DESC
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, params, as_dict=True)
 
     # One alert for all of them: a line per area buried the page (13 alerts
     # for September 2026) and repeated the territory chart right below it.
@@ -609,19 +730,20 @@ def get_alerts_data(from_date=None, to_date=None):
     # 2. Couriers with unsettled balance older than 7 days
     # Subquery avoids MySQL 1247 error when referencing the MIN() alias in HAVING.
     today = getdate(nowdate())
-    aged = frappe.db.sql("""
+    aged = frappe.db.sql(f"""
         SELECT party_type, party, total, oldest_date
         FROM (
-            SELECT party_type, party,
-                   COALESCE(SUM(shipping_amount), 0) AS total,
-                   MIN(date)                          AS oldest_date
-            FROM `tabCourier Transaction`
-            WHERE status = 'Unsettled'
-            GROUP BY party_type, party
+            SELECT ct.party_type, ct.party,
+                   COALESCE(SUM(ct.shipping_amount), 0) AS total,
+                   MIN(ct.date)                          AS oldest_date
+            FROM `tabCourier Transaction` ct
+            WHERE ct.status = 'Unsettled'
+              {_when(branch, _CT_BRANCH)}
+            GROUP BY ct.party_type, ct.party
         ) sub
         WHERE DATEDIFF(CURDATE(), oldest_date) > 7
         ORDER BY DATEDIFF(CURDATE(), oldest_date) DESC
-    """, as_dict=True)
+    """, params, as_dict=True)
 
     for c in aged:
         days = int(date_diff(today, c["oldest_date"])) if c["oldest_date"] else 0
@@ -634,14 +756,15 @@ def get_alerts_data(from_date=None, to_date=None):
         })
 
     # 3. Pending Custom Shipping Requests older than 24 hours
-    old_csrs = frappe.db.sql("""
-        SELECT name, invoice, territory,
-               TIMESTAMPDIFF(HOUR, creation, NOW()) AS hours_pending
-        FROM `tabCustom Shipping Request`
-        WHERE status = 'Pending'
-          AND creation < DATE_SUB(NOW(), INTERVAL 24 HOUR)
-        ORDER BY creation ASC
-    """, as_dict=True)
+    old_csrs = frappe.db.sql(f"""
+        SELECT csr.name, csr.invoice, csr.territory,
+               TIMESTAMPDIFF(HOUR, csr.creation, NOW()) AS hours_pending
+        FROM `tabCustom Shipping Request` csr
+        WHERE csr.status = 'Pending'
+          AND csr.creation < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+          {_when(branch, _CSR_BRANCH)}
+        ORDER BY csr.creation ASC
+    """, params, as_dict=True)
 
     for csr in old_csrs:
         hours = int(csr["hours_pending"] or 0)
@@ -656,16 +779,17 @@ def get_alerts_data(from_date=None, to_date=None):
     # 4. Large approved overrides in range (delta > 50% of original), as ONE
     # alert: a line per invoice listed ten near-identical rows (Sep 2026: 63
     # such overrides). The overrides card below breaks them down by area.
-    large = frappe.db.sql("""
+    large = frappe.db.sql(f"""
         SELECT COUNT(*) AS n,
-               COALESCE(SUM(requested_amount - original_amount), 0) AS extra,
-               MAX((requested_amount - original_amount) / original_amount) AS max_pct
-        FROM `tabCustom Shipping Request`
-        WHERE status = 'Approved'
-          AND DATE(creation) BETWEEN %(fd)s AND %(td)s
-          AND original_amount > 0
-          AND (requested_amount - original_amount) > original_amount * 0.5
-    """, {"fd": fd, "td": td}, as_dict=True)[0]
+               COALESCE(SUM(csr.requested_amount - csr.original_amount), 0) AS extra,
+               MAX((csr.requested_amount - csr.original_amount) / csr.original_amount) AS max_pct
+        FROM `tabCustom Shipping Request` csr
+        WHERE csr.status = 'Approved'
+          AND DATE(csr.creation) BETWEEN %(fd)s AND %(td)s
+          AND csr.original_amount > 0
+          AND (csr.requested_amount - csr.original_amount) > csr.original_amount * 0.5
+          {_when(branch, _CSR_BRANCH)}
+    """, params, as_dict=True)[0]
 
     if int(large.get("n") or 0):
         alerts.append({
@@ -695,12 +819,13 @@ def get_alerts_data(from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_pickup_delivery_trend(from_date=None, to_date=None):
+def get_pickup_delivery_trend(from_date=None, to_date=None, branch=None):
     """Daily delivery vs pickup order counts for a stacked trend chart."""
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
+    branch = _norm_branch(branch)
 
-    rows = frappe.db.sql("""
+    rows = frappe.db.sql(f"""
         SELECT
             posting_date,
             SUM(CASE WHEN custom_is_pickup = 1 THEN 1 ELSE 0 END) AS pickup,
@@ -709,9 +834,10 @@ def get_pickup_delivery_trend(from_date=None, to_date=None):
         WHERE docstatus = 1
           AND is_return = 0
           AND posting_date BETWEEN %(fd)s AND %(td)s
+          {_when(branch, _PLAIN_BRANCH)}
         GROUP BY posting_date
         ORDER BY posting_date ASC
-    """, {"fd": fd, "td": td}, as_dict=True)
+    """, {"fd": fd, "td": td, "branch": branch}, as_dict=True)
 
     for r in rows:
         r["posting_date"] = str(r["posting_date"])

@@ -364,3 +364,94 @@ class TestReportsAPI(unittest.TestCase):
             SimpleNamespace(get_value=lambda *a, **k: None),
         ):
             self.assertEqual([], reports._expand_item_groups(("Packaging", "Labels")))
+
+    def test_final_products_carry_stock_value_and_totals(self):
+        from jarz_pos.api import reports
+
+        items = [
+            {"item_code": "ITEM-M", "item_name": "Blueberry Medium", "item_group": "Medium", "stock_uom": "Nos"},
+            {"item_code": "ITEM-L", "item_name": "Blueberry Large", "item_group": "Large", "stock_uom": "Nos"},
+        ]
+        bins = [
+            {"item_code": "ITEM-M", "warehouse": "WH-A", "actual_qty": 4, "stock_value": 200.0},
+            {"item_code": "ITEM-M", "warehouse": "WH-B", "actual_qty": 1, "stock_value": 50.0},
+            {"item_code": "ITEM-L", "warehouse": "WH-A", "actual_qty": 2, "stock_value": 180.0},
+        ]
+
+        def fake_get_all(doctype, **kwargs):
+            if doctype == "Item":
+                return items
+            if doctype == "Bin":
+                self.assertIn("stock_value", kwargs["fields"])
+                return bins
+            if doctype == "Company":
+                return []
+            self.fail(f"Unexpected doctype lookup: {doctype}")
+
+        with patch("jarz_pos.api.reports._ensure_jarz_manager"), patch(
+            "jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all
+        ):
+            result = reports.get_final_products_report()
+
+        medium = result["groups"][0]
+        self.assertEqual(250.0, medium["items"][0]["stock_value"])
+        self.assertEqual({"qty": 5.0, "stock_value": 250.0}, medium["totals"])
+        self.assertEqual({"qty": 7.0, "stock_value": 430.0}, result["totals"])
+        self.assertEqual({"branch": None, "warehouse": None}, result["filters"])
+
+    def test_final_products_branch_shows_only_that_warehouse(self):
+        from jarz_pos.api import reports
+
+        items = [
+            {"item_code": "ITEM-M", "item_name": "Blueberry Medium", "item_group": "Medium", "stock_uom": "Nos"},
+        ]
+        captured = {}
+
+        def fake_get_all(doctype, **kwargs):
+            if doctype == "Item":
+                return items
+            if doctype == "Bin":
+                captured["filters"] = kwargs["filters"]
+                return [{"item_code": "ITEM-M", "warehouse": "Stores - Dokki", "actual_qty": 3, "stock_value": 90.0}]
+            self.fail(f"Unexpected doctype lookup: {doctype}")
+
+        db = SimpleNamespace(get_value=lambda doctype, name, field: "Stores - Dokki")
+        with patch("jarz_pos.api.reports._ensure_jarz_manager"), patch(
+            "jarz_pos.api.reports.frappe.db", db
+        ), patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all):
+            result = reports.get_final_products_report(branch="Dokki")
+
+        self.assertEqual("Stores - Dokki", captured["filters"]["warehouse"])
+        self.assertEqual(["Stores - Dokki"], result["groups"][0]["warehouses"])
+        self.assertEqual({"qty": 3.0, "stock_value": 90.0}, result["totals"])
+        self.assertEqual("Dokki", result["filters"]["branch"])
+
+    def test_materials_report_carries_bucket_and_grand_totals(self):
+        from jarz_pos.api import reports
+
+        tree = {"Raw Material": (10, 11)}
+        items = [{"item_code": "RM-1", "item_name": "flour", "item_group": "Raw Material", "stock_uom": "Kg"}]
+
+        def fake_get_value(doctype, name, fields, as_dict=False):
+            bounds = tree.get(name)
+            return {"lft": bounds[0], "rgt": bounds[1]} if bounds else None
+
+        def fake_get_all(doctype, **kwargs):
+            if doctype == "Item Group":
+                lft = kwargs["filters"]["lft"][1]
+                return [{"name": n} for n, b in tree.items() if b[0] == lft]
+            if doctype == "Item":
+                return items
+            if doctype == "Bin":
+                return [{"item_code": "RM-1", "warehouse": "Raw Material - J", "actual_qty": 10, "stock_value": 400.0}]
+            self.fail(f"Unexpected doctype lookup: {doctype}")
+
+        with patch("jarz_pos.api.reports._ensure_materials_report_access"), patch(
+            "jarz_pos.api.reports.frappe.db", SimpleNamespace(get_value=fake_get_value)
+        ), patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all):
+            result = reports.get_materials_report()
+
+        self.assertEqual(400.0, result["raw_materials"][0]["stock_value"])
+        self.assertEqual({"qty": 10.0, "stock_value": 400.0}, result["bucket_totals"]["raw_materials"])
+        self.assertEqual({"qty": 0.0, "stock_value": 0.0}, result["bucket_totals"]["consumables"])
+        self.assertEqual({"qty": 10.0, "stock_value": 400.0}, result["totals"])
