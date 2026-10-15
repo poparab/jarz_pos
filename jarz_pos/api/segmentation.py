@@ -67,9 +67,14 @@ def set_segment_override(customer, override, manual_segment=None):
 
     ``manual_segment`` must be one of :data:`REAL_SEGMENTS` when given. The
     pseudo segment "Regular" (and anything else the Select field does not hold)
-    is refused with a clear error instead of being written.
+    is refused with a clear error instead of being written. An unknown
+    ``customer`` raises ``DoesNotExistError`` (``db.set_value`` on a missing
+    name is a silent no-op, so the call used to report "ok" for nothing).
     """
     _ensure_jarz_manager()
+    customer = str(customer or "").strip()
+    if not customer or not frappe.db.exists("Customer", customer):
+        frappe.throw(_("Customer {0} not found").format(customer or "''"), frappe.DoesNotExistError)
     pin = _is_truthy(override)
     segment = str(manual_segment or "").strip()
     if pin and segment and segment not in REAL_SEGMENTS:

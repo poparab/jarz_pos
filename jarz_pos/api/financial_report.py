@@ -331,6 +331,7 @@ def actual_line_cost_sql(
     td_param: str = "td",
     si_alias: str = "si",
     sii_alias: str = "sii",
+    net_returns: bool = False,
 ) -> Tuple[str, str]:
     """``(join_sql, cost_expr)`` giving the real cost of goods of an invoice line.
 
@@ -347,13 +348,56 @@ def actual_line_cost_sql(
 
     ``cost_expr`` is the line's cost in company currency (``incoming_rate ×
     stock_qty``), or NULL when neither path has posted a positive valuation —
-    the caller decides the fallback (BOM, or nothing). Return DNs are excluded.
+    the caller decides the fallback (BOM, or nothing). Return DNs are excluded
+    unless ``net_returns`` is set (below).
     Jarz bundles are separate invoice lines, not Packed Items, so no Packed Item
     path is needed (no ``Product Bundle`` is used anywhere in the app).
 
     The derived table is bounded to invoices posted inside
     ``%(<fd_param>)s``..``%(<td_param>)s`` so it never scans the whole DN history.
+
+    ``net_returns`` (default ``False``, the gross cost product analytics reports)
+    nets stock that came back against the line it was sold on. A Jarz return
+    books a credit note with ``update_stock = 0`` and a separate **return**
+    Delivery Note whose rows carry the original invoice line in ``si_detail``
+    and a negative qty (``services/invoice_return._build_return_delivery_note``).
+    With ``net_returns`` those rows are subtracted from the line's cost, and a
+    line whose net cost is ≤ 0 (fully returned) costs 0 — never negative — while
+    still counting as costed (not NULL). Only return DNs **posted inside the
+    same range** are netted: a return in a later period leaves this period's
+    cost (and its full revenue) untouched, and in the later period the original
+    line is outside the range, so neither period can go negative. The credit
+    note's own lines carry no cost (no stock moves on them).
     """
+    if net_returns:
+        join_sql = f"""
+        LEFT JOIN (
+            SELECT dni.si_detail AS si_detail,
+                   SUM(CASE WHEN IFNULL(dn.is_return, 0) = 0
+                            THEN dni.incoming_rate * dni.stock_qty ELSE 0 END) AS cost,
+                   SUM(CASE WHEN IFNULL(dn.is_return, 0) = 1
+                            THEN ABS(dni.incoming_rate * dni.stock_qty) ELSE 0 END) AS returned_cost
+            FROM `tabDelivery Note Item` dni
+            JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+            JOIN `tabSales Invoice` dsi ON dsi.name = dni.against_sales_invoice
+            WHERE dni.docstatus = 1
+              AND IFNULL(dni.si_detail, '') != ''
+              AND dsi.docstatus = 1
+              AND dsi.posting_date BETWEEN %({fd_param})s AND %({td_param})s
+              AND (IFNULL(dn.is_return, 0) = 0
+                   OR dn.posting_date BETWEEN %({fd_param})s AND %({td_param})s)
+            GROUP BY dni.si_detail
+        ) dnc ON dnc.si_detail = {sii_alias}.name
+        """
+        cost_expr = (
+            f"(CASE WHEN {si_alias}.update_stock = 1 AND IFNULL({sii_alias}.incoming_rate, 0) > 0 "
+            f"THEN GREATEST({sii_alias}.incoming_rate * {sii_alias}.stock_qty "
+            f"- IFNULL(dnc.returned_cost, 0), 0) "
+            f"WHEN IFNULL(dnc.cost, 0) > 0 THEN GREATEST(dnc.cost - IFNULL(dnc.returned_cost, 0), 0) "
+            f"ELSE NULL END)"
+        )
+        return join_sql, cost_expr
+
     join_sql = f"""
         LEFT JOIN (
             SELECT dni.si_detail AS si_detail,
@@ -433,6 +477,21 @@ def _shipping_rows(
 NO_BRANCH_LABEL = "(No Profile)"
 
 
+def validate_branch(branch: Any) -> Optional[str]:
+    """``None``/blank = all branches; otherwise it must be an existing POS Profile.
+
+    An unknown branch used to return an empty, all-zero branch view that looked
+    like a quiet day. The ``(No Profile)`` bucket label names invoices without a
+    POS Profile; it is a row in ``branches``, not a branch you can filter on.
+    """
+    text = str(branch or "").strip()
+    if not text:
+        return None
+    if text == NO_BRANCH_LABEL or not frappe.db.exists("POS Profile", text):
+        frappe.throw(_("Unknown branch: {0}").format(text), frappe.ValidationError)
+    return text
+
+
 def _branch_rows(
     fd: date,
     td: date,
@@ -444,10 +503,16 @@ def _branch_rows(
 
     * ``revenue`` — net sales (``base_net_total``), returns included as negatives,
       the same basis as the channel split.
-    * ``cogs`` — real cost of goods from :func:`actual_line_cost_sql`
-      (``incoming_rate × stock_qty``); lines with no posted valuation add 0, and
-      ``cogs_coverage_pct`` says how much of the stock-item sales was costed.
+    * ``cogs`` — real cost of goods from :func:`actual_line_cost_sql` with
+      ``net_returns`` (``incoming_rate × stock_qty``, less stock that came back
+      on a return Delivery Note in the same range, floored at 0 per line); lines
+      with no posted valuation add 0, and ``cogs_coverage_pct`` says how much of
+      the stock-item sales was costed. Credit-note lines are left out of that
+      percentage (their stock is netted on the original line instead).
     * ``shipping_income`` — the ``Shipping Income`` tax rows.
+    * ``b2b_revenue`` / ``b2c_revenue`` (additive) — the branch's own invoices
+      split by ``custom_order_purpose`` (:func:`channel_for_purpose`), on the
+      same basis as ``summary.b2b_revenue``: net sales **plus** billed shipping.
     """
     cond = "AND si.company = %(company)s" if company else ""
     cond += " " + branch_condition(branch)
@@ -456,27 +521,28 @@ def _branch_rows(
 
     sales = frappe.db.sql(
         f"""
-        SELECT {label} AS branch,
+        SELECT {label} AS branch, si.custom_order_purpose AS purpose,
                SUM(CASE WHEN si.is_return = 0 THEN 1 ELSE 0 END) AS orders,
                SUM(si.base_net_total) AS revenue
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {cond}
-        GROUP BY branch
+        GROUP BY branch, si.custom_order_purpose
         """,
         params,
         as_dict=True,
     )
 
-    join_sql, cost_expr = actual_line_cost_sql()
+    join_sql, cost_expr = actual_line_cost_sql(net_returns=True)
     costs = frappe.db.sql(
         f"""
         SELECT {label} AS branch,
                SUM(COALESCE({cost_expr}, 0)) AS cogs,
-               SUM(CASE WHEN IFNULL(it.is_stock_item, 0) = 1 THEN sii.base_net_amount ELSE 0 END)
-                   AS stock_sales,
-               SUM(CASE WHEN IFNULL(it.is_stock_item, 0) = 1 AND {cost_expr} IS NOT NULL
+               SUM(CASE WHEN si.is_return = 0 AND IFNULL(it.is_stock_item, 0) = 1
+                        THEN sii.base_net_amount ELSE 0 END) AS stock_sales,
+               SUM(CASE WHEN si.is_return = 0 AND IFNULL(it.is_stock_item, 0) = 1
+                         AND {cost_expr} IS NOT NULL
                         THEN sii.base_net_amount ELSE 0 END) AS costed_sales
         FROM `tabSales Invoice Item` sii
         JOIN `tabSales Invoice` si ON si.name = sii.parent AND sii.parenttype = 'Sales Invoice'
@@ -493,7 +559,8 @@ def _branch_rows(
 
     shipping = frappe.db.sql(
         f"""
-        SELECT {label} AS branch, SUM(stc.base_tax_amount) AS amount
+        SELECT {label} AS branch, si.custom_order_purpose AS purpose,
+               SUM(stc.base_tax_amount) AS amount
         FROM `tabSales Taxes and Charges` stc
         JOIN `tabSales Invoice` si
           ON si.name = stc.parent AND stc.parenttype = 'Sales Invoice'
@@ -501,7 +568,7 @@ def _branch_rows(
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           AND (stc.description LIKE 'Shipping Income%%' OR stc.account_head = %(ship)s)
           {cond}
-        GROUP BY branch
+        GROUP BY branch, si.custom_order_purpose
         """,
         params,
         as_dict=True,
@@ -514,27 +581,43 @@ def assemble_branch_rows(
     costs: Iterable[Dict[str, Any]],
     shipping: Iterable[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Merge the three per-branch aggregates (pure), biggest revenue first."""
+    """Merge the three per-branch aggregates (pure), biggest revenue first.
+
+    ``sales`` and ``shipping`` rows may carry ``purpose`` (one row per branch and
+    order purpose); it feeds the additive ``b2b_revenue`` / ``b2c_revenue``
+    (net sales + billed shipping, as :func:`channel_for_purpose` maps it). A
+    row without ``purpose`` is a legacy blank, i.e. B2C.
+    """
     out: Dict[str, Dict[str, Any]] = {}
 
     def row(name: str) -> Dict[str, Any]:
         return out.setdefault(
             name or NO_BRANCH_LABEL,
             {"orders": 0, "revenue": 0.0, "cogs": 0.0, "shipping_income": 0.0,
-             "stock_sales": 0.0, "costed_sales": 0.0},
+             "stock_sales": 0.0, "costed_sales": 0.0,
+             CHANNEL_B2B: 0.0, CHANNEL_B2C: 0.0},
         )
+
+    def add_channel(b: Dict[str, Any], purpose: Optional[str], amount: float) -> None:
+        c = channel_for_purpose(purpose)
+        if c in (CHANNEL_B2B, CHANNEL_B2C):
+            b[c] += amount
 
     for r in sales or []:
         b = row(r.get("branch"))
         b["orders"] += int(r.get("orders") or 0)
         b["revenue"] += flt(r.get("revenue"))
+        add_channel(b, r.get("purpose"), flt(r.get("revenue")))
     for r in costs or []:
         b = row(r.get("branch"))
-        b["cogs"] += flt(r.get("cogs"))
+        # A line's cost is floored at 0 in SQL; a branch never shows negative COGS.
+        b["cogs"] += max(flt(r.get("cogs")), 0.0)
         b["stock_sales"] += flt(r.get("stock_sales"))
         b["costed_sales"] += flt(r.get("costed_sales"))
     for r in shipping or []:
-        row(r.get("branch"))["shipping_income"] += flt(r.get("amount"))
+        b = row(r.get("branch"))
+        b["shipping_income"] += flt(r.get("amount"))
+        add_channel(b, r.get("purpose"), flt(r.get("amount")))
 
     rows: List[Dict[str, Any]] = []
     for name, b in out.items():
@@ -549,6 +632,8 @@ def assemble_branch_rows(
             "gross_margin_pct": pct(revenue - cogs, revenue),
             "shipping_income": round(b["shipping_income"], 2),
             "cogs_coverage_pct": pct(b["costed_sales"], b["stock_sales"]) if b["stock_sales"] else 100.0,
+            "b2b_revenue": round(b[CHANNEL_B2B], 2),
+            "b2c_revenue": round(b[CHANNEL_B2C], 2),
         })
     rows.sort(key=lambda x: (-x["revenue"], x["branch"]))
     return rows
@@ -624,10 +709,13 @@ def build_report(
     With ``branch`` set, ``invoice_rows``/``shipping_rows``/``order_basis`` must
     still be the **company-wide** rows: every GL-coupled figure (summary totals,
     shipping section, trend, reconciliation) is computed exactly as without a
-    branch, because the ledger has no branch dimension. Only the invoice-based
-    ``channels`` list (and the summary fields derived from it: ``orders``,
-    ``b2b_revenue``, ``b2c_revenue``) is rebuilt from ``branch_invoice_rows`` /
-    ``branch_shipping_rows``; ``data_quality`` says so.
+    branch, because the ledger has no branch dimension. ``summary`` is entirely
+    company-wide, including ``orders``, ``b2b_revenue`` and ``b2c_revenue`` (one
+    scope per block: before 2026-10-15 those three followed the branch while
+    ``sales`` and profit did not). Only the invoice-based ``channels`` list is
+    rebuilt from ``branch_invoice_rows`` / ``branch_shipping_rows``; the
+    branch's own orders and B2B/B2C revenue are on its ``branches`` row.
+    ``data_quality`` says so.
     """
     granularity = granularity_for(fd, td)
     keys = bucket_keys(fd, td, granularity)
@@ -777,6 +865,9 @@ def build_report(
             "revenue": adjustments, "orders": 0, "returns": 0, "returns_value": 0.0,
             "share_pct": pct(adjustments, total_revenue),
         })
+    # ``summary`` is company-wide whatever the branch, so its channel figures
+    # are read from the company rows before a branch replaces ``channels``.
+    company_channel_rows = channel_rows
     if branch:
         # The ledger cannot be split by branch, so there is no "adjustments"
         # row here: the branch's channels are its invoices, and their shares
@@ -854,7 +945,8 @@ def build_report(
         data_quality["notes"] = ["gl_company_wide"]
         data_quality["note"] = (
             "Ledger (GL) figures are company-wide: the General Ledger has no branch "
-            "dimension. Only channels and branches are filtered to this branch."
+            "dimension. Only channels and branches are filtered to this branch; "
+            "the summary is company-wide."
         )
     return {
         "period": {"date_from": fd.isoformat(), "date_to": td.isoformat(), "granularity": granularity},
@@ -862,8 +954,8 @@ def build_report(
             "total_revenue": total_revenue,
             "sales": sales_total,
             "shipping_income": round(shipping_income, 2),
-            "b2b_revenue": next(r["revenue"] for r in channel_rows if r["channel"] == CHANNEL_B2B),
-            "b2c_revenue": next(r["revenue"] for r in channel_rows if r["channel"] == CHANNEL_B2C),
+            "b2b_revenue": next(r["revenue"] for r in company_channel_rows if r["channel"] == CHANNEL_B2B),
+            "b2c_revenue": next(r["revenue"] for r in company_channel_rows if r["channel"] == CHANNEL_B2C),
             "cost_of_sales": cost_of_sales_total,
             "gross_profit": gross_profit,
             "gross_margin_pct": pct(gross_profit, sales_total),
@@ -875,7 +967,7 @@ def build_report(
             "total_expenses": total_expenses,
             "net_profit": net_profit,
             "net_margin_pct": pct(net_profit, total_revenue),
-            "orders": sum(int(r["orders"]) for r in channel_rows),
+            "orders": sum(int(r["orders"]) for r in company_channel_rows),
         },
         "channels": channel_rows,
         "cost_of_sales": {"total": cost_of_sales_total, "cost_of_goods": cost_of_goods, "rows": cogs_rows},
@@ -960,12 +1052,15 @@ def get_profit_and_loss(
     ``channels`` and ``branches``. Ledger figures stay company-wide and
     ``data_quality.notes`` carries ``gl_company_wide``. ``branches`` lists every
     branch (or just the chosen one) with orders, net revenue, actual COGS
-    (``incoming_rate × stock_qty``), gross profit and shipping income.
+    (``incoming_rate × stock_qty``, returns netted), gross profit, shipping
+    income and (additive) ``b2b_revenue`` / ``b2c_revenue``. ``summary`` is
+    always company-wide. A ``branch`` that is not an existing POS Profile is
+    refused with a ``ValidationError``.
     """
     _ensure_jarz_manager()
+    branch = validate_branch(branch)
     fd, td = _parse_dates(date_from, date_to)
     company = company or _default_company()
-    branch = (branch or "").strip() or None
     shipping_account, freight_account = _accounts(company)
     recurring = _recurring_accounts(company)
 

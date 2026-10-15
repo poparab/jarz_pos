@@ -53,6 +53,31 @@ def _norm_branch(branch):
     return (branch or "").strip() or None
 
 
+def _unsettled_scope(as_of, params):
+    """``(WHERE clause, reference date)`` for courier balances still owed.
+
+    ``as_of`` falsy: rows unsettled right now. Otherwise the balance at the end
+    of that day: rows dated on or before it that were unsettled then. A Settled
+    row with no ``settled_at`` (legacy) is taken as settled on its own ``date``,
+    so it can never surface as owed. ``modified`` is NOT a settlement time: any
+    later save (a note, a carry-over) moved it, which turned settled rows into
+    phantom balances. The settling Journal Entry is not used either:
+    ``Courier Transaction.journal_entry`` does not reliably name the settlement.
+    Sets ``params["as_of_end"]`` when ``as_of`` is given.
+    """
+    today = getdate(nowdate())
+    if not as_of:
+        return "ct.status = 'Unsettled'", today
+    as_of_date = getdate(as_of)
+    params["as_of_end"] = f"{as_of_date} 23:59:59"
+    scope = """ct.date <= %(as_of_end)s
+          AND (
+              ct.status = 'Unsettled'
+              OR (ct.status = 'Settled' AND COALESCE(ct.settled_at, ct.date) > %(as_of_end)s)
+          )"""
+    return scope, min(as_of_date, today)
+
+
 def _when(branch, condition):
     return condition if branch else ""
 
@@ -111,8 +136,10 @@ def get_shipping_analytics(from_date=None, to_date=None, branch=None):
 
     ``unsettled_courier_balances`` is the balance owed **as of ``to_date``**
     (end of day): transactions dated on or before it that were not yet settled
-    then. ``unsettled_as_of`` (new key) names that date. The
-    ``summary_kpis.unsettled_courier_total`` figure is still today's balance.
+    then. ``unsettled_as_of`` (new key) names that date.
+    ``summary_kpis.unsettled_courier_total`` is computed on the same as-of date
+    (and branch), so the KPI equals the table's total; the standalone
+    ``get_summary_kpis`` without ``as_of`` still returns today's balance.
     """
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
@@ -120,7 +147,9 @@ def get_shipping_analytics(from_date=None, to_date=None, branch=None):
 
     return {
         "summary_kpis": _safe(
-            "summary_kpis", lambda: get_summary_kpis(from_date=fd, to_date=td, branch=branch), {}
+            "summary_kpis",
+            lambda: get_summary_kpis(from_date=fd, to_date=td, branch=branch, as_of=td),
+            {},
         ),
         "alerts": _safe(
             "alerts", lambda: get_alerts_data(from_date=fd, to_date=td, branch=branch), []
@@ -179,12 +208,19 @@ def get_shipping_analytics(from_date=None, to_date=None, branch=None):
 
 
 @frappe.whitelist()
-def get_summary_kpis(from_date=None, to_date=None, branch=None):
-    """Eight headline KPIs covering the selected date range."""
+def get_summary_kpis(from_date=None, to_date=None, branch=None, as_of=None):
+    """Eight headline KPIs covering the selected date range.
+
+    ``unsettled_courier_total`` is today's balance unless ``as_of`` (optional
+    date) is given, in which case it is the balance owed at the end of that day,
+    on exactly the rules of ``get_unsettled_courier_balances(as_of=...)``.
+    ``unsettled_as_of`` (additive) echoes the date used, or null for today.
+    """
     _ensure_jarz_manager()
     fd, td = _parse_dates(from_date, to_date)
     branch = _norm_branch(branch)
     params = {"fd": fd, "td": td, "branch": branch}
+    unsettled_scope, _reference = _unsettled_scope(as_of, params)
 
     row = frappe.db.sql(f"""
         SELECT
@@ -213,12 +249,11 @@ def get_summary_kpis(from_date=None, to_date=None, branch=None):
     else:
         pending_csr = frappe.db.count("Custom Shipping Request", {"status": "Pending"})
 
-    # Today's balance (current state); the dashboard's as-of-to_date figure is
-    # ``get_unsettled_courier_balances(as_of=...)``.
+    # Today's balance, or (with ``as_of``) the same scope the balances table uses.
     unsettled_row = frappe.db.sql(f"""
         SELECT COALESCE(SUM(ct.shipping_amount), 0) AS total
         FROM `tabCourier Transaction` ct
-        WHERE ct.status = 'Unsettled'
+        WHERE {unsettled_scope}
           {_when(branch, _CT_BRANCH)}
     """, params, as_dict=True)[0]
 
@@ -232,6 +267,7 @@ def get_summary_kpis(from_date=None, to_date=None, branch=None):
         "avg_cost_per_order": float(row.avg_cost_per_order or 0),
         "pending_csr_count": int(pending_csr or 0),
         "unsettled_courier_total": float(unsettled_row.total or 0),
+        "unsettled_as_of": str(getdate(as_of)) if as_of else None,
     }
 
 
@@ -626,29 +662,28 @@ def get_unsettled_courier_balances(as_of=None, branch=None):
     With ``as_of`` (a date): the balance as it stood at the end of that day —
     transactions dated on or before it that were either still unsettled, or
     settled only after it. When a settled row has no ``settled_at`` (legacy
-    rows) its ``modified`` time stands in. ``days_aged`` is measured to the
-    earlier of ``as_of`` and today.
+    rows) its own ``date`` stands in, i.e. it is treated as settled when it was
+    raised: such a row can be under-reported as owed, never invented. (Its
+    ``modified`` time used to stand in, which made any later save look like an
+    unpaid balance until that save.) ``days_aged`` is measured to the earlier
+    of ``as_of`` and today.
+
+    Known limit (accepted): a settlement that was later **reversed** cannot be
+    told apart from a row that was never settled. A Courier Transaction has only
+    Unsettled/Settled and no history; ``courier_carry`` reverses by flipping
+    ``status`` back to Unsettled (keeping the old ``settled_at``) and a re-settle
+    overwrites ``settled_at``, so nothing records when it was settled the first
+    time or when that was undone. The as-of view reads each row by its current
+    status and ``settled_at``: a row settled before ``as_of`` and reversed
+    after it shows as owed at ``as_of``.
 
     ``branch`` (optional POS Profile) keeps transactions whose reference
     invoice belongs to that branch.
     """
     _ensure_jarz_manager()
     branch = _norm_branch(branch)
-    today = getdate(nowdate())
     params = {"branch": branch}
-
-    if as_of:
-        as_of_date = getdate(as_of)
-        params["as_of_end"] = f"{as_of_date} 23:59:59"
-        scope = """ct.date <= %(as_of_end)s
-          AND (
-              ct.status = 'Unsettled'
-              OR (ct.status = 'Settled' AND COALESCE(ct.settled_at, ct.modified) > %(as_of_end)s)
-          )"""
-        reference = min(as_of_date, today)
-    else:
-        scope = "ct.status = 'Unsettled'"
-        reference = today
+    scope, reference = _unsettled_scope(as_of, params)
 
     rows = frappe.db.sql(f"""
         SELECT

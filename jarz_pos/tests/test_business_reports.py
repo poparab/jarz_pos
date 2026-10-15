@@ -3,8 +3,12 @@
 Every builder takes plain rows and returns the payload, so no site is needed.
 """
 
+import math
 import unittest
 from datetime import date
+from unittest.mock import MagicMock, patch
+
+import frappe
 
 from jarz_pos.api import business_reports as br
 
@@ -170,6 +174,70 @@ class TestLabour(unittest.TestCase):
         self.assertEqual(one["totals"]["labour_pct"], 10.0)
         self.assertEqual([e["employee"] for e in one["employees"]], ["E1"])
         self.assertEqual(one["employees"][0]["cost"], 3000.0)
+
+
+def _fake_frappe():
+    """A frappe stand-in whose ``throw`` raises the real exception class."""
+    fake = MagicMock()
+    fake.ValidationError = frappe.ValidationError
+
+    def _throw(msg, exc=frappe.ValidationError, *a, **kw):
+        raise exc(msg)
+
+    fake.throw.side_effect = _throw
+    return fake
+
+
+class TestRangeCap(unittest.TestCase):
+    """Every report here refuses a range longer than MAX_RANGE_DAYS (366)."""
+
+    def _patched(self):
+        return patch.multiple(br, frappe=_fake_frappe(), _=lambda s, *a, **k: s)
+
+    def test_ensure_max_range_boundaries(self):
+        with self._patched():
+            br.ensure_max_range(date(2025, 1, 1), date(2025, 12, 31))  # 365 days
+            br.ensure_max_range(date(2024, 1, 1), date(2024, 12, 31))  # 366 days (leap year)
+            with self.assertRaises(frappe.ValidationError):
+                br.ensure_max_range(date(2024, 1, 1), date(2025, 1, 1))  # 367 days
+
+    def test_every_endpoint_refuses_an_over_long_range(self):
+        too_long = (date(2025, 1, 1), date(2026, 6, 30))
+        endpoints = (br.get_labour_cost, br.get_unit_economics, br.get_promo_performance, br.get_stock_adjustments)
+        with self._patched(), patch.object(br, "_ensure_jarz_manager"), patch.object(
+            br.fr, "_parse_dates", return_value=too_long
+        ), patch.object(br.fr, "_default_company") as company:
+            for fn in endpoints:
+                with self.subTest(endpoint=fn.__name__):
+                    with self.assertRaises(frappe.ValidationError):
+                        fn(date_from="2025-01-01", date_to="2026-06-30")
+        # Refused before any data is read.
+        company.assert_not_called()
+
+
+class TestOwnerInputsAreFinite(unittest.TestCase):
+    def test_nan_and_infinity_are_clamped(self):
+        nan, inf = float("nan"), float("inf")
+        out = br.owner_inputs(inf, nan, -inf, nan)
+        self.assertEqual(out, {"ad_spend": 0.0, "kashier_pct": 3.0, "talabat_pct": 0.0, "extra_fixed": 0.0})
+        out = br.owner_inputs(-inf, inf, inf, inf)
+        self.assertEqual(out, {"ad_spend": 0.0, "kashier_pct": 100.0, "talabat_pct": 100.0, "extra_fixed": 0.0})
+        for v in out.values():
+            self.assertTrue(math.isfinite(v))
+
+    def test_string_inputs_from_the_query_string(self):
+        out = br.owner_inputs("NaN", "inf", "-5", "1e999")
+        self.assertEqual(out, {"ad_spend": 0.0, "kashier_pct": 100.0, "talabat_pct": 0.0, "extra_fixed": 0.0})
+
+    def test_ordinary_values_pass_through(self):
+        out = br.owner_inputs("15000", 2.5, 35, "40000")
+        self.assertEqual(out, {"ad_spend": 15000.0, "kashier_pct": 2.5, "talabat_pct": 35.0, "extra_fixed": 40000.0})
+
+    def test_builder_survives_an_infinite_fixed_cost(self):
+        # Belt and braces: even if an infinity reaches the builder directly,
+        # break-even is reported as unavailable instead of raising OverflowError.
+        out = TestUnitEconomics().build(ad_spend=0.0, extra_fixed=float("inf"))
+        self.assertIsNone(out["break_even_orders"])
 
 
 if __name__ == "__main__":

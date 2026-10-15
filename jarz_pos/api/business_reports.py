@@ -9,7 +9,9 @@ Four read-only reports, all gated to JARZ Manager or Administrator:
 
 "Branch" means **POS Profile** everywhere (``Sales Invoice.pos_profile``); a
 branch's stock is that POS Profile's ``warehouse``. Dates are inclusive
-``YYYY-MM-DD`` strings and default to month-to-date. Money is company currency.
+``YYYY-MM-DD`` strings and default to month-to-date; a range longer than
+``MAX_RANGE_DAYS`` (366) is refused with a ValidationError. Money is company
+currency.
 
 Data sources (confirmed in code / fixtures, not guessed):
 
@@ -84,6 +86,42 @@ def _clean_branch(branch: Any) -> Optional[str]:
     if not frappe.db.exists("POS Profile", text):
         frappe.throw(_("Unknown branch: {0}").format(text))
     return text
+
+
+#: Longest range any report here accepts, inclusive (same cap as
+#: ``ops_reports.get_fulfilment_sla``). Labour loads payroll once per month and
+#: every check-in in the range, so an open-ended range is a heavy request.
+MAX_RANGE_DAYS = 366
+
+
+def ensure_max_range(fd: date, td: date, max_days: int = MAX_RANGE_DAYS) -> None:
+    """Refuse a range longer than ``max_days`` (inclusive) with a ValidationError."""
+    if (td - fd).days + 1 > max_days:
+        frappe.throw(_("Choose a range of at most {0} days").format(max_days), frappe.ValidationError)
+
+
+def _parse_range(date_from: Optional[str], date_to: Optional[str]) -> Tuple[date, date]:
+    """``fr._parse_dates`` plus the :data:`MAX_RANGE_DAYS` cap."""
+    fd, td = fr._parse_dates(date_from, date_to)
+    ensure_max_range(fd, td)
+    return fd, td
+
+
+def _finite_input(value: Any, default: float, lo: float = 0.0, hi: Optional[float] = None) -> float:
+    """An owner input as a finite float clamped to ``[lo, hi]``.
+
+    ``flt("NaN")`` is NaN and ``flt("inf")`` is inf; NaN passes ``max``/``min``
+    untouched and inf reaches ``math.ceil`` (OverflowError). NaN takes
+    ``default``; an infinity is clamped to ``hi``, or takes ``default`` when the
+    input has no upper bound.
+    """
+    v = flt(value)
+    if math.isnan(v):
+        v = default
+    v = max(v, lo)
+    if hi is not None:
+        v = min(v, hi)
+    return v if math.isfinite(v) else default
 
 
 def _r2(value: Any) -> float:
@@ -244,11 +282,11 @@ def build_unit_economics(
 
     aov = revenue / orders if orders else 0.0
     break_even_revenue = break_even_orders = gap = None
-    if revenue > 0 and contribution > 0:
+    if revenue > 0 and contribution > 0 and math.isfinite(fixed_total):
         ratio = contribution / revenue
         break_even_revenue = round(fixed_total / ratio, 2)
         gap = round(break_even_revenue - revenue, 2)
-        if aov > 0:
+        if aov > 0 and math.isfinite(break_even_revenue / aov):
             break_even_orders = int(math.ceil(break_even_revenue / aov))
 
     def per_order(value: float) -> float:
@@ -331,6 +369,16 @@ def build_unit_economics(
     }
 
 
+def owner_inputs(ad_spend: Any, kashier_pct: Any, talabat_pct: Any, extra_fixed: Any) -> Dict[str, float]:
+    """The four owner inputs of :func:`get_unit_economics`, finite and clamped."""
+    return {
+        "ad_spend": _finite_input(ad_spend, 0.0),
+        "kashier_pct": _finite_input(kashier_pct, 3.0, hi=100.0),
+        "talabat_pct": _finite_input(talabat_pct, 30.0, hi=100.0),
+        "extra_fixed": _finite_input(extra_fixed, 0.0),
+    }
+
+
 @frappe.whitelist()
 def get_unit_economics(
     date_from: Optional[str] = None,
@@ -345,18 +393,14 @@ def get_unit_economics(
     Ledger figures come from the P&L report; ``ad_spend`` and ``extra_fixed``
     (owner inputs, not booked) are amounts for the range; ``kashier_pct`` is
     applied to money received into Kashier, ``talabat_pct`` to Talabat-partner
-    net sales.
+    net sales. Non-finite inputs ("NaN", "inf") are clamped: amounts fall back
+    to 0, percentages to their defaults (+inf to 100). Ranges over
+    :data:`MAX_RANGE_DAYS` days are refused.
     """
     _ensure_jarz_manager()
-    fd, td = fr._parse_dates(date_from, date_to)
+    fd, td = _parse_range(date_from, date_to)
     company = fr._default_company()
-
-    inputs = {
-        "ad_spend": max(flt(ad_spend), 0.0),
-        "kashier_pct": min(max(flt(kashier_pct), 0.0), 100.0),
-        "talabat_pct": min(max(flt(talabat_pct), 0.0), 100.0),
-        "extra_fixed": max(flt(extra_fixed), 0.0),
-    }
+    inputs = owner_inputs(ad_spend, kashier_pct, talabat_pct, extra_fixed)
 
     pnl = _profit_and_loss(fd, td, company)
     talabat_sales, _talabat_orders = _talabat_sales(fd, td, company)
@@ -486,7 +530,7 @@ def get_promo_performance(
     promo (any time up to today, not only inside the range).
     """
     _ensure_jarz_manager()
-    fd, td = fr._parse_dates(date_from, date_to)
+    fd, td = _parse_range(date_from, date_to)
     branch = _clean_branch(branch)
 
     params = {"fd": fd, "td": td, "branch": branch}
@@ -685,7 +729,7 @@ def get_stock_adjustments(
     With ``branch`` only that POS Profile's warehouse (and its children) count.
     """
     _ensure_jarz_manager()
-    fd, td = fr._parse_dates(date_from, date_to)
+    fd, td = _parse_range(date_from, date_to)
     branch = _clean_branch(branch)
     scope, params = _adjustment_scope(fd, td, branch)
 
@@ -1288,7 +1332,7 @@ def get_labour_cost(
     net totals by ``pos_profile`` (returns as negatives).
     """
     _ensure_jarz_manager()
-    fd, td = fr._parse_dates(date_from, date_to)
+    fd, td = _parse_range(date_from, date_to)
     branch = _clean_branch(branch)
     company = fr._default_company()
 

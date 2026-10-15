@@ -274,16 +274,20 @@ class TestBranchSplit(unittest.TestCase):
             branch_invoice_rows=[inv("B2B Supply", 2, 500, orders=2)],
             branch_shipping_rows=[],
         )
-        # Ledger-based figures are identical to the company-wide report.
-        for key in ("total_revenue", "total_expenses", "net_profit", "gross_profit"):
-            self.assertEqual(r["summary"][key], company["summary"][key])
+        # The whole summary is the company-wide one: one scope per block. Before
+        # 2026-10-15 orders / b2b_revenue / b2c_revenue followed the branch while
+        # sales and profit did not.
+        self.assertEqual(r["summary"], company["summary"])
+        self.assertEqual(r["summary"]["orders"], 10)
+        self.assertEqual(r["summary"]["b2b_revenue"], 500.0)
+        self.assertEqual(r["summary"]["b2c_revenue"], 960.0)
         self.assertTrue(r["reconciliation"]["matches"])
         # Channels are the branch's invoices, with no ledger "adjustments" row.
         self.assertFalse([c for c in r["channels"] if c["channel"] == "adjustments"])
         b2b = next(c for c in r["channels"] if c["channel"] == "b2b")
         self.assertEqual(b2b["revenue"], 500.0)
         self.assertEqual(b2b["share_pct"], 100.0)
-        self.assertEqual(r["summary"]["orders"], 2)
+        self.assertEqual(sum(c["orders"] for c in r["channels"]), 2)
         self.assertIn("gl_company_wide", r["data_quality"]["notes"])
         self.assertEqual(r["branches"][0]["branch"], "Dokki")
         self.assertEqual(r["filters"]["branch"], "Dokki")
@@ -300,6 +304,38 @@ class TestBranchSplit(unittest.TestCase):
         self.assertEqual(d["shipping_income"], 60.0)
         self.assertEqual(d["cogs_coverage_pct"], 50.0)
         self.assertEqual(rows[1]["cogs"], 0.0)
+        # Rows without a purpose are legacy blanks: B2C.
+        self.assertEqual((d["b2b_revenue"], d["b2c_revenue"]), (0.0, 960.0))
+
+    def test_branch_rows_split_b2b_and_b2c_on_the_summary_basis(self):
+        """Net sales + billed shipping per purpose; staff and samples in neither."""
+        rows = fr.assemble_branch_rows(
+            [
+                {"branch": "Dokki", "purpose": "Standard", "orders": 3, "revenue": 900},
+                {"branch": "Dokki", "purpose": "Standard", "orders": 0, "revenue": -100},
+                {"branch": "Dokki", "purpose": "B2B Supply", "orders": 1, "revenue": 500},
+                {"branch": "Dokki", "purpose": "Employee", "orders": 1, "revenue": 50},
+                {"branch": "Dokki", "purpose": "Sample - Courier", "orders": 1, "revenue": 0},
+            ],
+            [{"branch": "Dokki", "cogs": 400, "stock_sales": 1350, "costed_sales": 1350}],
+            [{"branch": "Dokki", "purpose": "Standard", "amount": 60},
+             {"branch": "Dokki", "purpose": "B2B Supply", "amount": 20}],
+        )
+        d = rows[0]
+        self.assertEqual(d["orders"], 6)
+        self.assertEqual(d["revenue"], 1350.0)
+        self.assertEqual(d["shipping_income"], 80.0)
+        self.assertEqual(d["b2b_revenue"], 520.0)
+        self.assertEqual(d["b2c_revenue"], 860.0)
+
+    def test_branch_cogs_is_never_negative(self):
+        rows = fr.assemble_branch_rows(
+            [{"branch": "Dokki", "orders": 1, "revenue": 0}],
+            [{"branch": "Dokki", "cogs": -120, "stock_sales": 0, "costed_sales": 0}],
+            [],
+        )
+        self.assertEqual(rows[0]["cogs"], 0.0)
+        self.assertEqual(rows[0]["gross_profit"], 0.0)
 
     def test_actual_cost_reads_incoming_rate_and_delivery_notes(self):
         join_sql, cost = fr.actual_line_cost_sql()
@@ -307,6 +343,106 @@ class TestBranchSplit(unittest.TestCase):
         self.assertIn("si.update_stock = 1", cost)
         self.assertIn("dni.si_detail", join_sql)
         self.assertIn("%(fd)s", join_sql)
+
+    def test_default_cost_stays_gross_for_product_analytics(self):
+        """Product analytics reports gross (is_return = 0) lines: no netting there."""
+        join_sql, cost = fr.actual_line_cost_sql()
+        self.assertIn("IFNULL(dn.is_return, 0) = 0", join_sql)
+        self.assertNotIn("returned_cost", join_sql + cost)
+        self.assertNotIn("GREATEST", cost)
+
+    def test_net_returns_nets_return_dns_on_the_original_line(self):
+        join_sql, cost = fr.actual_line_cost_sql(net_returns=True)
+        flat = " ".join(join_sql.split())
+        # Return DN rows are kept (not filtered out) and summed separately ...
+        self.assertNotIn("AND IFNULL(dn.is_return, 0) = 0 AND", flat)
+        self.assertIn("THEN ABS(dni.incoming_rate * dni.stock_qty) ELSE 0 END) AS returned_cost", flat)
+        # ... keyed on the original invoice line they carry in si_detail ...
+        self.assertIn("GROUP BY dni.si_detail", flat)
+        self.assertIn("dnc.si_detail = sii.name", flat)
+        # ... and only when the return itself was posted inside the range, so a
+        # later-month return never rewrites (or negates) this month's cost.
+        self.assertIn("OR dn.posting_date BETWEEN %(fd)s AND %(td)s", flat)
+        self.assertIn("dsi.posting_date BETWEEN %(fd)s AND %(td)s", flat)
+        # A fully returned line costs 0, never negative, and is still costed.
+        self.assertIn("GREATEST(dnc.cost - IFNULL(dnc.returned_cost, 0), 0)", cost)
+        self.assertIn("- IFNULL(dnc.returned_cost, 0), 0)", cost)
+        self.assertTrue(cost.strip().endswith("ELSE NULL END)"))
+
+    def test_branch_rows_net_returns_and_keep_credit_notes_out_of_coverage(self):
+        from unittest.mock import MagicMock, patch
+
+        fake = MagicMock()
+        seen = []
+        fake.db.sql.side_effect = lambda q, p=None, as_dict=False, **kw: seen.append(q) or []
+        with patch.object(fr, "frappe", fake):
+            self.assertEqual(fr._branch_rows(date(2026, 9, 1), date(2026, 9, 30), "J", SHIP), [])
+        sales_q, costs_q, ship_q = (" ".join(q.split()) for q in seen)
+        self.assertIn("returned_cost", costs_q)
+        self.assertIn(
+            "SUM(CASE WHEN si.is_return = 0 AND IFNULL(it.is_stock_item, 0) = 1 "
+            "THEN sii.base_net_amount ELSE 0 END) AS stock_sales", costs_q)
+        self.assertIn("WHEN si.is_return = 0 AND IFNULL(it.is_stock_item, 0) = 1 AND", costs_q)
+        self.assertIn("GROUP BY branch, si.custom_order_purpose", sales_q)
+        self.assertIn("GROUP BY branch, si.custom_order_purpose", ship_q)
+
+
+def _fake_frappe(exists=True):
+    """A MagicMock ``frappe`` whose ``throw`` raises the real exception class."""
+    from unittest.mock import MagicMock
+
+    import frappe as real
+
+    fake = MagicMock()
+    fake.ValidationError = real.ValidationError
+    fake.DoesNotExistError = real.DoesNotExistError
+    fake.PermissionError = real.PermissionError
+
+    def _throw(msg, exc=real.ValidationError, *a, **kw):
+        raise exc(msg)
+
+    fake.throw.side_effect = _throw
+    fake.db.exists.return_value = exists
+    return fake
+
+
+class TestBranchValidation(unittest.TestCase):
+    def _patch(self, exists):
+        from unittest.mock import patch
+
+        return patch.multiple(fr, frappe=_fake_frappe(exists), _=lambda s, *a, **k: s)
+
+    def test_blank_is_all_branches(self):
+        with self._patch(False):
+            self.assertIsNone(fr.validate_branch(None))
+            self.assertIsNone(fr.validate_branch("  "))
+
+    def test_existing_pos_profile_passes(self):
+        with self._patch(True):
+            self.assertEqual(fr.validate_branch(" Dokki "), "Dokki")
+
+    def test_unknown_branch_is_refused(self):
+        import frappe as real
+
+        with self._patch(False), self.assertRaises(real.ValidationError):
+            fr.validate_branch("Nowhere")
+
+    def test_no_profile_bucket_label_is_not_a_branch(self):
+        import frappe as real
+
+        with self._patch(True), self.assertRaises(real.ValidationError):
+            fr.validate_branch(fr.NO_BRANCH_LABEL)
+
+    def test_profit_and_loss_refuses_an_unknown_branch(self):
+        from unittest.mock import patch
+
+        import frappe as real
+
+        with self._patch(False), patch.object(fr, "_ensure_jarz_manager"), patch.object(
+            fr, "_gl_rows"
+        ) as gl_rows, self.assertRaises(real.ValidationError):
+            fr.get_profit_and_loss(date_from="2026-09-01", date_to="2026-09-30", branch="Nowhere")
+        gl_rows.assert_not_called()
 
 
 class TestLedgerQuery(unittest.TestCase):
@@ -372,11 +508,82 @@ class TestUnsettledCourierBalancesAsOf(unittest.TestCase):
         rows, seen = self._run(as_of="2026-09-30", branch="Dokki")
         query, params = seen[0]
         self.assertIn("ct.date <= %(as_of_end)s", query)
-        self.assertIn("COALESCE(ct.settled_at, ct.modified) > %(as_of_end)s", query)
         self.assertIn("bsi.pos_profile = %(branch)s", query)
         self.assertEqual("2026-09-30 23:59:59", params["as_of_end"])
         # Aged to the as-of date, not today.
         self.assertEqual(10, rows[0]["days_aged"])
+
+    def test_settled_row_without_settled_at_is_never_a_phantom_balance(self):
+        """``modified`` moves on any later save; the row's own date cannot."""
+        _rows, seen = self._run(as_of="2026-09-30")
+        query, _params = seen[0]
+        self.assertIn("COALESCE(ct.settled_at, ct.date) > %(as_of_end)s", query)
+        self.assertNotIn("ct.modified", query)
+
+
+class TestShippingKpiAsOf(unittest.TestCase):
+    """The dashboard's unsettled KPI is read on the same as-of date as its table."""
+
+    def _kpis(self, **kwargs):
+        from unittest.mock import MagicMock, patch
+
+        import frappe as real
+
+        from jarz_pos.api import shipping_analytics as sa
+
+        fake = MagicMock()
+        seen = []
+
+        def _sql(query, params=None, as_dict=False, **kw):
+            seen.append((query, dict(params or {})))
+            return [real._dict(total_orders=0, delivery_orders=0, pickup_orders=0, total_expense=0,
+                               total_income=0, avg_cost_per_order=0, total=120, n=0)]
+
+        fake.db.sql.side_effect = _sql
+        fake.db.count.return_value = 0
+        with patch.object(sa, "frappe", fake), patch.object(sa, "_ensure_jarz_manager"), patch.object(
+            sa, "nowdate", return_value="2026-10-15"
+        ):
+            out = sa.get_summary_kpis(from_date="2026-09-01", to_date="2026-09-30", **kwargs)
+        ct_query, ct_params = next((q, p) for q, p in seen if "tabCourier Transaction" in q)
+        return out, ct_query, ct_params
+
+    def test_without_as_of_the_kpi_is_todays_balance(self):
+        out, query, params = self._kpis()
+        self.assertIn("ct.status = 'Unsettled'", query)
+        self.assertNotIn("as_of_end", query)
+        self.assertNotIn("as_of_end", params)
+        self.assertIsNone(out["unsettled_as_of"])
+        self.assertEqual(out["unsettled_courier_total"], 120.0)
+
+    def test_as_of_uses_the_balances_table_scope(self):
+        out, query, params = self._kpis(as_of="2026-09-30", branch="Dokki")
+        self.assertIn("ct.date <= %(as_of_end)s", query)
+        self.assertIn("COALESCE(ct.settled_at, ct.date) > %(as_of_end)s", query)
+        self.assertIn("bsi.pos_profile = %(branch)s", query)
+        self.assertEqual(params["as_of_end"], "2026-09-30 23:59:59")
+        self.assertEqual(out["unsettled_as_of"], "2026-09-30")
+
+    def test_dashboard_reads_kpi_and_table_on_to_date(self):
+        from unittest.mock import MagicMock, patch
+
+        from jarz_pos.api import shipping_analytics as sa
+
+        loaders = [
+            "get_summary_kpis", "get_alerts_data", "get_cost_by_territory", "get_cost_by_sub_territory",
+            "get_cost_by_pos_profile", "get_cost_by_courier", "get_custom_shipping_breakdown",
+            "get_double_shipping_impact", "get_daily_trend", "get_pickup_vs_delivery_split",
+            "get_unsettled_courier_balances", "get_pickup_delivery_trend",
+        ]
+        mocks = {name: MagicMock(return_value={}) for name in loaders}
+        with patch.multiple(sa, _ensure_jarz_manager=MagicMock(), **mocks), patch.object(
+            sa, "nowdate", return_value="2026-10-15"
+        ):
+            out = sa.get_shipping_analytics(from_date="2026-09-01", to_date="2026-09-30", branch="Dokki")
+        self.assertEqual(mocks["get_summary_kpis"].call_args.kwargs["as_of"], "2026-09-30")
+        self.assertEqual(mocks["get_summary_kpis"].call_args.kwargs["branch"], "Dokki")
+        self.assertEqual(mocks["get_unsettled_courier_balances"].call_args.kwargs["as_of"], "2026-09-30")
+        self.assertEqual(out["unsettled_as_of"], "2026-09-30")
 
 
 if __name__ == "__main__":

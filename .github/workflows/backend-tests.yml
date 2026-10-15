@@ -595,6 +595,8 @@ jobs:
             test_inventory_restock
             test_api_product_analytics
             test_api_reports
+            test_executive_analytics
+            test_segmentation
             # The posting TIME a POS user picks. It must be in CI because the
             # failure it guards is invisible at runtime: Journal Entry, Payment
             # Entry and GL Entry have no posting_time field, so the old

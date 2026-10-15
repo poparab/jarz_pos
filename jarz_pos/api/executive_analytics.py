@@ -53,8 +53,11 @@ def get_executive_overview(
     ``branch`` (optional POS Profile name) is passed to product, P&L, shipping
     and inventory. With a branch:
 
-    * revenue, gross profit and orders come from that branch's row of the P&L
-      ``branches`` split (invoice net sales, actual cost of goods);
+    * revenue, gross profit, orders and B2B / B2C revenue come from that
+      branch's row of the P&L ``branches`` split (invoice net sales, actual cost
+      of goods net of returns; B2B/B2C = net sales + billed shipping, the same
+      basis as the company figures) — never from the P&L ``summary``, which is
+      company-wide;
     * shipping expense / income / net come from the branch's invoices
       (shipping summary KPIs), not the company-wide ledger;
     * critical / watch stock are the branch's restock statuses (its warehouse,
@@ -63,14 +66,17 @@ def get_executive_overview(
       branch) and the customer segment mix stays company-wide — both listed in
       ``scope_notes``.
 
-    Additive keys: ``filters`` and ``scope_notes``.
+    Additive keys: ``filters`` and ``scope_notes``. A ``branch`` that is not an
+    existing POS Profile is refused with a ``ValidationError`` (before, every
+    section swallowed it and the overview rendered as an all-zero branch).
     """
     _ensure_jarz_manager()
+    from jarz_pos.api.financial_report import validate_branch
+
+    branch = validate_branch(branch)
 
     if not date_from or not date_to:
         date_from, date_to = _default_dates()
-
-    branch = (branch or "").strip() or None
 
     # ── Product / sales (revenue, margin, mix, trend, territory) ─────────
     def _load_product():
@@ -103,6 +109,15 @@ def get_executive_overview(
     branch_row = None
     if branch:
         branch_row = next((r for r in pnl_branches or [] if r.get("branch") == branch), None)
+
+    # B2B / B2C revenue: the P&L summary is company-wide, so a branch reads its
+    # own row (no row = the branch invoiced nothing in the range).
+    if branch:
+        b2b_revenue = float((branch_row or {}).get("b2b_revenue") or 0)
+        b2c_revenue = float((branch_row or {}).get("b2c_revenue") or 0)
+    else:
+        b2b_revenue = float(pnl_summary.get("b2b_revenue") or 0)
+        b2c_revenue = float(pnl_summary.get("b2c_revenue") or 0)
 
     if branch:
         if branch_row:
@@ -228,8 +243,8 @@ def get_executive_overview(
         "net_shipping_pl": float(pnl_shipping.get("net", shipping.get("net_pl")) or 0),
         "net_profit": float(pnl_summary.get("net_profit") or 0),
         "net_margin": float(pnl_summary.get("net_margin_pct") or 0),
-        "b2b_revenue": float(pnl_summary.get("b2b_revenue") or 0),
-        "b2c_revenue": float(pnl_summary.get("b2c_revenue") or 0),
+        "b2b_revenue": b2b_revenue,
+        "b2c_revenue": b2c_revenue,
         "avg_cost_per_order": float(shipping.get("avg_cost_per_order") or 0),
         "unsettled_courier_total": float(shipping.get("unsettled_courier_total") or 0),
         "pending_overrides": int(shipping.get("pending_csr_count") or 0),
