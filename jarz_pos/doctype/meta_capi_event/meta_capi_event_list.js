@@ -50,5 +50,21 @@ frappe.listview_settings["Meta CAPI Event"] = {
 				__("Reject")
 			);
 		});
+		listview.page.add_actions_menu_item(__("Retry Failed"), () => {
+			const names = picked();
+			if (!names.length) return;
+			frappe.call({ method: method + "retry_events", args: { names } }).then((r) => {
+				const m = r.message || {};
+				frappe.show_alert({
+					message: __("{0} back in the send queue, {1} expired, {2} not Failed", [
+						m.retried || 0,
+						m.expired || 0,
+						m.skipped || 0,
+					]),
+					indicator: "green",
+				});
+				listview.refresh();
+			});
+		});
 	},
 };

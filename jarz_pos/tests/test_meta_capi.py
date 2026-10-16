@@ -241,13 +241,14 @@ class SendTimeEligibilityTest(unittest.TestCase):
 		invoice="ACC-SINV-1", event_id="ACC-SINV-1", event_time=D(2026, 10, 19, 12, 0), order_value=480
 	)
 
-	def _event(self, inv, has_return=False):
+	def _event(self, inv, has_return=False, customer=None, blocked=()):
+		customer = customer or {"mobile_no": "", m.CUSTOMER_EXCLUDE_FIELD: 0}
 		db = SimpleNamespace(
-			get_value=mock.Mock(return_value=inv),
+			get_value=mock.Mock(side_effect=[inv, customer]),
 			exists=mock.Mock(return_value="ACC-SINV-RET-1" if has_return else None),
 		)
 		with mock.patch.object(m.frappe, "db", db, create=True):
-			return m._event_for_row(self.ROW, "Africa/Cairo")
+			return m._event_for_row(self.ROW, "Africa/Cairo", blocked)
 
 	def test_delivered_order_is_sent(self):
 		event, reason = self._event(_inv())
@@ -257,7 +258,7 @@ class SendTimeEligibilityTest(unittest.TestCase):
 	def test_returned_state_is_skipped(self):
 		event, reason = self._event(_inv(custom_sales_invoice_state="Returned"))
 		self.assertIsNone(event)
-		self.assertEqual(reason, "Order state is now Returned")
+		self.assertEqual(reason, "Order no longer delivered: Returned")
 
 	def test_credit_note_against_the_order_is_skipped(self):
 		event, reason = self._event(_inv(), has_return=True)
@@ -271,9 +272,24 @@ class SendTimeEligibilityTest(unittest.TestCase):
 		self.assertEqual(m.not_sendable_reason(None, False), "Invoice no longer exists")
 		self.assertIsNone(m.not_sendable_reason(_inv(), False))
 
+	def test_customer_excluded_while_waiting_is_skipped(self):
+		event, reason = self._event(_inv(), customer={"mobile_no": "", m.CUSTOMER_EXCLUDE_FIELD: 1})
+		self.assertIsNone(event)
+		self.assertEqual(reason, "Customer excluded from Meta")
+
+	def test_phone_added_to_do_not_send_while_waiting_is_skipped(self):
+		event, reason = self._event(_inv(), blocked=m.parse_phones("+20 100 123 4567"))
+		self.assertIsNone(event)
+		self.assertEqual(reason, "Phone on the do-not-send list")
+
+	def test_customer_mobile_is_the_fallback_phone(self):
+		event, reason = self._event(_inv(contact_mobile=""), customer={"mobile_no": "01001234567"})
+		self.assertEqual(reason, "")
+		self.assertEqual(event["user_data"]["ph"], [sha(m.normalize_eg_mobile("01001234567"))])
+
 	def test_no_phone_is_still_skipped(self):
 		db = SimpleNamespace(
-			get_value=mock.Mock(side_effect=[_inv(contact_mobile=""), ""]),
+			get_value=mock.Mock(side_effect=[_inv(contact_mobile=""), {"mobile_no": ""}]),
 			exists=mock.Mock(return_value=None),
 		)
 		with mock.patch.object(m.frappe, "db", db, create=True):
@@ -443,6 +459,7 @@ class WiringTest(unittest.TestCase):
 			"approval_mode",
 			"hold_above",
 			"excluded_customer_groups",
+			"do_not_send_phones",
 		):
 			self.assertIn(name, fields)
 		self.assertEqual(fields["access_token"]["fieldtype"], "Password")
@@ -479,6 +496,231 @@ class WiringTest(unittest.TestCase):
 		self.assertEqual(row["fieldname"], m.CUSTOMER_EXCLUDE_FIELD)
 		self.assertEqual(row["fieldtype"], "Check")
 		self.assertEqual(row["dt"], "Customer")
+
+
+def _order(**over):
+	order = {
+		"name": "ACC-SINV-9",
+		"amended_from": None,
+		"customer": "CUST-1",
+		"contact_mobile": "01001234567",
+		"customer_mobile": "",
+		"grand_total": 480,
+		"creation": D(2026, 10, 18, 14, 0),
+		"custom_order_purpose": "Standard",
+		"sales_partner": None,
+		"is_partner_order": 0,
+		"customer_type": "Individual",
+		"customer_group": "Individual",
+		"exclude_from_meta": 0,
+	}
+	order.update(over)
+	return SimpleNamespace(**order)
+
+
+class RuleSkipReasonTest(unittest.TestCase):
+	"""Every delivered chat order gets a row; these rules decide which are Skipped and why."""
+
+	def reason(self, blocked=(), **over):
+		phone = m.normalize_eg_mobile("01001234567")
+		return m.rule_skip_reason(_order(**over), phone, ("B2B", "Employee"), blocked)
+
+	def test_a_plain_customer_order_passes(self):
+		self.assertIsNone(self.reason())
+
+	def test_each_rule_names_its_reason(self):
+		self.assertEqual(self.reason(custom_order_purpose="Sample"), "Not a standard order: Sample")
+		self.assertEqual(self.reason(custom_order_purpose=None), "Not a standard order: blank")
+		self.assertEqual(self.reason(sales_partner="Talabat"), "Partner order: Talabat")
+		self.assertEqual(self.reason(is_partner_order=1), "Partner order: partner order")
+		self.assertEqual(self.reason(customer_type="Company"), "Not an individual customer: Company")
+		self.assertEqual(self.reason(customer_group="B2B"), "Excluded customer group: B2B")
+		self.assertEqual(self.reason(exclude_from_meta=1), "Customer excluded from Meta")
+		self.assertEqual(self.reason(blocked=m.parse_phones("01001234567")), "Phone on the do-not-send list")
+
+	def test_purpose_is_checked_before_the_group(self):
+		self.assertEqual(
+			self.reason(custom_order_purpose="Employee", customer_group="Employee"),
+			"Not a standard order: Employee",
+		)
+
+	def test_every_reason_has_a_category(self):
+		self.assertEqual(m.reason_category("Partner order: Talabat"), "Partner order")
+		self.assertEqual(m.reason_category("Customer excluded from Meta"), "Customer excluded from Meta")
+		self.assertEqual(m.reason_category(""), "No reason recorded")
+		self.assertEqual(m.reason_category(None), "No reason recorded")
+
+
+class DoNotSendListTest(unittest.TestCase):
+	def test_formats_are_normalised_and_junk_ignored(self):
+		phones = m.parse_phones("01001234567\n+20 111 222 3333, 01223334444; hello\n\n123")
+		expected = {m.normalize_eg_mobile(p) for p in ("01001234567", "01112223333", "01223334444")}
+		self.assertEqual(phones, frozenset(expected))
+
+	def test_blank_list_blocks_nobody(self):
+		self.assertEqual(m.parse_phones(""), frozenset())
+		self.assertEqual(m.parse_phones(None), frozenset())
+
+	def test_settings_carry_the_list(self):
+		doc = {"enabled": 1, "do_not_send_phones": "01001234567"}
+		with mock.patch.object(m.frappe, "get_single", return_value=doc, create=True):
+			settings = m.load_settings()
+		self.assertIn(m.normalize_eg_mobile("01001234567"), settings["blocked_phones"])
+
+
+class EarlierRowVerdictTest(unittest.TestCase):
+	def test_sent_or_rejected_blocks_any_copy(self):
+		for status in (m.STATUS_SENT, m.STATUS_REJECTED):
+			self.assertEqual(m.earlier_row_verdict(status, True), "block")
+			self.assertEqual(m.earlier_row_verdict(status, False), "block")
+
+	def test_in_flight_on_a_cancelled_original_is_superseded(self):
+		for status in (m.STATUS_PENDING, m.STATUS_HELD, m.STATUS_APPROVED, m.STATUS_FAILED):
+			self.assertEqual(m.earlier_row_verdict(status, False), "supersede")
+			self.assertEqual(m.earlier_row_verdict(status, True), "block")
+
+	def test_skipped_and_expired_say_nothing(self):
+		self.assertEqual(m.earlier_row_verdict(m.STATUS_SKIPPED, False), "ignore")
+		self.assertEqual(m.earlier_row_verdict(m.STATUS_EXPIRED, True), "ignore")
+
+
+QUEUE_SETTINGS = {
+	"excluded_groups": ("B2B",),
+	"blocked_phones": frozenset(),
+	"approval_mode": m.APPROVAL_EVERY_ORDER,
+	"hold_above": 2500,
+}
+
+
+class QueueOneTest(unittest.TestCase):
+	def _queue(self, order, earlier=()):
+		inserted, marks = {}, []
+
+		def get_doc(values):
+			inserted.update(values)
+			return SimpleNamespace(insert=lambda **k: None)
+
+		# The earlier invoice was cancelled when it was amended.
+		db = SimpleNamespace(get_value=mock.Mock(return_value=2))
+		with (
+			mock.patch.object(m.frappe, "get_doc", get_doc, create=True),
+			mock.patch.object(m.frappe, "get_all", mock.Mock(return_value=list(earlier)), create=True),
+			mock.patch.object(m.frappe, "db", db, create=True),
+			mock.patch.object(m, "_mark", lambda name, values: marks.append((name, values))),
+		):
+			status = m._queue_one(order, QUEUE_SETTINGS)
+		return status, inserted, marks
+
+	def test_rule_skip_still_writes_a_row(self):
+		status, row, _ = self._queue(_order(customer_group="B2B"))
+		self.assertEqual(status, m.STATUS_SKIPPED)
+		self.assertEqual(row["status_reason"], "Excluded customer group: B2B")
+		self.assertEqual(row["invoice"], "ACC-SINV-9")
+
+	def test_eligible_order_waits_for_approval(self):
+		status, row, _ = self._queue(_order())
+		self.assertEqual(status, m.STATUS_PENDING)
+		self.assertEqual(row["status_reason"], "")
+
+	def test_amendment_retires_the_cancelled_original(self):
+		earlier = [SimpleNamespace(name="EV-1", invoice="ACC-SINV-9", status=m.STATUS_PENDING)]
+		status, _, marks = self._queue(_order(name="ACC-SINV-9-1", amended_from="ACC-SINV-9"), earlier)
+		self.assertEqual(status, m.STATUS_PENDING)
+		retired = {"status": m.STATUS_SKIPPED, "status_reason": "Replaced by amendment: ACC-SINV-9-1"}
+		self.assertEqual(marks, [("EV-1", retired)])
+
+	def test_already_sent_order_is_not_sent_twice(self):
+		earlier = [SimpleNamespace(name="EV-1", invoice="ACC-SINV-9", status=m.STATUS_SENT)]
+		status, row, _ = self._queue(_order(name="ACC-SINV-9-1", amended_from="ACC-SINV-9"), earlier)
+		self.assertEqual(status, m.STATUS_SKIPPED)
+		self.assertEqual(row["status_reason"], "Already queued: same order as ACC-SINV-9 (Sent)")
+
+
+class RetryTest(unittest.TestCase):
+	def test_failed_rows_go_back_to_approved(self):
+		rows = {
+			"EV-1": SimpleNamespace(status=m.STATUS_FAILED, event_time=D(2026, 10, 18, 12, 0)),
+			"EV-2": SimpleNamespace(status=m.STATUS_FAILED, event_time=D(2026, 10, 10, 12, 0)),
+			"EV-3": SimpleNamespace(status=m.STATUS_SENT, event_time=D(2026, 10, 18, 12, 0)),
+		}
+		marks = {}
+		db = SimpleNamespace(get_value=mock.Mock(side_effect=lambda dt, name, *a, **k: rows.get(name)))
+		with (
+			mock.patch.object(m, "_require_manager"),
+			mock.patch.object(m.frappe, "db", db, create=True),
+			mock.patch.object(m, "_mark", lambda name, values: marks.__setitem__(name, values)),
+			mock.patch("frappe.utils.now_datetime", return_value=D(2026, 10, 19, 12, 0)),
+		):
+			result = m.retry_events(json.dumps([*rows, "EV-missing"]))
+		self.assertEqual(result, {"retried": 1, "expired": 1, "skipped": 2})
+		self.assertEqual(marks["EV-1"], {"status": m.STATUS_APPROVED, "attempts": 0, "last_error": ""})
+		self.assertEqual(marks["EV-2"]["status"], m.STATUS_EXPIRED)
+		self.assertNotIn("EV-3", marks)
+
+
+class SkippedReportTest(unittest.TestCase):
+	def test_reasons_group_by_category(self):
+		day = datetime.date
+		rows = [
+			SimpleNamespace(
+				status_reason="Partner order: A", orders=3, order_value=900, last_day=day(2026, 10, 18)
+			),
+			SimpleNamespace(
+				status_reason="Partner order: B", orders=2, order_value=600, last_day=day(2026, 10, 19)
+			),
+			SimpleNamespace(
+				status_reason="Order value is zero", orders=1, order_value=0, last_day=day(2026, 10, 17)
+			),
+		]
+		db = SimpleNamespace(sql=mock.Mock(return_value=rows))
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			out = m.skipped_by_reason("2026-10-06", "2026-10-19")
+		self.assertEqual([r["reason"] for r in out], ["Partner order", "Order value is zero"])
+		self.assertEqual(out[0]["orders"], 5)
+		self.assertEqual(out[0]["order_value"], 1500.0)
+		self.assertEqual(out[0]["last_day"], day(2026, 10, 19))
+
+	def test_report_switches_view(self):
+		from jarz_pos.report.meta_capi_daily import meta_capi_daily as report
+
+		with mock.patch.object(report, "skipped_by_reason", return_value=[{"reason": "x"}]) as skipped:
+			columns, data = report.execute({"view": report.VIEW_SKIPPED})
+		skipped.assert_called_once()
+		self.assertEqual(columns[0]["fieldname"], "reason")
+		self.assertEqual(data, [{"reason": "x"}])
+		with mock.patch.object(report, "daily_rows", return_value=[]) as daily:
+			columns, _ = report.execute({})
+		daily.assert_called_once()
+		self.assertEqual(columns[0]["fieldname"], "day")
+
+
+class WorkspaceCountsTest(unittest.TestCase):
+	def test_meta_tiles_count_event_rows(self):
+		from jarz_pos.utils import setup_workspace as sw
+
+		labels = [s["label"] for s in sw.META_SHORTCUTS]
+		self.assertEqual(
+			labels, ["Meta: Waiting Approval", "Meta: Held", "Meta: Failed", "Meta: Sent This Week"]
+		)
+		statuses = set()
+		for sc in sw.META_SHORTCUTS:
+			self.assertEqual((sc["type"], sc["link_to"]), ("DocType", m.EVENT_DOCTYPE))
+			self.assertIn("{}", sc["format"])
+			for flt in sc["stats_filter"]:
+				# Four elements: with a fifth, Frappe drops the last filter.
+				self.assertEqual(len(flt), 4)
+				self.assertEqual(flt[0], m.EVENT_DOCTYPE)
+				if flt[1] == "status":
+					statuses.add(flt[3])
+		self.assertEqual(statuses, {m.STATUS_PENDING, m.STATUS_HELD, m.STATUS_FAILED, m.STATUS_SENT})
+
+	def test_meta_tiles_get_their_own_header(self):
+		from jarz_pos.utils import setup_workspace as sw
+
+		blocks = sw._content_blocks([], [], sw.META_SHORTCUTS)
+		self.assertIn("Meta Chat Orders", blocks[1]["data"]["text"])
+		names = [b["data"]["shortcut_name"] for b in blocks[2:]]
+		self.assertEqual(names, [s["label"] for s in sw.META_SHORTCUTS])
 
 
 if __name__ == "__main__":

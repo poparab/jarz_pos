@@ -10,14 +10,19 @@ already reports them, and sending them twice would double-count revenue.
 
 Flow (all state lives on ``Meta CAPI Event``, one row per invoice):
 
-1. ``queue_delivered_orders`` (hourly) finds delivered chat orders and creates a
-   row: ``Pending Approval``, ``Held`` (above the hold amount), ``Approved``
-   (approval mode "Held only" and nothing to hold) or ``Skipped`` (no valid
-   Egyptian mobile, or the order root was already queued).
+1. ``queue_delivered_orders`` (hourly) gives EVERY delivered chat order a row,
+   so each one is accounted for: ``Pending Approval``, ``Held`` (above the hold
+   amount), ``Approved`` (approval mode "Held only" and nothing to hold) or
+   ``Skipped`` with the reason (a rule failed: purpose, partner, customer type
+   or group, Exclude from Meta, the do-not-send phone list, no valid Egyptian
+   mobile, zero value, or the same order was already queued).
 2. A ``Meta CAPI Manager`` approves or rejects rows from the list or the form.
 3. ``send_approved_events`` (hourly, or "Send now") posts approved rows to Meta.
    In test mode they go with the test event code and stay ``Approved`` so the
    live switch sends them for real; out of test mode they become ``Sent``.
+   A row that failed all its attempts can be put back with "Retry".
+
+Skip reasons read "Category: detail"; the daily report groups on the category.
 
 Privacy: nothing personal is stored on the log. The phone, name and customer id
 are read from the invoice at send time, normalised and SHA-256 hashed before
@@ -62,6 +67,12 @@ STATUS_FAILED = "Failed"
 STATUS_EXPIRED = "Expired"
 STATUS_SKIPPED = "Skipped"
 AWAITING_DECISION = (STATUS_PENDING, STATUS_HELD)
+# Rows still on their way to Meta. One of these on a cancelled invoice has been
+# replaced by the amendment; on a live invoice it is the order itself.
+IN_FLIGHT = (STATUS_PENDING, STATUS_HELD, STATUS_APPROVED, STATUS_FAILED)
+# An earlier row in one of these settles the order for good: an amendment of a
+# sent or rejected order is neither sent again nor asked about again.
+SETTLED = (STATUS_SENT, STATUS_REJECTED)
 
 # Customer groups that are never retail chat buyers, even on a flutter order.
 DEFAULT_EXCLUDED_GROUPS = (
@@ -79,6 +90,7 @@ DEFAULT_EXCLUDED_GROUPS = (
 MAX_EVENT_AGE = timedelta(days=7) - timedelta(minutes=30)
 MAX_ATTEMPTS = 3
 MAX_QUEUE_PER_RUN = 500
+MAX_QUEUE_ROUNDS = 10  # a 7-day backfill can hold more than one page of orders
 MAX_SEND_PER_RUN = 500
 BATCH_SIZE = 50
 HTTP_TIMEOUT = 30
@@ -221,6 +233,49 @@ def initial_status(
 	return STATUS_PENDING, ""
 
 
+def rule_skip_reason(
+	order: Any, phone: str | None, excluded_groups: Iterable[str], blocked_phones: Iterable[str]
+) -> str | None:
+	"""Why a delivered chat order must never reach Meta, or None when it may.
+
+	*phone* must already be normalised. A missing phone and a zero value are
+	left to ``initial_status``; this covers who the order is for.
+	"""
+	purpose = _get(order, "custom_order_purpose")
+	if purpose != "Standard":
+		return f"Not a standard order: {purpose or 'blank'}"
+	partner = _get(order, "sales_partner")
+	if partner or int(_get(order, "is_partner_order", 0) or 0):
+		return f"Partner order: {partner or 'partner order'}"
+	customer_type = _get(order, "customer_type")
+	if customer_type != "Individual":
+		return f"Not an individual customer: {customer_type or 'blank'}"
+	group = _get(order, "customer_group")
+	if group and group in set(excluded_groups):
+		return f"Excluded customer group: {group}"
+	if int(_get(order, "exclude_from_meta", 0) or 0):
+		return "Customer excluded from Meta"
+	if phone and phone in set(blocked_phones):
+		return "Phone on the do-not-send list"
+	return None
+
+
+def earlier_row_verdict(status: str, invoice_live: bool) -> str:
+	"""What an earlier row with the same event id means for a new invoice.
+
+	``block``: the order is already settled or still waiting on its live
+	invoice, so the new invoice is Skipped as a duplicate. ``supersede``: the
+	earlier row is in flight on a cancelled invoice (it was amended), so that
+	row is retired and the amendment is queued. ``ignore``: the earlier row is
+	Skipped or Expired and says nothing about this invoice.
+	"""
+	if status in SETTLED:
+		return "block"
+	if status in IN_FLIGHT:
+		return "block" if invoice_live else "supersede"
+	return "ignore"
+
+
 def is_expired(event_time: datetime, now: datetime) -> bool:
 	return (now - event_time) > MAX_EVENT_AGE
 
@@ -229,6 +284,18 @@ def parse_groups(text: Any) -> tuple[str, ...]:
 	"""Customer groups from the settings box: one per line or comma separated."""
 	groups = [g.strip() for g in re.split(r"[\n,]", str(text or "")) if g.strip()]
 	return tuple(dict.fromkeys(groups)) or DEFAULT_EXCLUDED_GROUPS
+
+
+def parse_phones(text: Any) -> frozenset[str]:
+	"""The do-not-send list, normalised. Lines that are not an Egyptian mobile are ignored."""
+	phones = (normalize_eg_mobile(p) for p in re.split(r"[\n,;]", str(text or "")))
+	return frozenset(p for p in phones if p)
+
+
+def reason_category(reason: Any) -> str:
+	"""The part of a skip reason before the colon, for grouping."""
+	text = str(reason or "").strip()
+	return text.split(":", 1)[0].strip() if text else "No reason recorded"
 
 
 def chunks(items: list[Any], size: int) -> Iterable[list[Any]]:
@@ -279,6 +346,7 @@ def load_settings() -> dict[str, Any]:
 		"approval_mode": _get(doc, "approval_mode", APPROVAL_EVERY_ORDER),
 		"hold_above": float(_get(doc, "hold_above", DEFAULT_HOLD_ABOVE) or 0),
 		"excluded_groups": parse_groups(_get(doc, "excluded_customer_groups", "")),
+		"blocked_phones": parse_phones(_get(doc, "do_not_send_phones", "")),
 	}
 
 
@@ -330,56 +398,81 @@ def _queue_since(settings: dict[str, Any], backfill_days: int | None) -> datetim
 
 
 def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
-	"""Delivered chat orders inside the window that have no log row yet."""
+	"""Every delivered chat order inside the window that has no log row yet.
+
+	The send rules are NOT applied here: an order that fails one still gets a
+	row, Skipped with the reason, so every chat order is accounted for.
+	"""
 	has = frappe.db.has_column
 	for column in ("custom_order_channel", "custom_order_purpose", "custom_sales_invoice_state"):
 		if not has("Sales Invoice", column):
 			return []
 	partner = (
-		"AND IFNULL(si.custom_is_partner_order, 0) = 0"
-		if has("Sales Invoice", "custom_is_partner_order")
-		else ""
+		"IFNULL(si.custom_is_partner_order, 0)" if has("Sales Invoice", "custom_is_partner_order") else "0"
 	)
-	excluded = (
-		f"AND IFNULL(c.{CUSTOMER_EXCLUDE_FIELD}, 0) = 0" if has("Customer", CUSTOMER_EXCLUDE_FIELD) else ""
-	)
+	excluded = f"IFNULL(c.{CUSTOMER_EXCLUDE_FIELD}, 0)" if has("Customer", CUSTOMER_EXCLUDE_FIELD) else "0"
 	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
 	return frappe.db.sql(
 		f"""
         SELECT si.name, si.amended_from, si.customer, si.customer_name, si.grand_total, si.creation,
-               si.contact_mobile, c.mobile_no AS customer_mobile
+               si.contact_mobile, c.mobile_no AS customer_mobile,
+               si.custom_order_purpose, si.sales_partner, {partner} AS is_partner_order,
+               c.customer_type, c.customer_group, {excluded} AS exclude_from_meta
         FROM `tabSales Invoice` si
         INNER JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND IFNULL(si.is_return, 0) = 0
-          AND si.grand_total > 0
           AND si.custom_order_channel = 'flutter'
-          AND si.custom_order_purpose = 'Standard'
           AND si.custom_sales_invoice_state = 'Delivered'
-          AND IFNULL(si.sales_partner, '') = ''
-          {partner}
-          AND c.customer_type = 'Individual'
-          AND IFNULL(c.customer_group, '') NOT IN %(groups)s
-          {excluded}
           AND si.creation >= %(since)s
           AND NOT EXISTS (SELECT 1 FROM `tabMeta CAPI Event` e WHERE e.invoice = si.name)
         ORDER BY si.creation ASC
         LIMIT %(limit)s
         """,
-		{"groups": settings["excluded_groups"], "since": since, "limit": MAX_QUEUE_PER_RUN},
+		{"since": since, "limit": MAX_QUEUE_PER_RUN},
 		as_dict=True,
 	)
+
+
+def _duplicate_reason(event_id: str, invoice: str) -> str | None:
+	"""Skip reason when the same order already has a row, else None.
+
+	An in-flight row left on a cancelled invoice (the order was amended) is
+	retired here so that the amendment, not the dead original, goes to Meta.
+	"""
+	earlier_rows = frappe.get_all(
+		EVENT_DOCTYPE,
+		filters={"event_id": event_id, "invoice": ["!=", invoice]},
+		fields=["name", "invoice", "status"],
+		order_by="creation asc",
+	)
+	for row in earlier_rows:
+		live = frappe.db.get_value("Sales Invoice", row.invoice, "docstatus") == 1
+		verdict = earlier_row_verdict(row.status, live)
+		if verdict == "block":
+			return f"Already queued: same order as {row.invoice} ({row.status})"
+		if verdict == "supersede":
+			_mark(
+				row.name,
+				{"status": STATUS_SKIPPED, "status_reason": f"Replaced by amendment: {invoice}"},
+			)
+	return None
 
 
 def _queue_one(order: Any, settings: dict[str, Any]) -> str:
 	event_id = event_id_for(order.name, order.amended_from)
 	phone = normalize_eg_mobile(order.contact_mobile) or normalize_eg_mobile(order.customer_mobile)
-	status, reason = initial_status(
-		order.grand_total, phone, settings["approval_mode"], settings["hold_above"]
-	)
-	earlier = frappe.db.get_value(EVENT_DOCTYPE, {"event_id": event_id}, "invoice")
-	if earlier:
-		status, reason = STATUS_SKIPPED, f"Same order already queued as {earlier}"
+	reason = rule_skip_reason(order, phone, settings["excluded_groups"], settings.get("blocked_phones", ()))
+	if reason:
+		status = STATUS_SKIPPED
+	else:
+		status, reason = initial_status(
+			order.grand_total, phone, settings["approval_mode"], settings["hold_above"]
+		)
+	if status != STATUS_SKIPPED:
+		duplicate = _duplicate_reason(event_id, order.name)
+		if duplicate:
+			status, reason = STATUS_SKIPPED, duplicate
 	frappe.get_doc(
 		{
 			"doctype": EVENT_DOCTYPE,
@@ -403,17 +496,25 @@ def queue_delivered_orders(backfill_days: int | None = None) -> dict[str, Any]:
 		result["enabled"] = settings["enabled"]
 		if not settings["enabled"]:  # the kill switch; backfill only moves the start date
 			return result
-		for order in _candidate_orders(settings, _queue_since(settings, backfill_days)):
-			try:
-				frappe.db.savepoint("meta_capi_queue")
-				status = _queue_one(order, settings)
-				result["queued"] += 1
-				result["by_status"][status] = result["by_status"].get(status, 0) + 1
-			except Exception:
-				result["errors"] += 1
-				frappe.db.rollback(save_point="meta_capi_queue")
-				frappe.log_error(frappe.get_traceback(), f"meta_capi: queue {order.name} failed")
-		frappe.db.commit()
+		since = _queue_since(settings, backfill_days)
+		failed: set[str] = set()
+		for _round in range(MAX_QUEUE_ROUNDS):
+			orders = [o for o in _candidate_orders(settings, since) if o.name not in failed]
+			for order in orders:
+				try:
+					frappe.db.savepoint("meta_capi_queue")
+					status = _queue_one(order, settings)
+					result["queued"] += 1
+					result["by_status"][status] = result["by_status"].get(status, 0) + 1
+				except Exception:
+					result["errors"] += 1
+					failed.add(order.name)
+					frappe.db.rollback(save_point="meta_capi_queue")
+					frappe.log_error(frappe.get_traceback(), f"meta_capi: queue {order.name} failed")
+			frappe.db.commit()
+			# A short page is the last one; a page of only failures would repeat forever.
+			if len(orders) < MAX_QUEUE_PER_RUN or all(o.name in failed for o in orders):
+				break
 	except Exception:
 		result["errors"] += 1
 		try:
@@ -439,14 +540,20 @@ def not_sendable_reason(inv: Any, has_return: bool) -> str | None:
 		return "Invoice is a return"
 	state = _get(inv, "custom_sales_invoice_state")
 	if state != "Delivered":
-		return f"Order state is now {state or 'blank'}"
+		return f"Order no longer delivered: {state or 'blank'}"
 	if has_return:
 		return "A return was booked against this order"
 	return None
 
 
-def _event_for_row(row: Any, tz_name: str) -> tuple[dict[str, Any] | None, str]:
-	"""(event, "") for a log row, rebuilt from the invoice, or (None, reason to skip)."""
+def _event_for_row(
+	row: Any, tz_name: str, blocked_phones: Iterable[str] = ()
+) -> tuple[dict[str, Any] | None, str]:
+	"""(event, "") for a log row, rebuilt from the invoice, or (None, reason to skip).
+
+	Exclude from Meta and the do-not-send list are checked again here: either
+	can be set while the row waits for approval.
+	"""
 	inv = frappe.db.get_value(
 		"Sales Invoice",
 		row.invoice,
@@ -467,11 +574,16 @@ def _event_for_row(row: Any, tz_name: str) -> tuple[dict[str, Any] | None, str]:
 	reason = not_sendable_reason(inv, has_return)
 	if reason:
 		return None, reason
-	phone = normalize_eg_mobile(inv.contact_mobile) or normalize_eg_mobile(
-		frappe.db.get_value("Customer", inv.customer, "mobile_no")
+	customer = frappe.db.get_value(
+		"Customer", inv.customer, ["mobile_no", CUSTOMER_EXCLUDE_FIELD], as_dict=True
 	)
+	if int(_get(customer, CUSTOMER_EXCLUDE_FIELD, 0) or 0):
+		return None, "Customer excluded from Meta"
+	phone = normalize_eg_mobile(inv.contact_mobile) or normalize_eg_mobile(_get(customer, "mobile_no"))
 	if not phone:
 		return None, "No valid Egyptian mobile at send time"
+	if phone in set(blocked_phones):
+		return None, "Phone on the do-not-send list"
 	event = build_event(
 		event_id=row.event_id,
 		event_time=to_unix(row.event_time, tz_name),
@@ -545,7 +657,7 @@ def send_approved_events() -> dict[str, Any]:
 				_mark(row.name, {"status": STATUS_EXPIRED, "status_reason": "Older than Meta's 7-day limit"})
 				result["expired"] += 1
 				continue
-			event, reason = _event_for_row(row, tz_name)
+			event, reason = _event_for_row(row, tz_name, settings.get("blocked_phones", ()))
 			if not event:
 				_mark(row.name, {"status": STATUS_SKIPPED, "status_reason": reason})
 				result["skipped"] += 1
@@ -667,6 +779,34 @@ def reject_events(names: Any, reason: str | None = None) -> dict[str, Any]:
 
 
 @frappe.whitelist(methods=["POST"])
+def retry_events(names: Any) -> dict[str, Any]:
+	"""Put Failed rows back in the send queue with a fresh set of attempts.
+
+	A row past Meta's 7-day limit cannot be sent any more and becomes Expired.
+	The approval stands: a failed row was already approved once.
+	"""
+	_require_manager()
+	from frappe.utils import get_datetime, now_datetime
+
+	now = now_datetime()
+	done, expired, skipped = 0, 0, 0
+	for name in _names(names):
+		row = frappe.db.get_value(
+			EVENT_DOCTYPE, name, ["status", "event_time"], as_dict=True, for_update=True
+		)
+		if not row or row.status != STATUS_FAILED:
+			skipped += 1
+			continue
+		if is_expired(get_datetime(row.event_time), now):
+			_mark(name, {"status": STATUS_EXPIRED, "status_reason": "Older than Meta's 7-day limit"})
+			expired += 1
+			continue
+		_mark(name, {"status": STATUS_APPROVED, "attempts": 0, "last_error": ""})
+		done += 1
+	return {"retried": done, "expired": expired, "skipped": skipped}
+
+
+@frappe.whitelist(methods=["POST"])
 def check_token() -> dict[str, Any]:
 	"""Ask Meta whether the saved token can read the dataset. Never echoes it."""
 	_require_manager()
@@ -774,3 +914,32 @@ def daily_rows(days: int = 14, from_date: Any = None, to_date: Any = None) -> li
 		{"from_date": from_date, "to_date": to_date},
 		as_dict=True,
 	)
+
+
+def skipped_by_reason(from_date: Any = None, to_date: Any = None) -> list[dict[str, Any]]:
+	"""Skipped rows in the window, grouped by the reason's category, largest first."""
+	from frappe.utils import add_days, getdate, nowdate
+
+	to_date = getdate(to_date or nowdate())
+	from_date = getdate(from_date or add_days(to_date, -13))
+	rows = frappe.db.sql(
+		"""
+        SELECT status_reason, COUNT(*) AS orders, SUM(order_value) AS order_value,
+               MAX(DATE(event_time)) AS last_day
+        FROM `tabMeta CAPI Event`
+        WHERE status = %(skipped)s
+          AND DATE(event_time) BETWEEN %(from_date)s AND %(to_date)s
+        GROUP BY status_reason
+        """,
+		{"skipped": STATUS_SKIPPED, "from_date": from_date, "to_date": to_date},
+		as_dict=True,
+	)
+	grouped: dict[str, dict[str, Any]] = {}
+	for row in rows:
+		key = reason_category(row.status_reason)
+		agg = grouped.setdefault(key, {"reason": key, "orders": 0, "order_value": 0.0, "last_day": None})
+		agg["orders"] += int(row.orders or 0)
+		agg["order_value"] += float(row.order_value or 0)
+		if row.last_day and (agg["last_day"] is None or row.last_day > agg["last_day"]):
+			agg["last_day"] = row.last_day
+	return sorted(grouped.values(), key=lambda r: (-r["orders"], r["reason"]))

@@ -14,5 +14,12 @@ frappe.query_reports["Meta CAPI Daily"] = {
 			default: frappe.datetime.get_today(),
 			reqd: 1,
 		},
+		{
+			fieldname: "view",
+			label: __("View"),
+			fieldtype: "Select",
+			options: ["By day", "Skipped by reason"],
+			default: "By day",
+		},
 	],
 };

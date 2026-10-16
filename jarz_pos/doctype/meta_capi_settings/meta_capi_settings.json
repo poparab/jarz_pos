@@ -17,7 +17,8 @@
   "column_break_b",
   "access_token",
   "section_filters",
-  "excluded_customer_groups"
+  "excluded_customer_groups",
+  "do_not_send_phones"
  ],
  "fields": [
   {
@@ -104,12 +105,18 @@
    "fieldtype": "Small Text",
    "label": "Excluded Customer Groups",
    "default": "B2B\nEmployee\nCommercial\nDistributor\nGovernment\nNon Profit\nSample",
-   "description": "One per line. Orders from these groups are never queued. A single customer can also be excluded with Exclude from Meta on the Customer."
+   "description": "One per line. Orders from these groups are Skipped, never sent. A single customer can also be excluded with Exclude from Meta on the Customer."
+  },
+  {
+   "fieldname": "do_not_send_phones",
+   "fieldtype": "Small Text",
+   "label": "Do-Not-Send Phones",
+   "description": "One mobile per line, in any format (01..., +20..., 0020...). Orders for these numbers are Skipped and never sent, also when the number is added after the order was queued."
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 12:00:00.000000",
+ "modified": "2026-10-17 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Meta CAPI Settings",
