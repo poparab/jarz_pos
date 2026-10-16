@@ -10,10 +10,8 @@ def ensure_meta_capi_role() -> None:
 	try:
 		if frappe.db.exists("Role", ROLE_NAME):
 			return
-		frappe.get_doc(
-			{"doctype": "Role", "role_name": ROLE_NAME, "desk_access": 1, "disabled": 0}
-		).insert(ignore_permissions=True)
-	except Exception:
-		frappe.logger("jarz_pos.setup", allow_site=True).error(
-			"ensure_meta_capi_role failed", exc_info=True
+		frappe.get_doc({"doctype": "Role", "role_name": ROLE_NAME, "desk_access": 1, "disabled": 0}).insert(
+			ignore_permissions=True
 		)
+	except Exception:
+		frappe.logger("jarz_pos.setup", allow_site=True).error("ensure_meta_capi_role failed", exc_info=True)
