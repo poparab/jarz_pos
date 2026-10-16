@@ -148,6 +148,15 @@ class ROLES:
     # may hand work to someone else. Deliberately NOT LINE_MANAGER_TIER -- that
     # is the board's door (who may use it at all), this is who runs it.
     TASK_MANAGER = {JARZ_MANAGER, SYSTEM_MANAGER, ADMINISTRATOR}
+    #: Answers customers in the chat inbox (WhatsApp / Instagram / Messenger /
+    #: comments). A real Role record; api/orders.py already names it literally.
+    MODERATOR = "Moderator"
+    #: Chat inbox door (api/chat.py): moderators plus the whole manager tier.
+    CHAT = {MODERATOR, JARZ_MANAGER, SYSTEM_MANAGER} | LINE_MANAGER_TIER
+
+
+#: Module-level alias the chat services import (contract name).
+CHAT_ROLES = frozenset(ROLES.CHAT)
 
 
 # ── WebSocket / realtime event names ────────────────────────────────────
@@ -213,6 +222,10 @@ class WS_EVENTS:
     # Task Board: a task a recipient is involved in changed (see
     # api.notifications.send_task_notification). Payload {"task", "event"}.
     TASK_UPDATED = "jarz_task_updated"
+    # Chat inbox: a conversation got a message, a draft, a status or an
+    # assignee change (see services/chat_common.publish_chat_update). One room
+    # per moderator. Payload {conversation, kind, summary, message, draft}.
+    CHAT_UPDATE = "jarz_chat_update"
     TEST_EVENT = "test_event"
 
 

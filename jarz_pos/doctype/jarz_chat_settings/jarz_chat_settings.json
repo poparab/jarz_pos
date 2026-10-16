@@ -1,0 +1,205 @@
+{
+ "actions": [],
+ "creation": "2026-10-16 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_general",
+  "enabled",
+  "auto_draft",
+  "alert_after_minutes",
+  "alert_repeat_minutes",
+  "moderators",
+  "sec_ai",
+  "anthropic_api_key",
+  "draft_model",
+  "mask_personal_data",
+  "default_pos_profile",
+  "brand_instructions",
+  "planted_draft_percent",
+  "upsell_items",
+  "sec_meta",
+  "graph_api_version",
+  "meta_app_secret",
+  "webhook_verify_token",
+  "whatsapp_access_token",
+  "whatsapp_phone_number_id",
+  "whatsapp_business_account_id",
+  "facebook_page_id",
+  "page_access_token",
+  "instagram_account_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_general",
+   "fieldtype": "Section Break",
+   "label": "General"
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "0",
+   "description": "Master switch. When off, the webhook ignores events (it still answers Meta's GET verification)."
+  },
+  {
+   "fieldname": "auto_draft",
+   "fieldtype": "Check",
+   "label": "Auto Draft",
+   "default": "1",
+   "description": "Generate an AI draft for each new inbound message."
+  },
+  {
+   "fieldname": "alert_after_minutes",
+   "fieldtype": "Int",
+   "label": "Alert After (Minutes)",
+   "default": "10",
+   "description": "Push moderators when a customer has waited this long."
+  },
+  {
+   "fieldname": "alert_repeat_minutes",
+   "fieldtype": "Int",
+   "label": "Repeat Alert Every (Minutes)",
+   "default": "10"
+  },
+  {
+   "fieldname": "moderators",
+   "fieldtype": "Table",
+   "label": "Moderators",
+   "options": "Jarz Chat Moderator",
+   "description": "Who receives chat pushes. Empty means every enabled user with the Moderator role."
+  },
+  {
+   "fieldname": "sec_ai",
+   "fieldtype": "Section Break",
+   "label": "AI drafts"
+  },
+  {
+   "fieldname": "anthropic_api_key",
+   "fieldtype": "Password",
+   "label": "Anthropic API Key"
+  },
+  {
+   "fieldname": "draft_model",
+   "fieldtype": "Select",
+   "label": "Draft Model",
+   "options": "claude-haiku-5-5\nclaude-sonnet-5-5",
+   "default": "claude-haiku-5-5"
+  },
+  {
+   "fieldname": "mask_personal_data",
+   "fieldtype": "Check",
+   "label": "Mask Personal Data",
+   "default": "1",
+   "description": "Replace phone numbers, emails, links and the customer's name before anything is sent to the AI."
+  },
+  {
+   "fieldname": "default_pos_profile",
+   "fieldtype": "Link",
+   "label": "Default POS Profile",
+   "options": "POS Profile",
+   "description": "Menu and price list source for the AI drafts."
+  },
+  {
+   "fieldname": "brand_instructions",
+   "fieldtype": "Long Text",
+   "label": "Brand Instructions",
+   "description": "Tone and policy notes appended to the AI system prompt."
+  },
+  {
+   "fieldname": "planted_draft_percent",
+   "fieldtype": "Float",
+   "label": "Planted Draft %",
+   "default": "0",
+   "description": "0 to 20. Share of drafts deliberately made wrong, as a training check for moderators."
+  },
+  {
+   "fieldname": "upsell_items",
+   "fieldtype": "Table",
+   "label": "Upsell Items",
+   "options": "Jarz Chat Upsell Item",
+   "description": "The ONLY items the AI may suggest as an upsell."
+  },
+  {
+   "fieldname": "sec_meta",
+   "fieldtype": "Section Break",
+   "label": "Meta (WhatsApp / Instagram / Messenger)"
+  },
+  {
+   "fieldname": "graph_api_version",
+   "fieldtype": "Data",
+   "label": "Graph API Version",
+   "default": "v24.0"
+  },
+  {
+   "fieldname": "meta_app_secret",
+   "fieldtype": "Password",
+   "label": "Meta App Secret",
+   "description": "Key for the X-Hub-Signature-256 webhook signature."
+  },
+  {
+   "fieldname": "webhook_verify_token",
+   "fieldtype": "Password",
+   "label": "Webhook Verify Token",
+   "description": "Must match hub.verify_token on Meta's GET verification."
+  },
+  {
+   "fieldname": "whatsapp_access_token",
+   "fieldtype": "Password",
+   "label": "WhatsApp Access Token",
+   "description": "System-user token."
+  },
+  {
+   "fieldname": "whatsapp_phone_number_id",
+   "fieldtype": "Data",
+   "label": "WhatsApp Phone Number ID"
+  },
+  {
+   "fieldname": "whatsapp_business_account_id",
+   "fieldtype": "Data",
+   "label": "WhatsApp Business Account ID"
+  },
+  {
+   "fieldname": "facebook_page_id",
+   "fieldtype": "Data",
+   "label": "Facebook Page ID"
+  },
+  {
+   "fieldname": "page_access_token",
+   "fieldtype": "Password",
+   "label": "Page Access Token",
+   "description": "Used for Messenger, Instagram and comments."
+  },
+  {
+   "fieldname": "instagram_account_id",
+   "fieldtype": "Data",
+   "label": "Instagram Account ID"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Settings",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "issingle": 1,
+ "track_changes": 0,
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ]
+}

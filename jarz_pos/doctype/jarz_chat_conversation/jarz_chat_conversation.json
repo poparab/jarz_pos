@@ -1,0 +1,232 @@
+{
+ "actions": [],
+ "creation": "2026-10-16 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "channel",
+  "external_id",
+  "channel_key",
+  "contact_name",
+  "phone",
+  "customer",
+  "status",
+  "assigned_to",
+  "intent",
+  "is_complaint",
+  "last_message_at",
+  "last_inbound_at",
+  "last_outbound_at",
+  "last_message_preview",
+  "last_direction",
+  "unread_count",
+  "waiting_since",
+  "window_expires_at",
+  "alert_sent_at",
+  "alert_count",
+  "source_post_id",
+  "ad_referral",
+  "private_reply_sent",
+  "last_order"
+ ],
+ "fields": [
+  {
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "label": "Channel",
+   "options": "WhatsApp\nInstagram\nMessenger\nFacebook Comment\nInstagram Comment",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "external_id",
+   "fieldtype": "Data",
+   "label": "External ID",
+   "reqd": 1,
+   "description": "wa_id (digits) / PSID / IGSID / root comment id of a comment thread."
+  },
+  {
+   "fieldname": "channel_key",
+   "fieldtype": "Data",
+   "label": "Channel Key",
+   "unique": 1,
+   "read_only": 1,
+   "hidden": 1,
+   "description": "channel:external_id, set on validate."
+  },
+  {
+   "fieldname": "contact_name",
+   "fieldtype": "Data",
+   "label": "Contact Name",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "phone",
+   "fieldtype": "Data",
+   "label": "Phone",
+   "description": "Normalized 01XXXXXXXXX on WhatsApp conversations."
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Open\nAnswered\nClosed",
+   "default": "Open",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1,
+   "description": "Open = the customer is waiting for us."
+  },
+  {
+   "fieldname": "assigned_to",
+   "fieldtype": "Link",
+   "label": "Assigned To",
+   "options": "User",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "intent",
+   "fieldtype": "Select",
+   "label": "Intent",
+   "options": "\nInquiry\nOrder\nComplaint\nOther",
+   "description": "Latest AI classification."
+  },
+  {
+   "fieldname": "is_complaint",
+   "fieldtype": "Check",
+   "label": "Is Complaint"
+  },
+  {
+   "fieldname": "last_message_at",
+   "fieldtype": "Datetime",
+   "label": "Last Message At",
+   "search_index": 1
+  },
+  {
+   "fieldname": "last_inbound_at",
+   "fieldtype": "Datetime",
+   "label": "Last Inbound At"
+  },
+  {
+   "fieldname": "last_outbound_at",
+   "fieldtype": "Datetime",
+   "label": "Last Outbound At"
+  },
+  {
+   "fieldname": "last_message_preview",
+   "fieldtype": "Small Text",
+   "label": "Last Message Preview"
+  },
+  {
+   "fieldname": "last_direction",
+   "fieldtype": "Select",
+   "label": "Last Direction",
+   "options": "\nInbound\nOutbound"
+  },
+  {
+   "fieldname": "unread_count",
+   "fieldtype": "Int",
+   "label": "Unread Count",
+   "description": "Inbound messages since a moderator last opened the conversation."
+  },
+  {
+   "fieldname": "waiting_since",
+   "fieldtype": "Datetime",
+   "label": "Waiting Since",
+   "description": "First unanswered inbound message; cleared on outbound."
+  },
+  {
+   "fieldname": "window_expires_at",
+   "fieldtype": "Datetime",
+   "label": "Window Expires At",
+   "description": "WhatsApp / Instagram / Messenger: last inbound + 24h. Comments: comment time + 7 days."
+  },
+  {
+   "fieldname": "alert_sent_at",
+   "fieldtype": "Datetime",
+   "label": "Alert Sent At"
+  },
+  {
+   "fieldname": "alert_count",
+   "fieldtype": "Int",
+   "label": "Alert Count"
+  },
+  {
+   "fieldname": "source_post_id",
+   "fieldtype": "Data",
+   "label": "Source Post ID",
+   "description": "Comment conversations only."
+  },
+  {
+   "fieldname": "ad_referral",
+   "fieldtype": "Small Text",
+   "label": "Ad Referral",
+   "description": "JSON of the WhatsApp / Messenger referral (ad id, headline)."
+  },
+  {
+   "fieldname": "private_reply_sent",
+   "fieldtype": "Check",
+   "label": "Private Reply Sent",
+   "description": "Comments: Meta allows one private reply."
+  },
+  {
+   "fieldname": "last_order",
+   "fieldtype": "Link",
+   "label": "Last Order",
+   "options": "Sales Invoice",
+   "description": "Order started from this chat."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Conversation",
+ "owner": "Administrator",
+ "sort_field": "last_message_at",
+ "sort_order": "DESC",
+ "states": [],
+ "autoname": "CHAT-.#####",
+ "title_field": "contact_name",
+ "track_changes": 0,
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Moderator",
+   "write": 1
+  }
+ ]
+}
