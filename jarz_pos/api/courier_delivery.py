@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

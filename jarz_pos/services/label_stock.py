@@ -32,7 +32,7 @@ Guarantees mirrored from ``services/consumable_deduction`` and ``crm/*``:
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Optional
 
 try:
 	import frappe

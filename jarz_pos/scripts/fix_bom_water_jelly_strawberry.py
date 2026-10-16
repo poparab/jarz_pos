@@ -47,7 +47,7 @@ default displaced.  That is the same shape ``migrate_mix_to_subassembly.py`` use
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe.utils import flt

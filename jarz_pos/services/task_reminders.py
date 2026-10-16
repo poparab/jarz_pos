@@ -25,7 +25,7 @@ rest of the scheduler slot. Never raises.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 import frappe
 from frappe.utils import add_days, getdate, nowdate

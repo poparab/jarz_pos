@@ -12,8 +12,6 @@ every app on the site. Must import cleanly with no top-level frappe calls.
 
 from __future__ import annotations
 
-from typing import Dict
-
 import frappe
 
 from jarz_pos.services import task_board as tb

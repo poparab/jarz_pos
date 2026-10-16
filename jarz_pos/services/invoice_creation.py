@@ -1343,10 +1343,10 @@ def _apply_delivery_slot_fields(invoice_doc, delivery_datetime, delivery_end_dat
 				return h * 3600 + m * 60
 			# Suffix-based
 			if s.endswith(("hours", "hour", "hrs", "hr", "h")):
-				num = float(s.rstrip("hoursr h"))
+				num = float(s.rstrip("hoursr h"))  # noqa: B005 - strips the unit letters as a set
 				return int(num * 3600)
 			if s.endswith(("minutes", "minute", "mins", "min", "m")):
-				num = float(s.rstrip("minutesin m"))
+				num = float(s.rstrip("minutesin m"))  # noqa: B005 - strips the unit letters as a set
 				return int(num * 60)
 			# Plain number: assume minutes (legacy)
 			return int(float(s) * 60)

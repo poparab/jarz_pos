@@ -1,5 +1,4 @@
 /* jshint esversion: 9 */
-/* globals frappe */
 
 frappe.pages["shipping-analytics"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({

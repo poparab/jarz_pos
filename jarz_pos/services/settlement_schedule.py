@@ -31,7 +31,7 @@ import datetime
 import json
 import re
 from collections.abc import Iterable, Sequence
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Vocabulary (wire contract with the DocType Select options and the client)

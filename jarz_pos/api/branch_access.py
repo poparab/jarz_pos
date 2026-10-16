@@ -12,7 +12,7 @@ turn every remove into an add.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

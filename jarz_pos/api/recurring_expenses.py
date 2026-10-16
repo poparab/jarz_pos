@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

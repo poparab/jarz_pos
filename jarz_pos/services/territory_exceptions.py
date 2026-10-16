@@ -53,7 +53,7 @@ Trigger the historical backfill by hand with::
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 

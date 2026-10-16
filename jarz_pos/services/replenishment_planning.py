@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 #: Below this, a quantity is float noise rather than a jar.  Same value the
 #: production planner uses so the two agree at the boundary.

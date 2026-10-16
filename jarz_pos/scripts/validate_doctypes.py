@@ -10,7 +10,6 @@ import frappe
 
 
 def run():  # pragma: no cover - helper script
-	app = "jarz_pos"
 	failures = []
 	doctypes = []
 

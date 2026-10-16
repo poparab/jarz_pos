@@ -1,5 +1,4 @@
 /* jshint esversion: 9 */
-/* globals frappe, __ */
 
 frappe.pages["recurring-expenses"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({

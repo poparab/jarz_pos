@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _

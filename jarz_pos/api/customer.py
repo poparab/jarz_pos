@@ -647,7 +647,6 @@ def get_customers(search=None):
 		if search:
 			filters["customer_name"] = ["like", f"%{search}%"]
 			# Also search by mobile number
-			mobile_filter = {"mobile_no": ["like", f"%{search}%"]}
 
 		fields = [
 			"name",
@@ -1459,7 +1458,7 @@ def update_default_address(customer, address, phone, invoice=None):
 		if not frappe.db.exists("Customer", customer):
 			frappe.throw(f"Customer '{customer}' not found")
 
-		customer_doc = frappe.get_doc("Customer", customer)
+		customer_doc = frappe.get_doc("Customer", customer)  # noqa: F841
 
 		result = save_customer_shipping_address(
 			customer=customer,

@@ -13,7 +13,7 @@ Two rules live here and both exist to keep production history honest:
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
 import frappe
 from frappe import _

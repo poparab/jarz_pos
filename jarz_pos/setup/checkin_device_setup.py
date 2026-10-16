@@ -7,8 +7,6 @@ never raised, safe on a bench without HRMS.
 
 from __future__ import annotations
 
-from typing import Dict, List
-
 from jarz_pos.services.checkin_device import (
 	EMPLOYEE_DEVICE_FIELD,
 	EMPLOYEE_REGISTERED_ON_FIELD,

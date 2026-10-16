@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any
 
 import frappe
 from frappe import _
@@ -640,7 +640,7 @@ def get_payment_receipt(receipt_name: str):
 
 
 @frappe.whitelist()
-def list_payment_receipts(pos_profile: str = None, status: str = None):
+def list_payment_receipts(pos_profile: str = None, status: str = None):  # noqa: RUF013
 	"""List payment receipts filtered by POS profile and status.
 
 	Branch scoping is the same rule the write endpoints enforce

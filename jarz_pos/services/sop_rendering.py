@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 # ── Vocabulary shared with the DocType Select options ───────────────────
 # Kept here rather than in constants.py so the pure module stays importable

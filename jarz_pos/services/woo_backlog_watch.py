@@ -78,7 +78,7 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 
@@ -328,7 +328,7 @@ def _terminal_state_sql_list() -> str:
 	constant, never user input, so inlining it (rather than a bound parameter)
 	is safe and keeps the query text readable.
 	"""
-	return ", ".join("'{0}'".format(state.replace("'", "''")) for state in sorted(TERMINAL_STATES))
+	return ", ".join("'{}'".format(state.replace("'", "''")) for state in sorted(TERMINAL_STATES))
 
 
 def _has_legacy_state_column() -> bool:

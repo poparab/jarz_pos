@@ -33,7 +33,7 @@ safe and idempotent — a second run simply re-accepts the same ``pos_link`` pin
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 

@@ -30,7 +30,7 @@ import json
 import mimetypes
 import os
 from collections.abc import Iterable
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

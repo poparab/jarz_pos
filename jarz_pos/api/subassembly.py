@@ -47,7 +47,7 @@ symbol instead of the world.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _

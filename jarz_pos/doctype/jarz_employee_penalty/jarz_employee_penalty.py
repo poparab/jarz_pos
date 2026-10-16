@@ -33,7 +33,7 @@ a penalty worth 0 EGP looks settled and deducts nothing.
 from __future__ import annotations
 
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _

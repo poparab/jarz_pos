@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 import re
 import time
-from typing import Dict, Optional, Tuple
+from typing import Optional
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 try:  # pragma: no cover - during static analysis or docs build

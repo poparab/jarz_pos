@@ -33,7 +33,7 @@ noisy bench output.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe.utils import flt

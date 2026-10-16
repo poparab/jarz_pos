@@ -6,6 +6,7 @@ and query limit lives here so that a rename or config change only
 requires updating a single file (or the Jarz POS Settings doctype).
 """
 
+from typing import ClassVar
 
 # ── Account name defaults ──────────────────────────────────────────────
 # These are used as *fallback* names when the Jarz POS Settings doctype
@@ -70,7 +71,7 @@ class ROLES:
 	# one, along with the Production Board's item picker and Return-WIP.
 	# The owner's call (2026-08-19) is that the server was wrong: a JARZ Manager
 	# is meant to do these things.
-	MANAGER = {
+	MANAGER: ClassVar[set[str]] = {
 		"System Manager",
 		"Accounts Manager",
 		"Stock Manager",
@@ -78,15 +79,21 @@ class ROLES:
 		"Purchase Manager",
 		JARZ_MANAGER,
 	}
-	STOCK = {"System Manager", "Stock Manager", "Manufacturing Manager", "Accounts Manager", JARZ_MANAGER}
-	MANUFACTURING = {
+	STOCK: ClassVar[set[str]] = {
+		"System Manager",
+		"Stock Manager",
+		"Manufacturing Manager",
+		"Accounts Manager",
+		JARZ_MANAGER,
+	}
+	MANUFACTURING: ClassVar[set[str]] = {
 		"System Manager",
 		"Manufacturing Manager",
 		"Stock Manager",
 		"Purchase Manager",
 		JARZ_MANAGER,
 	}
-	PURCHASE = {
+	PURCHASE: ClassVar[set[str]] = {
 		"System Manager",
 		"Stock Manager",
 		"Manufacturing Manager",
@@ -94,7 +101,7 @@ class ROLES:
 		"Accounts Manager",
 		JARZ_MANAGER,
 	}
-	ADMIN = {"System Manager", "POS Manager"}
+	ADMIN: ClassVar[set[str]] = {"System Manager", "POS Manager"}
 	# Everything a JARZ line manager may do, the manager tier and the
 	# Administrator may do too.  The line manager is a *narrower* manager — a
 	# floor supervisor — never the holder of an authority its own manager
@@ -103,7 +110,7 @@ class ROLES:
 	# months, so a JARZ Manager was refused on their own branch's orders).
 	# Both spellings of the line-manager role are carried because both exist as
 	# real Role records on staging and production.
-	LINE_MANAGER_TIER = {
+	LINE_MANAGER_TIER: ClassVar[set[str]] = {
 		JARZ_LINE_MANAGER,
 		JARZ_LINE_MANAGER_ALT,
 		JARZ_MANAGER,
@@ -112,7 +119,7 @@ class ROLES:
 	}
 	#: Same membership, lowercased — for the gates that compare case-folded
 	#: role names.  Keep the two in lockstep.
-	LINE_MANAGER_TIER_LOWER = {role.lower() for role in LINE_MANAGER_TIER}
+	LINE_MANAGER_TIER_LOWER: ClassVar[set[str]] = {role.lower() for role in LINE_MANAGER_TIER}
 	# Move stock between warehouses (``api/transfer.py``).  Deliberately WIDER
 	# than MANAGER: moving jars from the branch to Finished Goods (or between
 	# branches) is floor-supervisor work, and gating it on MANAGER alone left a
@@ -165,7 +172,7 @@ class ROLES:
 	# Task Board "manager": may create tasks, sees every line manager's work and
 	# may hand work to someone else. Deliberately NOT LINE_MANAGER_TIER -- that
 	# is the board's door (who may use it at all), this is who runs it.
-	TASK_MANAGER = {JARZ_MANAGER, SYSTEM_MANAGER, ADMINISTRATOR}
+	TASK_MANAGER: ClassVar[set[str]] = {JARZ_MANAGER, SYSTEM_MANAGER, ADMINISTRATOR}
 
 
 # ── WebSocket / realtime event names ────────────────────────────────────

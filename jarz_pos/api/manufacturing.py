@@ -8,7 +8,7 @@ import re
 from datetime import date as _date_cls
 from datetime import datetime as _datetime_cls
 from datetime import timedelta as _timedelta_cls
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

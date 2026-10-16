@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import datetime
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe.exceptions import QueryDeadlockError, QueryTimeoutError

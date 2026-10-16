@@ -23,7 +23,7 @@ users assigned to the branch the event belongs to.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 

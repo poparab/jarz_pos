@@ -313,7 +313,7 @@ def settle_delivery_partner(
 		missing = [n for n in selected if n not in found]
 		if missing:
 			frappe.throw(
-				"These are not unbilled trips or fee periods for {0}: {1}".format(
+				"These are not unbilled trips or fee periods for {}: {}".format(
 					delivery_partner, ", ".join(missing[:10])
 				)
 			)

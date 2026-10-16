@@ -26,7 +26,7 @@ The endpoint below carries two limiters, on purpose:
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import frappe
 

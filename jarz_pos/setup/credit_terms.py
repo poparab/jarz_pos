@@ -50,7 +50,7 @@ This module must import cleanly with NO top-level frappe calls.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 import frappe
 

@@ -35,7 +35,7 @@ stock, item alternatives, item metadata); the maths lives in
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe.utils import add_days, getdate, now_datetime, nowdate

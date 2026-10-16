@@ -24,7 +24,7 @@ manager could read any employee in the company by posting a different id.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

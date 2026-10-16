@@ -16,7 +16,7 @@ import json
 import re
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import frappe
 from frappe import _
@@ -5306,8 +5306,6 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> dict[str, Any]:
 
 		# Handle delivery time: try to find closest matching period in new POS profile
 		current_time_from = inv.get("custom_delivery_time_from")
-		current_time_to = inv.get("custom_delivery_time_to")
-		current_delivery_date = inv.get("custom_delivery_date")
 
 		if current_time_from and meta.get_field("custom_delivery_time_from"):
 			try:

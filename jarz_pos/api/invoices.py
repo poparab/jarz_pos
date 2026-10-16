@@ -112,7 +112,7 @@ def create_pos_invoice():
 	_guard_branch_sale(pos_profile_name, action_label="creating an order")
 
 	# Frappe best practice: Use frappe.logger() for structured logging
-	logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
+	logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)  # noqa: F841
 
 	# Always log API calls in development
 	frappe.log_error(
@@ -869,7 +869,6 @@ def get_invoice_settlement_preview(
 	# path performs (get_courier_balances / _summarize_courier_transactions).
 	ct_order_total = sum(float(r.get("amount") or 0) for r in cts)
 	order_amount = ct_order_total
-	any_ct_order = ct_order_total > 0
 
 	# Shipping MUST come from the SAME source the batch settlement (settle_delivery_party /
 	# get_courier_balances) and the actual settlement JE (settle_single_invoice_paid /

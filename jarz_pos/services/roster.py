@@ -46,7 +46,7 @@ import json
 from collections.abc import Callable, Iterable
 from datetime import date as date_cls
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _
@@ -2433,7 +2433,7 @@ def _write_ranges(
 
 
 def _shift_schedule_name(shift_type: str, days: list[str]) -> str:
-	base = "{0} ({1})".format(shift_type, ",".join(WEEKDAY_ABBR[d] for d in days))
+	base = "{} ({})".format(shift_type, ",".join(WEEKDAY_ABBR[d] for d in days))
 	name, suffix = base, 2
 	while frappe.db.exists("Shift Schedule", name):
 		name = f"{base} {suffix}"

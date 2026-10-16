@@ -64,7 +64,7 @@ from datetime import (
 from datetime import (
 	timedelta as _timedelta_cls,
 )
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _

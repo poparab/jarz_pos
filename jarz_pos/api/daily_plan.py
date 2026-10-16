@@ -12,7 +12,7 @@ the batch split on every keystroke without leaving a trail of draft documents.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

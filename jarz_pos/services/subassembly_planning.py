@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 # Batch counts are reported to 3 decimals.  Enough to see "2.5 batches in the
 # freezer" without rendering 0.30000000000000004 at somebody standing at a

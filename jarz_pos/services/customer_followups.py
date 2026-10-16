@@ -24,7 +24,7 @@ from __future__ import annotations
 import datetime as _dt
 import secrets
 from collections.abc import Iterable
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 

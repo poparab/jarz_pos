@@ -14,7 +14,7 @@ and a dedicated placeholder to extend later without mixing logic paths.
 from __future__ import annotations
 
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import frappe
 

@@ -23,7 +23,7 @@ courier ends up able to see a branch they cannot be assigned work in.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Optional
 
 import frappe
 from frappe import _

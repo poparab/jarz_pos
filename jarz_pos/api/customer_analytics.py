@@ -17,7 +17,7 @@ Read-only.  Requires the JARZ Manager role.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

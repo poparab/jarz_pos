@@ -15,7 +15,7 @@ deliberate mapping is never overwritten by a name that happens to look close.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 

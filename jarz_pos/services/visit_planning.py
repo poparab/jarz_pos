@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe.utils import date_diff, getdate, nowdate
@@ -698,7 +698,7 @@ def targets_for_record(reference_doctype: str, reference_name: str) -> list[Visi
 		return []
 
 	optional = {}
-	for field in (
+	for fieldname in (
 		"custom_fit_score",
 		"custom_b2b_stage",
 		"custom_fit_tier",
@@ -711,11 +711,11 @@ def targets_for_record(reference_doctype: str, reference_name: str) -> list[Visi
 		"custom_next_followup_date",
 		"custom_followup_done",
 	):
-		if _has_field("Lead", field):
+		if _has_field("Lead", fieldname):
 			try:
-				optional[field] = frappe.db.get_value("Lead", name, field)
+				optional[fieldname] = frappe.db.get_value("Lead", name, fieldname)
 			except Exception:
-				optional[field] = None
+				optional[fieldname] = None
 
 	doors = (_lead_branches([name]) or {}).get(name) or []
 	if not doors:

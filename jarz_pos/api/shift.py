@@ -1216,7 +1216,7 @@ def _add_carry_audit_comment(
 		]
 		for party in (courier_block.get("parties") or [])[:5]:
 			lines.append(
-				"- {0}: {1} transaction(s), {2:.2f}".format(
+				"- {}: {} transaction(s), {:.2f}".format(
 					party.get("display_name") or party.get("party"),
 					party.get("transaction_count"),
 					flt(party.get("net_balance")),
@@ -1251,7 +1251,7 @@ def _record_force_close_audit(
 		]
 		if courier_block and courier_block.get("blocked"):
 			lines.append(
-				"Closed with {0} unsettled courier transaction(s) across {1} invoice(s) "
+				"Closed with {} unsettled courier transaction(s) across {} invoice(s) "
 				"still outstanding; these remain open and must still be settled.".format(
 					courier_block.get("transaction_count", 0),
 					courier_block.get("invoice_count", 0),

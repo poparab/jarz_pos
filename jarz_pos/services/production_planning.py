@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Optional
 
 import frappe
 

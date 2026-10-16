@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, time, timedelta
-from typing import Any, Dict, List, Union
+from typing import Any, Union
 
 import frappe
 
@@ -339,8 +339,8 @@ def _generate_day_slots(
 	closing_time: time | timedelta,
 	same_day: str,
 	slot_duration_minutes: int,
-	current_datetime: datetime = None,
-	last_slot_duration_minutes: int = None,
+	current_datetime: datetime | None = None,
+	last_slot_duration_minutes: int | None = None,
 	anchor_last_slot_to_closing: bool = False,
 ) -> list[dict[str, Any]]:
 	"""

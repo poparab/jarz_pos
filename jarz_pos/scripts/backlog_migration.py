@@ -61,7 +61,7 @@ import datetime
 import os
 import traceback
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 
@@ -168,7 +168,7 @@ def _assert_safe() -> None:
 	live = {field: value for field, value in _outbound_state().items() if _is_on(value)}
 	if live:
 		frappe.throw(
-			"ABORT: WooCommerce outbound is still armed ({0}). Run "
+			"ABORT: WooCommerce outbound is still armed ({}). Run "
 			"harden_outbound first -- otherwise every Payment Entry pushes a "
 			"status change to the live store and emails a real customer.".format(
 				", ".join(f"{k}={v}" for k, v in sorted(live.items()))
@@ -266,7 +266,7 @@ def preflight() -> dict[str, Any]:
 	state = _outbound_state()
 	print("WooCommerce outbound switches:")
 	for field, value in sorted(state.items()):
-		print("  {0:32} {1!r:>8}  {2}".format(field, value, "ARMED" if _is_on(value) else "off"))
+		print("  {:32} {!r:>8}  {}".format(field, value, "ARMED" if _is_on(value) else "off"))
 
 	rows = frappe.db.sql(
 		"""
@@ -285,9 +285,7 @@ def preflight() -> dict[str, Any]:
 
 	snapshot_path = _path(SNAPSHOT_FILE)
 	print(
-		"\nsnapshot: {0} ({1})".format(
-			snapshot_path, "present" if os.path.exists(snapshot_path) else "MISSING"
-		)
+		"\nsnapshot: {} ({})".format(snapshot_path, "present" if os.path.exists(snapshot_path) else "MISSING")
 	)
 	return {"outbound": state, "states": rows, "snapshot": os.path.exists(snapshot_path)}
 
@@ -419,7 +417,7 @@ def classify() -> dict[str, int]:
 		else:
 			buckets["ALIGNED"].append(invoice)
 
-	print("\n{0:38} {1:>9} {2:>17}".format("bucket", "invoices", "outstanding EGP"))
+	print("\n{:38} {:>9} {:>17}".format("bucket", "invoices", "outstanding EGP"))
 	print("-" * 68)
 	counts: dict[str, int] = {}
 	for bucket in sorted(buckets):
@@ -443,7 +441,7 @@ def _write_audit(rows: list[dict[str, Any]], bucket: str, dry_run: bool) -> str 
 	if not rows:
 		return None
 	stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-	path = _path("migration_{0}_{1}_{2}.csv".format(bucket, "DRY" if dry_run else "LIVE", stamp))
+	path = _path("migration_{}_{}_{}.csv".format(bucket, "DRY" if dry_run else "LIVE", stamp))
 	with open(path, "w", newline="", encoding="utf-8") as handle:
 		writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
 		writer.writeheader()
@@ -581,7 +579,7 @@ def run(
 			# Only ever act on an order Woo still calls finished.
 			if row["woo_status"] != "completed":
 				record["outcome"] = "SKIP"
-				record["note"] = "woo_status={0}".format(row["woo_status"])
+				record["note"] = "woo_status={}".format(row["woo_status"])
 				audit.append(record)
 				continue
 
@@ -734,7 +732,7 @@ def run_cancel(dry_run: bool = True, limit: int | None = None, csv_path: str | N
 				name,
 				{
 					"custom_cancellation_type": "Cancelled by Customer",
-					"custom_cancellation_reason": "{0} | Woo status={1}".format(MARKER, row["woo_status"]),
+					"custom_cancellation_reason": "{} | Woo status={}".format(MARKER, row["woo_status"]),
 				},
 				update_modified=False,
 			)
@@ -834,7 +832,7 @@ def verify() -> dict[str, Any]:
 
 	print(f"\nEmail Queue rows in the last 24h: {emails}  (expected 0)")
 	print(
-		"Outbound sync events in the last 24h: {0}  (expected none)".format(
+		"Outbound sync events in the last 24h: {}  (expected none)".format(
 			{r.status: r.n for r in pending} or "none"
 		)
 	)

@@ -33,7 +33,7 @@ catalog Leads is not, and stays open to a B2B rep exactly as ``merge_leads`` is.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 
@@ -854,7 +854,7 @@ def _norm_woo_id(value) -> str | None:
 def customer_merge_blockers(source: str, target: str) -> list[str]:
 	"""Reasons a customer merge must not run. Empty means it may."""
 	blockers = []
-	for role, customer in (("source", source), ("target", target)):
+	for _role, customer in (("source", source), ("target", target)):
 		reason = _structural_use(customer)
 		if reason:
 			blockers.append(f"'{customer}' cannot be merged: {reason}.")

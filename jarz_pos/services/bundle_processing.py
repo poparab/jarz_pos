@@ -795,7 +795,7 @@ def process_bundle_item(bundle_id, bundle_qty, bundle_price, selling_price_list)
 			bundle_doc = frappe.get_doc("Jarz Bundle", bundle_id)
 			if bundle_doc.erpnext_item:
 				return process_bundle_for_invoice(bundle_doc.erpnext_item, bundle_qty)
-		except:
+		except BaseException:
 			pass
 
 		# If all fails, re-raise the original error

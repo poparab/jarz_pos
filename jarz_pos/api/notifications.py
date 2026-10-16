@@ -8,7 +8,7 @@ import json
 import os
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import frappe
 from frappe import _
@@ -204,7 +204,7 @@ def check_for_updates(last_check: str | None = None) -> dict[str, Any]:
 		if last_check:
 			try:
 				cutoff = frappe.utils.get_datetime(last_check)
-			except:
+			except BaseException:
 				cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-5)
 		else:
 			cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-5)

@@ -30,7 +30,7 @@ staging site, and a rollback cannot recall a push already handed to Google.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe.utils import getdate, nowdate

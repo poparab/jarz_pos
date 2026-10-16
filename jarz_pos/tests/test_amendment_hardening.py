@@ -31,7 +31,7 @@ def _make_invoice(
 	docstatus: int = 1,
 	grand_total: float = 500.0,
 	state: str = "Received",
-	items: list = None,
+	items: list | None = None,
 	**extra,
 ):
 	"""Return a minimal invoice-like namespace."""

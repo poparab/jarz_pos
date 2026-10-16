@@ -56,7 +56,7 @@ import datetime as _dt
 import hashlib
 import json
 import secrets
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe.utils import cint, flt, get_datetime, get_url, now_datetime

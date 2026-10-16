@@ -17,7 +17,7 @@ and stays untouched; the gate here must fail exactly the same way.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

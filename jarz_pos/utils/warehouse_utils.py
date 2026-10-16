@@ -24,7 +24,7 @@ every group nested under it and a route on a child group overrides its parent.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

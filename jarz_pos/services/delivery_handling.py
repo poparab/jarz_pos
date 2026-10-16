@@ -3981,7 +3981,6 @@ def handle_out_for_delivery_transition(
 		invoice_name = (invoice_name or "").strip()
 		courier = (courier or "").strip()
 		pos_profile = (pos_profile or "").strip()
-		token = (idempotency_token or "").strip() or None
 		if not invoice_name:
 			frappe.throw("invoice_name required")
 		if not pos_profile:
@@ -4841,7 +4840,7 @@ def change_payment_collection_method(
 	existing_real_payment = _get_real_customer_payment_entry(inv.name, inv.company, for_update=True)
 	if existing_real_payment:
 		frappe.throw(
-			"This order already has a real customer payment ({0}); payment method change is not allowed.".format(
+			"This order already has a real customer payment ({}); payment method change is not allowed.".format(
 				existing_real_payment.get("name")
 			)
 		)

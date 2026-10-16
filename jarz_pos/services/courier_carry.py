@@ -28,7 +28,7 @@ it, which is exactly where it belongs until the cash is physically handed over.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _

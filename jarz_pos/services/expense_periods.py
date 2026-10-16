@@ -22,7 +22,6 @@ from __future__ import annotations
 import calendar
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import List
 
 #: A typo in the year (2025 for 2026) would otherwise book a year of ads into
 #: the wrong accounting year without anyone noticing. A Meta billing cycle is

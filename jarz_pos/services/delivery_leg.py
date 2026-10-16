@@ -60,7 +60,7 @@ exact failure this module was built to prevent, arrived at by a different route.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe.utils import get_datetime, now_datetime

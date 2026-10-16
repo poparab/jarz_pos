@@ -1,6 +1,6 @@
 import json
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _

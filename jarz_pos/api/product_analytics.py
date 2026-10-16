@@ -29,7 +29,7 @@ Python only shapes the aggregated rows.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Optional
 
 import frappe
 from frappe import _

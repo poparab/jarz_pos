@@ -28,7 +28,7 @@ Idempotent: rows that already carry ``against_sales_invoice`` are skipped.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 

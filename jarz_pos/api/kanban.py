@@ -8,7 +8,7 @@ from __future__ import annotations
 import datetime
 import json
 import traceback
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import frappe
 from frappe.query_builder.functions import Count

@@ -33,7 +33,7 @@ import json
 import re
 from collections.abc import Iterable, Sequence
 from datetime import date
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _
@@ -2826,7 +2826,7 @@ def pay_salary(
 			reason_account=salary_account,
 			paying_account=account,
 			payment_date=payment_date,
-			remarks=remarks or "{0} — {1} {2}".format(label, _("salary"), month_key),
+			remarks=remarks or "{} — {} {}".format(label, _("salary"), month_key),
 			expense_kind="Salary",
 			period_month=month_key,
 			employee=employee,

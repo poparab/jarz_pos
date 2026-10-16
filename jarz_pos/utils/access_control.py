@@ -23,7 +23,7 @@ further: not just "is this your branch?" but "is your branch open right now?".
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import frappe
 from frappe import _
