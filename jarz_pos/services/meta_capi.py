@@ -233,12 +233,23 @@ def initial_status(
 	return STATUS_PENDING, ""
 
 
+def order_phones(*raw: Any) -> frozenset[str]:
+	"""Every valid number an order carries (contact and customer mobile), normalised."""
+	return frozenset(p for p in (normalize_eg_mobile(r) for r in raw) if p)
+
+
 def rule_skip_reason(
-	order: Any, phone: str | None, excluded_groups: Iterable[str], blocked_phones: Iterable[str]
+	order: Any,
+	phone: str | None,
+	excluded_groups: Iterable[str],
+	blocked_phones: Iterable[str],
+	other_phones: Iterable[str] = (),
 ) -> str | None:
 	"""Why a delivered chat order must never reach Meta, or None when it may.
 
-	*phone* must already be normalised. A missing phone and a zero value are
+	*phone* and *other_phones* must already be normalised. The do-not-send list
+	is checked against all of them: a blocked customer stays blocked when the
+	order was taken on a different number. A missing phone and a zero value are
 	left to ``initial_status``; this covers who the order is for.
 	"""
 	purpose = _get(order, "custom_order_purpose")
@@ -255,7 +266,8 @@ def rule_skip_reason(
 		return f"Excluded customer group: {group}"
 	if int(_get(order, "exclude_from_meta", 0) or 0):
 		return "Customer excluded from Meta"
-	if phone and phone in set(blocked_phones):
+	phones = {p for p in (phone, *other_phones) if p}
+	if phones & set(blocked_phones):
 		return "Phone on the do-not-send list"
 	return None
 
@@ -462,17 +474,23 @@ def _duplicate_reason(event_id: str, invoice: str) -> str | None:
 def _queue_one(order: Any, settings: dict[str, Any]) -> str:
 	event_id = event_id_for(order.name, order.amended_from)
 	phone = normalize_eg_mobile(order.contact_mobile) or normalize_eg_mobile(order.customer_mobile)
-	reason = rule_skip_reason(order, phone, settings["excluded_groups"], settings.get("blocked_phones", ()))
+	reason = rule_skip_reason(
+		order,
+		phone,
+		settings["excluded_groups"],
+		settings.get("blocked_phones", ()),
+		order_phones(order.contact_mobile, order.customer_mobile),
+	)
 	if reason:
 		status = STATUS_SKIPPED
 	else:
 		status, reason = initial_status(
 			order.grand_total, phone, settings["approval_mode"], settings["hold_above"]
 		)
-	if status != STATUS_SKIPPED:
-		duplicate = _duplicate_reason(event_id, order.name)
-		if duplicate:
-			status, reason = STATUS_SKIPPED, duplicate
+	# Runs for Skipped amendments too, so the cancelled original's row leaves the queue.
+	duplicate = _duplicate_reason(event_id, order.name)
+	if duplicate and status != STATUS_SKIPPED:
+		status, reason = STATUS_SKIPPED, duplicate
 	frappe.get_doc(
 		{
 			"doctype": EVENT_DOCTYPE,
@@ -582,7 +600,7 @@ def _event_for_row(
 	phone = normalize_eg_mobile(inv.contact_mobile) or normalize_eg_mobile(_get(customer, "mobile_no"))
 	if not phone:
 		return None, "No valid Egyptian mobile at send time"
-	if phone in set(blocked_phones):
+	if order_phones(inv.contact_mobile, _get(customer, "mobile_no")) & set(blocked_phones):
 		return None, "Phone on the do-not-send list"
 	event = build_event(
 		event_id=row.event_id,
