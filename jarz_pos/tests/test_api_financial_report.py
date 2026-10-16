@@ -519,7 +519,9 @@ class TestShippingAnalyticsSource(unittest.TestCase):
 		here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 		with open(os.path.join(here, "api", "shipping_analytics.py"), encoding="utf-8") as fh:
 			src = fh.read()
-		self.queries = re.findall(r'sql\(f?"""(.*?)"""', src, flags=re.S)
+		# The formatter puts the query string on its own line after "sql(", so allow
+		# whitespace after the opening parenthesis.
+		self.queries = re.findall(r'sql\(\s*f?"""(.*?)"""', src, flags=re.S)
 		self.assertTrue(self.queries)
 
 	def test_no_territory_or_override_fallback_for_income(self):

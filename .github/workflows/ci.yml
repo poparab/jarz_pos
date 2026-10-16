@@ -68,6 +68,11 @@ jobs:
           bench init --frappe-branch version-16 --skip-redis-config-generation --skip-assets --python "$(which python)" ~/frappe-bench
           mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL character_set_server = 'utf8mb4'"
           mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL collation_server = 'utf8mb4_unicode_ci'"
+          # MariaDB 11.6.2 and later default innodb_snapshot_isolation to ON, which turns a locking read
+          # (SELECT ... FOR UPDATE) of a row committed since the snapshot into error 1020 instead of
+          # returning the committed row. The deploy stack runs MariaDB 10.6, which has no such mode and
+          # returns the row, and the settlement-reversal guard is written for that behaviour.
+          mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL innodb_snapshot_isolation = OFF"
 
       - name: Install
         working-directory: /home/runner/frappe-bench

@@ -735,6 +735,22 @@ class TestDeliveryPromotionInvoiceIntegration(unittest.TestCase):
 		apply_audit.assert_called_once()
 
 	def test_selected_shipping_address_territory_controls_shipping_income(self):
+		# The territory resolver reads the real Territory master (only the invoice service's
+		# own ``frappe`` is mocked below), so the address's territory has to exist for real.
+		# A bare site (the CI site) does not carry it. It is uncommitted and rolled back.
+		import frappe as real_frappe
+
+		if not real_frappe.db.exists("Territory", "EGNASRCITY"):
+			real_frappe.get_doc(
+				{
+					"doctype": "Territory",
+					"territory_name": "EGNASRCITY",
+					"parent_territory": "All Territories",
+					"is_group": 0,
+				}
+			).insert(ignore_permissions=True)
+		self.addCleanup(real_frappe.db.rollback)
+
 		inv = _InvoiceDocCapture()
 		customer = _mock_customer(territory="EGHADAYEQAH")
 		pos_profile = _mock_pos_profile(name="Nasr city", company="Jarz Company")
