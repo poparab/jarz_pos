@@ -242,6 +242,7 @@ def _load_snapshot() -> dict[int, dict[str, str]]:
 			"the read-only store crawl before classifying."
 		)
 	snapshot: dict[int, dict[str, str]] = {}
+	# nosemgrep: frappe-security-file-traversal -- operator-run via bench execute or console, path is the operator's own argument, not whitelisted
 	with open(path, newline="", encoding="utf-8") as handle:
 		for row in csv.DictReader(handle):
 			try:
@@ -427,6 +428,7 @@ def classify() -> dict[str, int]:
 		print(f"{bucket:38} {len(rows):>9} {total:>17,.0f}")
 		if bucket == "ALIGNED":
 			continue
+		# nosemgrep: frappe-security-file-traversal -- operator-run via bench execute or console, path is the operator's own argument, not whitelisted
 		with open(_bucket_path(bucket), "w", newline="", encoding="utf-8") as handle:
 			writer = csv.DictWriter(handle, fieldnames=BUCKET_COLUMNS, extrasaction="ignore")
 			writer.writeheader()
@@ -442,6 +444,7 @@ def _write_audit(rows: list[dict[str, Any]], bucket: str, dry_run: bool) -> str 
 		return None
 	stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 	path = _path("migration_{}_{}_{}.csv".format(bucket, "DRY" if dry_run else "LIVE", stamp))
+	# nosemgrep: frappe-security-file-traversal -- operator-run via bench execute or console, path is the operator's own argument, not whitelisted
 	with open(path, "w", newline="", encoding="utf-8") as handle:
 		writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
 		writer.writeheader()
@@ -554,6 +557,7 @@ def run(
 	path = csv_path or _bucket_path(bucket)
 	if not os.path.exists(path):
 		frappe.throw(f"No bucket file at {path}. Run classify first.")
+	# nosemgrep: frappe-security-file-traversal -- operator-run via bench execute or console, path is the operator's own argument, not whitelisted
 	with open(path, newline="", encoding="utf-8") as handle:
 		todo = list(csv.DictReader(handle))
 	if limit:
@@ -675,6 +679,7 @@ def run_cancel(dry_run: bool = True, limit: int | None = None, csv_path: str | N
 	path = csv_path or _bucket_path("B4_cancel_in_erp")
 	if not os.path.exists(path):
 		frappe.throw(f"No bucket file at {path}. Run classify first.")
+	# nosemgrep: frappe-security-file-traversal -- operator-run via bench execute or console, path is the operator's own argument, not whitelisted
 	with open(path, newline="", encoding="utf-8") as handle:
 		todo = list(csv.DictReader(handle))
 	if limit:

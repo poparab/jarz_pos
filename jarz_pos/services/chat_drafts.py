@@ -842,6 +842,7 @@ def generate_draft_job(conversation: str, for_message: str | None = None) -> str
 	"""
 	try:
 		if frappe.session.user in (None, "", "Guest"):
+			# nosemgrep: frappe-setuser -- background job (RQ worker) promotes a Guest enqueuer; worker calls frappe.destroy() after every job, so nothing leaks
 			frappe.set_user("Administrator")
 		if for_message:
 			latest = _latest_inbound(conversation)

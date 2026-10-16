@@ -956,6 +956,7 @@ def preview(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
 def _snapshot(names: list[str]) -> dict[str, float]:
 	"""Money and row totals that a merge must move but never change."""
 	placeholders = ", ".join(["%s"] * len(names))
+	# nosemgrep: frappe-sql-format-injection -- only generated %s placeholders for len(names) are interpolated; names are bound as parameters
 	si = frappe.db.sql(
 		f"""SELECT COUNT(*) AS n,
                    COALESCE(SUM(CASE WHEN docstatus = 1 THEN grand_total END), 0) AS billed,
@@ -964,6 +965,7 @@ def _snapshot(names: list[str]) -> dict[str, float]:
 		tuple(names),
 		as_dict=True,
 	)[0]
+	# nosemgrep: frappe-sql-format-injection -- only generated %s placeholders for len(names) are interpolated; names are bound as parameters
 	gl = frappe.db.sql(
 		f"""SELECT COUNT(*) AS n, COALESCE(SUM(debit), 0) AS debit, COALESCE(SUM(credit), 0) AS credit
             FROM `tabGL Entry`
@@ -971,12 +973,14 @@ def _snapshot(names: list[str]) -> dict[str, float]:
 		tuple(names),
 		as_dict=True,
 	)[0]
+	# nosemgrep: frappe-sql-format-injection -- only generated %s placeholders for len(names) are interpolated; names are bound as parameters
 	pe = frappe.db.sql(
 		f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN docstatus = 1 THEN paid_amount END), 0) AS paid
             FROM `tabPayment Entry` WHERE party_type = 'Customer' AND party IN ({placeholders})""",
 		tuple(names),
 		as_dict=True,
 	)[0]
+	# nosemgrep: frappe-sql-format-injection -- only generated %s placeholders for len(names) are interpolated; names are bound as parameters
 	ple = frappe.db.sql(
 		f"""SELECT COALESCE(SUM(amount), 0) AS amount FROM `tabPayment Ledger Entry`
             WHERE party_type = 'Customer' AND party IN ({placeholders}) AND delinked = 0""",

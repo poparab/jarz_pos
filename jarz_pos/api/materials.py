@@ -469,6 +469,7 @@ def rebuild_material(name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# nosemgrep: guest-whitelisted-method -- public share page: authorised by the unguessable share token, rate limited, response never cached
 @frappe.whitelist(allow_guest=True)
 @_rate_limited
 def get_public_share(
@@ -631,7 +632,8 @@ def _record_view(share, client: dict[str, Any]) -> str | None:
 	return view_name
 
 
-@frappe.whitelist(allow_guest=True)
+# nosemgrep: guest-whitelisted-method -- public engagement beacon: needs a valid share token plus a view row belonging to it, rate limited, values only move up
+@frappe.whitelist(allow_guest=True, methods=["POST"])
 @_rate_limited
 def record_material_engagement(
 	token: str | None = None,

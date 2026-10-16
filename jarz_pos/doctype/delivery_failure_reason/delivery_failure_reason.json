@@ -65,7 +65,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-05 00:00:00.000000",
+ "modified": "2026-10-16 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Delivery Failure Reason",
@@ -86,7 +86,7 @@
   },
   {
    "read": 1,
-   "role": "All"
+   "role": "Desk User"
   }
  ],
  "sort_field": "modified",

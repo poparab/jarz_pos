@@ -223,6 +223,7 @@ def get_summary_kpis(from_date=None, to_date=None, branch=None, as_of=None):
 	params = {"fd": fd, "td": td, "branch": branch}
 	unsettled_scope, _reference = _unsettled_scope(as_of, params)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	row = frappe.db.sql(
 		f"""
         SELECT
@@ -245,6 +246,7 @@ def get_summary_kpis(from_date=None, to_date=None, branch=None, as_of=None):
 	)[0]
 
 	if branch:
+		# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 		pending_csr = frappe.db.sql(
 			f"""
             SELECT COUNT(*) AS n
@@ -259,6 +261,7 @@ def get_summary_kpis(from_date=None, to_date=None, branch=None, as_of=None):
 		pending_csr = frappe.db.count("Custom Shipping Request", {"status": "Pending"})
 
 	# Today's balance, or (with ``as_of``) the same scope the balances table uses.
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	unsettled_row = frappe.db.sql(
 		f"""
         SELECT COALESCE(SUM(ct.shipping_amount), 0) AS total
@@ -291,6 +294,7 @@ def get_cost_by_territory(from_date=None, to_date=None, branch=None):
 	fd, td = _parse_dates(from_date, to_date)
 	branch = _norm_branch(branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -335,6 +339,7 @@ def get_cost_by_sub_territory(from_date=None, to_date=None, branch=None):
 	fd, td = _parse_dates(from_date, to_date)
 	branch = _norm_branch(branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -374,6 +379,7 @@ def get_cost_by_pos_profile(from_date=None, to_date=None, branch=None):
 	fd, td = _parse_dates(from_date, to_date)
 	branch = _norm_branch(branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -411,6 +417,7 @@ def get_cost_by_courier(from_date=None, to_date=None, branch=None):
 	fd, td = _parse_dates(from_date, to_date)
 	branch = _norm_branch(branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -459,6 +466,7 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None, branch=None):
 	params = {"fd": fd, "td": td, "branch": branch}
 	csr_branch = _when(branch, _CSR_BRANCH)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -492,6 +500,7 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None, branch=None):
 	# only APPROVED ones changed what was paid. An increase is extra cost, a
 	# decrease a saving. Computed over every request in range, not the 200
 	# rows returned for listing.
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	money = frappe.db.sql(
 		f"""
         SELECT
@@ -511,6 +520,7 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None, branch=None):
 		params,
 		as_dict=True,
 	)[0]
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	pending_extra = frappe.db.sql(
 		f"""
         SELECT COALESCE(SUM(csr.requested_amount - csr.original_amount), 0) AS x
@@ -521,6 +531,7 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None, branch=None):
 		params,
 		as_dict=True,
 	)[0]["x"]
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	delivery_orders = frappe.db.sql(
 		f"""
         SELECT COUNT(*) AS n FROM `tabSales Invoice`
@@ -531,6 +542,7 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None, branch=None):
 		params,
 		as_dict=True,
 	)[0]["n"]
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	area_rows = frappe.db.sql(
 		f"""
         SELECT csr.territory,
@@ -658,6 +670,7 @@ def get_daily_trend(from_date=None, to_date=None, branch=None):
 	fd, td = _parse_dates(from_date, to_date)
 	branch = _norm_branch(branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -693,6 +706,7 @@ def get_pickup_vs_delivery_split(from_date=None, to_date=None, branch=None):
 	fd, td = _parse_dates(from_date, to_date)
 	branch = _norm_branch(branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -750,6 +764,7 @@ def get_unsettled_courier_balances(as_of=None, branch=None):
 	params = {"branch": branch}
 	scope, reference = _unsettled_scope(as_of, params)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -797,6 +812,7 @@ def get_alerts_data(from_date=None, to_date=None, branch=None):
 	# 1. Territories where delivery expense exceeds income (losing money)
 	# Use subquery so the outer WHERE can reference aliases without the
 	# MySQL 1247 "reference to group function" error.
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	losing = frappe.db.sql(
 		f"""
         SELECT territory, expense, income
@@ -840,6 +856,7 @@ def get_alerts_data(from_date=None, to_date=None, branch=None):
 	# 2. Couriers with unsettled balance older than 7 days
 	# Subquery avoids MySQL 1247 error when referencing the MIN() alias in HAVING.
 	today = getdate(nowdate())
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	aged = frappe.db.sql(
 		f"""
         SELECT party_type, party, total, oldest_date
@@ -872,6 +889,7 @@ def get_alerts_data(from_date=None, to_date=None, branch=None):
 		)
 
 	# 3. Pending Custom Shipping Requests older than 24 hours
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	old_csrs = frappe.db.sql(
 		f"""
         SELECT csr.name, csr.invoice, csr.territory,
@@ -901,6 +919,7 @@ def get_alerts_data(from_date=None, to_date=None, branch=None):
 	# 4. Large approved overrides in range (delta > 50% of original), as ONE
 	# alert: a line per invoice listed ten near-identical rows (Sep 2026: 63
 	# such overrides). The overrides card below breaks them down by area.
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	large = frappe.db.sql(
 		f"""
         SELECT COUNT(*) AS n,
@@ -958,6 +977,7 @@ def get_pickup_delivery_trend(from_date=None, to_date=None, branch=None):
 	fd, td = _parse_dates(from_date, to_date)
 	branch = _norm_branch(branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and constant fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT

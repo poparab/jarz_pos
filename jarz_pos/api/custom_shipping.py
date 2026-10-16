@@ -43,7 +43,7 @@ def _publish_shipping_event(event: str, payload: dict, *, invoice_name: str) -> 
 	publish_invoice_event_by_name(event, payload, invoice_name)
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def request_custom_shipping(invoice_name: str, amount: float, reason: str):
 	"""Create a Custom Shipping Request for an invoice.
 
@@ -144,7 +144,7 @@ def request_custom_shipping(invoice_name: str, amount: float, reason: str):
 	}
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def approve_custom_shipping(request_name: str):
 	"""Approve a Custom Shipping Request (manager tier, incl. line manager).
 
@@ -204,7 +204,7 @@ def approve_custom_shipping(request_name: str):
 	}
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def reject_custom_shipping(request_name: str, rejection_reason: str = ""):
 	"""Reject a Custom Shipping Request (manager tier, incl. line manager).
 

@@ -602,6 +602,7 @@ def get_board(
 		where.append("(t.status != %(done)s OR t.completed_on >= %(done_cutoff)s)")
 		params["done_cutoff"] = add_days(now_datetime(), -days)
 
+	# nosemgrep: frappe-sql-format-injection -- where holds constant fragments plus visibility_sql (db.escape'd users); LIMIT forced through int()
 	rows = frappe.db.sql(
 		f"""
         SELECT t.name, t.title, t.status, t.priority, t.assigned_to, t.created_by,
@@ -661,6 +662,7 @@ def get_overview(days: Any = 30) -> dict[str, Any]:
 	visibility = tb.visibility_sql(viewer, "t")
 	if visibility:
 		where.append(visibility)
+	# nosemgrep: frappe-sql-format-injection -- where holds constant fragments plus visibility_sql (db.escape'd users); values are bound params
 	rows = frappe.db.sql(
 		f"""
         SELECT t.name, t.status, t.assigned_to, t.due_date, t.completed_on
@@ -769,6 +771,7 @@ def download_attachment(file: str) -> None:
 
 	file_doc = frappe.get_doc("File", row.name)
 	# Raw bytes from disk: File.get_content() decodes text files to str.
+	# nosemgrep: frappe-security-file-traversal -- path comes from the File doc's own get_full_path() after the row was checked to be a visible task attachment; the request value is only a File name looked up in the DB
 	with open(file_doc.get_full_path(), "rb") as handle:
 		content = handle.read()
 

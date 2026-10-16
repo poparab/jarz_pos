@@ -3356,7 +3356,7 @@ def settle_courier(courier: str, pos_profile: str | None = None):
 	return settle_delivery_party(party_type="", party=courier, pos_profile=pos_profile)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def settle_delivery_party(
 	party_type: str | None = None, party: str | None = None, pos_profile: str | None = None
 ):
@@ -3612,7 +3612,7 @@ def settle_courier_for_invoice(invoice_name: str, pos_profile: str | None = None
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def handle_out_for_delivery_paid(
 	invoice_name: str,
 	courier: str,
@@ -4124,7 +4124,7 @@ def handle_out_for_delivery_transition(
 		frappe.throw(f"Failed Out For Delivery transition: {err}")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def settle_single_invoice_paid(
 	invoice_name: str, pos_profile: str, party_type: str | None = None, party: str | None = None
 ):

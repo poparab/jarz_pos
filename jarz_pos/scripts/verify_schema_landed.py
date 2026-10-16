@@ -112,6 +112,7 @@ def _app_path() -> str:
 
 def _load_json(path: str) -> Any | None:
 	try:
+		# nosemgrep: frappe-security-file-traversal -- path comes from walking the app's own source tree, operator-run via bench execute, not whitelisted
 		with open(path, encoding="utf-8") as handle:
 			return json.load(handle)
 	except Exception:
@@ -408,6 +409,7 @@ def run() -> dict[str, Any]:
 
 	if failures:
 		lines = [
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			f"Schema verification FAILED: {len(failures)} declared field(s) are not "
 			f"live on {frappe.local.site} after migrate.",
 			"",
@@ -420,6 +422,7 @@ def run() -> dict[str, Any]:
 					lines.append(f"  [{bucket}] {item.get('what')} -- {item.get('why')}")
 		lines += [
 			"",
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			"Most likely cause: a fixture edit whose 'modified' timestamp was not "
 			"bumped, so the import skipped it. Bump 'modified' in "
 			"fixtures/custom_field.json and redeploy, or add the missing 'dt' to the "

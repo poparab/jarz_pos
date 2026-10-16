@@ -70,6 +70,7 @@ def _draft_or_throw(name: Any) -> Any:
 def _claim(key: str) -> bool:
 	"""Short Redis claim so two moderators cannot act on one draft at once."""
 	try:
+		# nosemgrep: frappe-cache-breaks-multitenancy -- key goes through cache.make_key(), which adds the per-site prefix
 		cache = frappe.cache()
 		return bool(cache.set(cache.make_key(key), 1, ex=_DRAFT_LOCK_SECONDS, nx=True))
 	except Exception:
@@ -168,12 +169,13 @@ def get_conversations(
 	}
 
 
-@frappe.whitelist(methods=["GET", "POST"])
+@frappe.whitelist(methods=["POST"])
 def get_conversation(name: str, limit: int | str | None = 50, before: str | None = None) -> dict[str, Any]:
 	"""One thread: summary, messages (oldest to newest), the Pending draft, the customer card.
 
 	Opening a thread marks it read (``unread_count`` = 0) and, on WhatsApp,
-	sends blue ticks for the newest inbound message in the background.
+	sends blue ticks for the newest inbound message in the background. That is
+	a write, so this is POST only: a forged GET link cannot mark a thread read.
 	"""
 	_gate()
 	conv = _conversation_or_throw(name)
@@ -194,7 +196,6 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 
 	if int(conv.unread_count or 0) > 0 and not before:
 		frappe.db.set_value(cc.CONVERSATION, conv.name, "unread_count", 0, update_modified=False)
-		frappe.db.commit()  # a GET is rolled back by Frappe unless committed
 		if conv.channel == cc.WHATSAPP:
 			wamid = next(
 				(
@@ -215,7 +216,6 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 				except Exception:
 					pass
 		cc.publish_chat_update(conv.name, "status")
-		frappe.db.commit()
 
 	return {
 		"conversation": cc.load_summary(conv.name),

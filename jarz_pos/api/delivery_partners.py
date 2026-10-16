@@ -94,6 +94,7 @@ def get_delivery_partner_balances(delivery_partner: str | None = None):
 	three are aliases kept so older dashboards keep rendering.
 	"""
 	_ensure_delivery_partner_access()
+	# nosemgrep: frappe-sql-format-injection -- only a constant AND-fragment is formatted in; delivery_partner is bound as %(delivery_partner)s
 	rows = frappe.db.sql(
 		"""
         SELECT
@@ -228,7 +229,7 @@ def get_delivery_partner_unsettled_details(delivery_partner: str):
 	return rows
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def settle_delivery_partner(
 	delivery_partner: str,
 	bank_account: str | None = None,
@@ -431,7 +432,7 @@ def settle_delivery_partner(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def accrue_delivery_partner_recurring_fees(delivery_partner: str | None = None):
 	"""Accrue any recurring-fee periods that are due, now, instead of on the hour.
 

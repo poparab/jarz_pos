@@ -369,6 +369,7 @@ def _fetch_candidate_rows(cutoff: Any, limit: int) -> list[dict[str, Any]]:
 	Bounded by ``LIMIT`` and ordered oldest-first, so a capped run always
 	surfaces the longest-stuck orders rather than an arbitrary slice.
 	"""
+	# nosemgrep: frappe-sql-format-injection -- _state_expr() and _terminal_state_sql_list() build SQL from constants (quotes escaped); cutoff and limit are bound
 	query = f"""
         SELECT name, woo_order_id, customer, posting_date, posting_time,
                {_state_expr()} AS ops_state,
@@ -453,6 +454,7 @@ def _insert_exception(snapshot: dict[str, Any]) -> tuple[str | None, bool]:
 		doc.insert(ignore_permissions=True)
 		return doc.name, True
 	except Exception:
+		# nosemgrep: no-strings-as-booleans -- savepoint is a name string, deliberately set to empty when frappe.db.savepoint failed; truthiness is the intent
 		if savepoint:
 			try:
 				frappe.db.rollback(save_point=savepoint)

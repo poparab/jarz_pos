@@ -3,6 +3,7 @@
 import frappe
 
 
+# nosemgrep: frappe-test-whitelist-missing-protection -- authenticated kanban setup diagnostic, not a test fixture; read-only
 @frappe.whitelist(allow_guest=False)
 def test_kanban_setup():
 	"""Test function to verify kanban setup"""
@@ -70,7 +71,8 @@ def test_kanban_setup():
 	return results
 
 
-@frappe.whitelist(allow_guest=False)
+# nosemgrep: frappe-test-whitelist-missing-protection -- System Manager recovery tool (frappe.only_for), not a test fixture; must stay callable on production
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def create_sales_invoice_state_field():
 	"""Create the sales_invoice_state custom field if it doesn't exist.
 
@@ -114,7 +116,8 @@ def create_sales_invoice_state_field():
 		return {"success": False, "error": str(e)}
 
 
-@frappe.whitelist(allow_guest=False)
+# nosemgrep: frappe-test-whitelist-missing-protection -- System Manager recovery tool (frappe.only_for), not a test fixture; must stay callable on production
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def fix_existing_invoices_state():
 	"""Set default state for existing POS invoices that don't have a state.
 

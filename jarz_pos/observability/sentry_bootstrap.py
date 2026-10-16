@@ -303,6 +303,7 @@ def _read_app_commit_sha() -> str | None:
 		if not git_dir:
 			return None
 
+		# nosemgrep: frappe-security-file-traversal -- path is under the app's own .git dir on the server, no request value reaches it
 		with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as handle:
 			head = handle.read().strip()
 		if not head:
@@ -319,6 +320,7 @@ def _read_app_commit_sha() -> str | None:
 		# Loose ref first (.git/refs/heads/main), then the packed-refs table.
 		loose_ref = os.path.join(git_dir, *ref.split("/"))
 		try:
+			# nosemgrep: frappe-security-file-traversal -- path is under the app's own .git dir on the server, no request value reaches it
 			with open(loose_ref, encoding="utf-8") as handle:
 				sha = handle.read().strip()
 			if _is_commit_sha(sha):
@@ -337,6 +339,7 @@ def _resolve_git_dir(app_dir: str) -> str | None:
 	if os.path.isdir(git_path):
 		return git_path
 	if os.path.isfile(git_path):
+		# nosemgrep: frappe-security-file-traversal -- path is under the app's own .git dir on the server, no request value reaches it
 		with open(git_path, encoding="utf-8") as handle:
 			pointer = handle.read().strip()
 		if pointer.startswith("gitdir:"):
@@ -350,6 +353,7 @@ def _resolve_git_dir(app_dir: str) -> str | None:
 def _read_packed_ref(git_dir: str, ref: str) -> str | None:
 	packed_refs = os.path.join(git_dir, "packed-refs")
 	try:
+		# nosemgrep: frappe-security-file-traversal -- path is under the app's own .git dir on the server, no request value reaches it
 		with open(packed_refs, encoding="utf-8") as handle:
 			for raw_line in handle:
 				line = raw_line.strip()

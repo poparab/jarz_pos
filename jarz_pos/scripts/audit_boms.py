@@ -97,6 +97,7 @@ def rule_superseded_boms_still_active() -> list[dict[str, Any]]:
 			"warning",
 			"superseded_bom_active",
 			row["item"],
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			f"Superseded BOM is still active and selectable on a Work Order "
 			f"(yields {flt(row['quantity'], 3)}).",
 			bom=row["name"],
@@ -226,6 +227,7 @@ def rule_mix_not_migrated(mix_item: str, mix_components: Sequence[str]) -> list[
 			"warning",
 			"mix_not_migrated",
 			row["item"],
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			f"Lists the {mix_item} ingredients directly instead of the "
 			f"sub-assembly. The ratio is maintained by hand here and the Daily "
 			f"Production Plan cannot see it.",
@@ -265,6 +267,7 @@ def rule_wrong_size_packaging() -> list[dict[str, Any]]:
 			"error",
 			"wrong_size_packaging",
 			item,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			f"Medium jar BOM consumes large-jar packaging: {', '.join(codes)}. "
 			f"It will draw down 330 stock and never reserve the 212 equivalents.",
 			bom=bom,
@@ -552,6 +555,7 @@ def rule_stocked_subassembly_explodes() -> list[dict[str, Any]]:
 			"warning",
 			"stocked_subassembly_explodes",
 			row["parent_item"],
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			f"{row['item_code']} is held in stock ({flt(row['on_hand'], 3)} on hand) "
 			f"but this BOM explodes through it to raw materials. Set "
 			f"do_not_explode on the line so planning nets against the freezer.",
@@ -583,6 +587,7 @@ def rule_orphan_subassembly_boms() -> list[dict[str, Any]]:
 			"info",
 			"orphan_subassembly",
 			row["item_code"],
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			"Has a maintained default BOM but no current recipe uses it. It will "
 			"still be forecast and suggested on the production board.",
 			bom=row.get("default_bom"),

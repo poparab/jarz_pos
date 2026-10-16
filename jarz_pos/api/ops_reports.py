@@ -511,6 +511,7 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 	branch_expr = "IFNULL(NULLIF(si.pos_profile, ''), %(nb)s)"
 	channel = _channel_sql("si")
 
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 	invoice_rows = frappe.db.sql(
 		f"""
         SELECT {branch_expr} AS branch,
@@ -533,6 +534,7 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 		as_dict=True,
 	)
 
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 	shipping_rows = frappe.db.sql(
 		f"""
         SELECT {branch_expr} AS branch, SUM(stc.base_tax_amount) AS amount
@@ -550,6 +552,7 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 	)
 
 	cancel_type = _si_col("custom_cancellation_type", "si", "''")
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 	cancelled_rows = frappe.db.sql(
 		f"""
         SELECT {branch_expr} AS branch, COUNT(*) AS cancelled
@@ -569,6 +572,7 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 		as_dict=True,
 	)
 
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 	pos_payment_rows = frappe.db.sql(
 		f"""
         SELECT {branch_expr} AS branch, sip.mode_of_payment AS mode, SUM(sip.base_amount) AS amount
@@ -585,6 +589,7 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 		as_dict=True,
 	)
 
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 	pe_rows = frappe.db.sql(
 		f"""
         SELECT {branch_expr} AS branch,
@@ -829,6 +834,7 @@ def get_cash_over_short(date_from=None, date_to=None, branch=None):
 	cond = _scope_sql("pce.pos_profile", scope, params)
 
 	shift_rows = (
+		# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 		frappe.db.sql(
 			f"""
         SELECT pce.name AS closing,
@@ -1198,6 +1204,7 @@ def get_fulfilment_sla(date_from=None, date_to=None, branch=None, late_threshold
 	cancel_type = _si_col("custom_cancellation_type", "si", "''")
 
 	rows = (
+		# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 		frappe.db.sql(
 			f"""
         SELECT si.name, si.customer, si.customer_name, si.creation, si.docstatus,

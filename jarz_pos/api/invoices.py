@@ -1152,7 +1152,7 @@ def _assert_delivery_slot_not_ended(delivery_date, delivery_time_from, delivery_
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_invoice_delivery_slot(
 	invoice_id: str,
 	delivery_date: str,

@@ -261,7 +261,7 @@ def list_accounts(company: str | None = None, as_of: str | None = None) -> list[
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def submit_transfer(
 	from_account: str,
 	to_account: str,

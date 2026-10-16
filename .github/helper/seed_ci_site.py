@@ -67,6 +67,7 @@ def missing_link_defaults():
 	path = os.path.join(
 		os.path.dirname(jarz_pos.__file__), "doctype", "jarz_pos_settings", "jarz_pos_settings.json"
 	)
+	# nosemgrep: frappe-security-file-traversal -- path built from the installed jarz_pos package dir plus constants, CI-only script
 	with open(path, encoding="utf-8") as f:
 		fields = json.load(f)["fields"]
 	return [

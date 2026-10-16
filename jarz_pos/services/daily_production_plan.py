@@ -466,6 +466,7 @@ def _resolve_planable_rows(company: str, mix_item: str) -> list[dict[str, Any]]:
 		values["company"] = company
 
 	where = " AND ".join(conditions)
+	# nosemgrep: frappe-sql-format-injection -- where joins fixed condition strings; company and mix_item are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT

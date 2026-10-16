@@ -166,6 +166,7 @@ _LINE_COST = "COALESCE(l.actual_cost, l.bom_unit * l.stock_qty, 0)"
 
 def _product_rows(params: dict[str, Any], lines: str) -> list[dict[str, Any]]:
 	return (
+		# nosemgrep: frappe-sql-format-injection -- only module constants and the constant-built lines subquery interpolated; values are bound parameters
 		frappe.db.sql(
 			f"""
         SELECT l.item_code,
@@ -198,6 +199,7 @@ def _territory_day_rows(params: dict[str, Any], lines: str) -> list[dict[str, An
 	# An invoice has one territory and one posting date, so distinct counts per
 	# (territory, day) add up to distinct counts per territory, per day, and overall.
 	return (
+		# nosemgrep: frappe-sql-format-injection -- only module constants and the constant-built lines subquery interpolated; values are bound parameters
 		frappe.db.sql(
 			f"""
         SELECT l.territory,

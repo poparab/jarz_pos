@@ -288,6 +288,7 @@ def phase3_warehouse_tree(r: Runner):
 	orphans = [
 		row[0]
 		for row in frappe.db.sql(
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			"SELECT name FROM `tabWarehouse` "
 			"WHERE is_group = 0 AND (parent_warehouse IS NULL OR parent_warehouse = '') "
 			"AND name != %s",
