@@ -190,7 +190,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-16 12:00:00.000000",
+ "modified": "2026-10-16 21:30:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Conversation",
@@ -225,8 +225,12 @@
   {
    "read": 1,
    "report": 1,
-   "role": "Moderator",
-   "write": 1
+   "role": "Moderator"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "JARZ line manager"
   }
  ]
 }
