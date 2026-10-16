@@ -69,7 +69,7 @@ def _publish_trip_event(event: str, payload: dict, trip, *, pos_profile: str | N
 # ---------------------------------------------------------------------------
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def create_delivery_trip(invoice_names, party_type: str, party: str, pos_profile: str | None = None):
 	"""Create a Delivery Trip grouping the given invoices.
 
@@ -362,7 +362,7 @@ def preview_trip_for_delivery(trip_name: str):
 	}
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def send_trip_for_delivery(
 	trip_name: str,
 	shortage_approved: bool | int = False,
@@ -563,7 +563,7 @@ def send_trip_for_delivery(
 # ---------------------------------------------------------------------------
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def mark_trip_as_delivered(trip_name: str):
 	"""Mark all invoices in a trip as Delivered and set trip status to Completed.
 

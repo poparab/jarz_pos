@@ -56,6 +56,7 @@ def _log_rejection(reason: str, has_header: bool, length: int) -> None:
 	)
 
 
+# nosemgrep: guest-whitelisted-method -- Meta webhook: every POST is authorised by the X-Hub-Signature-256 HMAC and body-size cap; GET only answers the verify-token handshake
 @frappe.whitelist(allow_guest=True, methods=["GET", "POST"])
 def meta_webhook():
 	"""Meta subscription handshake (GET) and event delivery (POST)."""
@@ -92,6 +93,7 @@ def meta_webhook():
 		return _response("EVENT_RECEIVED", 200)
 
 	try:
+		# nosemgrep: whitelisted-side-effect-on-get -- GET is Meta's verify handshake and returns before this line; the enqueue runs only for HMAC-signed POSTs
 		frappe.enqueue(
 			"jarz_pos.services.chat_ingest.process_webhook",
 			queue="short",

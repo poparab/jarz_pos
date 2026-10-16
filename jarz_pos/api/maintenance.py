@@ -9,7 +9,7 @@ import frappe
 from jarz_pos.constants import ROLES
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def fix_employee_series():
 	"""Fix the HR-EMP naming series by setting the correct current value.
 

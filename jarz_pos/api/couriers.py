@@ -801,6 +801,7 @@ def _mint_settle_preview_token(data: dict) -> str:
 	# had NO expiry at all: verified against real Redis on 2026-09-07, `expire()`
 	# returned False and `TTL` on the real key was -1. A permit to post money was
 	# immortal, replayable long after the state it described had changed.
+	# nosemgrep: frappe-cache-breaks-multitenancy -- key built by _settle/_unsettle_preview_key via cache.make_key(), which adds the per-site prefix
 	frappe.cache().set(_settle_preview_key(token), json.dumps(data, sort_keys=True), ex=SETTLE_PREVIEW_TTL)
 	return token
 
@@ -837,6 +838,7 @@ def _peek_settle_preview_token(token: str):
 	# the recovery they already understand and which the caller already
 	# handles. Fails closed either way: no permit, no posting.
 	try:
+		# nosemgrep: frappe-cache-breaks-multitenancy -- key built by _settle/_unsettle_preview_key via cache.make_key(), which adds the per-site prefix
 		raw = frappe.cache().get(_settle_preview_key(presented))
 	except Exception:
 		_log_preview_cache_failure("settle")
@@ -1061,7 +1063,7 @@ def generate_settlement_preview(
 	}
 
 
-@frappe.whitelist()  # type: ignore[attr-defined]
+@frappe.whitelist(methods=["POST"])  # type: ignore[attr-defined]
 def confirm_settlement(
 	invoice: str,
 	preview_token: str,
@@ -1303,6 +1305,7 @@ def _mint_unsettle_preview_token(journal_entry: str, pos_profile: str) -> str:
 	# while the inherited `expire` does not, so that call set a TTL on a key that
 	# did not exist and silently returned False. The token it was meant to expire
 	# had NO expiry at all and stayed valid indefinitely.
+	# nosemgrep: frappe-cache-breaks-multitenancy -- key built by _settle/_unsettle_preview_key via cache.make_key(), which adds the per-site prefix
 	frappe.cache().set(_unsettle_preview_key(journal_entry), payload, ex=UNSETTLE_PREVIEW_TTL)
 	return token
 
@@ -1327,6 +1330,7 @@ def _peek_unsettle_preview_token(journal_entry: str, token: str):
 	# it. `GET` against a hash raises WRONGTYPE, which unhandled was a 500 on a
 	# manager reversing a wrong-branch settlement. Degrade to "no permit".
 	try:
+		# nosemgrep: frappe-cache-breaks-multitenancy -- key built by _settle/_unsettle_preview_key via cache.make_key(), which adds the per-site prefix
 		raw = frappe.cache().get(key)
 	except Exception:
 		_log_preview_cache_failure("unsettle")

@@ -70,6 +70,7 @@ def _draft_or_throw(name: Any) -> Any:
 def _claim(key: str) -> bool:
 	"""Short Redis claim so two moderators cannot act on one draft at once."""
 	try:
+		# nosemgrep: frappe-cache-breaks-multitenancy -- key goes through cache.make_key(), which adds the per-site prefix
 		cache = frappe.cache()
 		return bool(cache.set(cache.make_key(key), 1, ex=_DRAFT_LOCK_SECONDS, nx=True))
 	except Exception:
@@ -194,6 +195,7 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 
 	if int(conv.unread_count or 0) > 0 and not before:
 		frappe.db.set_value(cc.CONVERSATION, conv.name, "unread_count", 0, update_modified=False)
+		# nosemgrep: whitelisted-side-effect-on-get -- get_conversation is called with GET by the Flutter chat client (chat_repository.dart) and marks the thread read; moving it to POST would break the app
 		frappe.db.commit()  # a GET is rolled back by Frappe unless committed
 		if conv.channel == cc.WHATSAPP:
 			wamid = next(
@@ -206,6 +208,7 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 			)
 			if wamid:
 				try:
+					# nosemgrep: whitelisted-side-effect-on-get -- get_conversation is called with GET by the Flutter chat client (chat_repository.dart); enqueue is the mark-read side effect of opening a thread
 					frappe.enqueue(
 						"jarz_pos.services.chat_meta_client.wa_mark_read",
 						queue="short",
@@ -215,6 +218,7 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 				except Exception:
 					pass
 		cc.publish_chat_update(conv.name, "status")
+		# nosemgrep: whitelisted-side-effect-on-get -- get_conversation is called with GET by the Flutter chat client (chat_repository.dart); commit persists the mark-read side effect
 		frappe.db.commit()
 
 	return {

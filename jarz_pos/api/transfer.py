@@ -118,6 +118,7 @@ def _sum_bin_quantities(warehouse: str, item_codes: list[str]) -> dict[str, floa
 	if not item_codes:
 		return {}
 	placeholders = ",".join(["%s"] * len(item_codes))
+	# nosemgrep: frappe-sql-format-injection -- only a generated %s placeholder list is interpolated; values are bound
 	sql = f"""
         SELECT b.item_code, COALESCE(SUM(b.actual_qty), 0) AS qty
         FROM `tabBin` b
@@ -143,6 +144,7 @@ def _sum_reserved_from_sinv(warehouse: str, item_codes: list[str]) -> dict[str, 
 	if not item_codes:
 		return {}
 	placeholders = ",".join(["%s"] * len(item_codes))
+	# nosemgrep: frappe-sql-format-injection -- only a generated %s placeholder list is interpolated; values are bound
 	sql = f"""
         SELECT sii.item_code, COALESCE(SUM(sii.qty - COALESCE(sii.delivered_qty, 0)), 0) AS reserved
         FROM `tabSales Invoice Item` sii
@@ -225,7 +227,7 @@ def search_items_with_stock(
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def submit_transfer(
 	source_warehouse: str,
 	target_warehouse: str,

@@ -1211,6 +1211,7 @@ def _add_carry_audit_comment(
 		actor_name = frappe.db.get_value("User", actor, "full_name") or actor
 		total = flt(sum(flt(row.get("net_balance")) for row in rows))
 		lines = [
+			# nosemgrep: string-concat-in-list -- intentional: one message string split over two source lines
 			f"{actor_name} ({actor}) confirmed at close that {len(rows)} courier "
 			f"transaction(s) worth {total:.2f} are still out with couriers."
 		]
@@ -1245,6 +1246,7 @@ def _record_force_close_audit(
 		forced_by_name = frappe.db.get_value("User", forced_by, "full_name") or forced_by
 		owner_name = frappe.db.get_value("User", opening.user, "full_name") or opening.user
 		lines = [
+			# nosemgrep: string-concat-in-list -- intentional: one message string split over two source lines
 			f"Shift force-closed by {forced_by_name} ({forced_by}) on behalf of "
 			f"{owner_name} ({opening.user}).",
 			f"Reason: {reason or 'not provided'}",

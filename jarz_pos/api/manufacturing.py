@@ -1970,6 +1970,7 @@ def list_default_bom_items(search: str | None = None) -> list[dict[str, Any]]:
 		cond = "AND (i.name LIKE %(q)s OR i.item_name LIKE %(q)s)"
 		vals["q"] = f"%{term}%"
 
+	# nosemgrep: frappe-sql-format-injection -- cond is a constant fragment and the LIMIT a module int constant; search term is bound as %(q)s
 	sql = f"""
         SELECT
             i.name AS item_code,
@@ -2747,6 +2748,7 @@ def list_recent_work_orders(
 		if date_basis == "posting"
 		else "wo.creation DESC, wo.name DESC"
 	)
+	# nosemgrep: frappe-sql-format-injection -- where/order are built from constants and allowlisted date_basis; every value is a bound param
 	rows = frappe.db.sql(
 		f"""
         SELECT wo.name, wo.production_item, wo.item_name, wo.qty, wo.produced_qty,
@@ -3115,7 +3117,7 @@ def _start_production_batch_impl(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_production_batches(lines: Any, strict_basket: Any = 1) -> dict[str, Any]:
 	"""Open several batches in one call — "make these three mixes".
 

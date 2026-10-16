@@ -3218,7 +3218,7 @@ def _run_invoice_amendment_job(
 				pass
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def submit_invoice_amendment(
 	invoice_id: str,
 	cart_json: Any = None,
@@ -4786,6 +4786,7 @@ def get_invoice_warehouse_alignment_report(
 	# LIMIT counts candidate problems, and the exact messages still come from
 	# one place.
 	candidates = (
+		# nosemgrep: frappe-sql-format-injection -- profile_expr and conditions are code-built constants; company/branch/limit are bound params
 		frappe.db.sql(
 			f"""
         SELECT si.name, si.company, si.customer, si.posting_date, si.grand_total,
@@ -4935,7 +4936,7 @@ def get_invoice_warehouse_alignment_report(
 	return {"success": True, "count": len(misaligned_invoices), "invoices": misaligned_invoices}
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def repair_invoice_warehouse_alignment(
 	company: str | None = None,
 	branch: str | None = None,
@@ -5169,7 +5170,7 @@ def update_cancelled_invoice_status_fields(
 		return {"success": False, "error": str(exc)}
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def update_invoice_branch(invoice_id: str, new_branch: str) -> dict[str, Any]:
 	"""Reassign a submitted POS invoice by updating custom_kanban_profile.
 
