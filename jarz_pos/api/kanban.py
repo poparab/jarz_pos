@@ -2220,7 +2220,7 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 		return _failure(error_msg)
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def update_invoice_state(
 	invoice_id: str,
 	new_state: str,
@@ -2863,7 +2863,7 @@ def _release_operational_artifacts(invoice_name: str) -> dict[str, Any]:
 	return released
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def cancel_invoice(invoice_id: str, reason: str, notes: str | None = None) -> dict[str, Any]:
 	"""Cancel a Sales Invoice prior to dispatch with audit trail and notifications."""
 	try:
@@ -3278,7 +3278,7 @@ def get_invoice_notes(invoice_id: str) -> dict[str, Any]:
 		return _failure(error_msg)
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def add_invoice_note(invoice_id: str, note: str) -> dict[str, Any]:
 	"""Add an operational Jarz note to a Sales Invoice."""
 	try:

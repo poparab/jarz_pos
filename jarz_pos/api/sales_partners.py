@@ -284,7 +284,7 @@ def get_sales_partner_balances(sales_partner: str | None = None):
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def settle_sales_partner(sales_partner: str, pos_profile: str | None = None):
 	"""Post the batch commission + VAT recognition Journal Entry for a Sales Partner.
 

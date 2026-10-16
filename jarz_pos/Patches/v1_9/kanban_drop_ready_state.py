@@ -42,6 +42,7 @@ def execute() -> None:
 	# Collect the affected invoices before anything is overwritten.
 	affected: dict[str, str | None] = {}
 	for column in columns:
+		# nosemgrep: frappe-sql-format-injection -- column name comes from the fixed STATE_COLUMNS allowlist, values are bound with %s
 		rows = frappe.db.sql(
 			f"SELECT `name`, `pos_profile` FROM `tabSales Invoice` WHERE `{column}` = %s",
 			(OLD_STATE,),
@@ -53,6 +54,7 @@ def execute() -> None:
 		return
 
 	for column in columns:
+		# nosemgrep: frappe-sql-format-injection -- column name comes from the fixed STATE_COLUMNS allowlist, values are bound with %s
 		frappe.db.sql(
 			f"UPDATE `tabSales Invoice` SET `{column}` = %s WHERE `{column}` = %s",
 			(NEW_STATE, OLD_STATE),

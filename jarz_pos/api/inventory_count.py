@@ -303,6 +303,7 @@ def _get_bin_qty_map(warehouse: str, item_codes: list[str]) -> dict[str, float]:
 	if not item_codes:
 		return {}
 	ph = ",".join(["%s"] * len(item_codes))
+	# nosemgrep: frappe-sql-format-injection -- only a generated %s placeholder list is interpolated; values are bound
 	sql = f"""
         SELECT b.item_code, COALESCE(SUM(b.actual_qty), 0) AS qty
         FROM `tabBin` b
@@ -697,7 +698,7 @@ def _build_negative_stock_submission_message(error: Exception) -> str:
 	).format(_normalize_inventory_error_text(error))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def submit_reconciliation(
 	warehouse: str,
 	posting_date: str | None,

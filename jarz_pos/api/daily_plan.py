@@ -311,7 +311,7 @@ def _material_rollup(
 # ── Writes ──────────────────────────────────────────────────────────────
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_plan(
 	lines: Any,
 	company: str | None = None,
@@ -372,7 +372,7 @@ def save_plan(
 	return _serialise(doc)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def close_plan(
 	name: str,
 	lines: Any = None,
@@ -558,7 +558,7 @@ def _serialise(doc) -> dict[str, Any]:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_plan(name: str, reason: str) -> dict[str, Any]:
 	"""Call off a day's plan that will not be produced.
 

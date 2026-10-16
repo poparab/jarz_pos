@@ -703,7 +703,7 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):  # noqa:
 		frappe.throw(f"Failed to list payment receipts: {e!s}")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_payment_receipt(sales_invoice: str, payment_method: str, amount: float, pos_profile: str):
 	"""Create a new payment receipt record.
 
@@ -778,7 +778,7 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
 		frappe.throw(f"Failed to create payment receipt: {e!s}")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
 	"""Upload (or replace) the receipt image for a payment receipt.
 
@@ -868,7 +868,7 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
 		frappe.throw(f"Failed to upload receipt image: {e!s}")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def remove_receipt_image(receipt_name: str):
 	"""Remove the uploaded image from a payment receipt.
 
@@ -990,7 +990,7 @@ def _confirm_receipt_record(receipt) -> None:
 	receipt.save()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def confirm_receipt(receipt_name: str):
 	"""Confirm a payment receipt -- and, when one is owed, collect the money.
 

@@ -171,6 +171,7 @@ def content_digest(path: str) -> str:
 	points at the new pixels while the sweep drops what nothing can reach.
 	"""
 	digest = hashlib.sha256()
+	# nosemgrep: frappe-security-file-traversal -- path comes from source_path(): File.get_full_path() or os.path.basename() under the site files dir, never a request value
 	with open(path, "rb") as handle:
 		for chunk in iter(lambda: handle.read(1024 * 1024), b""):
 			digest.update(chunk)
@@ -370,6 +371,7 @@ def build_derivatives(material: str, force: bool = False) -> dict[str, Any]:
 				manifest["pages"].append(entry)
 				page.close()
 			manifest["count"] = len(manifest["pages"])
+			# nosemgrep: frappe-security-file-traversal -- manifest_path is site public/files/jarz_materials/<existing material name>/<hex digest>/manifest.json, all server-derived
 			with open(manifest_path, "w", encoding="utf-8") as handle:
 				json.dump(manifest, handle)
 		except Exception as exc:
@@ -397,6 +399,7 @@ def build_derivatives(material: str, force: bool = False) -> dict[str, Any]:
 
 def _read_manifest(path: str) -> dict[str, Any]:
 	try:
+		# nosemgrep: frappe-security-file-traversal -- path is the server-derived manifest path under the site files dir, never a request value
 		with open(path, encoding="utf-8") as handle:
 			return json.load(handle)
 	except (OSError, ValueError):

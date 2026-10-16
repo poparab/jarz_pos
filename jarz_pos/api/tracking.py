@@ -142,6 +142,7 @@ def _tracking_customer_phone(invoice_id: str) -> str | None:
 		return None
 
 
+# nosemgrep: guest-whitelisted-method -- public order tracking is authorised by an unguessable per-order token, rate limited twice, and every miss returns one opaque not-found
 @frappe.whitelist(allow_guest=True)
 @_rate_limited
 def get_public_status(token: str | None = None) -> dict[str, Any]:

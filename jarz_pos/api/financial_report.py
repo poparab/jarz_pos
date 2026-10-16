@@ -300,6 +300,7 @@ def _due_for_range(
 def _gl_rows(fd: date, td: date, company: str | None) -> list[dict[str, Any]]:
 	"""Net P&L movement per (account, bucket day) inside the range."""
 	cond = "AND gle.company = %(company)s" if company else ""
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	return frappe.db.sql(
 		f"""
         SELECT gle.account, gle.posting_date, acc.root_type, acc.account_type,
@@ -432,6 +433,7 @@ def _invoice_rows(fd: date, td: date, company: str | None, branch: str | None = 
 	"""Net sales per (purpose, day), returns included as negatives."""
 	cond = "AND company = %(company)s" if company else ""
 	cond += " " + branch_condition(branch, alias="")
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	return frappe.db.sql(
 		f"""
         SELECT custom_order_purpose AS purpose, posting_date,
@@ -460,6 +462,7 @@ def _shipping_rows(
 	"""Delivery charges billed, per (purpose, day), from the invoice tax rows."""
 	cond = "AND si.company = %(company)s" if company else ""
 	cond += " " + branch_condition(branch)
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	return frappe.db.sql(
 		f"""
         SELECT si.custom_order_purpose AS purpose, si.posting_date,
@@ -523,6 +526,7 @@ def _branch_rows(
 	params = {"fd": fd, "td": td, "company": company, "branch": branch, "ship": shipping_account or ""}
 	label = f"COALESCE(NULLIF(si.pos_profile, ''), '{NO_BRANCH_LABEL}')"
 
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	sales = frappe.db.sql(
 		f"""
         SELECT {label} AS branch, si.custom_order_purpose AS purpose,
@@ -539,6 +543,7 @@ def _branch_rows(
 	)
 
 	join_sql, cost_expr = actual_line_cost_sql(net_returns=True)
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	costs = frappe.db.sql(
 		f"""
         SELECT {label} AS branch,
@@ -561,6 +566,7 @@ def _branch_rows(
 		as_dict=True,
 	)
 
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	shipping = frappe.db.sql(
 		f"""
         SELECT {label} AS branch, si.custom_order_purpose AS purpose,
@@ -666,6 +672,7 @@ def _shipping_order_basis(
 	"""
 	cond = "AND si.company = %(company)s" if company else ""
 	cond += " " + branch_condition(branch)
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	row = frappe.db.sql(
 		f"""
         SELECT COALESCE(SUM(si.custom_shipping_expense), 0) AS expense,

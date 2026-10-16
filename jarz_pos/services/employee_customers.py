@@ -166,6 +166,7 @@ def _lock_employee(employee: str) -> dict[str, Any] | None:
 		columns.append("cell_number")
 	select = ", ".join(f"`{c}`" for c in columns)
 	rows = (
+		# nosemgrep: frappe-sql-format-injection -- columns come from a fixed list; employee name is bound
 		frappe.db.sql(
 			f"SELECT {select} FROM `tabEmployee` WHERE `name` = %s FOR UPDATE",
 			(employee,),
@@ -253,6 +254,7 @@ def _claim_customer(customer: str, employee: str) -> bool:
 		(employee, frappe.utils.now(), frappe.session.user, customer),
 	)
 	rows = (
+		# nosemgrep: frappe-sql-format-injection -- only the module-constant field name _F is interpolated; values are bound parameters
 		frappe.db.sql(
 			f"SELECT `{_F}` FROM `tabCustomer` WHERE `name` = %s FOR UPDATE",
 			(customer,),

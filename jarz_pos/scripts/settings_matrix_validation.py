@@ -283,6 +283,7 @@ def _app_root() -> str:
 
 def _read_lines(relpath: str) -> list[str]:
 	path = os.path.join(_app_root(), relpath.replace("/", os.sep))
+	# nosemgrep: frappe-security-file-traversal -- path comes from walking the app's own source tree, operator-run via bench execute, not whitelisted
 	with open(path, encoding="utf-8", errors="replace") as handle:
 		return handle.read().splitlines()
 
@@ -1254,6 +1255,7 @@ def _classify_hits(fieldname: str, sources: list[str]) -> dict[str, list[str]]:
 		if rel in _SCAN_EXCLUDED:
 			continue
 		try:
+			# nosemgrep: frappe-security-file-traversal -- path comes from walking the app's own source tree, operator-run via bench execute, not whitelisted
 			with open(path, encoding="utf-8", errors="replace") as handle:
 				lines = handle.read().splitlines()
 		except Exception:
@@ -1323,6 +1325,7 @@ def _section_permissions(ctx: RunContext) -> dict[str, Any]:
 	# 200 on read and 403 on write, which reads like a bug from the app.
 	expected_write = ("system manager" in roles) or user == "Administrator"
 	try:
+		# nosemgrep: unchecked-frappe-permission-call -- result is bool()-assigned to can_write and reported, diagnostic script
 		can_write = bool(frappe.has_permission(SETTINGS, ptype="write", user=user))
 	except Exception as exc:
 		ctx.skip("PERM.write_matches_the_role_model", f"has_permission raised: {exc}")

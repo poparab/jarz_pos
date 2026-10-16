@@ -1168,6 +1168,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY, "line_manager": ALLOW, "manager": ALLOW},
 			params={"profile": own_profile},
 			skip_reason=_needs(env, "own_profile"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="manager pricing gate (api/pos.py:129). The profile must be REAL: "
 			"assert_pos_profile_enabled runs on line 128, one line BEFORE the "
 			"gate, so the old made-up profile id answered 417 without the gate "
@@ -1189,6 +1190,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY, "line_manager": DENY, "manager": ALLOW},
 			params={"price_list_name": env.get("price_list")},
 			skip_reason=_needs(env, "price_list"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="writes need pricing AND B2B; a line manager is read-only here. "
 			"create_price_list is get-or-create, so handing it an existing list "
 			"makes the manager's ALLOW a real success rather than the old empty "
@@ -1206,6 +1208,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 				for persona in ("staff", "line_manager", "manager")
 			},
 			skip_reason=_needs(env, "cancelable"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="kanban.py:2132 - the regression that broke cancel for months. Each "
 			"persona gets its OWN submitted fixture: the tier personas really do "
 			"cancel one, which is the only honest proof they may. The argument is "
@@ -1218,6 +1221,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"line_manager": DENY, "manager": DENY},
 			params={"invoice_id": other_invoice, "reason": "role matrix cross-branch probe"},
 			skip_reason=_needs(env, "other_invoice"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="kanban.py:2138 ensure_profile_scoped_invoice_access — holding the "
 			"cancel role is not permission to cancel ANY branch's order",
 		),
@@ -1228,6 +1232,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY, "line_manager": ALLOW, "manager": ALLOW},
 			params={"invoice_id": own_invoice},
 			skip_reason=_needs(env, "own_invoice"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="read-only twin of submit_invoice_return; same role gate "
 			"(returns.py:31) plus the branch check inside build_return_preview",
 		),
@@ -1237,6 +1242,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"line_manager": DENY, "manager": DENY},
 			params={"invoice_id": other_invoice},
 			skip_reason=_needs(env, "other_invoice"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="invoice_return.py:431 — the branch gate, asserted with a document "
 			"that really belongs to another branch",
 		),
@@ -1247,6 +1253,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			params={"invoice_id": own_invoice, "lines": "[]", "reason": "role matrix probe"},
 			gate_is_first=True,
 			skip_reason=_needs(env, "own_invoice"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="_ensure_return_permission is the FIRST statement (returns.py:58), so "
 			"reaching the service's own 'select at least one line' / disabled-flag "
 			"answer proves the tier passed the role gate. Empty lines keep the "
@@ -1265,6 +1272,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 				"reason": "role matrix cross-branch probe",
 			},
 			skip_reason=_needs(env, "other_invoice"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="invoice_return.py:1239. NOT gate_is_first: returns_enabled() is "
 			"checked before the branch gate, so on a site with the workflow off "
 			"this SKIPs as inconclusive instead of inventing a verdict",
@@ -1286,6 +1294,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY, "line_manager": ALLOW, "manager": ALLOW},
 			params={"pos_opening_entry": own_opening},
 			skip_reason=_needs(env, "own_opening"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="shift.py:1296-1301 — the read-only twin of force_close_shift, "
 			"carrying the identical role-then-branch gate pair. This is where the "
 			"tier's ALLOW is asserted, because proving it on the mutating endpoint "
@@ -1305,6 +1314,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY},
 			params={"pos_opening_entry": own_opening, "reason": "role matrix probe"},
 			skip_reason=_needs(env, "own_opening"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="shift.py:1258 _ensure_shift_monitor_access refuses before anything "
 			"is written, so this DENY is provable against a real open shift "
 			"without ever closing it",
@@ -1315,12 +1325,14 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"line_manager": DENY, "manager": DENY},
 			params={"pos_opening_entry": other_opening, "reason": "role matrix cross-branch probe"},
 			skip_reason=_needs(env, "other_opening"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="shift.py:1260 the branch gate, which also runs before _close_shift " "posts anything",
 		),
 		Probe(
 			"manager.force_close_shift.own_branch_allow",
 			"jarz_pos.api.shift.force_close_shift",
 			{"line_manager": ALLOW, "manager": ALLOW},
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			skip_reason=(
 				"asserting this would force-close a live shift on a real branch, book "
 				"its Cash Over/Short and lock out the staff working it. The identical "
@@ -1358,6 +1370,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			"ops.stock_transfer",
 			"jarz_pos.api.transfer.list_pos_profiles",
 			{"staff": DENY, "line_manager": ALLOW, "manager": ALLOW},
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="ROLES.STOCK_TRANSFER = MANAGER | LINE_MANAGER_TIER. The one "
 			"operational screen the line manager reaches: moving stock "
 			"between a branch and Finished Goods is floor work. Cash "
@@ -1394,6 +1407,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY, "line_manager": DENY, "manager": ALLOW},
 			params={"name": ""},
 			gate_is_first=True,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="JARZ Manager only - a line manager may not approve. _is_manager() is "
 			"the first statement (expenses.py:671) and the empty name is rejected "
 			"on the NEXT line, before any document is loaded — so the manager's "
@@ -1413,6 +1427,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY, "manager": ALLOW},
 			params={"name": ""},
 			gate_is_first=True,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="_ensure_review_access is the first statement (purchase_request.py:241) "
 			"and the empty name is rejected on the next line, so no real Material "
 			"Request is ever stopped to prove this",
@@ -1427,6 +1442,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			"b2b.labels",
 			"jarz_pos.api.labels.get_storage_locations",
 			{"staff": DENY, "line_manager": DENY, "manager": ALLOW},
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="labels.py:419 _ensure_access. The old probe called "
 			"jarz_pos.api.labels.get_label_settings, which is not a whitelisted "
 			"method on this app — every persona got the same 404/417 and the "
@@ -1439,6 +1455,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY, "line_manager": ALLOW, "manager": ALLOW},
 			params={"request_name": env.get("shipping_request") or ""},
 			gate_is_first=True,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="custom_shipping.py _can_approve_shipping() is the first statement, "
 			"and it mirrors the Manager Dashboard's own access set — the line "
 			"manager sees the pending request on that dashboard, so it approves "
@@ -1457,6 +1474,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": ALLOW, "line_manager": ALLOW, "manager": ALLOW},
 			params={"invoice": own_invoice},
 			skip_reason=_needs(env, "own_invoice"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="couriers.py:600 is branch-scoped, NOT role-scoped, and previewing "
 			"posts nothing — so everyone assigned to the branch may look. This is "
 			"the half that proves the new guard does not over-block",
@@ -1479,6 +1497,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 				"mode": "pay_now",
 			},
 			skip_reason=_needs(env, "other_invoice"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="couriers.py:768 — the guard runs before the preview token is even "
 			"looked up, so a cross-branch caller is refused without anything being "
 			"posted",
@@ -1494,6 +1513,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			},
 			gate_is_first=True,
 			skip_reason=_needs(env, "own_invoice") or (env.get("shift_gate_reason") or ""),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="only two argument-presence checks precede _guard_invoice_action "
 			"(couriers.py:757-768) and this probe satisfies both, so reaching the "
 			"deliberately invalid preview token proves the branch gate let the "
@@ -1515,6 +1535,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 				"pos_profile": twin_profile,
 			},
 			gate_is_first=True,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="_resolve_guarded_settlement_profile is the first statement, so the "
 			"branch answer comes back before any Courier Transaction is read. The "
 			"party is deliberately unresolvable: if the guard HAS regressed open "
@@ -1535,6 +1556,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			{"staff": DENY},
 			params={"invoice_name": _NONEXISTENT_INVOICE, "pos_profile": twin_profile},
 			gate_is_first=True,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="the pos_profile branch check runs BEFORE the invoice is loaded, which "
 			"is what makes an unloadable invoice the RIGHT argument here: the gate "
 			"is still reached, and a caller who gets past it can only reach a "
@@ -1547,6 +1569,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			params={"cart_json": "[]", "customer_name": "", "pos_profile_name": twin_profile},
 			known_open=True,
 			gate_is_first=True,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="bypasses the branch+shift guard on api/invoices.py:105. There is no "
 			"gate at all in this twin, so ANY outcome other than a refusal proves "
 			"the bypass — which is exactly what gate_is_first encodes here",
@@ -1568,6 +1591,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			"jarz_pos.api.couriers.get_courier_balances",
 			{"staff": DENY},
 			leak_proof=_proof_courier_balances,
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="CLOSED 2026-09-02: the endpoint now scopes rows to the branch that owns "
 			"each invoice, so this answers 200 with the persona's OWN branches and the "
 			"probe skips as unproven. It stays here as the regression watch — if it "
@@ -1582,6 +1606,7 @@ def _matrix(env: dict[str, Any]) -> list[Probe]:
 			known_open=True,
 			leak_proof=_proof_branch_drawer,
 			skip_reason=_needs(env, "other_profile"),
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			note="any branch's cash drawer balance. The argument is 'profile' — the old "
 			"probe sent pos_profile and 500'd on the signature",
 		),

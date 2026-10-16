@@ -157,7 +157,7 @@ def _post_earlier_month_shares(doc, company: str) -> tuple[float, str | None]:
 			frappe.throw(
 				_(
 					"Could not book {0} of this payment to {1}, dated {2}: {3}. Reopen that month or shorten the period to start in an open month."
-				).format(share.amount, share.month, share.month_end, exc)
+				).format(share.amount, share.month, share.month_end, str(exc))
 			)
 		names.append(je.name)
 
@@ -184,7 +184,7 @@ class JarzExpenseRequest(Document):
 		try:
 			self.amount = flt(self.amount)
 		except Exception as exc:
-			frappe.throw(_("Invalid amount: {0}").format(exc))
+			frappe.throw(_("Invalid amount: {0}").format(str(exc)))
 		if self.amount <= 0:
 			frappe.throw(_("Amount must be greater than zero."))
 

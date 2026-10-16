@@ -2,11 +2,13 @@
 
 import frappe
 from frappe import _
+from frappe.tests.utils import whitelist_for_tests
 
 from jarz_pos.constants import WS_EVENTS
 from jarz_pos.utils.error_handler import handle_api_error, success_response
 
 
+# nosemgrep: frappe-test-whitelist-missing-protection -- connectivity ping, not a test fixture; run directly by scripts/smoke_test.py outside test mode
 @frappe.whitelist(allow_guest=False)
 def ping():
 	"""Simple ping endpoint to test connection"""
@@ -19,6 +21,7 @@ def ping():
 		return handle_api_error(e, "Ping Test")
 
 
+# nosemgrep: frappe-test-whitelist-missing-protection -- authenticated health check, not a test fixture; run directly by scripts/smoke_test.py outside test mode
 @frappe.whitelist(allow_guest=False)
 def health_check():
 	"""Comprehensive health check for the backend"""
@@ -29,7 +32,7 @@ def health_check():
 		# Test Redis connection (if available)
 		redis_test = True
 		try:
-			frappe.cache().get("test_key")
+			frappe.cache().get_value("test_key")
 		except Exception:
 			redis_test = False
 
@@ -60,6 +63,7 @@ def health_check():
 		}
 
 
+# nosemgrep: frappe-test-whitelist-missing-protection -- authenticated backend info, not a test fixture; run directly by scripts/smoke_test.py outside test mode
 @frappe.whitelist(allow_guest=False)
 def get_backend_info():
 	"""Get detailed backend information"""
@@ -85,7 +89,7 @@ def get_backend_info():
 	}
 
 
-@frappe.whitelist()
+@whitelist_for_tests()
 def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
 	"""Emit a realtime test event to verify Socket.IO delivery to clients.
 	Default event is 'jarz_pos_new_invoice'. Requires auth.
@@ -121,7 +125,8 @@ def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
 # ---------------------------------------------------------------------------
 
 
-@frappe.whitelist(allow_guest=False)
+# nosemgrep: frappe-test-whitelist-missing-protection -- System Manager recovery tool (frappe.only_for), not a test fixture; must stay callable on production
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def reload_jarz_doctypes():
 	"""Reload standard DocTypes shipped with this app into the site DB.
 	Useful when DocTypes were removed during migrate and need restoring.

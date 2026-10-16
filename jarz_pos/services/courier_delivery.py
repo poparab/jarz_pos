@@ -229,7 +229,7 @@ def _assert_invoice_fields(fieldnames: Sequence[str]) -> None:
 		meta = frappe.get_meta("Sales Invoice")
 	except Exception as exc:  # pragma: no cover - environmental
 		frappe.throw(
-			_("Could not read Sales Invoice metadata: {0}").format(exc),
+			_("Could not read Sales Invoice metadata: {0}").format(str(exc)),
 			CourierSchemaError,
 		)
 

@@ -178,6 +178,7 @@ def resolve_requirement(platform: Any, build_number: Any) -> dict[str, Any]:
 	}
 
 
+# nosemgrep: guest-whitelisted-method -- public by design: pre-login version-floor check, read-only, no caller-specific data
 @frappe.whitelist(allow_guest=True)
 def get_app_requirement(
 	platform: str | None = None,

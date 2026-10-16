@@ -721,6 +721,7 @@ def _insert_exception(snapshot: dict[str, Any], exception_type: str) -> str | No
 		doc.insert(ignore_permissions=True)
 		return doc.name
 	except Exception:
+		# nosemgrep: no-strings-as-booleans -- savepoint is a name string, deliberately set to empty when frappe.db.savepoint failed; truthiness is the intent
 		if savepoint:
 			try:
 				frappe.db.rollback(save_point=savepoint)

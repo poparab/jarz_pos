@@ -57,6 +57,7 @@ def _safe_log(title: str) -> None:
 
 
 def _card_pass(today, tomorrow, summary: dict[str, int], bucket: str) -> None:
+	# nosemgrep: frappe-sql-format-injection -- DUE_BUCKETS[bucket] is a fixed fragment from a module-constant dict iterated by the scheduler; values are bound
 	rows = frappe.db.sql(
 		f"""
         SELECT name, title, status, archived, assigned_to, created_by, due_date,
@@ -90,6 +91,7 @@ def _card_pass(today, tomorrow, summary: dict[str, int], bucket: str) -> None:
 
 
 def _subtask_pass(today, tomorrow, summary: dict[str, int], bucket: str) -> None:
+	# nosemgrep: frappe-sql-format-injection -- DUE_BUCKETS[bucket] is a fixed fragment from a module-constant dict iterated by the scheduler; values are bound
 	rows = frappe.db.sql(
 		f"""
         SELECT s.name, s.parent, s.title AS subtask_title, s.assigned_to, s.due_date,

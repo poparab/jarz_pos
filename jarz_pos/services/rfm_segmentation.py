@@ -174,6 +174,7 @@ def run_segmentation(dry_run=False):
 	# regular windows, the biggest order, and the latest order's value. The
 	# latest value comes from GROUP_CONCAT ordered newest first (only the first
 	# element is read, so the connection's group_concat_max_len cannot matter).
+	# nosemgrep: frappe-sql-format-injection -- scope is retail_scope_sql output (constants only); dates are bound parameters
 	customers = frappe.db.sql(
 		f"""
         SELECT
@@ -274,6 +275,7 @@ def _clear_out_of_scope(scope_invoice_conds, new_fields):
 	if "rfm_lifetime_orders" in new_fields:
 		sets.append("c.rfm_lifetime_orders = 0")
 	conds = " AND ".join(scope_invoice_conds)
+	# nosemgrep: frappe-sql-format-injection -- sets, groups and conds are fixed column names and retail_invoice_conditions constants, no user input
 	frappe.db.sql(
 		"""
         UPDATE `tabCustomer` c
@@ -349,6 +351,7 @@ def export_segment_csv(segment):
 	else:
 		where = "c.customer_segment = %s"
 		params = (segment,)
+	# nosemgrep: frappe-sql-format-injection -- extra_cols and where are fixed fragments; segment is a bound parameter
 	return frappe.db.sql(
 		f"""
         SELECT

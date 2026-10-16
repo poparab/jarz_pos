@@ -1704,6 +1704,7 @@ def _lock_relationship_row(doctype, name):
 	"""Serialize competing account-link requests for one Lead/Opportunity."""
 	if doctype not in ("Lead", "Opportunity"):
 		frappe.throw("party_doctype must be 'Lead' or 'Opportunity'.")
+	# nosemgrep: frappe-sql-format-injection -- doctype is checked against the Lead/Opportunity allowlist above; name is a bound parameter
 	frappe.db.sql(
 		f"SELECT name FROM `tab{doctype}` WHERE name = %s FOR UPDATE",
 		(name,),

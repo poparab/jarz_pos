@@ -174,6 +174,7 @@ def _gl_net_for_invoices(invoices: list[str], account: str) -> float:
 	if not invoices:
 		return 0.0
 	placeholders = ", ".join(["%s"] * len(invoices))
+	# nosemgrep: frappe-sql-format-injection -- only generated %s placeholders interpolated, values bound as parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT ROUND(SUM(debit - credit), 2)

@@ -105,6 +105,7 @@ def get_unsettled_transactions(pos_profile: str) -> list[dict[str, Any]]:
 		if carry_columns_available()
 		else ""
 	)
+	# nosemgrep: frappe-sql-format-injection -- carry_select and _courier_profile_expr() return fixed SQL fragments; profile is bound as a parameter
 	rows = frappe.db.sql(
 		f"""
         SELECT
@@ -517,6 +518,7 @@ def get_shift_carry_stats_bulk(openings: list[dict[str, Any]]) -> dict[str, dict
 	try:
 		placeholders = ", ".join(["%s"] * len(names))
 		settled = (
+			# nosemgrep: frappe-sql-format-injection -- only generated %s placeholders for len(names) are interpolated; names are bound as parameters
 			frappe.db.sql(
 				f"""
             SELECT settled_in_shift AS opening,

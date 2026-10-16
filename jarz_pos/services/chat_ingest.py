@@ -792,6 +792,7 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 	result = {"events": 0, "messages": 0, "statuses": 0, "errors": 0}
 	try:
 		if frappe.session.user in (None, "", "Guest"):
+			# nosemgrep: frappe-setuser -- background job (RQ worker) enqueued after the HMAC-verified webhook; worker calls frappe.destroy() after every job
 			frappe.set_user("Administrator")
 		if isinstance(payload, str | bytes):
 			payload = json.loads(payload)
@@ -898,6 +899,7 @@ def download_media(message_name: str, url: str | None = None) -> str | None:
 	"""
 	try:
 		if frappe.session.user in (None, "", "Guest"):
+			# nosemgrep: frappe-setuser -- background job (RQ worker) enqueued server-side; worker calls frappe.destroy() after every job
 			frappe.set_user("Administrator")
 		row = frappe.db.get_value(
 			cc.MESSAGE,

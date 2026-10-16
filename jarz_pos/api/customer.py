@@ -469,7 +469,7 @@ def get_customer_shipping_addresses(customer, invoice=None):
 		frappe.throw(_("Failed to fetch customer shipping addresses."))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_customer_shipping_address(
 	customer,
 	phone=None,
@@ -759,6 +759,7 @@ def search_customers(name=None, phone=None, customer_type=None):
 	if has_credit_column:
 		fields_to_select.append("`custom_credit_allowed`")
 
+	# nosemgrep: frappe-sql-format-injection -- fixed column list and generated bound-parameter conditions; user text only enters via %(name)s params
 	query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
 
 	params = {}
@@ -1480,7 +1481,7 @@ def update_default_address(customer, address, phone, invoice=None):
 # ---------------------------------------------------------------------------
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_customer_shipping_address(
 	customer,
 	address_name,
@@ -1550,7 +1551,7 @@ def update_customer_shipping_address(
 		frappe.throw(_("Failed to update address: {0}").format(str(e)))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_customer_shipping_address(customer, address_name):
 	"""Delete a shipping address that belongs to this customer.
 
@@ -1674,7 +1675,7 @@ def _assert_submitted_invoice_fee_unchanged(inv, new_territory: str, new_income:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def change_invoice_shipping_address(invoice_name, address_name):
 	"""Re-link a Sales Invoice to a different shipping address and optionally
 	recompute shipping income / expense when the territory changes.
