@@ -57,9 +57,11 @@ class TestStockTransferHistory(unittest.TestCase):
 	def _call(self, handlers, count=0, **kwargs):
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer, "_ensure_transfer_access"), patch.object(
-			transfer.frappe, "get_all", side_effect=_dispatch(handlers)
-		), patch.object(transfer.frappe, "db", _fake_db(count)):
+		with (
+			patch.object(transfer, "_ensure_transfer_access"),
+			patch.object(transfer.frappe, "get_all", side_effect=_dispatch(handlers)),
+			patch.object(transfer.frappe, "db", _fake_db(count)),
+		):
 			return transfer.list_transfers(**kwargs)
 
 	def test_unfiltered_call_does_not_restrict_by_name(self):
@@ -73,26 +75,44 @@ class TestStockTransferHistory(unittest.TestCase):
 
 		def stock_entry(**kwargs):
 			seen.update(kwargs.get("filters") or {})
-			return [{
-				"name": "STE-0001",
-				"posting_date": "2026-09-01",
-				"posting_time": "10:00:00",
-				"total_outgoing_value": 100.0,
-				"owner": "a@example.com",
-				"creation": "2026-09-01 10:00:00",
-				"remarks": None,
-			}]
+			return [
+				{
+					"name": "STE-0001",
+					"posting_date": "2026-09-01",
+					"posting_time": "10:00:00",
+					"total_outgoing_value": 100.0,
+					"owner": "a@example.com",
+					"creation": "2026-09-01 10:00:00",
+					"remarks": None,
+				}
+			]
 
 		result = self._call(
 			{
 				"Stock Entry": stock_entry,
 				"Stock Entry Detail": [
-					{"parent": "STE-0001", "item_code": "JAR-1", "item_name": "Jar",
-					 "qty": 3.0, "uom": "Nos", "s_warehouse": "A", "t_warehouse": "B",
-					 "basic_rate": 10.0, "amount": 30.0},
-					{"parent": "STE-0001", "item_code": "JAR-2", "item_name": "Jar 2",
-					 "qty": 2.0, "uom": "Nos", "s_warehouse": "A", "t_warehouse": "B",
-					 "basic_rate": 10.0, "amount": 20.0},
+					{
+						"parent": "STE-0001",
+						"item_code": "JAR-1",
+						"item_name": "Jar",
+						"qty": 3.0,
+						"uom": "Nos",
+						"s_warehouse": "A",
+						"t_warehouse": "B",
+						"basic_rate": 10.0,
+						"amount": 30.0,
+					},
+					{
+						"parent": "STE-0001",
+						"item_code": "JAR-2",
+						"item_name": "Jar 2",
+						"qty": 2.0,
+						"uom": "Nos",
+						"s_warehouse": "A",
+						"t_warehouse": "B",
+						"basic_rate": 10.0,
+						"amount": 20.0,
+					},
 				],
 				"User": [{"name": "a@example.com", "full_name": "Ada"}],
 			},
@@ -110,8 +130,7 @@ class TestStockTransferHistory(unittest.TestCase):
 
 	def test_warehouse_filter_with_no_match_returns_empty(self):
 		"""No child row on that warehouse means no transfer, not every transfer."""
-		result = self._call({"Stock Entry Detail": []}, count=99,
-							source_warehouse="Nowhere")
+		result = self._call({"Stock Entry Detail": []}, count=99, source_warehouse="Nowhere")
 		self.assertEqual(result, {"transfers": [], "total": 0})
 
 	def test_search_matches_name_or_item_and_intersects_warehouse(self):
@@ -144,18 +163,40 @@ class TestStockTransferHistory(unittest.TestCase):
 		"""A hand-made entry spanning warehouses has no one route to name."""
 		result = self._call(
 			{
-				"Stock Entry": [{
-					"name": "STE-0002", "posting_date": "2026-09-01",
-					"posting_time": "10:00:00", "total_outgoing_value": 0.0,
-					"owner": None, "creation": "2026-09-01 10:00:00", "remarks": None,
-				}],
+				"Stock Entry": [
+					{
+						"name": "STE-0002",
+						"posting_date": "2026-09-01",
+						"posting_time": "10:00:00",
+						"total_outgoing_value": 0.0,
+						"owner": None,
+						"creation": "2026-09-01 10:00:00",
+						"remarks": None,
+					}
+				],
 				"Stock Entry Detail": [
-					{"parent": "STE-0002", "item_code": "X", "item_name": "X", "qty": 1.0,
-					 "uom": "Nos", "s_warehouse": "A", "t_warehouse": "B",
-					 "basic_rate": 0.0, "amount": 0.0},
-					{"parent": "STE-0002", "item_code": "Y", "item_name": "Y", "qty": 1.0,
-					 "uom": "Nos", "s_warehouse": "C", "t_warehouse": "B",
-					 "basic_rate": 0.0, "amount": 0.0},
+					{
+						"parent": "STE-0002",
+						"item_code": "X",
+						"item_name": "X",
+						"qty": 1.0,
+						"uom": "Nos",
+						"s_warehouse": "A",
+						"t_warehouse": "B",
+						"basic_rate": 0.0,
+						"amount": 0.0,
+					},
+					{
+						"parent": "STE-0002",
+						"item_code": "Y",
+						"item_name": "Y",
+						"qty": 1.0,
+						"uom": "Nos",
+						"s_warehouse": "C",
+						"t_warehouse": "B",
+						"basic_rate": 0.0,
+						"amount": 0.0,
+					},
 				],
 			},
 			count=1,
@@ -189,35 +230,49 @@ class TestCashTransferHistory(unittest.TestCase):
 			"Journal Entry Account": je_rows,
 			"Journal Entry": journal_entry,
 			"User": [],
-			"Account": [{"name": n, "account_name": n.split(" - ")[0]}
-						for n in sorted(self.TRANSFERABLE)],
+			"Account": [{"name": n, "account_name": n.split(" - ")[0]} for n in sorted(self.TRANSFERABLE)],
 		}
-		with patch.object(cash_transfer, "_ensure_manager_access"), patch.object(
-			cash_transfer, "_transferable_account_names",
-			return_value=set(self.TRANSFERABLE)
-		), patch.object(
-			cash_transfer.frappe, "get_all", side_effect=_dispatch(handlers)
-		), patch.object(cash_transfer.frappe, "db", _fake_db()), patch.object(
-			cash_transfer.frappe.defaults, "get_user_default", return_value="JARZ"
+		with (
+			patch.object(cash_transfer, "_ensure_manager_access"),
+			patch.object(cash_transfer, "_transferable_account_names", return_value=set(self.TRANSFERABLE)),
+			patch.object(cash_transfer.frappe, "get_all", side_effect=_dispatch(handlers)),
+			patch.object(cash_transfer.frappe, "db", _fake_db()),
+			patch.object(cash_transfer.frappe.defaults, "get_user_default", return_value="JARZ"),
 		):
 			return cash_transfer.list_transfers(**kwargs)
 
 	def _two_leg_rows(self, credit_account, debit_account):
 		return [
-			{"parent": "JE-1", "account": credit_account, "idx": 1,
-			 "debit_in_account_currency": 0.0, "credit_in_account_currency": 500.0},
-			{"parent": "JE-1", "account": debit_account, "idx": 2,
-			 "debit_in_account_currency": 500.0, "credit_in_account_currency": 0.0},
+			{
+				"parent": "JE-1",
+				"account": credit_account,
+				"idx": 1,
+				"debit_in_account_currency": 0.0,
+				"credit_in_account_currency": 500.0,
+			},
+			{
+				"parent": "JE-1",
+				"account": debit_account,
+				"idx": 2,
+				"debit_in_account_currency": 500.0,
+				"credit_in_account_currency": 0.0,
+			},
 		]
 
 	def test_two_leg_entry_between_cash_accounts_is_a_transfer(self):
 		result = self._call(
 			self._two_leg_rows("Cash - J", "Bank - J"),
-			journal_entries=[{
-				"name": "JE-1", "posting_date": "2026-09-01", "total_debit": 500.0,
-				"user_remark": "drawer to bank", "owner": None,
-				"creation": "2026-09-01 09:00:00", "voucher_type": "Journal Entry",
-			}],
+			journal_entries=[
+				{
+					"name": "JE-1",
+					"posting_date": "2026-09-01",
+					"total_debit": 500.0,
+					"user_remark": "drawer to bank",
+					"owner": None,
+					"creation": "2026-09-01 09:00:00",
+					"voucher_type": "Journal Entry",
+				}
+			],
 		)
 		self.assertEqual(result["total"], 1)
 		row = result["transfers"][0]
@@ -237,26 +292,39 @@ class TestCashTransferHistory(unittest.TestCase):
 
 	def test_entry_with_more_than_two_legs_is_excluded(self):
 		rows = self._two_leg_rows("Cash - J", "Bank - J")
-		rows.append({
-			"parent": "JE-1", "account": "Dokki - J", "idx": 3,
-			"debit_in_account_currency": 10.0, "credit_in_account_currency": 0.0,
-		})
+		rows.append(
+			{
+				"parent": "JE-1",
+				"account": "Dokki - J",
+				"idx": 3,
+				"debit_in_account_currency": 10.0,
+				"credit_in_account_currency": 0.0,
+			}
+		)
 		result = self._call(rows)
 		self.assertEqual(result, {"transfers": [], "total": 0})
 
 	def test_account_filter_matches_either_side(self):
 		rows = self._two_leg_rows("Cash - J", "Bank - J")
-		entries = [{
-			"name": "JE-1", "posting_date": "2026-09-01", "total_debit": 500.0,
-			"user_remark": None, "owner": None, "creation": "2026-09-01 09:00:00",
-			"voucher_type": "Journal Entry",
-		}]
+		entries = [
+			{
+				"name": "JE-1",
+				"posting_date": "2026-09-01",
+				"total_debit": 500.0,
+				"user_remark": None,
+				"owner": None,
+				"creation": "2026-09-01 09:00:00",
+				"voucher_type": "Journal Entry",
+			}
+		]
 		self.assertEqual(
-			self._call(rows, journal_entries=entries, account="Bank - J")["total"], 1,
+			self._call(rows, journal_entries=entries, account="Bank - J")["total"],
+			1,
 			"the receiving side must match",
 		)
 		self.assertEqual(
-			self._call(rows, journal_entries=entries, account="Cash - J")["total"], 1,
+			self._call(rows, journal_entries=entries, account="Cash - J")["total"],
+			1,
 			"the sending side must match",
 		)
 		self.assertEqual(
@@ -272,30 +340,54 @@ class TestInventoryCountHistory(unittest.TestCase):
 	def _call(self, handlers, count=0, **kwargs):
 		from jarz_pos.api import inventory_count
 
-		with patch.object(inventory_count, "_ensure_manager_access"), patch.object(
-			inventory_count.frappe, "get_all", side_effect=_dispatch(handlers)
-		), patch.object(inventory_count.frappe, "db", _fake_db(count)):
+		with (
+			patch.object(inventory_count, "_ensure_manager_access"),
+			patch.object(inventory_count.frappe, "get_all", side_effect=_dispatch(handlers)),
+			patch.object(inventory_count.frappe, "db", _fake_db(count)),
+		):
 			return inventory_count.list_reconciliations(**kwargs)
 
 	def test_line_delta_is_counted_minus_system(self):
 		"""The stored row holds before and after; the operator wants the delta."""
 		result = self._call(
 			{
-				"Stock Reconciliation": [{
-					"name": "SR-1", "posting_date": "2026-09-01",
-					"posting_time": "18:00:00", "set_warehouse": "Dokki - J",
-					"difference_amount": -250.0, "company": "JARZ", "owner": None,
-					"creation": "2026-09-01 18:00:00",
-				}],
+				"Stock Reconciliation": [
+					{
+						"name": "SR-1",
+						"posting_date": "2026-09-01",
+						"posting_time": "18:00:00",
+						"set_warehouse": "Dokki - J",
+						"difference_amount": -250.0,
+						"company": "JARZ",
+						"owner": None,
+						"creation": "2026-09-01 18:00:00",
+					}
+				],
 				"Stock Reconciliation Item": [
-					{"parent": "SR-1", "item_code": "A", "item_name": "A",
-					 "warehouse": "Dokki - J", "qty": 12.0, "current_qty": 15.0,
-					 "valuation_rate": 10.0, "current_valuation_rate": 10.0,
-					 "amount": 120.0, "current_amount": 150.0},
-					{"parent": "SR-1", "item_code": "B", "item_name": "B",
-					 "warehouse": "Dokki - J", "qty": 8.0, "current_qty": 5.0,
-					 "valuation_rate": 10.0, "current_valuation_rate": 10.0,
-					 "amount": 80.0, "current_amount": 50.0},
+					{
+						"parent": "SR-1",
+						"item_code": "A",
+						"item_name": "A",
+						"warehouse": "Dokki - J",
+						"qty": 12.0,
+						"current_qty": 15.0,
+						"valuation_rate": 10.0,
+						"current_valuation_rate": 10.0,
+						"amount": 120.0,
+						"current_amount": 150.0,
+					},
+					{
+						"parent": "SR-1",
+						"item_code": "B",
+						"item_name": "B",
+						"warehouse": "Dokki - J",
+						"qty": 8.0,
+						"current_qty": 5.0,
+						"valuation_rate": 10.0,
+						"current_valuation_rate": 10.0,
+						"amount": 80.0,
+						"current_amount": 50.0,
+					},
 				],
 			},
 			count=1,
@@ -345,23 +437,43 @@ class TestShiftHistory(unittest.TestCase):
 	"""
 
 	OPENING = {
-		"name": "POS-OPEN-1", "status": "Closed", "user": "cashier@example.com",
-		"company": "JARZ", "pos_profile": "Dokki", "docstatus": 1,
+		"name": "POS-OPEN-1",
+		"status": "Closed",
+		"user": "cashier@example.com",
+		"company": "JARZ",
+		"pos_profile": "Dokki",
+		"docstatus": 1,
 		"period_start_date": "2026-09-01 09:00:00",
 		"period_end_date": "2026-09-01 21:00:00",
 		"creation": "2026-09-01 09:00:00",
 	}
 	CLOSING = {
-		"name": "POS-CLOSE-1", "pos_opening_entry": "POS-OPEN-1",
-		"posting_date": "2026-09-01", "period_end_date": "2026-09-01 21:00:00",
-		"grand_total": 5000.0, "net_total": 4800.0, "total_quantity": 120.0,
+		"name": "POS-CLOSE-1",
+		"pos_opening_entry": "POS-OPEN-1",
+		"posting_date": "2026-09-01",
+		"period_end_date": "2026-09-01 21:00:00",
+		"grand_total": 5000.0,
+		"net_total": 4800.0,
+		"total_quantity": 120.0,
 		"status": "Submitted",
 	}
 	RECON = [
-		{"parent": "POS-CLOSE-1", "mode_of_payment": "Cash", "opening_amount": 1000.0,
-		 "expected_amount": 4000.0, "closing_amount": 3950.0, "difference": -50.0},
-		{"parent": "POS-CLOSE-1", "mode_of_payment": "InstaPay", "opening_amount": 0.0,
-		 "expected_amount": 1000.0, "closing_amount": 1000.0, "difference": 0.0},
+		{
+			"parent": "POS-CLOSE-1",
+			"mode_of_payment": "Cash",
+			"opening_amount": 1000.0,
+			"expected_amount": 4000.0,
+			"closing_amount": 3950.0,
+			"difference": -50.0,
+		},
+		{
+			"parent": "POS-CLOSE-1",
+			"mode_of_payment": "InstaPay",
+			"opening_amount": 0.0,
+			"expected_amount": 1000.0,
+			"closing_amount": 1000.0,
+			"difference": 0.0,
+		},
 	]
 
 	def _call(self, *, is_manager, **kwargs):
@@ -379,11 +491,12 @@ class TestShiftHistory(unittest.TestCase):
 			"POS Closing Entry Detail": [dict(r) for r in self.RECON],
 			"User": [{"name": "cashier@example.com", "full_name": "Sam"}],
 		}
-		with patch.object(shift, "_user_can_see_all_shifts", return_value=is_manager), \
-				patch.object(shift.frappe, "get_all", side_effect=_dispatch(handlers)), \
-				patch.object(shift.frappe, "db", _fake_db(1)), \
-				patch.object(shift.frappe, "session", shift.frappe._dict(
-					{"user": "cashier@example.com"})):
+		with (
+			patch.object(shift, "_user_can_see_all_shifts", return_value=is_manager),
+			patch.object(shift.frappe, "get_all", side_effect=_dispatch(handlers)),
+			patch.object(shift.frappe, "db", _fake_db(1)),
+			patch.object(shift.frappe, "session", shift.frappe._dict({"user": "cashier@example.com"})),
+		):
 			return shift.list_shifts(**kwargs), captured
 
 	def test_manager_sees_amounts_and_the_signed_variance(self):
@@ -407,8 +520,9 @@ class TestShiftHistory(unittest.TestCase):
 
 	def test_non_manager_gets_own_shifts_without_money(self):
 		result, filters = self._call(is_manager=False)
-		self.assertEqual(filters.get("user"), "cashier@example.com",
-						 "a non-manager must be pinned to their own shifts")
+		self.assertEqual(
+			filters.get("user"), "cashier@example.com", "a non-manager must be pinned to their own shifts"
+		)
 		self.assertEqual(result["amounts_hidden"], 1)
 		row = result["shifts"][0]
 		self.assertNotIn("grand_total", row)

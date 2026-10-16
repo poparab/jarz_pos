@@ -6,584 +6,599 @@ including account lookup, payment processing, and cash handling.
 """
 
 import frappe
+
 from jarz_pos.constants import ACCOUNTS
 
 
 def _settings():
-    """Return the Jarz POS Settings doc (cached), or None before migration."""
-    try:
-        from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
-        return get_jarz_settings()
-    except Exception:
-        return None
+	"""Return the Jarz POS Settings doc (cached), or None before migration."""
+	try:
+		from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
+
+		return get_jarz_settings()
+	except Exception:
+		return None
 
 
 def get_account_for_company(account_name, company):
-    """
-    Get account for company with fallback options
-    """
-    print(f"   🔍 get_account_for_company({account_name}, {company})")
-    
-    # Try exact match first
-    company_abbr = frappe.db.get_value("Company", company, "abbr")
-    account_with_abbr = f"{account_name} - {company_abbr}"
-    if frappe.db.exists("Account", account_with_abbr):
-        return account_with_abbr
-    
-    # Fallback to searching by name and company
-    acc = frappe.db.get_value("Account", {"account_name": account_name, "company": company})
-    if acc:
-        return acc
-    
-    # If still not found, throw an error
-    frappe.throw(f"Could not find account '{account_name}' for company '{company}'")
+	"""
+	Get account for company with fallback options
+	"""
+	print(f"   🔍 get_account_for_company({account_name}, {company})")
+
+	# Try exact match first
+	company_abbr = frappe.db.get_value("Company", company, "abbr")
+	account_with_abbr = f"{account_name} - {company_abbr}"
+	if frappe.db.exists("Account", account_with_abbr):
+		return account_with_abbr
+
+	# Fallback to searching by name and company
+	acc = frappe.db.get_value("Account", {"account_name": account_name, "company": company})
+	if acc:
+		return acc
+
+	# If still not found, throw an error
+	frappe.throw(f"Could not find account '{account_name}' for company '{company}'")
 
 
 def get_item_price(item_code, price_list):
-    """Return the selling rate for an item in the given price list, or None if not set.
+	"""Return the selling rate for an item in the given price list, or None if not set.
 
-    Strictly scoped to ``price_list`` — callers supply their own fallback (e.g. the
-    cart-provided rate). ERPNext v16 removed ``Item.standard_selling_rate``, so there is
-    NO item-level standard-rate fallback here: querying that column raises
-    ``OperationalError: Unknown column 'standard_selling_rate'`` and was the cause of POS
-    invoice creation failing (HTTP 417) whenever a resolved price list had no Item Price
-    for an item (e.g. an as-yet-unpopulated B2B/Employee/Sample list).
-    """
-    if not price_list:
-        return None
-    return frappe.db.get_value(
-        "Item Price",
-        {"item_code": item_code, "price_list": price_list, "customer": ["in", [None, ""]]},
-        "price_list_rate",
-    )
+	Strictly scoped to ``price_list`` — callers supply their own fallback (e.g. the
+	cart-provided rate). ERPNext v16 removed ``Item.standard_selling_rate``, so there is
+	NO item-level standard-rate fallback here: querying that column raises
+	``OperationalError: Unknown column 'standard_selling_rate'`` and was the cause of POS
+	invoice creation failing (HTTP 417) whenever a resolved price list had no Item Price
+	for an item (e.g. an as-yet-unpopulated B2B/Employee/Sample list).
+	"""
+	if not price_list:
+		return None
+	return frappe.db.get_value(
+		"Item Price",
+		{"item_code": item_code, "price_list": price_list, "customer": ["in", [None, ""]]},
+		"price_list_rate",
+	)
 
 
 def _get_cash_account(pos_profile: str, company: str) -> str:
-    """Return Cash In Hand ledger for the given POS profile."""
-    frappe.logger().info(f"DEBUG _get_cash_account: pos_profile='{pos_profile}', company='{company}'")
-    
-    # First, check if pos_profile itself is already a valid Cash/Bank account
-    if frappe.db.exists("Account", pos_profile):
-        account_type = frappe.db.get_value("Account", pos_profile, "account_type")
-        frappe.logger().info(f"DEBUG _get_cash_account: pos_profile exists as account with type='{account_type}'")
-        if account_type in ["Cash", "Bank"]:
-            frappe.logger().info(f"DEBUG _get_cash_account: RETURNING pos_profile itself '{pos_profile}' (is Cash/Bank)")
-            return pos_profile
-        else:
-            frappe.logger().warning(f"DEBUG _get_cash_account: pos_profile '{pos_profile}' is an account but NOT Cash/Bank type (type='{account_type}')")
-            # Don't return it - it's the wrong type (probably Receivable)
-    
-    # Try exact child under Cash In Hand: "{pos_profile} - <ABBR>"
-    acc = frappe.db.get_value(
-        "Account",
-        {
-            "company": company,
-            "parent_account": ["like", "%Cash In Hand%"],
-            "account_name": pos_profile,
-            "is_group": 0,
-        },
-        "name",
-    )
-    
-    frappe.logger().info(f"DEBUG _get_cash_account: exact match result='{acc}'")
-    
-    # Fallback: partial match
-    if not acc:
-        acc = frappe.db.get_value(
-            "Account",
-            {
-                "company": company,
-                "parent_account": ["like", f"%{ACCOUNTS.CASH_IN_HAND}%"],
-                "account_name": ["like", f"%{pos_profile}%"],
-                "is_group": 0,
-            },
-            "name",
-        )
-        frappe.logger().info(f"DEBUG _get_cash_account: partial match result='{acc}'")
-    
-    if acc:
-        # Final validation: ensure it's actually a Cash/Bank account
-        account_type = frappe.db.get_value("Account", acc, "account_type")
-        frappe.logger().info(f"DEBUG _get_cash_account: found account '{acc}' with type='{account_type}'")
-        if account_type not in ["Cash", "Bank"]:
-            frappe.logger().error(f"DEBUG _get_cash_account: ERROR - Found account '{acc}' but it's NOT Cash/Bank (type='{account_type}')")
-            frappe.throw(
-                f"Account '{acc}' found for POS profile '{pos_profile}' is not a Cash or Bank account (type: {account_type})"
-            )
-        frappe.logger().info(f"DEBUG _get_cash_account: RETURNING '{acc}'")
-        return acc
-    
-    frappe.logger().error(f"DEBUG _get_cash_account: NO ACCOUNT FOUND! pos_profile='{pos_profile}', company='{company}'")
-    frappe.throw(
-        f"No Cash In Hand account found for POS profile '{pos_profile}' in company {company}."
-    )
+	"""Return Cash In Hand ledger for the given POS profile."""
+	frappe.logger().info(f"DEBUG _get_cash_account: pos_profile='{pos_profile}', company='{company}'")
+
+	# First, check if pos_profile itself is already a valid Cash/Bank account
+	if frappe.db.exists("Account", pos_profile):
+		account_type = frappe.db.get_value("Account", pos_profile, "account_type")
+		frappe.logger().info(
+			f"DEBUG _get_cash_account: pos_profile exists as account with type='{account_type}'"
+		)
+		if account_type in ["Cash", "Bank"]:
+			frappe.logger().info(
+				f"DEBUG _get_cash_account: RETURNING pos_profile itself '{pos_profile}' (is Cash/Bank)"
+			)
+			return pos_profile
+		else:
+			frappe.logger().warning(
+				f"DEBUG _get_cash_account: pos_profile '{pos_profile}' is an account but NOT Cash/Bank type (type='{account_type}')"
+			)
+			# Don't return it - it's the wrong type (probably Receivable)
+
+	# Try exact child under Cash In Hand: "{pos_profile} - <ABBR>"
+	acc = frappe.db.get_value(
+		"Account",
+		{
+			"company": company,
+			"parent_account": ["like", "%Cash In Hand%"],
+			"account_name": pos_profile,
+			"is_group": 0,
+		},
+		"name",
+	)
+
+	frappe.logger().info(f"DEBUG _get_cash_account: exact match result='{acc}'")
+
+	# Fallback: partial match
+	if not acc:
+		acc = frappe.db.get_value(
+			"Account",
+			{
+				"company": company,
+				"parent_account": ["like", f"%{ACCOUNTS.CASH_IN_HAND}%"],
+				"account_name": ["like", f"%{pos_profile}%"],
+				"is_group": 0,
+			},
+			"name",
+		)
+		frappe.logger().info(f"DEBUG _get_cash_account: partial match result='{acc}'")
+
+	if acc:
+		# Final validation: ensure it's actually a Cash/Bank account
+		account_type = frappe.db.get_value("Account", acc, "account_type")
+		frappe.logger().info(f"DEBUG _get_cash_account: found account '{acc}' with type='{account_type}'")
+		if account_type not in ["Cash", "Bank"]:
+			frappe.logger().error(
+				f"DEBUG _get_cash_account: ERROR - Found account '{acc}' but it's NOT Cash/Bank (type='{account_type}')"
+			)
+			frappe.throw(
+				f"Account '{acc}' found for POS profile '{pos_profile}' is not a Cash or Bank account (type: {account_type})"
+			)
+		frappe.logger().info(f"DEBUG _get_cash_account: RETURNING '{acc}'")
+		return acc
+
+	frappe.logger().error(
+		f"DEBUG _get_cash_account: NO ACCOUNT FOUND! pos_profile='{pos_profile}', company='{company}'"
+	)
+	frappe.throw(f"No Cash In Hand account found for POS profile '{pos_profile}' in company {company}.")
 
 
 # ------------------ NEW HELPER FUNCTIONS (centralized resolution) ------------------
 
-def get_freight_expense_account(company: str) -> str:
-    """Return Freight & Forwarding Charges account for company (validated).
 
-    Prefers Jarz POS Settings → freight_charges_account, then falls back
-    to ``get_account_for_company(ACCOUNTS.FREIGHT_AND_FORWARDING, ...)``.
-    """
-    s = _settings()
-    if s and s.freight_charges_account:
-        # Validate the configured account actually exists in the database
-        if frappe.db.exists("Account", s.freight_charges_account):
-            return s.freight_charges_account
-        # Settings value may be missing company abbreviation — try appending it
-        company_abbr = frappe.db.get_value("Company", company, "abbr")
-        if company_abbr:
-            with_abbr = f"{s.freight_charges_account} - {company_abbr}"
-            if frappe.db.exists("Account", with_abbr):
-                return with_abbr
-    acc = get_account_for_company(ACCOUNTS.FREIGHT_AND_FORWARDING, company)
-    if not acc:
-        frappe.throw(f"{ACCOUNTS.FREIGHT_AND_FORWARDING} account missing for {company}")
-    return acc
+def get_freight_expense_account(company: str) -> str:
+	"""Return Freight & Forwarding Charges account for company (validated).
+
+	Prefers Jarz POS Settings → freight_charges_account, then falls back
+	to ``get_account_for_company(ACCOUNTS.FREIGHT_AND_FORWARDING, ...)``.
+	"""
+	s = _settings()
+	if s and s.freight_charges_account:
+		# Validate the configured account actually exists in the database
+		if frappe.db.exists("Account", s.freight_charges_account):
+			return s.freight_charges_account
+		# Settings value may be missing company abbreviation — try appending it
+		company_abbr = frappe.db.get_value("Company", company, "abbr")
+		if company_abbr:
+			with_abbr = f"{s.freight_charges_account} - {company_abbr}"
+			if frappe.db.exists("Account", with_abbr):
+				return with_abbr
+	acc = get_account_for_company(ACCOUNTS.FREIGHT_AND_FORWARDING, company)
+	if not acc:
+		frappe.throw(f"{ACCOUNTS.FREIGHT_AND_FORWARDING} account missing for {company}")
+	return acc
 
 
 def _company_leaf(account_name: str, company: str):
-    """``<account_name> - <abbr>`` if it exists as a leaf of this company, else None."""
-    abbr = frappe.db.get_value("Company", company, "abbr")
-    if not abbr:
-        return None
-    name = f"{account_name} - {abbr}"
-    row = frappe.db.get_value("Account", name, ["company", "is_group"], as_dict=True)
-    if row and row.company == company and not int(row.is_group or 0):
-        return name
-    return None
+	"""``<account_name> - <abbr>`` if it exists as a leaf of this company, else None."""
+	abbr = frappe.db.get_value("Company", company, "abbr")
+	if not abbr:
+		return None
+	name = f"{account_name} - {abbr}"
+	row = frappe.db.get_value("Account", name, ["company", "is_group"], as_dict=True)
+	if row and row.company == company and not int(row.is_group or 0):
+		return name
+	return None
 
 
 def _report_ledger_fallback(account_name: str, company: str) -> None:
-    """Leave a visible trace when a new ledger is missing and Freight is used.
+	"""Leave a visible trace when a new ledger is missing and Freight is used.
 
-    logger().warning is invisible on the servers; an Error Log is not. Never
-    raises: a failed log must not stop an invoice.
-    """
-    try:
-        frappe.log_error(
-            title=f"{account_name} account missing - booked to Freight",
-            message=f"{account_name} - <abbr> not found for company {company}; "
-            "run the create_expense_classification_accounts patch (bench migrate).",
-        )
-    except Exception:
-        pass
+	logger().warning is invisible on the servers; an Error Log is not. Never
+	raises: a failed log must not stop an invoice.
+	"""
+	try:
+		frappe.log_error(
+			title=f"{account_name} account missing - booked to Freight",
+			message=f"{account_name} - <abbr> not found for company {company}; "
+			"run the create_expense_classification_accounts patch (bench migrate).",
+		)
+	except Exception:
+		pass
 
 
 def get_shipping_income_account(company: str) -> str:
-    """Return the account the customer's delivery charge is credited to.
+	"""Return the account the customer's delivery charge is credited to.
 
-    ``Shipping Income - <abbr>`` (an Income account, created by the
-    ``create_expense_classification_accounts`` patch). Falls back to the
-    Freight account only on a site the patch has not reached yet, so invoicing
-    never stops over a missing ledger — that is the pre-2026-09 behaviour,
-    which netted the charge against the courier cost.
-    """
-    acc = _company_leaf(ACCOUNTS.SHIPPING_INCOME, company)
-    if acc:
-        return acc
-    _report_ledger_fallback("Shipping Income", company)
-    return get_freight_expense_account(company)
+	``Shipping Income - <abbr>`` (an Income account, created by the
+	``create_expense_classification_accounts`` patch). Falls back to the
+	Freight account only on a site the patch has not reached yet, so invoicing
+	never stops over a missing ledger — that is the pre-2026-09 behaviour,
+	which netted the charge against the courier cost.
+	"""
+	acc = _company_leaf(ACCOUNTS.SHIPPING_INCOME, company)
+	if acc:
+		return acc
+	_report_ledger_fallback("Shipping Income", company)
+	return get_freight_expense_account(company)
 
 
 def get_purchase_delivery_account(company: str) -> str:
-    """Return the account a purchase's delivery charge is booked to.
+	"""Return the account a purchase's delivery charge is booked to.
 
-    ``Purchase Delivery Charges - <abbr>``; Freight only as a pre-patch fallback.
-    """
-    acc = _company_leaf(ACCOUNTS.PURCHASE_DELIVERY, company)
-    if acc:
-        return acc
-    _report_ledger_fallback("Purchase Delivery Charges", company)
-    return get_freight_expense_account(company)
+	``Purchase Delivery Charges - <abbr>``; Freight only as a pre-patch fallback.
+	"""
+	acc = _company_leaf(ACCOUNTS.PURCHASE_DELIVERY, company)
+	if acc:
+		return acc
+	_report_ledger_fallback("Purchase Delivery Charges", company)
+	return get_freight_expense_account(company)
 
 
 def get_courier_outstanding_account(company: str) -> str:
-    """Return Courier Outstanding account (non-group) for company.
+	"""Return Courier Outstanding account (non-group) for company.
 
-    Prefers Jarz POS Settings → courier_outstanding_account.
-    """
-    s = _settings()
-    if s and s.courier_outstanding_account:
-        if frappe.db.exists("Account", s.courier_outstanding_account):
-            return s.courier_outstanding_account
-        # Try appending company abbreviation
-        company_abbr = frappe.db.get_value("Company", company, "abbr")
-        if company_abbr:
-            with_abbr = f"{s.courier_outstanding_account} - {company_abbr}"
-            if frappe.db.exists("Account", with_abbr):
-                return with_abbr
-    acc = frappe.db.get_value(
-        "Account",
-        {
-            "company": company,
-            "account_name": ["like", f"{ACCOUNTS.COURIER_OUTSTANDING}%"],
-            "is_group": 0,
-        },
-        "name",
-    )
-    if acc:
-        return acc
-    frappe.throw(
-        f"No '{ACCOUNTS.COURIER_OUTSTANDING}' account found for company {company}. Create a ledger under Accounts Receivable."
-    )
+	Prefers Jarz POS Settings → courier_outstanding_account.
+	"""
+	s = _settings()
+	if s and s.courier_outstanding_account:
+		if frappe.db.exists("Account", s.courier_outstanding_account):
+			return s.courier_outstanding_account
+		# Try appending company abbreviation
+		company_abbr = frappe.db.get_value("Company", company, "abbr")
+		if company_abbr:
+			with_abbr = f"{s.courier_outstanding_account} - {company_abbr}"
+			if frappe.db.exists("Account", with_abbr):
+				return with_abbr
+	acc = frappe.db.get_value(
+		"Account",
+		{
+			"company": company,
+			"account_name": ["like", f"{ACCOUNTS.COURIER_OUTSTANDING}%"],
+			"is_group": 0,
+		},
+		"name",
+	)
+	if acc:
+		return acc
+	frappe.throw(
+		f"No '{ACCOUNTS.COURIER_OUTSTANDING}' account found for company {company}. Create a ledger under Accounts Receivable."
+	)
 
 
 def get_pos_cash_account(pos_profile: str, company: str) -> str:
-    """Public wrapper for resolving POS profile cash-in-hand child account."""
-    return _get_cash_account(pos_profile, company)
+	"""Public wrapper for resolving POS profile cash-in-hand child account."""
+	return _get_cash_account(pos_profile, company)
 
 
 def validate_account_exists(account_name: str):
-    if not frappe.db.exists("Account", {"name": account_name}):
-        frappe.throw(f"Account '{account_name}' does not exist.")
+	if not frappe.db.exists("Account", {"name": account_name}):
+		frappe.throw(f"Account '{account_name}' does not exist.")
 
 
 def get_creditors_account(company: str) -> str:
-    """Resolve the company's Creditors (Payable) account.
+	"""Resolve the company's Creditors (Payable) account.
 
-    Strategy:
-    - Company.default_payable_account
-    - Exact 'Creditors - {abbr}'
-    - Any non-group Account with account_type='Payable' under the company
-    - Fallback to get_account_for_company('Creditors', company)
-    """
-    acc = frappe.get_value("Company", company, "default_payable_account")
-    if acc:
-        return acc
+	Strategy:
+	- Company.default_payable_account
+	- Exact 'Creditors - {abbr}'
+	- Any non-group Account with account_type='Payable' under the company
+	- Fallback to get_account_for_company('Creditors', company)
+	"""
+	acc = frappe.get_value("Company", company, "default_payable_account")
+	if acc:
+		return acc
 
-    abbr = frappe.get_value("Company", company, "abbr")
-    if abbr and frappe.db.exists("Account", f"{ACCOUNTS.CREDITORS} - {abbr}"):
-        return f"{ACCOUNTS.CREDITORS} - {abbr}"
+	abbr = frappe.get_value("Company", company, "abbr")
+	if abbr and frappe.db.exists("Account", f"{ACCOUNTS.CREDITORS} - {abbr}"):
+		return f"{ACCOUNTS.CREDITORS} - {abbr}"
 
-    acc = frappe.db.get_value(
-        "Account",
-        {
-            "company": company,
-            "account_type": "Payable",
-            "is_group": 0,
-        },
-        "name",
-    )
-    if acc:
-        return acc
+	acc = frappe.db.get_value(
+		"Account",
+		{
+			"company": company,
+			"account_type": "Payable",
+			"is_group": 0,
+		},
+		"name",
+	)
+	if acc:
+		return acc
 
-    # Last resort: try by name + company via helper
-    return get_account_for_company(ACCOUNTS.CREDITORS, company)
+	# Last resort: try by name + company via helper
+	return get_account_for_company(ACCOUNTS.CREDITORS, company)
 
 
 # ------------------ Sales Partner AR routing helpers ------------------
 
-def get_company_receivable_account(company: str) -> str:
-    """Return the company's default leaf Receivable account.
 
-    Tries Company.default_receivable_account, then any non-group Account with
-    account_type='Receivable' for that company. Throws if not found.
-    """
-    receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
-    if receivable:
-        return receivable
-    receivable = frappe.db.get_value(
-        "Account",
-        {"company": company, "account_type": "Receivable", "is_group": 0},
-        "name",
-    )
-    if not receivable:
-        frappe.throw(f"Could not determine receivable account for company {company}")
-    return receivable
+def get_company_receivable_account(company: str) -> str:
+	"""Return the company's default leaf Receivable account.
+
+	Tries Company.default_receivable_account, then any non-group Account with
+	account_type='Receivable' for that company. Throws if not found.
+	"""
+	receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
+	if receivable:
+		return receivable
+	receivable = frappe.db.get_value(
+		"Account",
+		{"company": company, "account_type": "Receivable", "is_group": 0},
+		"name",
+	)
+	if not receivable:
+		frappe.throw(f"Could not determine receivable account for company {company}")
+	return receivable
 
 
 def ensure_partner_receivable_subaccount(company: str, partner_name: str) -> str:
-    """Ensure an AR child account named exactly as sales partner exists under a Receivables group.
+	"""Ensure an AR child account named exactly as sales partner exists under a Receivables group.
 
-    Uses the parent of the company's default receivable if that default is a leaf. Falls back to any
-    Receivable group under the company. Returns the account name (e.g., "Partner X - CmpAbbr").
-    """
-    leaf_receivable = get_company_receivable_account(company)
-    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
-    desired = f"{partner_name} - {company_abbr}".strip()
-    if frappe.db.exists("Account", desired):
-        return desired
+	Uses the parent of the company's default receivable if that default is a leaf. Falls back to any
+	Receivable group under the company. Returns the account name (e.g., "Partner X - CmpAbbr").
+	"""
+	leaf_receivable = get_company_receivable_account(company)
+	company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+	desired = f"{partner_name} - {company_abbr}".strip()
+	if frappe.db.exists("Account", desired):
+		return desired
 
-    parent_name = None
-    try:
-        leaf_doc = frappe.get_doc("Account", leaf_receivable)
-        if int(getattr(leaf_doc, "is_group", 0)) == 1:
-            parent_name = leaf_doc.name
-        else:
-            parent_name = getattr(leaf_doc, "parent_account", None)
-    except Exception:
-        parent_name = None
+	parent_name = None
+	try:
+		leaf_doc = frappe.get_doc("Account", leaf_receivable)
+		if int(getattr(leaf_doc, "is_group", 0)) == 1:
+			parent_name = leaf_doc.name
+		else:
+			parent_name = getattr(leaf_doc, "parent_account", None)
+	except Exception:
+		parent_name = None
 
-    if not parent_name:
-        # Fallback: find any Receivable group account for the company
-        parent_name = frappe.db.get_value(
-            "Account",
-            {"company": company, "account_type": "Receivable", "is_group": 1},
-            "name",
-        )
-    if not parent_name:
-        frappe.throw(f"Could not find a Receivable group account to create partner subaccount for {company}")
+	if not parent_name:
+		# Fallback: find any Receivable group account for the company
+		parent_name = frappe.db.get_value(
+			"Account",
+			{"company": company, "account_type": "Receivable", "is_group": 1},
+			"name",
+		)
+	if not parent_name:
+		frappe.throw(f"Could not find a Receivable group account to create partner subaccount for {company}")
 
-    acc = frappe.new_doc("Account")
-    acc.account_name = partner_name
-    acc.parent_account = parent_name
-    acc.company = company
-    acc.is_group = 0
-    acc.account_type = "Receivable"
-    acc.insert(ignore_permissions=True)
-    return acc.name
+	acc = frappe.new_doc("Account")
+	acc.account_name = partner_name
+	acc.parent_account = parent_name
+	acc.company = company
+	acc.is_group = 0
+	acc.account_type = "Receivable"
+	acc.insert(ignore_permissions=True)
+	return acc.name
 
 
 def resolve_online_partner_paid_to(company: str, sales_partner: str | None) -> str:
-    """Resolve the destination account for online payments when a Sales Partner is present.
+	"""Resolve the destination account for online payments when a Sales Partner is present.
 
-    If a partner is provided and exists, return/ensure the partner AR subaccount under
-    Receivables; otherwise fallback to the company receivable (to still close the SI).
-    """
-    if sales_partner and frappe.db.exists("Sales Partner", sales_partner):
-        return ensure_partner_receivable_subaccount(company, sales_partner)
-    return get_company_receivable_account(company)
+	If a partner is provided and exists, return/ensure the partner AR subaccount under
+	Receivables; otherwise fallback to the company receivable (to still close the SI).
+	"""
+	if sales_partner and frappe.db.exists("Sales Partner", sales_partner):
+		return ensure_partner_receivable_subaccount(company, sales_partner)
+	return get_company_receivable_account(company)
 
 
 # ------------------ Sales Partner settlement helpers (fee recognition) ------------------
 
-def get_sales_commission_account(company: str) -> str:
-    """Resolve the 'Commission on Sales' expense ledger for the company.
 
-    Used as the debit (expense) side when recognizing Sales Partner commission at
-    settlement time. Throws (via get_account_for_company) if the ledger is missing.
-    """
-    return get_account_for_company("Commission on Sales", company)
+def get_sales_commission_account(company: str) -> str:
+	"""Resolve the 'Commission on Sales' expense ledger for the company.
+
+	Used as the debit (expense) side when recognizing Sales Partner commission at
+	settlement time. Throws (via get_account_for_company) if the ledger is missing.
+	"""
+	return get_account_for_company("Commission on Sales", company)
 
 
 def _ensure_tax_assets_group(company: str) -> str:
-    """Ensure an Asset 'Tax Assets - {abbr}' group account exists; return its name.
+	"""Ensure an Asset 'Tax Assets - {abbr}' group account exists; return its name.
 
-    This is the parent group for recoverable input-tax ledgers such as Input VAT.
-    """
-    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
-    desired = f"Tax Assets - {company_abbr}".strip()
-    if frappe.db.exists("Account", desired):
-        return desired
+	This is the parent group for recoverable input-tax ledgers such as Input VAT.
+	"""
+	company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+	desired = f"Tax Assets - {company_abbr}".strip()
+	if frappe.db.exists("Account", desired):
+		return desired
 
-    # Prefer nesting under a conventional Asset group, else any Asset group.
-    parent_name = None
-    for candidate in (
-        f"Current Assets - {company_abbr}",
-        f"Application of Funds (Assets) - {company_abbr}",
-    ):
-        if company_abbr and frappe.db.exists("Account", candidate):
-            parent_name = candidate
-            break
-    if not parent_name:
-        parent_name = frappe.db.get_value(
-            "Account",
-            {"company": company, "root_type": "Asset", "is_group": 1},
-            "name",
-        )
-    if not parent_name:
-        frappe.throw(f"Could not find an Asset group account to create 'Tax Assets' under for {company}")
+	# Prefer nesting under a conventional Asset group, else any Asset group.
+	parent_name = None
+	for candidate in (
+		f"Current Assets - {company_abbr}",
+		f"Application of Funds (Assets) - {company_abbr}",
+	):
+		if company_abbr and frappe.db.exists("Account", candidate):
+			parent_name = candidate
+			break
+	if not parent_name:
+		parent_name = frappe.db.get_value(
+			"Account",
+			{"company": company, "root_type": "Asset", "is_group": 1},
+			"name",
+		)
+	if not parent_name:
+		frappe.throw(f"Could not find an Asset group account to create 'Tax Assets' under for {company}")
 
-    acc = frappe.new_doc("Account")
-    acc.account_name = "Tax Assets"
-    acc.parent_account = parent_name
-    acc.company = company
-    acc.is_group = 1
-    acc.root_type = "Asset"
-    acc.insert(ignore_permissions=True)
-    return acc.name
+	acc = frappe.new_doc("Account")
+	acc.account_name = "Tax Assets"
+	acc.parent_account = parent_name
+	acc.company = company
+	acc.is_group = 1
+	acc.root_type = "Asset"
+	acc.insert(ignore_permissions=True)
+	return acc.name
 
 
 def ensure_input_vat_account(company: str) -> str:
-    """Ensure a recoverable 'Input VAT - {abbr}' Tax asset ledger exists; return its name.
+	"""Ensure a recoverable 'Input VAT - {abbr}' Tax asset ledger exists; return its name.
 
-    Created on demand under an Asset 'Tax Assets - {abbr}' group. This is the debit
-    side for the 14% VAT charged on Sales Partner fees, treated as recoverable input VAT.
-    """
-    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
-    desired = f"Input VAT - {company_abbr}".strip()
-    if frappe.db.exists("Account", desired):
-        return desired
+	Created on demand under an Asset 'Tax Assets - {abbr}' group. This is the debit
+	side for the 14% VAT charged on Sales Partner fees, treated as recoverable input VAT.
+	"""
+	company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+	desired = f"Input VAT - {company_abbr}".strip()
+	if frappe.db.exists("Account", desired):
+		return desired
 
-    parent_name = _ensure_tax_assets_group(company)
-    acc = frappe.new_doc("Account")
-    acc.account_name = "Input VAT"
-    acc.parent_account = parent_name
-    acc.company = company
-    acc.is_group = 0
-    acc.account_type = "Tax"
-    acc.root_type = "Asset"
-    acc.insert(ignore_permissions=True)
-    return acc.name
+	parent_name = _ensure_tax_assets_group(company)
+	acc = frappe.new_doc("Account")
+	acc.account_name = "Input VAT"
+	acc.parent_account = parent_name
+	acc.company = company
+	acc.is_group = 0
+	acc.account_type = "Tax"
+	acc.root_type = "Asset"
+	acc.insert(ignore_permissions=True)
+	return acc.name
 
 
 def ensure_partner_payable_subaccount(sales_partner: str, company: str) -> str:
-    """Ensure a Payable child account '{sales_partner} Payable - {abbr}' exists; return its name.
+	"""Ensure a Payable child account '{sales_partner} Payable - {abbr}' exists; return its name.
 
-    Mirrors ``ensure_partner_receivable_subaccount`` but on the Payable/Creditors side. Used to
-    accrue the commission we owe a Sales Partner on CASH orders (partner collected our fee), so a
-    later Payment Entry can clear it. Created under the company's Payable group on demand.
-    """
-    company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
-    desired = f"{sales_partner} Payable - {company_abbr}".strip()
-    if frappe.db.exists("Account", desired):
-        return desired
+	Mirrors ``ensure_partner_receivable_subaccount`` but on the Payable/Creditors side. Used to
+	accrue the commission we owe a Sales Partner on CASH orders (partner collected our fee), so a
+	later Payment Entry can clear it. Created under the company's Payable group on demand.
+	"""
+	company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+	desired = f"{sales_partner} Payable - {company_abbr}".strip()
+	if frappe.db.exists("Account", desired):
+		return desired
 
-    leaf_payable = get_creditors_account(company)
-    parent_name = None
-    try:
-        leaf_doc = frappe.get_doc("Account", leaf_payable)
-        if int(getattr(leaf_doc, "is_group", 0)) == 1:
-            parent_name = leaf_doc.name
-        else:
-            parent_name = getattr(leaf_doc, "parent_account", None)
-    except Exception:
-        parent_name = None
+	leaf_payable = get_creditors_account(company)
+	parent_name = None
+	try:
+		leaf_doc = frappe.get_doc("Account", leaf_payable)
+		if int(getattr(leaf_doc, "is_group", 0)) == 1:
+			parent_name = leaf_doc.name
+		else:
+			parent_name = getattr(leaf_doc, "parent_account", None)
+	except Exception:
+		parent_name = None
 
-    if not parent_name:
-        parent_name = frappe.db.get_value(
-            "Account",
-            {"company": company, "account_type": "Payable", "is_group": 1},
-            "name",
-        )
-    if not parent_name:
-        parent_name = frappe.db.get_value(
-            "Account",
-            {"company": company, "root_type": "Liability", "is_group": 1},
-            "name",
-        )
-    if not parent_name:
-        frappe.throw(f"Could not find a Payable group account to create partner payable subaccount for {company}")
+	if not parent_name:
+		parent_name = frappe.db.get_value(
+			"Account",
+			{"company": company, "account_type": "Payable", "is_group": 1},
+			"name",
+		)
+	if not parent_name:
+		parent_name = frappe.db.get_value(
+			"Account",
+			{"company": company, "root_type": "Liability", "is_group": 1},
+			"name",
+		)
+	if not parent_name:
+		frappe.throw(
+			f"Could not find a Payable group account to create partner payable subaccount for {company}"
+		)
 
-    acc = frappe.new_doc("Account")
-    acc.account_name = f"{sales_partner} Payable"
-    acc.parent_account = parent_name
-    acc.company = company
-    acc.is_group = 0
-    acc.account_type = "Payable"
-    acc.root_type = "Liability"
-    acc.insert(ignore_permissions=True)
-    return acc.name
+	acc = frappe.new_doc("Account")
+	acc.account_name = f"{sales_partner} Payable"
+	acc.parent_account = parent_name
+	acc.company = company
+	acc.is_group = 0
+	acc.account_type = "Payable"
+	acc.root_type = "Liability"
+	acc.insert(ignore_permissions=True)
+	return acc.name
 
 
 @frappe.whitelist()
 def create_online_payment_entry(
-    invoice_name: str,
-    payment_mode: str,
-    pos_profile: str | None = None,
+	invoice_name: str,
+	payment_mode: str,
+	pos_profile: str | None = None,
 ):
-    """
-    Create a Payment Entry for the given invoice and mark it as paid.
-    
-    Args:
-        invoice_name (str): The name of the Sales Invoice (e.g., "ACC-SINV-2023-0001").
-        payment_mode (str): The payment mode (e.g., "Instapay", "Payment Gateway").
-        pos_profile (str, optional): The POS Profile name. Required for cash payments.
-    
-    Returns:
-        dict: A dictionary containing the payment entry details.
-    
-    Raises:
-        frappe.ValidationError: If the invoice is not submitted, or if the payment mode is invalid.
-    """
-    invoice = frappe.get_doc("Sales Invoice", invoice_name)
-    
-    # Check if invoice is submitted
-    if invoice.docstatus != 1:
-        frappe.throw("Invoice must be submitted before payment can be recorded.")
-    
-    # Determine the payment account based on the payment mode
-    paid_to_account = _get_payment_account(payment_mode, invoice.company)
-    
-    # Get the default receivable account for the company
-    paid_from_account = frappe.get_value("Company", invoice.company, "default_receivable_account")
-    if not paid_from_account:
-        frappe.throw("No receivable account found for the company.")
-    
-    # Create a new Payment Entry
-    payment_entry = _create_payment_entry_document(invoice, payment_mode, paid_from_account, paid_to_account)
-    
-    # Save and submit the payment entry
-    payment_entry.save(ignore_permissions=True)
-    payment_entry.submit()
-    
-    # Return the created payment entry
-    return payment_entry
+	"""
+	Create a Payment Entry for the given invoice and mark it as paid.
+
+	Args:
+	    invoice_name (str): The name of the Sales Invoice (e.g., "ACC-SINV-2023-0001").
+	    payment_mode (str): The payment mode (e.g., "Instapay", "Payment Gateway").
+	    pos_profile (str, optional): The POS Profile name. Required for cash payments.
+
+	Returns:
+	    dict: A dictionary containing the payment entry details.
+
+	Raises:
+	    frappe.ValidationError: If the invoice is not submitted, or if the payment mode is invalid.
+	"""
+	invoice = frappe.get_doc("Sales Invoice", invoice_name)
+
+	# Check if invoice is submitted
+	if invoice.docstatus != 1:
+		frappe.throw("Invoice must be submitted before payment can be recorded.")
+
+	# Determine the payment account based on the payment mode
+	paid_to_account = _get_payment_account(payment_mode, invoice.company)
+
+	# Get the default receivable account for the company
+	paid_from_account = frappe.get_value("Company", invoice.company, "default_receivable_account")
+	if not paid_from_account:
+		frappe.throw("No receivable account found for the company.")
+
+	# Create a new Payment Entry
+	payment_entry = _create_payment_entry_document(invoice, payment_mode, paid_from_account, paid_to_account)
+
+	# Save and submit the payment entry
+	payment_entry.save(ignore_permissions=True)
+	payment_entry.submit()
+
+	# Return the created payment entry
+	return payment_entry
 
 
 def _get_payment_account(payment_mode, company):
-    """Get the appropriate payment account based on payment mode."""
-    if payment_mode in [ACCOUNTS.INSTAPAY, ACCOUNTS.PAYMENT_GATEWAY]:
-        # For online payments, find a suitable bank account
-        paid_to_account = frappe.db.get_value(
-            "Account",
-            {
-                "company": company,
-                "parent_account": ["like", f"%{ACCOUNTS.BANK_ACCOUNTS}%"],
-                "is_group": 0,
-            },
-            "name",
-        )
-        if not paid_to_account:
-            frappe.throw("No suitable bank account found for the payment.")
-    elif payment_mode == ACCOUNTS.MOBILE_WALLET:
-        # For mobile wallet payments, find a suitable mobile wallet account
-        paid_to_account = frappe.db.get_value(
-            "Account",
-            {
-                "company": company,
-                "account_name": ["like", f"{ACCOUNTS.MOBILE_WALLET}%"],
-                "is_group": 0,
-            },
-            "name",
-        )
-        if not paid_to_account:
-            frappe.throw("No suitable mobile wallet account found for the payment.")
-    else:
-        frappe.throw("Invalid payment mode. Please select a valid payment method.")
-    
-    return paid_to_account
+	"""Get the appropriate payment account based on payment mode."""
+	if payment_mode in [ACCOUNTS.INSTAPAY, ACCOUNTS.PAYMENT_GATEWAY]:
+		# For online payments, find a suitable bank account
+		paid_to_account = frappe.db.get_value(
+			"Account",
+			{
+				"company": company,
+				"parent_account": ["like", f"%{ACCOUNTS.BANK_ACCOUNTS}%"],
+				"is_group": 0,
+			},
+			"name",
+		)
+		if not paid_to_account:
+			frappe.throw("No suitable bank account found for the payment.")
+	elif payment_mode == ACCOUNTS.MOBILE_WALLET:
+		# For mobile wallet payments, find a suitable mobile wallet account
+		paid_to_account = frappe.db.get_value(
+			"Account",
+			{
+				"company": company,
+				"account_name": ["like", f"{ACCOUNTS.MOBILE_WALLET}%"],
+				"is_group": 0,
+			},
+			"name",
+		)
+		if not paid_to_account:
+			frappe.throw("No suitable mobile wallet account found for the payment.")
+	else:
+		frappe.throw("Invalid payment mode. Please select a valid payment method.")
+
+	return paid_to_account
 
 
 def _create_payment_entry_document(invoice, payment_mode, paid_from_account, paid_to_account):
-    """Create the payment entry document."""
-    payment_entry = frappe.new_doc("Payment Entry")
-    payment_entry.payment_type = "Receive"
-    payment_entry.mode_of_payment = payment_mode
-    payment_entry.company = invoice.company
-    payment_entry.party_type = "Customer"
-    payment_entry.party = invoice.customer
-    payment_entry.paid_from = paid_from_account
-    payment_entry.paid_to = paid_to_account
-    payment_entry.paid_amount = invoice.grand_total
-    payment_entry.received_amount = invoice.grand_total
-    
-    # Add a reference to the invoice in the payment entry
-    payment_entry.append(
-        "references",
-        {
-            "reference_doctype": "Sales Invoice",
-            "reference_name": invoice.name,
-            "due_date": invoice.get("due_date"),
-            "total_amount": invoice.grand_total,
-            "outstanding_amount": invoice.grand_total,
-            "allocated_amount": invoice.grand_total,
-        },
-    )
-    
-    # Set default reference number and date if not provided
-    if not payment_entry.get("reference_no"):
-        timestamp = frappe.utils.now_datetime().strftime("%Y%m%d-%H%M%S")
-        payment_entry.reference_no = f"POS-{payment_mode.upper().replace(' ', '')}-{timestamp}"
-    
-    if not payment_entry.get("reference_date"):
-        payment_entry.reference_date = frappe.utils.nowdate()
-    
-    # Stick to invoice currency
-    payment_entry.source_exchange_rate = 1
-    payment_entry.target_exchange_rate = 1
-    
-    return payment_entry
+	"""Create the payment entry document."""
+	payment_entry = frappe.new_doc("Payment Entry")
+	payment_entry.payment_type = "Receive"
+	payment_entry.mode_of_payment = payment_mode
+	payment_entry.company = invoice.company
+	payment_entry.party_type = "Customer"
+	payment_entry.party = invoice.customer
+	payment_entry.paid_from = paid_from_account
+	payment_entry.paid_to = paid_to_account
+	payment_entry.paid_amount = invoice.grand_total
+	payment_entry.received_amount = invoice.grand_total
+
+	# Add a reference to the invoice in the payment entry
+	payment_entry.append(
+		"references",
+		{
+			"reference_doctype": "Sales Invoice",
+			"reference_name": invoice.name,
+			"due_date": invoice.get("due_date"),
+			"total_amount": invoice.grand_total,
+			"outstanding_amount": invoice.grand_total,
+			"allocated_amount": invoice.grand_total,
+		},
+	)
+
+	# Set default reference number and date if not provided
+	if not payment_entry.get("reference_no"):
+		timestamp = frappe.utils.now_datetime().strftime("%Y%m%d-%H%M%S")
+		payment_entry.reference_no = f"POS-{payment_mode.upper().replace(' ', '')}-{timestamp}"
+
+	if not payment_entry.get("reference_date"):
+		payment_entry.reference_date = frappe.utils.nowdate()
+
+	# Stick to invoice currency
+	payment_entry.source_exchange_rate = 1
+	payment_entry.target_exchange_rate = 1
+
+	return payment_entry

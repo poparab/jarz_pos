@@ -74,9 +74,7 @@ def _ensure_b2b_roles(log):
 		doc.insert(ignore_permissions=True)
 		log["created"].append(f"Role Profile: {profile_name}")
 	except Exception:
-		_logger().error(
-			f"Failed to ensure Role Profile '{profile_name}'", exc_info=True
-		)
+		_logger().error(f"Failed to ensure Role Profile '{profile_name}'", exc_info=True)
 
 
 def _ensure_b2b_docperms(log):
@@ -92,8 +90,19 @@ def _ensure_b2b_docperms(log):
 	"""
 	role_name = "B2B Sales Rep"
 	permission_fields = (
-		"read", "write", "create", "delete", "submit", "cancel", "amend",
-		"report", "export", "import", "share", "print", "email",
+		"read",
+		"write",
+		"create",
+		"delete",
+		"submit",
+		"cancel",
+		"amend",
+		"report",
+		"export",
+		"import",
+		"share",
+		"print",
+		"email",
 	)
 	read_only = {fieldname: 0 for fieldname in permission_fields}
 	read_only["read"] = 1
@@ -133,13 +142,9 @@ def _ensure_b2b_docperms(log):
 						changed = True
 				if changed:
 					doc.save(ignore_permissions=True)
-					log["created"].append(
-						f"Custom DocPerm: updated {role_name} on {doctype}"
-					)
+					log["created"].append(f"Custom DocPerm: updated {role_name} on {doctype}")
 				else:
-					log["existing"].append(
-						f"Custom DocPerm: {role_name} on {doctype}"
-					)
+					log["existing"].append(f"Custom DocPerm: {role_name} on {doctype}")
 			else:
 				payload = {
 					"doctype": "Custom DocPerm",
@@ -152,9 +157,7 @@ def _ensure_b2b_docperms(log):
 				}
 				payload.update(required)
 				frappe.get_doc(payload).insert(ignore_permissions=True)
-				log["created"].append(
-					f"Custom DocPerm: {role_name} on {doctype}"
-				)
+				log["created"].append(f"Custom DocPerm: {role_name} on {doctype}")
 		except Exception:
 			_logger().error(
 				f"Failed to ensure Custom DocPerm for '{role_name}' on '{doctype}'",
@@ -235,9 +238,7 @@ def _ensure_opportunity_lost_reasons(log):
 			doc.insert(ignore_permissions=True)
 			log["created"].append(f"Opportunity Lost Reason: {reason}")
 		except Exception:
-			_logger().error(
-				f"Failed to ensure Opportunity Lost Reason '{reason}'", exc_info=True
-			)
+			_logger().error(f"Failed to ensure Opportunity Lost Reason '{reason}'", exc_info=True)
 
 
 def _ensure_lead_sources(log):
@@ -288,9 +289,7 @@ def _ensure_lead_categories(log):
 			doc.insert(ignore_permissions=True)
 			log["created"].append(f"Jarz Lead Category: {name}")
 		except Exception:
-			_logger().error(
-				f"Failed to ensure Jarz Lead Category '{name}'", exc_info=True
-			)
+			_logger().error(f"Failed to ensure Jarz Lead Category '{name}'", exc_info=True)
 
 
 def _ensure_commercial_policies(log):
@@ -363,11 +362,13 @@ def _ensure_commercial_policies(log):
 				# deliberate admin choice of a different list).
 				if (
 					name == "B2B Supply"
-					and frappe.db.get_value("Jarz Commercial Policy", name, "price_list")
-					== "B2B Selling"
+					and frappe.db.get_value("Jarz Commercial Policy", name, "price_list") == "B2B Selling"
 				):
 					frappe.db.set_value(
-						"Jarz Commercial Policy", name, "price_list", None,
+						"Jarz Commercial Policy",
+						name,
+						"price_list",
+						None,
 						update_modified=False,
 					)
 					log["created"].append(
@@ -385,7 +386,9 @@ def _ensure_commercial_policies(log):
 					)
 					if not current_behavior or current_behavior == "Normal":
 						frappe.db.set_value(
-							"Jarz Commercial Policy", name, "fulfilment_behavior",
+							"Jarz Commercial Policy",
+							name,
+							"fulfilment_behavior",
 							"Deliver at Branch",
 							update_modified=False,
 						)
@@ -398,8 +401,7 @@ def _ensure_commercial_policies(log):
 			price_list = spec.get("price_list")
 			if price_list and not frappe.db.exists("Price List", price_list):
 				_logger().warning(
-					f"Skipping policy '{name}': referenced Price List "
-					f"'{price_list}' does not exist"
+					f"Skipping policy '{name}': referenced Price List " f"'{price_list}' does not exist"
 				)
 				continue
 
@@ -413,9 +415,7 @@ def _ensure_commercial_policies(log):
 			doc.insert(ignore_permissions=True)
 			log["created"].append(f"Jarz Commercial Policy: {name}")
 		except Exception:
-			_logger().error(
-				f"Failed to ensure Jarz Commercial Policy '{name}'", exc_info=True
-			)
+			_logger().error(f"Failed to ensure Jarz Commercial Policy '{name}'", exc_info=True)
 
 
 def ensure_b2b_master_data():
@@ -438,16 +438,12 @@ def ensure_b2b_master_data():
 		_ensure_commercial_policies(log)
 
 		if log["created"]:
-			logger.info(
-				"B2B master data created: " + "; ".join(log["created"])
-			)
+			logger.info("B2B master data created: " + "; ".join(log["created"]))
 		else:
 			logger.info("B2B master data: nothing new to create")
 
 		if log["existing"]:
-			logger.info(
-				"B2B master data already present: " + "; ".join(log["existing"])
-			)
+			logger.info("B2B master data already present: " + "; ".join(log["existing"]))
 	except Exception:
 		# Never let master-data seeding break a migrate.
 		logger.error("ensure_b2b_master_data failed unexpectedly", exc_info=True)

@@ -101,9 +101,11 @@ class TestListUnconfirmedOnlinePaymentEscalations(unittest.TestCase):
 		]
 		mock_frappe.get_all.return_value = rows
 
-		with patch("jarz_pos.api.escalations.frappe", mock_frappe), \
-				patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", return_value=4), \
-				patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+		with (
+			patch("jarz_pos.api.escalations.frappe", mock_frappe),
+			patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", return_value=4),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]),
+		):
 			result = list_unconfirmed_online_payment_escalations()
 
 		self.assertTrue(result.get("success"))
@@ -135,9 +137,11 @@ class TestListUnconfirmedOnlinePaymentEscalations(unittest.TestCase):
 		mock_frappe.get_roles.return_value = ["System Manager"]
 		mock_frappe.get_all.return_value = []
 
-		with patch("jarz_pos.api.escalations.frappe", mock_frappe), \
-				patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", return_value=6), \
-				patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city", "Dokki"]):
+		with (
+			patch("jarz_pos.api.escalations.frappe", mock_frappe),
+			patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", return_value=6),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city", "Dokki"]),
+		):
 			result = list_unconfirmed_online_payment_escalations(pos_profile="Dokki")
 
 		self.assertEqual(result.get("orders"), [])
@@ -154,9 +158,11 @@ class TestListUnconfirmedOnlinePaymentEscalations(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 		threshold = MagicMock(return_value=4)
 
-		with patch("jarz_pos.api.escalations.frappe", mock_frappe), \
-				patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", threshold), \
-				patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+		with (
+			patch("jarz_pos.api.escalations.frappe", mock_frappe),
+			patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", threshold),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]),
+		):
 			with self.assertRaises(BranchAccessError) as exc:
 				list_unconfirmed_online_payment_escalations(pos_profile="Dokki")
 
@@ -173,9 +179,11 @@ class TestListUnconfirmedOnlinePaymentEscalations(unittest.TestCase):
 		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.throw.side_effect = _raise_frappe
 
-		with patch("jarz_pos.api.escalations.frappe", mock_frappe), \
-				patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", return_value=4), \
-				patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=[]):
+		with (
+			patch("jarz_pos.api.escalations.frappe", mock_frappe),
+			patch("jarz_pos.api.escalations.get_unconfirmed_online_payment_alert_hours", return_value=4),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=[]),
+		):
 			result = list_unconfirmed_online_payment_escalations()
 
 		self.assertEqual(result, {"success": True, "threshold_hours": 4, "orders": []})

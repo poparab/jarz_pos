@@ -41,7 +41,9 @@ class TestInvoiceAPI(unittest.TestCase):
 
 		self.assertEqual(result, {"success": True, "invoice_name": "INV-0001"})
 		mock_resolve_order_territory.assert_called_once_with("Test Customer", shipping_address_name=None)
-		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False, territory_name=None)
+		mock_assert_profile.assert_called_once_with(
+			"Test Customer", "Main POS", override=False, territory_name=None
+		)
 		# Assert the kwargs this test is about rather than the whole call.
 		# The exact-call form rotted silently: the API grew custom_delivery_income,
 		# order_purpose, commercial_policy, policy_reason, promo_codes and channel
@@ -98,7 +100,9 @@ class TestInvoiceAPI(unittest.TestCase):
 		create_pos_invoice()
 
 		mock_resolve_order_territory.assert_called_once_with("Test Customer", shipping_address_name=None)
-		mock_assert_profile.assert_called_once_with("Test Customer", "Main POS", override=False, territory_name=None)
+		mock_assert_profile.assert_called_once_with(
+			"Test Customer", "Main POS", override=False, territory_name=None
+		)
 		# Subset assertion for the same reason as the test above.
 		mock_create_invoice.assert_called_once()
 		self.assertEqual(mock_create_invoice.call_args.args, ())
@@ -125,11 +129,13 @@ class TestInvoiceAPI(unittest.TestCase):
 		"""Run the public wrapper and return the kwargs it handed the service."""
 		from jarz_pos.api.invoices import create_pos_invoice
 
-		with patch("jarz_pos.utils.invoice_utils.resolve_order_territory", return_value=None), \
-			 patch("jarz_pos.utils.invoice_utils.assert_pos_profile_matches_territory"), \
-			 patch("jarz_pos.api.invoices._guard_branch_sale"), \
-			 patch("jarz_pos.api.invoices._create_invoice") as mock_create_invoice, \
-			 patch("jarz_pos.api.invoices.frappe") as mock_frappe:
+		with (
+			patch("jarz_pos.utils.invoice_utils.resolve_order_territory", return_value=None),
+			patch("jarz_pos.utils.invoice_utils.assert_pos_profile_matches_territory"),
+			patch("jarz_pos.api.invoices._guard_branch_sale"),
+			patch("jarz_pos.api.invoices._create_invoice") as mock_create_invoice,
+			patch("jarz_pos.api.invoices.frappe") as mock_frappe,
+		):
 			mock_frappe.session.user = "cashier@example.com"
 			mock_frappe.local.site = "frontend"
 			mock_frappe.local.request.method = "POST"
@@ -144,26 +150,30 @@ class TestInvoiceAPI(unittest.TestCase):
 
 	def test_create_pos_invoice_forwards_employee_payment(self):
 		"""The service is whitelisted and validates; the wrapper must forward the raw value."""
-		forwarded = self._forwarded_employee_payment({
-			"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
-			"customer_name": "STAFF-Mona",
-			"pos_profile_name": "Nasr City",
-			"order_purpose": "Employee",
-			"employee_payment": "CASH",
-		})
+		forwarded = self._forwarded_employee_payment(
+			{
+				"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
+				"customer_name": "STAFF-Mona",
+				"pos_profile_name": "Nasr City",
+				"order_purpose": "Employee",
+				"employee_payment": "CASH",
+			}
+		)
 		self.assertIn("employee_payment", forwarded)
 		self.assertEqual(forwarded["employee_payment"], "CASH")
 		self.assertEqual(forwarded["order_purpose"], "Employee")
 
 	def test_create_pos_invoice_employee_payment_defaults_to_none(self):
 		"""An older client that never sends the key must reach the service as credit (None)."""
-		forwarded = self._forwarded_employee_payment({
-			"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
-			"customer_name": "STAFF-Mona",
-			"pos_profile_name": "Nasr City",
-			"order_purpose": "Employee",
-			"payment_method": "Cash",
-		})
+		forwarded = self._forwarded_employee_payment(
+			{
+				"cart_json": '[{"item_code":"ITEM-001","qty":1,"rate":100}]',
+				"customer_name": "STAFF-Mona",
+				"pos_profile_name": "Nasr City",
+				"order_purpose": "Employee",
+				"payment_method": "Cash",
+			}
+		)
 		self.assertIn("employee_payment", forwarded)
 		self.assertIsNone(forwarded["employee_payment"])
 		# payment_method=Cash is forwarded as a label only — it never implies cash.
@@ -265,14 +275,15 @@ class TestPayInvoiceIdempotency(unittest.TestCase):
 	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
 	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
 	@patch("jarz_pos.api.invoices.frappe")
-	def test_an_existing_payment_is_looked_up_with_a_locking_read(
-		self, mock_frappe, _scope, _shift, _flag
-	):
+	def test_an_existing_payment_is_looked_up_with_a_locking_read(self, mock_frappe, _scope, _shift, _flag):
 		from jarz_pos.api.invoices import pay_invoice
 
-		self._frappe(mock_frappe, existing_rows=[
-			{"name": "ACC-PAY-0001", "posting_date": "2026-09-16", "paid_amount": 480.0},
-		])
+		self._frappe(
+			mock_frappe,
+			existing_rows=[
+				{"name": "ACC-PAY-0001", "posting_date": "2026-09-16", "paid_amount": 480.0},
+			],
+		)
 
 		result = pay_invoice("ACC-SINV-0001", "cash", pos_profile="Dokki")
 
@@ -289,9 +300,7 @@ class TestPayInvoiceIdempotency(unittest.TestCase):
 	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
 	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
 	@patch("jarz_pos.api.invoices.frappe")
-	def test_a_failed_check_refuses_instead_of_posting_blind(
-		self, mock_frappe, _scope, _shift, _flag
-	):
+	def test_a_failed_check_refuses_instead_of_posting_blind(self, mock_frappe, _scope, _shift, _flag):
 		"""The moment this check is most likely to fail -- a lock wait, a
 		deadlock -- is the moment two people are paying the same order, which is
 		the case it exists to stop. It used to log and carry on."""
@@ -327,12 +336,18 @@ class TestPayInvoiceKashier(unittest.TestCase):
 		mock_frappe.get_roles.return_value = roles
 		mock_frappe.session.user = "lm@example.com"
 		mock_frappe.db.sql.return_value = []
-		mock_frappe.db.get_value.side_effect = lambda doctype, *a, **k: 300.0 if doctype == "Sales Invoice" else "J"
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, *a, **k: 300.0 if doctype == "Sales Invoice" else "J"
+		)
 		mock_frappe.db.exists.return_value = True
 		mock_frappe.get_cached_value.return_value = "Debtors - J"
-		mock_frappe.get_all.return_value = accounts if accounts is not None else [
-			{"name": "kashier - J", "account_name": "kashier", "is_group": 0, "disabled": 0},
-		]
+		mock_frappe.get_all.return_value = (
+			accounts
+			if accounts is not None
+			else [
+				{"name": "kashier - J", "account_name": "kashier", "is_group": 0, "disabled": 0},
+			]
+		)
 		mock_frappe.utils.cint.side_effect = lambda v: int(v or 0)
 		mock_frappe.utils.today.return_value = "2026-10-02"
 		mock_frappe.throw.side_effect = lambda msg, *a, **k: (_ for _ in ()).throw(Exception(msg))
@@ -361,7 +376,9 @@ class TestPayInvoiceKashier(unittest.TestCase):
 	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
 	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
 	@patch("jarz_pos.api.invoices.frappe")
-	def test_a_line_manager_books_the_outstanding_into_the_kashier_ledger(self, mock_frappe, scope, shift, _flag):
+	def test_a_line_manager_books_the_outstanding_into_the_kashier_ledger(
+		self, mock_frappe, scope, shift, _flag
+	):
 		from jarz_pos.api.invoices import KASHIER_PAYMENT_METHOD, pay_invoice
 
 		invoice, pe = self._frappe(mock_frappe, roles=["JARZ line manager"])
@@ -430,7 +447,9 @@ class TestPayInvoiceKashier(unittest.TestCase):
 	@patch("jarz_pos.api.invoices.ensure_open_shift_for_invoice")
 	@patch("jarz_pos.api.invoices.ensure_profile_scoped_invoice_access")
 	@patch("jarz_pos.api.invoices.frappe")
-	def test_kashier_is_refused_once_dispatch_moved_it_to_courier_outstanding(self, mock_frappe, _scope, _shift, _flag):
+	def test_kashier_is_refused_once_dispatch_moved_it_to_courier_outstanding(
+		self, mock_frappe, _scope, _shift, _flag
+	):
 		"""Dispatch's Courier Outstanding transfer is not a customer payment."""
 		from jarz_pos.api.invoices import pay_invoice
 

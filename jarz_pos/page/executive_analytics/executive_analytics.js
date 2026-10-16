@@ -1,18 +1,17 @@
 /* jshint esversion: 9 */
-/* globals frappe */
 
-frappe.pages['executive-analytics'].on_page_load = function (wrapper) {
+frappe.pages["executive-analytics"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __('Executive Overview'),
+		title: __("Executive Overview"),
 		single_column: true,
 	});
 	let dash = new ExecutiveAnalyticsDashboard(page);
-	$(wrapper).data('ex_dash', dash);
+	$(wrapper).data("ex_dash", dash);
 };
 
-frappe.pages['executive-analytics'].on_page_show = function (wrapper) {
-	let dash = $(wrapper).data('ex_dash');
+frappe.pages["executive-analytics"].on_page_show = function (wrapper) {
+	let dash = $(wrapper).data("ex_dash");
 	if (dash) dash.refresh();
 };
 
@@ -34,9 +33,9 @@ class ExecutiveAnalyticsDashboard {
 		let me = this;
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'from_date',
-			label: __('From'),
+			fieldtype: "Date",
+			fieldname: "from_date",
+			label: __("From"),
 			change() {
 				me.from_date = me.page.fields_dict.from_date.get_value() || me.from_date;
 				me.refresh();
@@ -45,9 +44,9 @@ class ExecutiveAnalyticsDashboard {
 		this.page.fields_dict.from_date.set_value(this.from_date);
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'to_date',
-			label: __('To'),
+			fieldtype: "Date",
+			fieldname: "to_date",
+			label: __("To"),
 			change() {
 				me.to_date = me.page.fields_dict.to_date.get_value() || me.to_date;
 				me.refresh();
@@ -55,7 +54,7 @@ class ExecutiveAnalyticsDashboard {
 		});
 		this.page.fields_dict.to_date.set_value(this.to_date);
 
-		this.page.add_inner_button(__('This Month'), () => {
+		this.page.add_inner_button(__("This Month"), () => {
 			this.from_date = frappe.datetime.month_start();
 			this.to_date = frappe.datetime.month_end();
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -63,7 +62,7 @@ class ExecutiveAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 30 Days'), () => {
+		this.page.add_inner_button(__("Last 30 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -30);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -71,7 +70,7 @@ class ExecutiveAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 90 Days'), () => {
+		this.page.add_inner_button(__("Last 90 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -90);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -212,127 +211,140 @@ class ExecutiveAnalyticsDashboard {
 	// ── Data loading ─────────────────────────────────────────────────────────
 
 	refresh() {
-		$('#ex-kpis').html('<div class="ex-loading">Loading…</div>');
+		$("#ex-kpis").html('<div class="ex-loading">Loading…</div>');
 
-		frappe.call({
-			method: 'jarz_pos.api.executive_analytics.get_executive_overview',
-			args: { date_from: this.from_date, date_to: this.to_date },
-		}).then(r => {
-			if (!r.message) return;
-			let d = r.message;
-			this._render_kpis(d.kpis || {});
-			this._render_alerts(d.alerts || []);
-			this._render_trend(d.revenue_trend || []);
-			this._render_product(d.product_mix || []);
-			this._render_segment(d.segment_mix || []);
-			this._render_territories(d.top_territories || []);
-		});
+		frappe
+			.call({
+				method: "jarz_pos.api.executive_analytics.get_executive_overview",
+				args: { date_from: this.from_date, date_to: this.to_date },
+			})
+			.then((r) => {
+				if (!r.message) return;
+				let d = r.message;
+				this._render_kpis(d.kpis || {});
+				this._render_alerts(d.alerts || []);
+				this._render_trend(d.revenue_trend || []);
+				this._render_product(d.product_mix || []);
+				this._render_segment(d.segment_mix || []);
+				this._render_territories(d.top_territories || []);
+			});
 	}
 
 	// ── Renderers ────────────────────────────────────────────────────────────
 
 	_render_kpis(k) {
-		let pl_cls = k.net_shipping_pl >= 0 ? 'pos' : 'neg';
-		let margin_cls = k.gross_margin >= 40 ? 'pos' : k.gross_margin >= 20 ? 'info' : 'warn';
-		let crit_cls = k.critical_stock > 0 ? 'neg' : 'pos';
+		let pl_cls = k.net_shipping_pl >= 0 ? "pos" : "neg";
+		let margin_cls = k.gross_margin >= 40 ? "pos" : k.gross_margin >= 20 ? "info" : "warn";
+		let crit_cls = k.critical_stock > 0 ? "neg" : "pos";
 
-		$('#ex-kpis').html(`
-			${_kpi('Revenue',          _egp(k.total_revenue), '')}
-			${_kpi('Orders',           (k.total_orders || 0).toLocaleString(), '')}
-			${_kpi('Gross Profit',     _egp(k.gross_profit), 'pos')}
-			${_kpi('Gross Margin',     (k.gross_margin || 0) + '%', margin_cls)}
-			${_kpi('Avg Order Value',  _egp(k.avg_order_value), 'info')}
-			${_kpi('Net Shipping P&L', _egp(k.net_shipping_pl), pl_cls)}
-			${_kpi('Customers',        (k.total_customers || 0).toLocaleString(), '')}
-			${_kpi('Critical Stock',   (k.critical_stock || 0).toLocaleString(), crit_cls)}
+		$("#ex-kpis").html(`
+			${_kpi("Revenue", _egp(k.total_revenue), "")}
+			${_kpi("Orders", (k.total_orders || 0).toLocaleString(), "")}
+			${_kpi("Gross Profit", _egp(k.gross_profit), "pos")}
+			${_kpi("Gross Margin", (k.gross_margin || 0) + "%", margin_cls)}
+			${_kpi("Avg Order Value", _egp(k.avg_order_value), "info")}
+			${_kpi("Net Shipping P&L", _egp(k.net_shipping_pl), pl_cls)}
+			${_kpi("Customers", (k.total_customers || 0).toLocaleString(), "")}
+			${_kpi("Critical Stock", (k.critical_stock || 0).toLocaleString(), crit_cls)}
 		`);
 	}
 
 	_render_alerts(alerts) {
-		let icons = { danger: '🔴', warning: '🟡', info: '🔵' };
+		let icons = { danger: "🔴", warning: "🟡", info: "🔵" };
 		if (!alerts.length) {
-			$('#ex-alerts').html('<div class="ex-no-alerts">✅ No priority alerts for the selected period.</div>');
+			$("#ex-alerts").html(
+				'<div class="ex-no-alerts">✅ No priority alerts for the selected period.</div>'
+			);
 			return;
 		}
-		$('#ex-alerts').html(alerts.map(a =>
-			`<div class="ex-alert ${a.type}">
-				<span class="ico">${icons[a.type] || 'ℹ'}</span>
+		$("#ex-alerts").html(
+			alerts
+				.map(
+					(a) =>
+						`<div class="ex-alert ${a.type}">
+				<span class="ico">${icons[a.type] || "ℹ"}</span>
 				<span>${a.message}</span>
 			</div>`
-		).join(''));
+				)
+				.join("")
+		);
 	}
 
 	_render_trend(rows) {
 		if (!rows.length) {
-			$('#ex-chart-trend').html('<div class="ex-loading">No data in range.</div>');
+			$("#ex-chart-trend").html('<div class="ex-loading">No data in range.</div>');
 			return;
 		}
-		_chart('ex-chart-trend', {
-			type: 'axis-mixed',
+		_chart("ex-chart-trend", {
+			type: "axis-mixed",
 			height: 300,
 			data: {
-				labels: rows.map(r => r.date),
+				labels: rows.map((r) => r.date),
 				datasets: [
-					{ name: 'Orders', type: 'bar', values: rows.map(r => r.orders) },
-					{ name: 'Revenue (EGP)', type: 'line', values: rows.map(r => r.revenue) },
+					{ name: "Orders", type: "bar", values: rows.map((r) => r.orders) },
+					{ name: "Revenue (EGP)", type: "line", values: rows.map((r) => r.revenue) },
 				],
 			},
-			colors: ['#95a5a6', '#7B61FF'],
+			colors: ["#95a5a6", "#7B61FF"],
 		});
 	}
 
 	_render_product(rows) {
 		if (!rows.length) {
-			$('#ex-chart-product').html('<div class="ex-loading">No product data.</div>');
+			$("#ex-chart-product").html('<div class="ex-loading">No product data.</div>');
 			return;
 		}
-		_chart('ex-chart-product', {
-			type: 'donut',
+		_chart("ex-chart-product", {
+			type: "donut",
 			height: 260,
 			data: {
-				labels: rows.map(r => r.type),
-				datasets: [{ values: rows.map(r => r.revenue) }],
+				labels: rows.map((r) => r.type),
+				datasets: [{ values: rows.map((r) => r.revenue) }],
 			},
-			colors: ['#7B61FF', '#22C55E', '#F97316'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#7B61FF", "#22C55E", "#F97316"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 	}
 
 	_render_segment(rows) {
-		let real = rows.filter(r => r.segment && r.segment !== 'Unclassified');
+		let real = rows.filter((r) => r.segment && r.segment !== "Unclassified");
 		let use = real.length ? real : rows;
 		if (!use.length) {
-			$('#ex-chart-segment').html('<div class="ex-loading">No segment data.</div>');
+			$("#ex-chart-segment").html('<div class="ex-loading">No segment data.</div>');
 			return;
 		}
-		_chart('ex-chart-segment', {
-			type: 'donut',
+		_chart("ex-chart-segment", {
+			type: "donut",
 			height: 260,
 			data: {
-				labels: use.map(r => r.segment),
-				datasets: [{ values: use.map(r => r.count) }],
+				labels: use.map((r) => r.segment),
+				datasets: [{ values: use.map((r) => r.count) }],
 			},
-			colors: use.map(r => _seg_color(r.segment)),
+			colors: use.map((r) => _seg_color(r.segment)),
 		});
 	}
 
 	_render_territories(rows) {
 		if (!rows.length) {
-			$('#ex-table-terr').html('<div class="ex-loading">No territory data in range.</div>');
+			$("#ex-table-terr").html('<div class="ex-loading">No territory data in range.</div>');
 			return;
 		}
-		$('#ex-table-terr').html(`
+		$("#ex-table-terr").html(`
 			<table class="ex-table">
 				<thead><tr>
 					<th>Territory</th><th>Orders</th><th>Revenue</th><th>Gross Profit</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
+					${rows
+						.map(
+							(r) => `<tr>
 						<td>${r.territory}</td>
 						<td>${r.orders}</td>
 						<td>${_egp(r.revenue)}</td>
-						<td class="green">${r.profit > 0 ? _egp(r.profit) : '—'}</td>
-					</tr>`).join('')}
+						<td class="green">${r.profit > 0 ? _egp(r.profit) : "—"}</td>
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
@@ -342,10 +354,13 @@ class ExecutiveAnalyticsDashboard {
 
 function _egp(v) {
 	let n = parseFloat(v || 0);
-	return 'EGP ' + n.toLocaleString('en', {
-		minimumFractionDigits: 0,
-		maximumFractionDigits: 0,
-	});
+	return (
+		"EGP " +
+		n.toLocaleString("en", {
+			minimumFractionDigits: 0,
+			maximumFractionDigits: 0,
+		})
+	);
 }
 
 function _kpi(label, value, cls) {
@@ -356,25 +371,25 @@ function _kpi(label, value, cls) {
 }
 
 const _SEG_COLORS = {
-	'Champion':           '#16a34a',
-	'Loyal':              '#2563eb',
-	'Potential Loyalist': '#0891b2',
-	'New Customer':       '#7c3aed',
-	'At Risk':            '#ea580c',
-	"Can't Lose Them":    '#dc2626',
-	'Lost':               '#6b7280',
-	'One-Time':           '#a16207',
-	'Unclassified':       '#94a3b8',
+	Champion: "#16a34a",
+	Loyal: "#2563eb",
+	"Potential Loyalist": "#0891b2",
+	"New Customer": "#7c3aed",
+	"At Risk": "#ea580c",
+	"Can't Lose Them": "#dc2626",
+	Lost: "#6b7280",
+	"One-Time": "#a16207",
+	Unclassified: "#94a3b8",
 };
 
 function _seg_color(segment) {
-	return _SEG_COLORS[segment] || '#7B61FF';
+	return _SEG_COLORS[segment] || "#7B61FF";
 }
 
 function _chart(id, opts) {
 	let el = document.getElementById(id);
 	if (!el) return;
-	el.innerHTML = '';
+	el.innerHTML = "";
 	try {
 		new frappe.Chart(el, opts);
 	} catch (e) {

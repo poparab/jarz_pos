@@ -167,9 +167,7 @@ def _group_like(item_code, preferred):
 
 
 def _default_warehouse(item_code, company):
-	return frappe.db.get_value(
-		"Item Default", {"parent": item_code, "company": company}, "default_warehouse"
-	)
+	return frappe.db.get_value("Item Default", {"parent": item_code, "company": company}, "default_warehouse")
 
 
 def _ensure_small_item(medium, company, log):
@@ -207,11 +205,7 @@ def _ensure_small_item(medium, company, log):
 
 
 def _has_active_default_bom(item_code):
-	return bool(
-		frappe.db.exists(
-			"BOM", {"item": item_code, "is_active": 1, "is_default": 1, "docstatus": 1}
-		)
-	)
+	return bool(frappe.db.exists("BOM", {"item": item_code, "is_active": 1, "is_default": 1, "docstatus": 1}))
 
 
 def build_small_bom_items(medium_bom_items, label_group_of):
@@ -336,7 +330,12 @@ def ensure_small_jar_setup():
 		packaging_group = _group_like("Glass Jar", PACKAGING_GROUP)
 		_ensure_material(GLASS_ITEM, packaging_group, "Glass Jar 147 ml", company, raw_wh, log)
 		_ensure_material(
-			LID_ITEM, _group_like("Jar Lid", packaging_group), "Jar Lid for the 147 ml jar", company, raw_wh, log
+			LID_ITEM,
+			_group_like("Jar Lid", packaging_group),
+			"Jar Lid for the 147 ml jar",
+			company,
+			raw_wh,
+			log,
 		)
 		_ensure_material(CARTON_ITEM, packaging_group, CARTON_ITEM, company, raw_wh, log)
 

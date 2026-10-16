@@ -12,7 +12,9 @@ class TestCourierAPI(unittest.TestCase):
 
 	def _employee_group_doc(self, employee_names):
 		doc = MagicMock()
-		doc.get.side_effect = lambda key: [{"employee": name} for name in employee_names] if key == "employees" else None
+		doc.get.side_effect = (
+			lambda key: [{"employee": name} for name in employee_names] if key == "employees" else None
+		)
 		doc.as_dict.return_value = {}
 		return doc
 
@@ -34,7 +36,7 @@ class TestCourierAPI(unittest.TestCase):
 
 	def test_get_couriers_wrapper(self):
 		"""Test that get_couriers is a wrapper for get_active_couriers."""
-		from jarz_pos.api.couriers import get_couriers, get_active_couriers
+		from jarz_pos.api.couriers import get_active_couriers, get_couriers
 
 		result_wrapper = get_couriers()
 		result_direct = get_active_couriers()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import frappe
 from frappe import _
@@ -81,9 +81,7 @@ def get_allowed_pos_profiles_for_user(user: str | None = None) -> list[str]:
 		return []
 
 	if user_has_global_profile_access(current_user):
-		return _normalize_profiles(
-			frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or []
-		)
+		return _normalize_profiles(frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or [])
 
 	linked_profiles = frappe.get_all("POS Profile User", filters={"user": current_user}, pluck="parent") or []
 	if not linked_profiles:
@@ -148,7 +146,9 @@ def resolve_assignment_pos_profile(
 	requested_pos_profile: str | None = None,
 	user: str | None = None,
 ) -> str:
-	invoice_label = _clean(invoice if isinstance(invoice, str) else _row_value(invoice, "name")) or _("the invoice")
+	invoice_label = _clean(invoice if isinstance(invoice, str) else _row_value(invoice, "name")) or _(
+		"the invoice"
+	)
 	resolved_requested = _clean(requested_pos_profile)
 	if resolved_requested:
 		resolved_requested = assert_user_can_access_pos_profile(resolved_requested, user)
@@ -198,7 +198,9 @@ def resolve_courier_delivery_partner(
 ) -> str:
 	delivery_partner = ""
 	if row is not None:
-		delivery_partner = _clean(_row_value(row, "delivery_partner") or _row_value(row, "custom_delivery_partner"))
+		delivery_partner = _clean(
+			_row_value(row, "delivery_partner") or _row_value(row, "custom_delivery_partner")
+		)
 	if delivery_partner:
 		return delivery_partner
 	if not party_type or not party:
@@ -367,6 +369,7 @@ def filter_available_couriers(
 
 	return result
 
+
 def map_invoice_branches(invoice_names: Iterable[object] | None) -> dict[str, str]:
 	"""Batch-map Sales Invoice name -> the branch (POS Profile) that owns it.
 
@@ -391,11 +394,14 @@ def map_invoice_branches(invoice_names: Iterable[object] | None) -> dict[str, st
 		pass
 
 	out: dict[str, str] = {}
-	rows = frappe.get_all(
-		"Sales Invoice",
-		filters={"name": ["in", list(names)]},
-		fields=fields,
-	) or []
+	rows = (
+		frappe.get_all(
+			"Sales Invoice",
+			filters={"name": ["in", list(names)]},
+			fields=fields,
+		)
+		or []
+	)
 	for row in rows:
 		branch = _clean(_row_value(row, "custom_kanban_profile")) or _clean(_row_value(row, "pos_profile"))
 		if branch:

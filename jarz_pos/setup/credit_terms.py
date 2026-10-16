@@ -50,7 +50,7 @@ This module must import cleanly with NO top-level frappe calls.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 import frappe
 
@@ -68,164 +68,162 @@ DEFAULT_CREDIT_DAYS = 30
 #: that exists on every site. Anchoring on one of this app's own fixture fields
 #: would drop the whole block to the bottom of the form on a site where that
 #: fixture has not imported yet.
-CUSTOMER_FIELDS: List[Dict[str, Any]] = [
-    {
-        "fieldname": "custom_credit_allowed",
-        "label": "Allow orders on credit",
-        "fieldtype": "Check",
-        "default": "0",
-        "insert_after": "customer_group",
-        "module": "jarz pos",
-        "description": (
-            "When on, the POS may take an order from this customer on credit "
-            "(goods delivered, nothing paid at the door). Decided per order at "
-            "checkout; this only says it is permitted at all."
-        ),
-    },
-    {
-        "fieldname": "custom_credit_days",
-        "label": "Credit Days",
-        "fieldtype": "Int",
-        "default": "0",
-        "non_negative": 1,
-        "insert_after": "custom_credit_allowed",
-        "depends_on": "eval:doc.custom_credit_allowed",
-        "module": "jarz pos",
-        "description": (
-            f"Days until a credit order from this customer falls due. "
-            f"0 means use the system default of {DEFAULT_CREDIT_DAYS} days. "
-            "The value in force at order time is frozen onto the invoice as "
-            "custom_credit_terms_days and never re-read."
-        ),
-    },
-    {
-        "fieldname": "custom_credit_limit_amount",
-        "label": "Credit Limit",
-        "fieldtype": "Currency",
-        "default": "0",
-        "non_negative": 1,
-        "insert_after": "custom_credit_days",
-        "depends_on": "eval:doc.custom_credit_allowed",
-        "module": "jarz pos",
-        "description": (
-            "Most this customer may owe across all open credit orders at once. "
-            "0 means no limit. Checked at order creation against the running "
-            "balance plus the new order."
-        ),
-    },
+CUSTOMER_FIELDS: list[dict[str, Any]] = [
+	{
+		"fieldname": "custom_credit_allowed",
+		"label": "Allow orders on credit",
+		"fieldtype": "Check",
+		"default": "0",
+		"insert_after": "customer_group",
+		"module": "jarz pos",
+		"description": (
+			"When on, the POS may take an order from this customer on credit "
+			"(goods delivered, nothing paid at the door). Decided per order at "
+			"checkout; this only says it is permitted at all."
+		),
+	},
+	{
+		"fieldname": "custom_credit_days",
+		"label": "Credit Days",
+		"fieldtype": "Int",
+		"default": "0",
+		"non_negative": 1,
+		"insert_after": "custom_credit_allowed",
+		"depends_on": "eval:doc.custom_credit_allowed",
+		"module": "jarz pos",
+		"description": (
+			f"Days until a credit order from this customer falls due. "
+			f"0 means use the system default of {DEFAULT_CREDIT_DAYS} days. "
+			"The value in force at order time is frozen onto the invoice as "
+			"custom_credit_terms_days and never re-read."
+		),
+	},
+	{
+		"fieldname": "custom_credit_limit_amount",
+		"label": "Credit Limit",
+		"fieldtype": "Currency",
+		"default": "0",
+		"non_negative": 1,
+		"insert_after": "custom_credit_days",
+		"depends_on": "eval:doc.custom_credit_allowed",
+		"module": "jarz pos",
+		"description": (
+			"Most this customer may owe across all open credit orders at once. "
+			"0 means no limit. Checked at order creation against the running "
+			"balance plus the new order."
+		),
+	},
 ]
 
 
 def _logger():
-    return frappe.logger(LOGGER_NAME, allow_site=True)
+	return frappe.logger(LOGGER_NAME, allow_site=True)
 
 
 def _custom_field_exists(doctype: str, fieldname: str) -> bool:
-    """True when the Custom Field row is already there.
+	"""True when the Custom Field row is already there.
 
-    ``create_custom_fields`` returns nothing, so created-vs-existing has to be
-    observed before the call rather than read off its result.
-    """
-    try:
-        return bool(frappe.db.exists("Custom Field", {"dt": doctype, "fieldname": fieldname}))
-    except Exception:
-        return False
-
-
-def _ensure_fields(doctype: str, specs: List[Dict[str, Any]], log: Dict[str, List[str]]) -> None:
-    """Create (or bring in line) the given Custom Fields on ``doctype``.
-
-    Uses ``frappe.custom.doctype.custom_field.custom_field.create_custom_fields``
-    rather than hand-inserting Custom Field docs, because it also clears the
-    DocType cache and runs ``frappe.db.updatedb`` so the new column is actually
-    queryable in the same migrate rather than one migrate later.
-    """
-    if not frappe.db.exists("DocType", doctype):
-        # Migrate ordering put this seeder ahead of the DocType, or the owning
-        # app is not installed. Not an error — the next migrate picks it up.
-        log.setdefault("skipped", []).append(f"{doctype}: DocType not present")
-        return
-
-    try:
-        from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-    except Exception:
-        _logger().error("Could not import create_custom_fields", exc_info=True)
-        return
-
-    for spec in specs:
-        fieldname = spec["fieldname"]
-        try:
-            already = _custom_field_exists(doctype, fieldname)
-            # One call per field on purpose: a batched call means one bad spec
-            # takes the whole group down, and the gate field is the one that
-            # decides whether credit orders are possible at all.
-            create_custom_fields({doctype: [dict(spec)]})
-            if already:
-                log["existing"].append(f"{doctype}.{fieldname}")
-            else:
-                log["created"].append(f"{doctype}.{fieldname}")
-        except Exception:
-            _logger().error(
-                f"Failed to ensure Custom Field {doctype}.{fieldname}", exc_info=True
-            )
+	``create_custom_fields`` returns nothing, so created-vs-existing has to be
+	observed before the call rather than read off its result.
+	"""
+	try:
+		return bool(frappe.db.exists("Custom Field", {"dt": doctype, "fieldname": fieldname}))
+	except Exception:
+		return False
 
 
-def _verify_columns(log: Dict[str, List[str]]) -> None:
-    """Say out loud whether the three columns are actually queryable.
+def _ensure_fields(doctype: str, specs: list[dict[str, Any]], log: dict[str, list[str]]) -> None:
+	"""Create (or bring in line) the given Custom Fields on ``doctype``.
 
-    ``create_custom_fields`` can succeed as a document write and still leave the
-    physical column missing if ``updatedb`` was skipped, and the failure mode
-    downstream is silent: ``frappe.db.get_value("Customer", x, "custom_credit_allowed")``
-    raises, the caller's ``except`` swallows it, and every customer looks like
-    "credit not allowed". Cheaper to name it here, at migrate time.
-    """
-    for spec in CUSTOMER_FIELDS:
-        fieldname = spec["fieldname"]
-        try:
-            present = bool(frappe.db.has_column("Customer", fieldname))
-        except Exception:
-            present = False
-        if not present:
-            log.setdefault("warnings", []).append(
-                f"Customer.{fieldname} has no database column; credit orders will be "
-                f"refused for every customer until the next successful migrate"
-            )
+	Uses ``frappe.custom.doctype.custom_field.custom_field.create_custom_fields``
+	rather than hand-inserting Custom Field docs, because it also clears the
+	DocType cache and runs ``frappe.db.updatedb`` so the new column is actually
+	queryable in the same migrate rather than one migrate later.
+	"""
+	if not frappe.db.exists("DocType", doctype):
+		# Migrate ordering put this seeder ahead of the DocType, or the owning
+		# app is not installed. Not an error — the next migrate picks it up.
+		log.setdefault("skipped", []).append(f"{doctype}: DocType not present")
+		return
+
+	try:
+		from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+	except Exception:
+		_logger().error("Could not import create_custom_fields", exc_info=True)
+		return
+
+	for spec in specs:
+		fieldname = spec["fieldname"]
+		try:
+			already = _custom_field_exists(doctype, fieldname)
+			# One call per field on purpose: a batched call means one bad spec
+			# takes the whole group down, and the gate field is the one that
+			# decides whether credit orders are possible at all.
+			create_custom_fields({doctype: [dict(spec)]})
+			if already:
+				log["existing"].append(f"{doctype}.{fieldname}")
+			else:
+				log["created"].append(f"{doctype}.{fieldname}")
+		except Exception:
+			_logger().error(f"Failed to ensure Custom Field {doctype}.{fieldname}", exc_info=True)
 
 
-def ensure_credit_terms_fields() -> Dict[str, List[str]]:
-    """Idempotently seed the customer credit schema. Safe on every migrate.
+def _verify_columns(log: dict[str, list[str]]) -> None:
+	"""Say out loud whether the three columns are actually queryable.
 
-    Never raises. This runs inside the shared ``bench migrate`` that the whole
-    bench depends on; a raising seeder does not fail its own feature, it aborts
-    the migrate for every app on the site.
-    """
-    log: Dict[str, List[str]] = {
-        "created": [],
-        "existing": [],
-        "skipped": [],
-        "warnings": [],
-    }
-    logger = _logger()
+	``create_custom_fields`` can succeed as a document write and still leave the
+	physical column missing if ``updatedb`` was skipped, and the failure mode
+	downstream is silent: ``frappe.db.get_value("Customer", x, "custom_credit_allowed")``
+	raises, the caller's ``except`` swallows it, and every customer looks like
+	"credit not allowed". Cheaper to name it here, at migrate time.
+	"""
+	for spec in CUSTOMER_FIELDS:
+		fieldname = spec["fieldname"]
+		try:
+			present = bool(frappe.db.has_column("Customer", fieldname))
+		except Exception:
+			present = False
+		if not present:
+			log.setdefault("warnings", []).append(
+				f"Customer.{fieldname} has no database column; credit orders will be "
+				f"refused for every customer until the next successful migrate"
+			)
 
-    try:
-        _ensure_fields("Customer", CUSTOMER_FIELDS, log)
-        _verify_columns(log)
 
-        if log["created"]:
-            frappe.db.commit()
+def ensure_credit_terms_fields() -> dict[str, list[str]]:
+	"""Idempotently seed the customer credit schema. Safe on every migrate.
 
-        # Logged at ERROR level on purpose. Frappe's default log level off a dev
-        # server is ERROR, so .info() and .warning() are discarded entirely on
-        # staging and production — a seeder summary that exists only at INFO is
-        # a summary nobody will ever read where it matters.
-        logger.error(
-            "credit_terms_setup: created=%s existing=%s skipped=%s"
-            % (log["created"], log["existing"], log["skipped"])
-        )
-        for warning in log["warnings"]:
-            logger.error("credit_terms_setup WARNING: " + warning)
-    except Exception:
-        # Never let schema seeding break a migrate for the whole bench.
-        logger.error("ensure_credit_terms_fields failed unexpectedly", exc_info=True)
+	Never raises. This runs inside the shared ``bench migrate`` that the whole
+	bench depends on; a raising seeder does not fail its own feature, it aborts
+	the migrate for every app on the site.
+	"""
+	log: dict[str, list[str]] = {
+		"created": [],
+		"existing": [],
+		"skipped": [],
+		"warnings": [],
+	}
+	logger = _logger()
 
-    return log
+	try:
+		_ensure_fields("Customer", CUSTOMER_FIELDS, log)
+		_verify_columns(log)
+
+		if log["created"]:
+			frappe.db.commit()
+
+		# Logged at ERROR level on purpose. Frappe's default log level off a dev
+		# server is ERROR, so .info() and .warning() are discarded entirely on
+		# staging and production — a seeder summary that exists only at INFO is
+		# a summary nobody will ever read where it matters.
+		logger.error(
+			"credit_terms_setup: created=%s existing=%s skipped=%s"
+			% (log["created"], log["existing"], log["skipped"])
+		)
+		for warning in log["warnings"]:
+			logger.error("credit_terms_setup WARNING: " + warning)
+	except Exception:
+		# Never let schema seeding break a migrate for the whole bench.
+		logger.error("ensure_credit_terms_fields failed unexpectedly", exc_info=True)
+
+	return log

@@ -3,9 +3,9 @@
 This module tests delivery slot management endpoints.
 """
 
+import datetime
 import sys
 import unittest
-import datetime
 
 
 class TestDeliverySlotsAPI(unittest.TestCase):
@@ -68,8 +68,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			start = datetime.datetime.fromisoformat(slot["datetime"])
 			end = datetime.datetime.fromisoformat(slot["end_datetime"])
 			self.assertEqual(
-				(end - start).total_seconds(), 90 * 60,
-				f"Slot {slot['time_label']} should be 90 minutes wide"
+				(end - start).total_seconds(), 90 * 60, f"Slot {slot['time_label']} should be 90 minutes wide"
 			)
 		# First slot: 09:00–10:30
 		first_start = datetime.datetime.fromisoformat(slots[0]["datetime"])
@@ -98,7 +97,9 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		)
 
 		# Should have 6 slots (5 regular + 1 custom last)
-		self.assertEqual(len(slots), 6, f"Expected 6 slots, got {len(slots)}: {[s['time_label'] for s in slots]}")
+		self.assertEqual(
+			len(slots), 6, f"Expected 6 slots, got {len(slots)}: {[s['time_label'] for s in slots]}"
+		)
 		last = slots[-1]
 		last_start = datetime.datetime.fromisoformat(last["datetime"])
 		last_end = datetime.datetime.fromisoformat(last["end_datetime"])
@@ -133,8 +134,9 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		)
 
 		self.assertEqual(
-			len(slots_no_last), len(slots_with_bad_last),
-			"Overflowing custom last slot should not increase slot count"
+			len(slots_no_last),
+			len(slots_with_bad_last),
+			"Overflowing custom last slot should not increase slot count",
 		)
 
 	def test_whole_hour_slots_unchanged(self):
@@ -163,12 +165,24 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	# Taken from 699 sampled production Woo orders on 2026-08-18. These are the
 	# slots customers can actually book on orderjarz.com; ERPNext must match.
 	WOO_GRID_A = [
-		"13:00-14:30", "14:30-16:00", "16:00-17:30", "17:30-19:00",
-		"19:00-20:30", "20:30-22:00", "22:00-23:30", "00:00-01:00",
+		"13:00-14:30",
+		"14:30-16:00",
+		"16:00-17:30",
+		"17:30-19:00",
+		"19:00-20:30",
+		"20:30-22:00",
+		"22:00-23:30",
+		"00:00-01:00",
 	]
 	WOO_FRIDAY = [
-		"14:00-15:30", "15:30-17:00", "17:00-18:30", "18:30-20:00",
-		"20:00-21:30", "21:30-23:00", "23:00-00:30", "00:30-01:30",
+		"14:00-15:30",
+		"15:30-17:00",
+		"17:00-18:30",
+		"18:30-20:00",
+		"20:00-21:30",
+		"21:30-23:00",
+		"23:00-00:30",
+		"00:30-01:30",
 	]
 
 	def _hhmm(self, slots):
@@ -330,6 +344,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_day_labels_follow_the_site_clock_not_the_container(self):
 		"""At 00:20 site time the running after-midnight slot is Today, not Tomorrow."""
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		now = self._at(0, 20, days=1)
@@ -358,6 +373,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 	def _with_clock(self, now, fn):
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		with mock.patch.object(delivery_slots.frappe.utils, "now_datetime", return_value=now):
@@ -384,9 +400,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		"""00:00:00 is already Saturday: nothing of Friday's tail reads Friday."""
 		now = datetime.datetime(2030, 1, 5, 0, 0, 0)
 		friday = self._with_clock(now, lambda: self._friday_slots(now))
-		grid_a = self._with_clock(
-			now, lambda: self._today_slots(now, target=datetime.date(2030, 1, 4))
-		)
+		grid_a = self._with_clock(now, lambda: self._today_slots(now, target=datetime.date(2030, 1, 4)))
 
 		self.assertEqual(self._hhmm(friday), ["23:00-00:30", "00:30-01:30"])
 		self.assertEqual([s["day_label"] for s in friday], ["Today", "Today"])
@@ -407,11 +421,14 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		from jarz_pos.api.delivery_slots import _build_slot
 
 		now = datetime.datetime(2030, 1, 5, 0, 10)
-		slot = self._with_clock(now, lambda: _build_slot(
-			datetime.date(2030, 1, 4),
-			datetime.datetime(2030, 1, 5, 0, 30),
-			datetime.datetime(2030, 1, 5, 1, 30),
-		))
+		slot = self._with_clock(
+			now,
+			lambda: _build_slot(
+				datetime.date(2030, 1, 4),
+				datetime.datetime(2030, 1, 5, 0, 30),
+				datetime.datetime(2030, 1, 5, 1, 30),
+			),
+		)
 
 		self.assertEqual(slot["day_label"], "Friday")
 
@@ -419,16 +436,25 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		"""Through the endpoint: past midnight on Saturday the list starts with Today."""
 		from types import SimpleNamespace
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		config = SimpleNamespace(
-			name="TT", slot_hours=1, slot_minutes=30, has_custom_last_slot=1,
-			last_slot_hours=1, last_slot_minutes=0, anchor_last_slot_to_closing=1,
+			name="TT",
+			slot_hours=1,
+			slot_minutes=30,
+			has_custom_last_slot=1,
+			last_slot_hours=1,
+			last_slot_minutes=0,
+			anchor_last_slot_to_closing=1,
 		)
 
 		def timing(day, opening, closing):
 			return SimpleNamespace(
-				day=day, opening_time=opening, closing_time=closing, same_day="Next Day",
+				day=day,
+				opening_time=opening,
+				closing_time=closing,
+				same_day="Next Day",
 				get=lambda key, default=None: "Next Day" if key == "same_day" else default,
 			)
 
@@ -440,13 +466,16 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			timing("Friday", datetime.timedelta(hours=14), datetime.timedelta(hours=1, minutes=30))
 		)
 
-		with mock.patch("jarz_pos.utils.validation_utils.assert_pos_profile_enabled"), \
-			mock.patch.object(delivery_slots.frappe, "get_value", return_value=config), \
-			mock.patch.object(delivery_slots.frappe, "get_all", return_value=timings), \
+		with (
+			mock.patch("jarz_pos.utils.validation_utils.assert_pos_profile_enabled"),
+			mock.patch.object(delivery_slots.frappe, "get_value", return_value=config),
+			mock.patch.object(delivery_slots.frappe, "get_all", return_value=timings),
 			mock.patch.object(
-				delivery_slots.frappe.utils, "now_datetime",
+				delivery_slots.frappe.utils,
+				"now_datetime",
 				return_value=datetime.datetime(2030, 1, 5, 0, 10),
-			):
+			),
+		):
 			slots = delivery_slots.get_available_delivery_slots("Test POS Profile")
 
 		labels = [s["day_label"] for s in slots]
@@ -461,29 +490,40 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		"""The running slot sorts first but the default is the next one."""
 		from types import SimpleNamespace
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		target = self._make_date()
 		config = SimpleNamespace(
-			name="TT", slot_hours=1, slot_minutes=30, has_custom_last_slot=1,
-			last_slot_hours=1, last_slot_minutes=0, anchor_last_slot_to_closing=1,
+			name="TT",
+			slot_hours=1,
+			slot_minutes=30,
+			has_custom_last_slot=1,
+			last_slot_hours=1,
+			last_slot_minutes=0,
+			anchor_last_slot_to_closing=1,
 		)
 		timings = [
 			SimpleNamespace(
-				day=day, opening_time=datetime.timedelta(hours=13),
-				closing_time=datetime.timedelta(hours=1), same_day="Next Day",
+				day=day,
+				opening_time=datetime.timedelta(hours=13),
+				closing_time=datetime.timedelta(hours=1),
+				same_day="Next Day",
 				get=lambda key, default=None, _d=day: "Next Day" if key == "same_day" else default,
 			)
 			for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 		]
 
-		with mock.patch("jarz_pos.utils.validation_utils.assert_pos_profile_enabled"), \
-			mock.patch.object(delivery_slots.frappe, "get_value", return_value=config), \
-			mock.patch.object(delivery_slots.frappe, "get_all", return_value=timings), \
+		with (
+			mock.patch("jarz_pos.utils.validation_utils.assert_pos_profile_enabled"),
+			mock.patch.object(delivery_slots.frappe, "get_value", return_value=config),
+			mock.patch.object(delivery_slots.frappe, "get_all", return_value=timings),
 			mock.patch.object(
-				delivery_slots.frappe.utils, "now_datetime",
+				delivery_slots.frappe.utils,
+				"now_datetime",
 				return_value=datetime.datetime.combine(target, datetime.time(22, 10)),
-			):
+			),
+		):
 			slots = delivery_slots.get_available_delivery_slots("Test POS Profile")
 			next_slot = delivery_slots.get_next_available_slot("Test POS Profile")
 
@@ -497,24 +537,35 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_preview_endpoint_reproduces_the_woo_week(self):
 		"""The Desk preview must render the same aligned week the POS serves."""
 		import json as _json
+
 		from jarz_pos.api.delivery_slots import preview_timetable_slots
 
 		timetable = [
-			{"day": day, "opening_time": "13:00:00", "closing_time": "01:00:00",
-			 "same_day": "Next Day"}
+			{"day": day, "opening_time": "13:00:00", "closing_time": "01:00:00", "same_day": "Next Day"}
 			for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Saturday", "Sunday")
 		]
-		timetable.append({
-			"day": "Friday", "opening_time": "14:00:00",
-			"closing_time": "01:30:00", "same_day": "Next Day",
-		})
+		timetable.append(
+			{
+				"day": "Friday",
+				"opening_time": "14:00:00",
+				"closing_time": "01:30:00",
+				"same_day": "Next Day",
+			}
+		)
 
-		result = preview_timetable_slots(_json.dumps({
-			"slot_hours": 1, "slot_minutes": 30,
-			"has_custom_last_slot": 1, "last_slot_hours": 1, "last_slot_minutes": 0,
-			"anchor_last_slot_to_closing": 1,
-			"timetable": timetable,
-		}))
+		result = preview_timetable_slots(
+			_json.dumps(
+				{
+					"slot_hours": 1,
+					"slot_minutes": 30,
+					"has_custom_last_slot": 1,
+					"last_slot_hours": 1,
+					"last_slot_minutes": 0,
+					"anchor_last_slot_to_closing": 1,
+					"timetable": timetable,
+				}
+			)
+		)
 
 		self.assertEqual(result["total_slots"], 56)
 		by_day = {d["day"]: d for d in result["days"]}
@@ -556,23 +607,29 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def _normalize(self, start, end=None, slots=None, now=None, explicit=None):
 		"""Run normalize_delivery_window against a fixed grid and clock."""
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
-		grid = [
-			{"datetime": "2030-01-07T00:00:00", "end_datetime": "2030-01-07T01:00:00"},
-			{"datetime": "2030-01-07T13:00:00", "end_datetime": "2030-01-07T14:30:00"},
-		] if slots is None else slots
+		grid = (
+			[
+				{"datetime": "2030-01-07T00:00:00", "end_datetime": "2030-01-07T01:00:00"},
+				{"datetime": "2030-01-07T13:00:00", "end_datetime": "2030-01-07T14:30:00"},
+			]
+			if slots is None
+			else slots
+		)
 
-		with mock.patch.object(
-			delivery_slots, "get_available_delivery_slots", side_effect=lambda _p: list(grid)
-		), mock.patch.object(
-			delivery_slots.frappe.utils,
-			"now_datetime",
-			return_value=now or datetime.datetime(2030, 1, 6, 22, 19, 21),
+		with (
+			mock.patch.object(
+				delivery_slots, "get_available_delivery_slots", side_effect=lambda _p: list(grid)
+			),
+			mock.patch.object(
+				delivery_slots.frappe.utils,
+				"now_datetime",
+				return_value=now or datetime.datetime(2030, 1, 6, 22, 19, 21),
+			),
 		):
-			return delivery_slots.normalize_delivery_window(
-				"Test POS Profile", start, end, explicit=explicit
-			)
+			return delivery_slots.normalize_delivery_window("Test POS Profile", start, end, explicit=explicit)
 
 	def test_a_slot_that_has_passed_snaps_to_the_next_one(self):
 		"""The 16906 case: a cart left open submits a slot that already started."""
@@ -590,9 +647,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			{"datetime": "2030-01-06T22:00:00", "end_datetime": "2030-01-06T23:30:00", "is_current": True},
 			{"datetime": "2030-01-07T00:00:00", "end_datetime": "2030-01-07T01:00:00"},
 		]
-		start, end, note = self._normalize(
-			datetime.datetime(2030, 1, 6, 22, 0), slots=grid, explicit=True
-		)
+		start, end, note = self._normalize(datetime.datetime(2030, 1, 6, 22, 0), slots=grid, explicit=True)
 
 		self.assertEqual(note, "matched")
 		self.assertEqual(start, datetime.datetime(2030, 1, 6, 22, 0))
@@ -606,9 +661,11 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def _running(self, hh, mm, explicit, slots=None):
 		"""Submit the 21:00 start of the running slot at ``hh:mm``."""
 		return self._normalize(
-			datetime.datetime(2030, 1, 6, 21, 0), datetime.datetime(2030, 1, 6, 22, 30),
+			datetime.datetime(2030, 1, 6, 21, 0),
+			datetime.datetime(2030, 1, 6, 22, 30),
 			slots=self.RUNNING_GRID if slots is None else slots,
-			now=datetime.datetime(2030, 1, 6, hh, mm), explicit=explicit,
+			now=datetime.datetime(2030, 1, 6, hh, mm),
+			explicit=explicit,
 		)
 
 	def test_an_aged_default_on_the_running_slot_snaps_to_the_next_one(self):
@@ -670,8 +727,10 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_the_flag_is_irrelevant_for_a_slot_that_has_not_started(self):
 		for explicit in (None, False, True):
 			start, _end, note = self._normalize(
-				datetime.datetime(2030, 1, 6, 22, 30), slots=self.RUNNING_GRID,
-				now=datetime.datetime(2030, 1, 6, 21, 20), explicit=explicit,
+				datetime.datetime(2030, 1, 6, 22, 30),
+				slots=self.RUNNING_GRID,
+				now=datetime.datetime(2030, 1, 6, 21, 20),
+				explicit=explicit,
 			)
 
 			self.assertEqual(note, "matched", explicit)
@@ -679,12 +738,22 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 	def test_the_explicit_flag_is_read_from_the_request(self):
 		from unittest import mock
+
 		from jarz_pos.services import invoice_creation
 
 		cases = [
-			(None, None), ("", None), ("  ", None),
-			("0", False), (0, False), (False, False), ("false", False),
-			("1", True), (1, True), (True, True), ("true", True), (" Yes ", True),
+			(None, None),
+			("", None),
+			("  ", None),
+			("0", False),
+			(0, False),
+			(False, False),
+			("false", False),
+			("1", True),
+			(1, True),
+			(True, True),
+			("true", True),
+			(" Yes ", True),
 		]
 		for raw, expected in cases:
 			form = {} if raw is None else {"delivery_slot_explicit": raw}
@@ -693,17 +762,21 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 	def test_invoice_creation_forwards_the_explicit_flag(self):
 		from unittest import mock
-		from jarz_pos.services import invoice_creation
+
 		from jarz_pos.api import delivery_slots
+		from jarz_pos.services import invoice_creation
 
 		start = datetime.datetime(2030, 1, 6, 21, 0)
 		for raw, expected in ((None, None), ("1", True), ("0", False)):
 			form = {} if raw is None else {"delivery_slot_explicit": raw}
-			with mock.patch.object(invoice_creation.frappe, "form_dict", form, create=True), \
+			with (
+				mock.patch.object(invoice_creation.frappe, "form_dict", form, create=True),
 				mock.patch.object(
-					delivery_slots, "normalize_delivery_window",
+					delivery_slots,
+					"normalize_delivery_window",
 					return_value=(start, None, "matched"),
-				) as normalize:
+				) as normalize,
+			):
 				invoice_creation._normalize_delivery_window("Test POS Profile", start, mock.Mock())
 
 			self.assertIs(normalize.call_args.kwargs["explicit"], expected, raw)
@@ -711,6 +784,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_an_amendment_keeping_its_own_window_counts_as_explicit(self):
 		"""Editing an order's address while its slot runs must not move the order."""
 		import frappe
+
 		from jarz_pos.api import manager
 
 		source = frappe._dict(custom_delivery_date="2030-01-06", custom_delivery_time_from="21:00:00")
@@ -735,6 +809,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_the_amendment_form_context_writes_the_flag_it_is_given(self):
 		"""The job's argument decides, not whatever the request happened to carry."""
 		import frappe
+
 		from jarz_pos.api import manager
 
 		had_previous = hasattr(frappe.local, "form_dict")
@@ -750,12 +825,11 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 						delivery_slot_explicit=given,
 					):
 						self.assertEqual(
-							frappe.form_dict.get("delivery_slot_explicit"), expected,
+							frappe.form_dict.get("delivery_slot_explicit"),
+							expected,
 							(request_flag, given),
 						)
-				self.assertEqual(
-					frappe.form_dict.get("delivery_slot_explicit"), request_flag, "restored"
-				)
+				self.assertEqual(frappe.form_dict.get("delivery_slot_explicit"), request_flag, "restored")
 		finally:
 			self._restore_local_form_dict(had_previous, previous)
 
@@ -777,6 +851,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		import threading
 
 		import frappe
+
 		from jarz_pos.api import manager
 
 		proxy = frappe.form_dict
@@ -800,17 +875,11 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			):
 				self.assertIs(frappe.form_dict, proxy)
 				self.assertIs(sys.modules["frappe"].form_dict, proxy)
-				self.assertEqual(
-					frappe.form_dict.get("required_delivery_datetime"), "2030-01-06 22:30:00"
-				)
-				self.assertEqual(
-					frappe.form_dict.get("delivery_end_datetime"), "2030-01-06 23:30:00"
-				)
+				self.assertEqual(frappe.form_dict.get("required_delivery_datetime"), "2030-01-06 22:30:00")
+				self.assertEqual(frappe.form_dict.get("delivery_end_datetime"), "2030-01-06 23:30:00")
 				self.assertEqual(frappe.form_dict.get("delivery_slot_explicit"), 1)
 				# The request's own keys are carried, on a copy - not mutated in place.
-				self.assertEqual(
-					frappe.form_dict.get("cmd"), "jarz_pos.api.manager.submit_invoice_amendment"
-				)
+				self.assertEqual(frappe.form_dict.get("cmd"), "jarz_pos.api.manager.submit_invoice_amendment")
 				self.assertIsNot(frappe.local.form_dict, original)
 				self.assertNotIn("required_delivery_datetime", original)
 
@@ -828,6 +897,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_the_amendment_form_context_restores_on_error(self):
 		"""An exception inside the block still puts the original object back."""
 		import frappe
+
 		from jarz_pos.api import manager
 
 		proxy = frappe.form_dict
@@ -850,12 +920,19 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		"""Declared on the endpoint, so it survives the job leaving the request."""
 		from types import SimpleNamespace
 		from unittest.mock import MagicMock, patch
+
 		from jarz_pos.api import manager
 
 		source = SimpleNamespace(
-			name="INV-SLOT-001", docstatus=1, pos_profile="Dokki", custom_kanban_profile="Dokki",
-			custom_sales_invoice_state="In Progress", sales_partner=None, custom_payment_method="Cash",
-			custom_delivery_date="2030-01-06", custom_delivery_time_from="21:00:00",
+			name="INV-SLOT-001",
+			docstatus=1,
+			pos_profile="Dokki",
+			custom_kanban_profile="Dokki",
+			custom_sales_invoice_state="In Progress",
+			sales_partner=None,
+			custom_payment_method="Cash",
+			custom_delivery_date="2030-01-06",
+			custom_delivery_time_from="21:00:00",
 			custom_delivery_duration=5400,
 		)
 		source.get = lambda key, default=None: getattr(source, key, default)
@@ -865,17 +942,21 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			mock_frappe.session.user = "manager@example.com"
 			mock_frappe.get_doc.return_value = source
 			mock_frappe.enqueue.return_value = {"success": True}
-			with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				patch("jarz_pos.api.manager._ensure_profile_scoped_invoice_access"), \
-				patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-				patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+			with (
+				patch("jarz_pos.api.manager.frappe", mock_frappe),
+				patch("jarz_pos.api.manager._ensure_profile_scoped_invoice_access"),
+				patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+				patch(
+					"jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}
+				),
+			):
 				manager.submit_invoice_amendment(
-					invoice_id="INV-SLOT-001", cart_json="[]", delivery_slot_explicit=flag,
+					invoice_id="INV-SLOT-001",
+					cart_json="[]",
+					delivery_slot_explicit=flag,
 				)
 
-			self.assertEqual(
-				mock_frappe.enqueue.call_args.kwargs["delivery_slot_explicit"], flag, flag
-			)
+			self.assertEqual(mock_frappe.enqueue.call_args.kwargs["delivery_slot_explicit"], flag, flag)
 
 	def test_a_passed_off_grid_start_never_snaps_onto_the_running_slot(self):
 		grid = [
@@ -883,7 +964,8 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 			{"datetime": "2030-01-06T22:00:00", "end_datetime": "2030-01-06T23:30:00"},
 		]
 		start, _end, note = self._normalize(
-			datetime.datetime(2030, 1, 6, 19, 0), slots=grid,
+			datetime.datetime(2030, 1, 6, 19, 0),
+			slots=grid,
 			now=datetime.datetime(2030, 1, 6, 21, 41),
 		)
 
@@ -933,6 +1015,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_a_failing_slot_lookup_never_takes_the_order_down(self):
 		"""Slot normalisation is advisory; an exception must not block a sale."""
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		with mock.patch.object(
@@ -955,6 +1038,7 @@ class TestRescheduleRefusesEndedSlot(unittest.TestCase):
 
 	def _assert(self, date, time, duration):
 		from unittest import mock
+
 		from jarz_pos.api import invoices
 
 		with mock.patch.object(invoices.frappe.utils, "now_datetime", return_value=self.NOW):
@@ -987,12 +1071,16 @@ class TestRescheduleRefusesEndedSlot(unittest.TestCase):
 			self._assert("not-a-date", "", 3600)
 
 	def test_the_endpoint_refuses_before_touching_the_invoice(self):
-		import frappe
 		from unittest import mock
+
+		import frappe
+
 		from jarz_pos.api import invoices
 
-		with mock.patch.object(invoices.frappe.utils, "now_datetime", return_value=self.NOW), \
-			mock.patch.object(invoices.frappe, "get_doc") as get_doc:
+		with (
+			mock.patch.object(invoices.frappe.utils, "now_datetime", return_value=self.NOW),
+			mock.patch.object(invoices.frappe, "get_doc") as get_doc,
+		):
 			with self.assertRaises(frappe.ValidationError) as ctx:
 				invoices.update_invoice_delivery_slot(
 					"ACC-SINV-TEST", "2030-01-06", "20:30:00", 90 * 60, "Today, 08:30 PM - 10:00 PM"

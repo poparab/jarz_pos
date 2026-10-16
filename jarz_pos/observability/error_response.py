@@ -22,13 +22,16 @@ def unexpected_error_response(
 	details: dict[str, Any] | None = None,
 	tags: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-	error_id = capture_exception(
-		error,
-		source="unexpected_error_response",
-		summary=summary,
-		details=_merge_context(details, context),
-		tags=tags,
-	) or _fallback_error_id()
+	error_id = (
+		capture_exception(
+			error,
+			source="unexpected_error_response",
+			summary=summary,
+			details=_merge_context(details, context),
+			tags=tags,
+		)
+		or _fallback_error_id()
+	)
 
 	_set_http_status(http_status_code)
 	_set_error_id(error_id)

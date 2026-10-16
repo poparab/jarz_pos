@@ -6,6 +6,7 @@ and query limit lives here so that a rename or config change only
 requires updating a single file (or the Jarz POS Settings doctype).
 """
 
+from typing import ClassVar
 
 # ── Account name defaults ──────────────────────────────────────────────
 # These are used as *fallback* names when the Jarz POS Settings doctype
@@ -13,146 +14,170 @@ requires updating a single file (or the Jarz POS Settings doctype).
 # settings doc; consumers should prefer ``settings.<field>`` over
 # these raw strings.
 
+
 class ACCOUNTS:
-    CASH_OVER_SHORT = "Cash Over Short"
-    INDIRECT_EXPENSES = "Indirect Expenses"
-    FREIGHT_AND_FORWARDING = "Freight and Forwarding Charges"
-    # What the customer is billed for delivery. Income, never netted against
-    # Freight: until 2026-09 it was credited to Freight and hid both numbers.
-    SHIPPING_INCOME = "Shipping Income"
-    DIRECT_INCOME = "Direct Income"
-    # Delivery paid to bring purchased goods in. Kept off Freight, which is
-    # the courier cost of delivering orders to customers.
-    PURCHASE_DELIVERY = "Purchase Delivery Charges"
-    VEHICLE_EXPENSES = "Vehicle Expenses"
-    VEHICLE_FUEL = "Vehicle Fuel"
-    VEHICLE_MAINTENANCE = "Vehicle Maintenance and Repairs"
-    VEHICLE_OTHER = "Vehicle Other Expenses"
-    COURIER_OUTSTANDING = "Courier Outstanding"
-    CREDITORS = "Creditors"
-    CASH_IN_HAND = "Cash In Hand"
-    BANK_ACCOUNTS = "Bank Accounts"
-    MOBILE_WALLET = "Mobile Wallet"
-    INSTAPAY = "Instapay"
-    PAYMENT_GATEWAY = "Payment Gateway"
-    # Liability that holds an earlier month's share of a bill paid later (the
-    # ad spend Meta charges on the 5th covers the last days of the previous
-    # month). Booked at that month's end, released by the payment itself.
-    ACCRUED_EXPENSES = "Accrued Expenses"
-    CURRENT_LIABILITIES = "Current Liabilities"
-    PAID_ADS = "Paid Ads - Media Buying"
+	CASH_OVER_SHORT = "Cash Over Short"
+	INDIRECT_EXPENSES = "Indirect Expenses"
+	FREIGHT_AND_FORWARDING = "Freight and Forwarding Charges"
+	# What the customer is billed for delivery. Income, never netted against
+	# Freight: until 2026-09 it was credited to Freight and hid both numbers.
+	SHIPPING_INCOME = "Shipping Income"
+	DIRECT_INCOME = "Direct Income"
+	# Delivery paid to bring purchased goods in. Kept off Freight, which is
+	# the courier cost of delivering orders to customers.
+	PURCHASE_DELIVERY = "Purchase Delivery Charges"
+	VEHICLE_EXPENSES = "Vehicle Expenses"
+	VEHICLE_FUEL = "Vehicle Fuel"
+	VEHICLE_MAINTENANCE = "Vehicle Maintenance and Repairs"
+	VEHICLE_OTHER = "Vehicle Other Expenses"
+	COURIER_OUTSTANDING = "Courier Outstanding"
+	CREDITORS = "Creditors"
+	CASH_IN_HAND = "Cash In Hand"
+	BANK_ACCOUNTS = "Bank Accounts"
+	MOBILE_WALLET = "Mobile Wallet"
+	INSTAPAY = "Instapay"
+	PAYMENT_GATEWAY = "Payment Gateway"
+	# Liability that holds an earlier month's share of a bill paid later (the
+	# ad spend Meta charges on the 5th covers the last days of the previous
+	# month). Booked at that month's end, released by the payment itself.
+	ACCRUED_EXPENSES = "Accrued Expenses"
+	CURRENT_LIABILITIES = "Current Liabilities"
+	PAID_ADS = "Paid Ads - Media Buying"
 
 
 # ── Role name sets ──────────────────────────────────────────────────────
 
-class ROLES:
-    # Individual role names first, so the sets below can be built from them
-    # rather than repeating the literals. The sets used to come first, which is
-    # why JARZ_MANAGER could not appear in them and why the divergence below
-    # went unnoticed for so long.
-    JARZ_MANAGER = "JARZ Manager"
-    JARZ_LINE_MANAGER = "jarz line manager"
-    #: Both spellings exist as real Role records on staging and production.
-    #: Anywhere the line manager is named, name both — a set that carries only
-    #: one silently excludes half the people holding the role.
-    JARZ_LINE_MANAGER_ALT = "JARZ line manager"
-    ADMINISTRATOR = "Administrator"
-    SYSTEM_MANAGER = "System Manager"
-    PRODUCTION_OPERATOR = "Production Operator"
 
-    # JARZ Manager is a member of all four operational sets below. It was in
-    # none of them, while the mobile drawer gated Cash Transfer, Stock Transfer,
-    # Inventory Count and Purchase Invoice on `hasManagerAccess` — which does
-    # include JARZ Manager. So the app showed a JARZ-Manager-only user four
-    # entries and the server answered "Not permitted: Managers only" on every
-    # one, along with the Production Board's item picker and Return-WIP.
-    # The owner's call (2026-08-19) is that the server was wrong: a JARZ Manager
-    # is meant to do these things.
-    MANAGER = {"System Manager", "Accounts Manager", "Stock Manager",
-               "Manufacturing Manager", "Purchase Manager", JARZ_MANAGER}
-    STOCK = {"System Manager", "Stock Manager", "Manufacturing Manager",
-             "Accounts Manager", JARZ_MANAGER}
-    MANUFACTURING = {"System Manager", "Manufacturing Manager",
-                     "Stock Manager", "Purchase Manager", JARZ_MANAGER}
-    PURCHASE = {"System Manager", "Stock Manager", "Manufacturing Manager",
-                "Purchase Manager", "Accounts Manager", JARZ_MANAGER}
-    ADMIN = {"System Manager", "POS Manager"}
-    # Everything a JARZ line manager may do, the manager tier and the
-    # Administrator may do too.  The line manager is a *narrower* manager — a
-    # floor supervisor — never the holder of an authority its own manager
-    # lacks.  Gate on this set instead of naming the line manager by hand: the
-    # hand-written sets drifted (cancel and return were line-manager-only for
-    # months, so a JARZ Manager was refused on their own branch's orders).
-    # Both spellings of the line-manager role are carried because both exist as
-    # real Role records on staging and production.
-    LINE_MANAGER_TIER = {
-        JARZ_LINE_MANAGER,
-        JARZ_LINE_MANAGER_ALT,
-        JARZ_MANAGER,
-        ADMINISTRATOR,
-        SYSTEM_MANAGER,
-    }
-    #: Same membership, lowercased — for the gates that compare case-folded
-    #: role names.  Keep the two in lockstep.
-    LINE_MANAGER_TIER_LOWER = {role.lower() for role in LINE_MANAGER_TIER}
-    # Move stock between warehouses (``api/transfer.py``).  Deliberately WIDER
-    # than MANAGER: moving jars from the branch to Finished Goods (or between
-    # branches) is floor-supervisor work, and gating it on MANAGER alone left a
-    # line manager with no way to do it — the drawer entry was hidden and the
-    # API answered "Not permitted" if they reached it another way.  Kept as its
-    # own name rather than widening MANAGER, because MANAGER also guards Cash
-    # Transfer and the Purchase Invoice, which commit money and stay closed to
-    # the line manager.
-    STOCK_TRANSFER = MANAGER | LINE_MANAGER_TIER
-    # Read-only access to the Production Board.  Deliberately WIDER than
-    # MANUFACTURING: the mobile screen has always been gated client-side on
-    # "JARZ Manager", which MANUFACTURING does not contain — so a
-    # JARZ-Manager-only user could open the screen and then hit
-    # PermissionError on every call.  Widening MANUFACTURING itself would
-    # change who may submit Work Orders, so the read path gets its own set.
-    PRODUCTION_VIEW = MANUFACTURING | {JARZ_MANAGER, PRODUCTION_OPERATOR}
-    # Start/finish a batch on the floor.  Same membership as PRODUCTION_VIEW
-    # today, but kept as its own name so tightening execution later (or opening
-    # the read path wider) does not require touching the other.
-    PRODUCTION_EXECUTE = MANUFACTURING | {JARZ_MANAGER, PRODUCTION_OPERATOR}
-    # Post a batch on an earlier date.  Operators are deliberately excluded:
-    # backdating is how stock and COGS land in a closed period, and the whole
-    # point of the floor role is that it cannot choose when a thing happened.
-    PRODUCTION_BACKDATE = MANUFACTURING | {JARZ_MANAGER}
-    # Raise an item request ("we're out of tomatoes").  Deliberately the widest
-    # set in this class: asking for stock commits no money and no stock, and a
-    # request flow only works if the people who actually notice a shortage —
-    # floor staff, line managers, cashiers — can file one.  Buying against a
-    # request stays on PURCHASE.
-    PURCHASE_REQUEST = (
-        PURCHASE
-        | PRODUCTION_VIEW
-        | {
-            JARZ_MANAGER,
-            JARZ_LINE_MANAGER,
-            # Carried here too, and this one was genuinely missing: this set
-            # named only the lower-case spelling, so a line manager holding the
-            # "JARZ line manager" Role record — the capitalised one, which is
-            # the spelling the mobile client matches on — could not raise an
-            # item request at all. Every other tier check carries both.
-            JARZ_LINE_MANAGER_ALT,
-            PRODUCTION_OPERATOR,
-            "POS User",
-            "POS Manager",
-        }
-    )
-    # Review the whole request queue and reject entries.  Requesters see only
-    # their own branch's queue; this set sees and acts on everything.
-    PURCHASE_REQUEST_REVIEW = PURCHASE | {JARZ_MANAGER}
-    # Task Board "manager": may create tasks, sees every line manager's work and
-    # may hand work to someone else. Deliberately NOT LINE_MANAGER_TIER -- that
-    # is the board's door (who may use it at all), this is who runs it.
-    TASK_MANAGER = {JARZ_MANAGER, SYSTEM_MANAGER, ADMINISTRATOR}
-    #: Answers customers in the chat inbox (WhatsApp / Instagram / Messenger /
-    #: comments). A real Role record; api/orders.py already names it literally.
-    MODERATOR = "Moderator"
-    #: Chat inbox door (api/chat.py): moderators plus the whole manager tier.
-    CHAT = {MODERATOR, JARZ_MANAGER, SYSTEM_MANAGER} | LINE_MANAGER_TIER
+class ROLES:
+	# Individual role names first, so the sets below can be built from them
+	# rather than repeating the literals. The sets used to come first, which is
+	# why JARZ_MANAGER could not appear in them and why the divergence below
+	# went unnoticed for so long.
+	JARZ_MANAGER = "JARZ Manager"
+	JARZ_LINE_MANAGER = "jarz line manager"
+	#: Both spellings exist as real Role records on staging and production.
+	#: Anywhere the line manager is named, name both — a set that carries only
+	#: one silently excludes half the people holding the role.
+	JARZ_LINE_MANAGER_ALT = "JARZ line manager"
+	ADMINISTRATOR = "Administrator"
+	SYSTEM_MANAGER = "System Manager"
+	PRODUCTION_OPERATOR = "Production Operator"
+
+	# JARZ Manager is a member of all four operational sets below. It was in
+	# none of them, while the mobile drawer gated Cash Transfer, Stock Transfer,
+	# Inventory Count and Purchase Invoice on `hasManagerAccess` — which does
+	# include JARZ Manager. So the app showed a JARZ-Manager-only user four
+	# entries and the server answered "Not permitted: Managers only" on every
+	# one, along with the Production Board's item picker and Return-WIP.
+	# The owner's call (2026-08-19) is that the server was wrong: a JARZ Manager
+	# is meant to do these things.
+	MANAGER: ClassVar[set[str]] = {
+		"System Manager",
+		"Accounts Manager",
+		"Stock Manager",
+		"Manufacturing Manager",
+		"Purchase Manager",
+		JARZ_MANAGER,
+	}
+	STOCK: ClassVar[set[str]] = {
+		"System Manager",
+		"Stock Manager",
+		"Manufacturing Manager",
+		"Accounts Manager",
+		JARZ_MANAGER,
+	}
+	MANUFACTURING: ClassVar[set[str]] = {
+		"System Manager",
+		"Manufacturing Manager",
+		"Stock Manager",
+		"Purchase Manager",
+		JARZ_MANAGER,
+	}
+	PURCHASE: ClassVar[set[str]] = {
+		"System Manager",
+		"Stock Manager",
+		"Manufacturing Manager",
+		"Purchase Manager",
+		"Accounts Manager",
+		JARZ_MANAGER,
+	}
+	ADMIN: ClassVar[set[str]] = {"System Manager", "POS Manager"}
+	# Everything a JARZ line manager may do, the manager tier and the
+	# Administrator may do too.  The line manager is a *narrower* manager — a
+	# floor supervisor — never the holder of an authority its own manager
+	# lacks.  Gate on this set instead of naming the line manager by hand: the
+	# hand-written sets drifted (cancel and return were line-manager-only for
+	# months, so a JARZ Manager was refused on their own branch's orders).
+	# Both spellings of the line-manager role are carried because both exist as
+	# real Role records on staging and production.
+	LINE_MANAGER_TIER: ClassVar[set[str]] = {
+		JARZ_LINE_MANAGER,
+		JARZ_LINE_MANAGER_ALT,
+		JARZ_MANAGER,
+		ADMINISTRATOR,
+		SYSTEM_MANAGER,
+	}
+	#: Same membership, lowercased — for the gates that compare case-folded
+	#: role names.  Keep the two in lockstep.
+	LINE_MANAGER_TIER_LOWER: ClassVar[set[str]] = {role.lower() for role in LINE_MANAGER_TIER}
+	# Move stock between warehouses (``api/transfer.py``).  Deliberately WIDER
+	# than MANAGER: moving jars from the branch to Finished Goods (or between
+	# branches) is floor-supervisor work, and gating it on MANAGER alone left a
+	# line manager with no way to do it — the drawer entry was hidden and the
+	# API answered "Not permitted" if they reached it another way.  Kept as its
+	# own name rather than widening MANAGER, because MANAGER also guards Cash
+	# Transfer and the Purchase Invoice, which commit money and stay closed to
+	# the line manager.
+	STOCK_TRANSFER = MANAGER | LINE_MANAGER_TIER
+	# Read-only access to the Production Board.  Deliberately WIDER than
+	# MANUFACTURING: the mobile screen has always been gated client-side on
+	# "JARZ Manager", which MANUFACTURING does not contain — so a
+	# JARZ-Manager-only user could open the screen and then hit
+	# PermissionError on every call.  Widening MANUFACTURING itself would
+	# change who may submit Work Orders, so the read path gets its own set.
+	PRODUCTION_VIEW = MANUFACTURING | {JARZ_MANAGER, PRODUCTION_OPERATOR}
+	# Start/finish a batch on the floor.  Same membership as PRODUCTION_VIEW
+	# today, but kept as its own name so tightening execution later (or opening
+	# the read path wider) does not require touching the other.
+	PRODUCTION_EXECUTE = MANUFACTURING | {JARZ_MANAGER, PRODUCTION_OPERATOR}
+	# Post a batch on an earlier date.  Operators are deliberately excluded:
+	# backdating is how stock and COGS land in a closed period, and the whole
+	# point of the floor role is that it cannot choose when a thing happened.
+	PRODUCTION_BACKDATE = MANUFACTURING | {JARZ_MANAGER}
+	# Raise an item request ("we're out of tomatoes").  Deliberately the widest
+	# set in this class: asking for stock commits no money and no stock, and a
+	# request flow only works if the people who actually notice a shortage —
+	# floor staff, line managers, cashiers — can file one.  Buying against a
+	# request stays on PURCHASE.
+	PURCHASE_REQUEST = (
+		PURCHASE
+		| PRODUCTION_VIEW
+		| {
+			JARZ_MANAGER,
+			JARZ_LINE_MANAGER,
+			# Carried here too, and this one was genuinely missing: this set
+			# named only the lower-case spelling, so a line manager holding the
+			# "JARZ line manager" Role record — the capitalised one, which is
+			# the spelling the mobile client matches on — could not raise an
+			# item request at all. Every other tier check carries both.
+			JARZ_LINE_MANAGER_ALT,
+			PRODUCTION_OPERATOR,
+			"POS User",
+			"POS Manager",
+		}
+	)
+	# Review the whole request queue and reject entries.  Requesters see only
+	# their own branch's queue; this set sees and acts on everything.
+	PURCHASE_REQUEST_REVIEW = PURCHASE | {JARZ_MANAGER}
+	# Task Board "manager": may create tasks, sees every line manager's work and
+	# may hand work to someone else. Deliberately NOT LINE_MANAGER_TIER -- that
+	# is the board's door (who may use it at all), this is who runs it.
+	TASK_MANAGER: ClassVar[set[str]] = {JARZ_MANAGER, SYSTEM_MANAGER, ADMINISTRATOR}
+	#: Answers customers in the chat inbox (WhatsApp / Instagram / Messenger /
+	#: comments). A real Role record; api/orders.py already names it literally.
+	MODERATOR = "Moderator"
+	#: Chat inbox door (api/chat.py): moderators plus the whole manager tier.
+	CHAT: ClassVar[set[str]] = {MODERATOR, JARZ_MANAGER, SYSTEM_MANAGER} | LINE_MANAGER_TIER
 
 
 #: Module-level alias the chat services import (contract name).
@@ -166,127 +191,134 @@ CHAT_ROLES = frozenset(ROLES.CHAT)
 # carries names with no Python counterpart.  The invariant is Python ⊆ Dart for
 # listened events — not set equality.  Do not write an equality test.
 
+
 class WS_EVENTS:
-    NEW_INVOICE = "jarz_pos_new_invoice"
-    INVOICE_STATE_CHANGE = "jarz_pos_invoice_state_change"
-    KANBAN_UPDATE = "kanban_update"
-    INVOICE_CANCELLED = "jarz_pos_invoice_cancelled"
-    INVOICE_ACCEPTED = "jarz_pos_invoice_accepted"
-    OUT_FOR_DELIVERY_TRANSITION = "jarz_pos_out_for_delivery_transition"
-    COURIER_OUTSTANDING = "jarz_pos_courier_outstanding"
-    COURIER_EXPENSE_PAID = "jarz_pos_courier_expense_paid"
-    COURIER_SETTLED = "jarz_pos_courier_settled"
-    # A posted courier settlement was reversed (see api.couriers.unsettle_courier_settlement).
-    # No Dart listener exists yet — see the class docstring on Python vs Dart parity.
-    COURIER_SETTLEMENT_REVERSED = "jarz_pos_courier_settlement_reversed"
-    SALES_PARTNER_COLLECT_PROMPT = "jarz_pos_sales_partner_collect_prompt"
-    SALES_PARTNER_UNPAID_OFD = "jarz_pos_sales_partner_unpaid_ofd"
-    SALES_PARTNER_PAID_OFD = "jarz_pos_sales_partner_paid_ofd"
-    COURIER_EXPENSE_ONLY = "jarz_pos_courier_expense_only"
-    SINGLE_COURIER_SETTLEMENT = "jarz_pos_single_courier_settlement"
-    COURIER_COLLECTED_SETTLEMENT = "jarz_pos_courier_collected_settlement"
-    TRIP_CREATED = "jarz_pos_trip_created"
-    TRIP_OFD = "jarz_pos_trip_ofd"
-    TRIP_COMPLETED = "jarz_pos_trip_completed"
-    CUSTOM_SHIPPING_REQUESTED = "jarz_pos_custom_shipping_requested"
-    CUSTOM_SHIPPING_APPROVED = "jarz_pos_custom_shipping_approved"
-    CUSTOM_SHIPPING_REJECTED = "jarz_pos_custom_shipping_rejected"
-    SHIFT_STARTED = "jarz_pos_shift_started"
-    SHIFT_ENDED = "jarz_pos_shift_ended"
-    # A Jarz Expense Request was filed that a JARZ Manager has to answer.
-    # The app is told by push (api.notifications.notify_expense_approval_required);
-    # this event is the in-session twin so an open expenses screen can refresh
-    # without waiting for its poll. No Dart listener yet -- see the class
-    # docstring on Python vs Dart parity.
-    EXPENSE_APPROVAL_REQUESTED = "jarz_pos_expense_approval_requested"
-    # Consumable deduction could not post for an invoice that reached Out for
-    # Delivery. Raised to a human on purpose: the handler is fire-and-forget
-    # (it must never block fulfilment) and stamp_out_for_delivery_flag closes
-    # the retry door immediately after it, so a failure nobody sees is a
-    # deduction lost for good -- which is how 167 consecutive failures went
-    # unnoticed for 11 days.
-    CONSUMABLE_DEDUCTION_FAILED = "jarz_pos_consumable_deduction_failed"
-    # Courier app (see COURIER_CONTRACTS.md §7 — frozen 2026-08-05).
-    COURIER_STOP_ARRIVED = "jarz_pos_courier_stop_arrived"
-    COURIER_STOP_DELIVERED = "jarz_pos_courier_stop_delivered"
-    COURIER_STOP_FAILED = "jarz_pos_courier_stop_failed"
-    # Trip leg. Not a state change — the board does not move — so these are
-    # separate events rather than another COURIER_STOP_* variant.
-    COURIER_LEG_STARTED = "jarz_pos_courier_leg_started"
-    COURIER_LEG_ENDED = "jarz_pos_courier_leg_ended"
-    COURIER_DUTY_CHANGED = "jarz_pos_courier_duty_changed"
-    COURIER_DEPOSIT_DECLARED = "jarz_pos_courier_deposit_declared"
-    ADDRESS_PIN_UPDATED = "jarz_pos_address_pin_updated"
-    # B2B printed-label stock running low (see services/label_stock.py).
-    LABEL_STOCK_ALERT = "jarz_pos_label_stock_alert"
-    # Task Board: a task a recipient is involved in changed (see
-    # api.notifications.send_task_notification). Payload {"task", "event"}.
-    TASK_UPDATED = "jarz_task_updated"
-    # Chat inbox: a conversation got a message, a draft, a status or an
-    # assignee change (see services/chat_common.publish_chat_update). One room
-    # per moderator. Payload {conversation, kind, summary, message, draft}.
-    CHAT_UPDATE = "jarz_chat_update"
-    TEST_EVENT = "test_event"
+	NEW_INVOICE = "jarz_pos_new_invoice"
+	INVOICE_STATE_CHANGE = "jarz_pos_invoice_state_change"
+	KANBAN_UPDATE = "kanban_update"
+	INVOICE_CANCELLED = "jarz_pos_invoice_cancelled"
+	INVOICE_ACCEPTED = "jarz_pos_invoice_accepted"
+	OUT_FOR_DELIVERY_TRANSITION = "jarz_pos_out_for_delivery_transition"
+	COURIER_OUTSTANDING = "jarz_pos_courier_outstanding"
+	COURIER_EXPENSE_PAID = "jarz_pos_courier_expense_paid"
+	COURIER_SETTLED = "jarz_pos_courier_settled"
+	# A posted courier settlement was reversed (see api.couriers.unsettle_courier_settlement).
+	# No Dart listener exists yet — see the class docstring on Python vs Dart parity.
+	COURIER_SETTLEMENT_REVERSED = "jarz_pos_courier_settlement_reversed"
+	SALES_PARTNER_COLLECT_PROMPT = "jarz_pos_sales_partner_collect_prompt"
+	SALES_PARTNER_UNPAID_OFD = "jarz_pos_sales_partner_unpaid_ofd"
+	SALES_PARTNER_PAID_OFD = "jarz_pos_sales_partner_paid_ofd"
+	COURIER_EXPENSE_ONLY = "jarz_pos_courier_expense_only"
+	SINGLE_COURIER_SETTLEMENT = "jarz_pos_single_courier_settlement"
+	COURIER_COLLECTED_SETTLEMENT = "jarz_pos_courier_collected_settlement"
+	TRIP_CREATED = "jarz_pos_trip_created"
+	TRIP_OFD = "jarz_pos_trip_ofd"
+	TRIP_COMPLETED = "jarz_pos_trip_completed"
+	CUSTOM_SHIPPING_REQUESTED = "jarz_pos_custom_shipping_requested"
+	CUSTOM_SHIPPING_APPROVED = "jarz_pos_custom_shipping_approved"
+	CUSTOM_SHIPPING_REJECTED = "jarz_pos_custom_shipping_rejected"
+	SHIFT_STARTED = "jarz_pos_shift_started"
+	SHIFT_ENDED = "jarz_pos_shift_ended"
+	# A Jarz Expense Request was filed that a JARZ Manager has to answer.
+	# The app is told by push (api.notifications.notify_expense_approval_required);
+	# this event is the in-session twin so an open expenses screen can refresh
+	# without waiting for its poll. No Dart listener yet -- see the class
+	# docstring on Python vs Dart parity.
+	EXPENSE_APPROVAL_REQUESTED = "jarz_pos_expense_approval_requested"
+	# Consumable deduction could not post for an invoice that reached Out for
+	# Delivery. Raised to a human on purpose: the handler is fire-and-forget
+	# (it must never block fulfilment) and stamp_out_for_delivery_flag closes
+	# the retry door immediately after it, so a failure nobody sees is a
+	# deduction lost for good -- which is how 167 consecutive failures went
+	# unnoticed for 11 days.
+	CONSUMABLE_DEDUCTION_FAILED = "jarz_pos_consumable_deduction_failed"
+	# Courier app (see COURIER_CONTRACTS.md §7 — frozen 2026-08-05).
+	COURIER_STOP_ARRIVED = "jarz_pos_courier_stop_arrived"
+	COURIER_STOP_DELIVERED = "jarz_pos_courier_stop_delivered"
+	COURIER_STOP_FAILED = "jarz_pos_courier_stop_failed"
+	# Trip leg. Not a state change — the board does not move — so these are
+	# separate events rather than another COURIER_STOP_* variant.
+	COURIER_LEG_STARTED = "jarz_pos_courier_leg_started"
+	COURIER_LEG_ENDED = "jarz_pos_courier_leg_ended"
+	COURIER_DUTY_CHANGED = "jarz_pos_courier_duty_changed"
+	COURIER_DEPOSIT_DECLARED = "jarz_pos_courier_deposit_declared"
+	ADDRESS_PIN_UPDATED = "jarz_pos_address_pin_updated"
+	# B2B printed-label stock running low (see services/label_stock.py).
+	LABEL_STOCK_ALERT = "jarz_pos_label_stock_alert"
+	# Task Board: a task a recipient is involved in changed (see
+	# api.notifications.send_task_notification). Payload {"task", "event"}.
+	TASK_UPDATED = "jarz_task_updated"
+	# Chat inbox: a conversation got a message, a draft, a status or an
+	# assignee change (see services/chat_common.publish_chat_update). One room
+	# per moderator. Payload {conversation, kind, summary, message, draft}.
+	CHAT_UPDATE = "jarz_chat_update"
+	TEST_EVENT = "test_event"
 
 
 # ── Query limits ────────────────────────────────────────────────────────
 
+
 class QUERY_LIMITS:
-    GL_ENTRIES = 1000
-    KANBAN_INVOICES = 5000
-    TERRITORIES = 250
-    DEFAULT_LIST = 100
-    NOTIFICATIONS = 50
-    SEARCH = 20
-    RECENT = 10
+	GL_ENTRIES = 1000
+	KANBAN_INVOICES = 5000
+	TERRITORIES = 250
+	DEFAULT_LIST = 100
+	NOTIFICATIONS = 50
+	SEARCH = 20
+	RECENT = 10
 
 
 # ── Status / document strings ──────────────────────────────────────────
 
+
 class STATUS:
-    DRAFT = "Draft"
-    OPEN = "Open"
-    PAID = "Paid"
-    UNPAID = "Unpaid"
-    CANCELLED = "Cancelled"
-    SUBMITTED = "Submitted"
-    RETURN = "Return"
-    # A request a manager turned down. Distinct from CANCELLED on purpose:
-    # cancelled means an approved document was reversed, rejected means it never
-    # became one. Collapsing the two would hide which of the requester's
-    # submissions were refused outright.
-    REJECTED = "Rejected"
-    PENDING_APPROVAL = "Pending Approval"
-    APPROVED = "Approved"
+	DRAFT = "Draft"
+	OPEN = "Open"
+	PAID = "Paid"
+	UNPAID = "Unpaid"
+	CANCELLED = "Cancelled"
+	SUBMITTED = "Submitted"
+	RETURN = "Return"
+	# A request a manager turned down. Distinct from CANCELLED on purpose:
+	# cancelled means an approved document was reversed, rejected means it never
+	# became one. Collapsing the two would hide which of the requester's
+	# submissions were refused outright.
+	REJECTED = "Rejected"
+	PENDING_APPROVAL = "Pending Approval"
+	APPROVED = "Approved"
 
 
 # ── Payment modes ──────────────────────────────────────────────────────
 
+
 class PAYMENT_MODES:
-    CASH = "Cash"
-    CASH_LOWER = "cash"
-    ONLINE = "Online"
-    ONLINE_LOWER = "online"
+	CASH = "Cash"
+	CASH_LOWER = "cash"
+	ONLINE = "Online"
+	ONLINE_LOWER = "online"
 
 
 # ── Delivery groups ────────────────────────────────────────────────────
 
+
 class DELIVERY_GROUPS:
-    EMPLOYEE_GROUP = "Delivery"
-    SUPPLIER_GROUP = "Delivery"
+	EMPLOYEE_GROUP = "Delivery"
+	SUPPLIER_GROUP = "Delivery"
 
 
 # ── Timing modes ───────────────────────────────────────────────────────
 
+
 class TIMING_MODES:
-    SAME_DAY = "Same Day"
-    NEXT_DAY = "Next Day"
+	SAME_DAY = "Same Day"
+	NEXT_DAY = "Next Day"
 
 
 # ── Price lists ─────────────────────────────────────────────────────────
 
+
 class PRICE_LISTS:
-    STANDARD_BUYING = "Standard Buying"
+	STANDARD_BUYING = "Standard Buying"
 
 
 # ── Default UOM ─────────────────────────────────────────────────────────
@@ -296,9 +328,10 @@ DEFAULT_UOM = "Nos"
 
 # ── Voucher types ───────────────────────────────────────────────────────
 
+
 class VOUCHER_TYPES:
-    SALES_INVOICE = "Sales Invoice"
-    JOURNAL_ENTRY = "Journal Entry"
-    PAYMENT_ENTRY = "Payment Entry"
-    POS_INVOICE = "POS Invoice"
-    DELIVERY_NOTE = "Delivery Note"
+	SALES_INVOICE = "Sales Invoice"
+	JOURNAL_ENTRY = "Journal Entry"
+	PAYMENT_ENTRY = "Payment Entry"
+	POS_INVOICE = "POS Invoice"
+	DELIVERY_NOTE = "Delivery Note"

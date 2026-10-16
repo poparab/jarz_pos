@@ -114,16 +114,17 @@ is the single row a manager most needs to ask about.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date as date_cls
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Optional
 
 import frappe
 from frappe import _
 from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_day, getdate
 
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
-from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER, mask_tokens_in_detail
 from jarz_pos.services import roster as roster_service
+from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER, mask_tokens_in_detail
 from jarz_pos.utils.settings_utils import single_flag, single_int
 
 SETTINGS = "Jarz POS Settings"
@@ -154,17 +155,17 @@ MAX_GRID_DAYS = 366
 #: ``shift_start``/``shift_end`` are stamped by ``fetch_shift()`` in validate, so
 #: they are present even though no Attendance record ever is.
 CHECKIN_FIELDS = [
-    "name",
-    "employee",
-    "time",
-    "log_type",
-    "shift",
-    "shift_start",
-    "shift_end",
-    "offshift",
-    "latitude",
-    "longitude",
-    "device_id",
+	"name",
+	"employee",
+	"time",
+	"log_type",
+	"shift",
+	"shift_start",
+	"shift_end",
+	"offshift",
+	"latitude",
+	"longitude",
+	"device_id",
 ]
 
 #: Read even on a bench whose HRMS predates the geolocation fields.
@@ -181,15 +182,15 @@ STATUS_NOT_ROSTERED = "not_rostered"
 
 #: The exact strings the Flutter client switches on. Order is the order the
 #: client renders its legend in; it is part of the contract.
-STATUSES: Tuple[str, ...] = (
-    STATUS_PRESENT,
-    STATUS_LATE,
-    STATUS_LATE_UNMATCHED,
-    STATUS_ABSENT,
-    STATUS_PENDING,
-    STATUS_OFF,
-    STATUS_HOLIDAY,
-    STATUS_NOT_ROSTERED,
+STATUSES: tuple[str, ...] = (
+	STATUS_PRESENT,
+	STATUS_LATE,
+	STATUS_LATE_UNMATCHED,
+	STATUS_ABSENT,
+	STATUS_PENDING,
+	STATUS_OFF,
+	STATUS_HOLIDAY,
+	STATUS_NOT_ROSTERED,
 )
 
 #: Days that carried an obligation AND have already been settled one way or the
@@ -202,14 +203,14 @@ SHOWED_STATUSES = (STATUS_PRESENT, STATUS_LATE, STATUS_LATE_UNMATCHED)
 
 #: Ordering for the day board: the rows a manager has to act on first.
 DAY_ROW_RANK = {
-    STATUS_LATE: 0,
-    STATUS_LATE_UNMATCHED: 1,
-    STATUS_ABSENT: 2,
-    STATUS_PENDING: 3,
-    STATUS_PRESENT: 4,
-    STATUS_OFF: 5,
-    STATUS_HOLIDAY: 6,
-    STATUS_NOT_ROSTERED: 7,
+	STATUS_LATE: 0,
+	STATUS_LATE_UNMATCHED: 1,
+	STATUS_ABSENT: 2,
+	STATUS_PENDING: 3,
+	STATUS_PRESENT: 4,
+	STATUS_OFF: 5,
+	STATUS_HOLIDAY: 6,
+	STATUS_NOT_ROSTERED: 7,
 }
 
 
@@ -219,81 +220,81 @@ DAY_ROW_RANK = {
 
 
 def has_attendance_access() -> bool:
-    """Same tier as the roster: if you may set the rota you may read the clock.
+	"""Same tier as the roster: if you may set the rota you may read the clock.
 
-    A narrower gate would be a dead screen. The attendance view is reached from
-    the same manager dashboard as the roster, and every person who can decide
-    who works tomorrow is the person who needs to know who failed to turn up
-    today.
-    """
-    return roster_service.has_roster_access()
+	A narrower gate would be a dead screen. The attendance view is reached from
+	the same manager dashboard as the roster, and every person who can decide
+	who works tomorrow is the person who needs to know who failed to turn up
+	today.
+	"""
+	return roster_service.has_roster_access()
 
 
 def ensure_attendance_access() -> None:
-    if not has_attendance_access():
-        frappe.throw(_("Not permitted: attendance access required"), frappe.PermissionError)
+	if not has_attendance_access():
+		frappe.throw(_("Not permitted: attendance access required"), frappe.PermissionError)
 
 
-def allowed_shift_locations() -> Optional[Set[str]]:
-    """Branch scope, identical to the roster's. ``None`` means unrestricted."""
-    return roster_service.allowed_shift_locations()
+def allowed_shift_locations() -> set[str] | None:
+	"""Branch scope, identical to the roster's. ``None`` means unrestricted."""
+	return roster_service.allowed_shift_locations()
 
 
-def scope_payload(allowed: Optional[Set[str]]) -> Dict[str, Any]:
-    return {
-        "configured": roster_service.roster_scope_configured(),
-        "unrestricted": allowed is None,
-        "locations": None if allowed is None else sorted(allowed),
-    }
+def scope_payload(allowed: set[str] | None) -> dict[str, Any]:
+	return {
+		"configured": roster_service.roster_scope_configured(),
+		"unrestricted": allowed is None,
+		"locations": None if allowed is None else sorted(allowed),
+	}
 
 
 def NOT_AVAILABLE_MESSAGE() -> str:
-    return _("That employee is not available to you.")
+	return _("That employee is not available to you.")
 
 
 def ensure_employee_in_scope(employee: str) -> None:
-    """Refuse to report on somebody outside the caller's branches.
+	"""Refuse to report on somebody outside the caller's branches.
 
-    The read equivalent of ``api/roster._ensure_employee_in_scope``, with one
-    difference that matters: it accepts ``Inactive`` assignments. A branch
-    manager pulling last quarter's attendance for one of their own staff would
-    otherwise be told the person is not at their branch, because HRMS has since
-    flipped every one of that employee's past assignments to Inactive.
-    """
-    allowed = allowed_shift_locations()
-    if allowed is None:
-        return
+	The read equivalent of ``api/roster._ensure_employee_in_scope``, with one
+	difference that matters: it accepts ``Inactive`` assignments. A branch
+	manager pulling last quarter's attendance for one of their own staff would
+	otherwise be told the person is not at their branch, because HRMS has since
+	flipped every one of that employee's past assignments to Inactive.
+	"""
+	allowed = allowed_shift_locations()
+	if allowed is None:
+		return
 
-    locations: Set[str] = set()
-    try:
-        for row in frappe.get_all(
-            "Shift Assignment",
-            filters={
-                "employee": employee,
-                "docstatus": 1,
-                "status": ("in", roster_service.READABLE_ASSIGNMENT_STATUSES),
-            },
-            fields=["shift_location"],
-        ):
-            if row.get("shift_location"):
-                locations.add(row["shift_location"])
-    except Exception:
-        pass
-    try:
-        for row in frappe.get_all(
-            "Shift Schedule Assignment",
-            filters={"employee": employee, "enabled": 1},
-            fields=["shift_location"],
-        ):
-            if row.get("shift_location"):
-                locations.add(row["shift_location"])
-    except Exception:
-        pass
+	locations: set[str] = set()
+	try:
+		for row in frappe.get_all(
+			"Shift Assignment",
+			filters={
+				"employee": employee,
+				"docstatus": 1,
+				"status": ("in", roster_service.READABLE_ASSIGNMENT_STATUSES),
+			},
+			fields=["shift_location"],
+		):
+			if row.get("shift_location"):
+				locations.add(row["shift_location"])
+	except Exception:
+		pass
+	try:
+		for row in frappe.get_all(
+			"Shift Schedule Assignment",
+			filters={"employee": employee, "enabled": 1},
+			fields=["shift_location"],
+		):
+			if row.get("shift_location"):
+				locations.add(row["shift_location"])
+	except Exception:
+		pass
 
-    if not locations.intersection(allowed):
-        # Deliberately says nothing about the employee: naming them would let an
-        # out-of-scope caller confirm which ids exist and read their names.
-        frappe.throw(NOT_AVAILABLE_MESSAGE(), frappe.PermissionError)
+	if not locations.intersection(allowed):
+		# Deliberately says nothing about the employee: naming them would let an
+		# out-of-scope caller confirm which ids exist and read their names.
+		frappe.throw(NOT_AVAILABLE_MESSAGE(), frappe.PermissionError)
 
 
 # ---------------------------------------------------------------------------
@@ -302,42 +303,42 @@ def ensure_employee_in_scope(employee: str) -> None:
 
 
 def grace_minutes() -> int:
-    """Minutes of grace before an arrival is late.
+	"""Minutes of grace before an arrival is late.
 
-    Read through ``single_int`` rather than ``get_single_value``: the latter
-    casts an Int through ``cint()``, so a field nobody has ever written reads as
-    ``0`` and every arrival one second past the hour would be graded late, with
-    the declared default of 15 unreachable. A deliberate 0 is honoured as 0 --
-    "no grace" is a real policy somebody may choose.
-    """
-    try:
-        value = single_int(SETTINGS, GRACE_FIELD, DEFAULT_GRACE_MINUTES)
-    except Exception:
-        return DEFAULT_GRACE_MINUTES
-    # A negative grace would grade an on-time arrival as late; clamp rather than
-    # throw, because this is a read path and a typo in Desk must not 500 it.
-    return max(0, int(value))
+	Read through ``single_int`` rather than ``get_single_value``: the latter
+	casts an Int through ``cint()``, so a field nobody has ever written reads as
+	``0`` and every arrival one second past the hour would be graded late, with
+	the declared default of 15 unreachable. A deliberate 0 is honoured as 0 --
+	"no grace" is a real policy somebody may choose.
+	"""
+	try:
+		value = single_int(SETTINGS, GRACE_FIELD, DEFAULT_GRACE_MINUTES)
+	except Exception:
+		return DEFAULT_GRACE_MINUTES
+	# A negative grace would grade an on-time arrival as late; clamp rather than
+	# throw, because this is a read path and a typo in Desk must not 500 it.
+	return max(0, int(value))
 
 
 def checkin_enforced() -> bool:
-    """Whether the roster gate is refusing unrostered check-ins right now.
+	"""Whether the roster gate is refusing unrostered check-ins right now.
 
-    Surfaced on the bootstrap because it changes how an ``absent`` should be
-    read: with the gate off, a missing check-in may simply mean somebody clocked
-    in from the wrong place and was not stopped.
-    """
-    try:
-        return single_flag(SETTINGS, "roster_enforce_checkin", True)
-    except Exception:
-        return True
+	Surfaced on the bootstrap because it changes how an ``absent`` should be
+	read: with the gate off, a missing check-in may simply mean somebody clocked
+	in from the wrong place and was not stopped.
+	"""
+	try:
+		return single_flag(SETTINGS, "roster_enforce_checkin", True)
+	except Exception:
+		return True
 
 
 def hrms_available() -> bool:
-    return roster_service.hrms_available()
+	return roster_service.hrms_available()
 
 
 def _hrms_notice() -> str:
-    return _("HRMS is not installed on this site, so there is no attendance to show.")
+	return _("HRMS is not installed on this site, so there is no attendance to show.")
 
 
 # ---------------------------------------------------------------------------
@@ -345,89 +346,87 @@ def _hrms_notice() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _hhmm(value: Any) -> Optional[str]:
-    """Render a Shift Type time as ``HH:mm``, keeping midnight visible.
+def _hhmm(value: Any) -> str | None:
+	"""Render a Shift Type time as ``HH:mm``, keeping midnight visible.
 
-    A Frappe ``Time`` field comes back as ``datetime.timedelta``, and midnight is
-    ``timedelta(0)`` -- which is FALSY. ``str(value or "")`` therefore erases the
-    end time of the Friday courier shift, which really does end at 00:00. Only
-    ``None`` means "no time here".
-    """
-    parsed = roster_service._as_timedelta(value)
-    if parsed is None:
-        return None
-    total = int(parsed.total_seconds()) % 86400
-    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}"
-
-
-def _dt_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    try:
-        return get_datetime(value).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return None
+	A Frappe ``Time`` field comes back as ``datetime.timedelta``, and midnight is
+	``timedelta(0)`` -- which is FALSY. ``str(value or "")`` therefore erases the
+	end time of the Friday courier shift, which really does end at 00:00. Only
+	``None`` means "no time here".
+	"""
+	parsed = roster_service._as_timedelta(value)
+	if parsed is None:
+		return None
+	total = int(parsed.total_seconds()) % 86400
+	return f"{total // 3600:02d}:{(total % 3600) // 60:02d}"
 
 
-def _float_or_none(value: Any) -> Optional[float]:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+def _dt_text(value: Any) -> str | None:
+	if value is None:
+		return None
+	try:
+		return get_datetime(value).strftime("%Y-%m-%d %H:%M:%S")
+	except Exception:
+		return None
 
 
-def _distance_m(lat1: Any, lng1: Any, lat2: Any, lng2: Any) -> Optional[float]:
-    """Metres between two points, or ``None`` when they cannot be measured.
-
-    Uses HRMS's own ``get_distance_between_coordinates`` so that ``geo_ok``
-    reports exactly what ``EmployeeCheckin.validate_distance_from_shift_location``
-    and our own ``events/employee_checkin._enforce_location`` enforce -- a report
-    that disagreed with the gate would be worse than no report. The in-app
-    haversine is the fallback for a bench without HRMS; neither is written a
-    second time here.
-    """
-    a_lat, a_lng = _float_or_none(lat1), _float_or_none(lng1)
-    b_lat, b_lng = _float_or_none(lat2), _float_or_none(lng2)
-    if None in (a_lat, a_lng, b_lat, b_lng):
-        return None
-    try:
-        from hrms.hr.utils import get_distance_between_coordinates
-
-        return float(get_distance_between_coordinates(a_lat, a_lng, b_lat, b_lng))
-    except Exception:
-        from jarz_pos.utils.geo import distance_m_or_none
-
-        return distance_m_or_none(a_lat, a_lng, b_lat, b_lng)
+def _float_or_none(value: Any) -> float | None:
+	if value is None or value == "":
+		return None
+	try:
+		return float(value)
+	except (TypeError, ValueError):
+		return None
 
 
-def _geo_ok(coords: List[Tuple[Any, Any]], location_row: Optional[Dict[str, Any]]) -> Optional[bool]:
-    """Whether every located check-in of the day sat inside the branch radius.
+def _distance_m(lat1: Any, lng1: Any, lat2: Any, lng2: Any) -> float | None:
+	"""Metres between two points, or ``None`` when they cannot be measured.
 
-    ``None`` -- not False -- whenever the question cannot be answered: no
-    coordinates on the check-in, no branch resolved, or a branch with no radius
-    configured. ``False`` is an accusation and must only be returned when a
-    distance was actually measured and actually exceeded. A non-positive radius
-    means "do not measure", matching HRMS's own escape hatch.
-    """
-    if not coords or not location_row:
-        return None
-    radius = flt(location_row.get("checkin_radius") or 0)
-    if radius <= 0:
-        return None
+	Uses HRMS's own ``get_distance_between_coordinates`` so that ``geo_ok``
+	reports exactly what ``EmployeeCheckin.validate_distance_from_shift_location``
+	and our own ``events/employee_checkin._enforce_location`` enforce -- a report
+	that disagreed with the gate would be worse than no report. The in-app
+	haversine is the fallback for a bench without HRMS; neither is written a
+	second time here.
+	"""
+	a_lat, a_lng = _float_or_none(lat1), _float_or_none(lng1)
+	b_lat, b_lng = _float_or_none(lat2), _float_or_none(lng2)
+	if None in (a_lat, a_lng, b_lat, b_lng):
+		return None
+	try:
+		from hrms.hr.utils import get_distance_between_coordinates
 
-    measured = False
-    for lat, lng in coords:
-        distance = _distance_m(
-            location_row.get("latitude"), location_row.get("longitude"), lat, lng
-        )
-        if distance is None:
-            continue
-        measured = True
-        if distance > radius:
-            return False
-    return True if measured else None
+		return float(get_distance_between_coordinates(a_lat, a_lng, b_lat, b_lng))
+	except Exception:
+		from jarz_pos.utils.geo import distance_m_or_none
+
+		return distance_m_or_none(a_lat, a_lng, b_lat, b_lng)
+
+
+def _geo_ok(coords: list[tuple[Any, Any]], location_row: dict[str, Any] | None) -> bool | None:
+	"""Whether every located check-in of the day sat inside the branch radius.
+
+	``None`` -- not False -- whenever the question cannot be answered: no
+	coordinates on the check-in, no branch resolved, or a branch with no radius
+	configured. ``False`` is an accusation and must only be returned when a
+	distance was actually measured and actually exceeded. A non-positive radius
+	means "do not measure", matching HRMS's own escape hatch.
+	"""
+	if not coords or not location_row:
+		return None
+	radius = flt(location_row.get("checkin_radius") or 0)
+	if radius <= 0:
+		return None
+
+	measured = False
+	for lat, lng in coords:
+		distance = _distance_m(location_row.get("latitude"), location_row.get("longitude"), lat, lng)
+		if distance is None:
+			continue
+		measured = True
+		if distance > radius:
+			return False
+	return True if measured else None
 
 
 # ---------------------------------------------------------------------------
@@ -435,53 +434,53 @@ def _geo_ok(coords: List[Tuple[Any, Any]], location_row: Optional[Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def shift_time_map() -> Dict[str, Tuple[Optional[str], Optional[str]]]:
-    """``{shift_type: (start "HH:mm", end "HH:mm")}`` from the roster catalogue."""
-    out: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-    try:
-        catalog = roster_service.shift_catalog()
-    except Exception:
-        return out
-    for row in catalog:
-        out[row["shift_type"]] = (
-            _hhmm(row.get("start_time")),
-            _hhmm(row.get("end_time")),
-        )
-    return out
+def shift_time_map() -> dict[str, tuple[str | None, str | None]]:
+	"""``{shift_type: (start "HH:mm", end "HH:mm")}`` from the roster catalogue."""
+	out: dict[str, tuple[str | None, str | None]] = {}
+	try:
+		catalog = roster_service.shift_catalog()
+	except Exception:
+		return out
+	for row in catalog:
+		out[row["shift_type"]] = (
+			_hhmm(row.get("start_time")),
+			_hhmm(row.get("end_time")),
+		)
+	return out
 
 
-def shift_location_map() -> Dict[str, Dict[str, Any]]:
-    out: Dict[str, Dict[str, Any]] = {}
-    try:
-        rows = roster_service.shift_locations()
-    except Exception:
-        return out
-    for row in rows:
-        out[row["shift_location"]] = row
-    return out
+def shift_location_map() -> dict[str, dict[str, Any]]:
+	out: dict[str, dict[str, Any]] = {}
+	try:
+		rows = roster_service.shift_locations()
+	except Exception:
+		return out
+	for row in rows:
+		out[row["shift_location"]] = row
+	return out
 
 
-def _holidays(employees: List[str], start: date_cls, end: date_cls) -> Dict[str, Set[str]]:
-    try:
-        return roster_service._holidays_by_employee(employees, start, end)
-    except Exception:
-        # A holiday list that cannot be resolved must not take the whole month
-        # read down; the worst outcome is a Friday showing as not_rostered.
-        return {}
+def _holidays(employees: list[str], start: date_cls, end: date_cls) -> dict[str, set[str]]:
+	try:
+		return roster_service._holidays_by_employee(employees, start, end)
+	except Exception:
+		# A holiday list that cannot be resolved must not take the whole month
+		# read down; the worst outcome is a Friday showing as not_rostered.
+		return {}
 
 
-def _is_courier(employee: str, designation: Optional[str]) -> bool:
-    try:
-        return roster_service.is_courier(employee, designation)
-    except Exception:
-        return False
+def _is_courier(employee: str, designation: str | None) -> bool:
+	try:
+		return roster_service.is_courier(employee, designation)
+	except Exception:
+		return False
 
 
 def _employee_exempt_field_exists() -> bool:
-    try:
-        return bool(frappe.get_meta("Employee").get_field(EMPLOYEE_EXEMPT_FIELD))
-    except Exception:
-        return False
+	try:
+		return bool(frappe.get_meta("Employee").get_field(EMPLOYEE_EXEMPT_FIELD))
+	except Exception:
+		return False
 
 
 # ---------------------------------------------------------------------------
@@ -489,125 +488,123 @@ def _employee_exempt_field_exists() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """Fold raw check-ins into one group per ``(employee, shift day)``.
+def group_checkins(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+	"""Fold raw check-ins into one group per ``(employee, shift day)``.
 
-    The day a group belongs to is the date of its ``shift_start``, NOT the wall
-    clock of the punch. Every branch shift here crosses midnight, so a check-out
-    at 00:40 carries a wall-clock date one day after the shift it closes;
-    grouping on the wall clock would split one shift in half and report the tail
-    as an unexplained arrival on a day the person was not even rostered.
+	The day a group belongs to is the date of its ``shift_start``, NOT the wall
+	clock of the punch. Every branch shift here crosses midnight, so a check-out
+	at 00:40 carries a wall-clock date one day after the shift it closes;
+	grouping on the wall clock would split one shift in half and report the tail
+	as an unexplained arrival on a day the person was not even rostered.
 
-    A row HRMS could not match to any shift has no ``shift_start`` and falls back
-    to its wall-clock date -- that is the ``late_unmatched`` case, an arrival
-    outside the window rather than an absence.
-    """
-    groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for row in rows or []:
-        employee = row.get("employee")
-        if not employee or not row.get("time"):
-            continue
-        try:
-            when = get_datetime(row.get("time"))
-        except Exception:
-            continue
-        if when is None:
-            continue
+	A row HRMS could not match to any shift has no ``shift_start`` and falls back
+	to its wall-clock date -- that is the ``late_unmatched`` case, an arrival
+	outside the window rather than an absence.
+	"""
+	groups: dict[tuple[str, str], dict[str, Any]] = {}
+	for row in rows or []:
+		employee = row.get("employee")
+		if not employee or not row.get("time"):
+			continue
+		try:
+			when = get_datetime(row.get("time"))
+		except Exception:
+			continue
+		if when is None:
+			continue
 
-        shift_start = None
-        if row.get("shift_start"):
-            try:
-                shift_start = get_datetime(row.get("shift_start"))
-            except Exception:
-                shift_start = None
+		shift_start = None
+		if row.get("shift_start"):
+			try:
+				shift_start = get_datetime(row.get("shift_start"))
+			except Exception:
+				shift_start = None
 
-        day_key = str(getdate(shift_start or when))
-        key = (employee, day_key)
-        group = groups.get(key)
-        if group is None:
-            group = {
-                "employee": employee,
-                "date": day_key,
-                "count": 0,
-                "first_in": None,
-                "last": None,
-                "shift_start": None,
-                "shift": None,
-                "offshift": False,
-                "coords": [],
-                "rows": [],
-                "device_flags": set(),
-                "device_details": [],
-            }
-            groups[key] = group
+		day_key = str(getdate(shift_start or when))
+		key = (employee, day_key)
+		group = groups.get(key)
+		if group is None:
+			group = {
+				"employee": employee,
+				"date": day_key,
+				"count": 0,
+				"first_in": None,
+				"last": None,
+				"shift_start": None,
+				"shift": None,
+				"offshift": False,
+				"coords": [],
+				"rows": [],
+				"device_flags": set(),
+				"device_details": [],
+			}
+			groups[key] = group
 
-        group["count"] += 1
-        group["rows"].append(row)
-        if group["first_in"] is None or when < group["first_in"]:
-            group["first_in"] = when
-        if group["last"] is None or when > group["last"]:
-            group["last"] = when
-        if shift_start is not None and (
-            group["shift_start"] is None or shift_start < group["shift_start"]
-        ):
-            group["shift_start"] = shift_start
-        if row.get("shift") and not group["shift"]:
-            group["shift"] = row["shift"]
-        if row.get("offshift"):
-            group["offshift"] = True
-        if row.get("custom_device_flag"):
-            group["device_flags"].add(row["custom_device_flag"])
-            if row.get("custom_device_flag_detail"):
-                group["device_details"].append(mask_tokens_in_detail(row["custom_device_flag_detail"]))
+		group["count"] += 1
+		group["rows"].append(row)
+		if group["first_in"] is None or when < group["first_in"]:
+			group["first_in"] = when
+		if group["last"] is None or when > group["last"]:
+			group["last"] = when
+		if shift_start is not None and (group["shift_start"] is None or shift_start < group["shift_start"]):
+			group["shift_start"] = shift_start
+		if row.get("shift") and not group["shift"]:
+			group["shift"] = row["shift"]
+		if row.get("offshift"):
+			group["offshift"] = True
+		if row.get("custom_device_flag"):
+			group["device_flags"].add(row["custom_device_flag"])
+			if row.get("custom_device_flag_detail"):
+				group["device_details"].append(mask_tokens_in_detail(row["custom_device_flag_detail"]))
 
-        lat = _float_or_none(row.get("latitude"))
-        lng = _float_or_none(row.get("longitude"))
-        if lat is not None and lng is not None:
-            group["coords"].append((lat, lng))
+		lat = _float_or_none(row.get("latitude"))
+		lng = _float_or_none(row.get("longitude"))
+		if lat is not None and lng is not None:
+			group["coords"].append((lat, lng))
 
-    return groups
+	return groups
 
 
-def device_flags_for(group: Optional[Dict[str, Any]]) -> List[str]:
-    """Distinct non-empty device flags among a day's check-ins, worst first."""
-    if not group:
-        return []
-    found = set(group.get("device_flags") or ())
-    ordered = [flag for flag in FLAG_ORDER if flag in found]
-    return ordered + sorted(found - set(FLAG_ORDER))
+def device_flags_for(group: dict[str, Any] | None) -> list[str]:
+	"""Distinct non-empty device flags among a day's check-ins, worst first."""
+	if not group:
+		return []
+	found = set(group.get("device_flags") or ())
+	ordered = [flag for flag in FLAG_ORDER if flag in found]
+	return ordered + sorted(found - set(FLAG_ORDER))
 
 
-def device_detail_for(group: Optional[Dict[str, Any]]) -> Optional[str]:
-    """The flagged check-ins' explanations joined into one line, or ``None``."""
-    details = list(dict.fromkeys((group or {}).get("device_details") or []))
-    return " | ".join(details) if details else None
+def device_detail_for(group: dict[str, Any] | None) -> str | None:
+	"""The flagged check-ins' explanations joined into one line, or ``None``."""
+	details = list(dict.fromkeys((group or {}).get("device_details") or []))
+	return " | ".join(details) if details else None
 
 
-def late_minutes_for(group: Optional[Dict[str, Any]]) -> Optional[int]:
-    """Signed minutes between the arrival and the scheduled start.
+def late_minutes_for(group: dict[str, Any] | None) -> int | None:
+	"""Signed minutes between the arrival and the scheduled start.
 
-    Negative means early, which is information a manager wants and which the
-    contract carries as a signed number on the cell. ``None`` when HRMS matched
-    no shift, because there is then nothing to be late *against*.
-    """
-    if not group or group.get("shift_start") is None or group.get("first_in") is None:
-        return None
-    delta = group["first_in"] - group["shift_start"]
-    return int(round(delta.total_seconds() / 60.0))
+	Negative means early, which is information a manager wants and which the
+	contract carries as a signed number on the cell. ``None`` when HRMS matched
+	no shift, because there is then nothing to be late *against*.
+	"""
+	if not group or group.get("shift_start") is None or group.get("first_in") is None:
+		return None
+	delta = group["first_in"] - group["shift_start"]
+	return int(round(delta.total_seconds() / 60.0))
 
 
-def worked_hours_for(group: Optional[Dict[str, Any]]) -> Optional[float]:
-    """Last punch minus first, in hours. ``None`` for a lone check-in.
+def worked_hours_for(group: dict[str, Any] | None) -> float | None:
+	"""Last punch minus first, in hours. ``None`` for a lone check-in.
 
-    A single punch is an arrival with no departure. Reporting 0.0 would read as
-    "clocked in and left immediately", which is a claim about somebody's day
-    that the data does not make.
-    """
-    if not group or group.get("count", 0) < 2:
-        return None
-    if group.get("first_in") is None or group.get("last") is None:
-        return None
-    return round((group["last"] - group["first_in"]).total_seconds() / 3600.0, 2)
+	A single punch is an arrival with no departure. Reporting 0.0 would read as
+	"clocked in and left immediately", which is a claim about somebody's day
+	that the data does not make.
+	"""
+	if not group or group.get("count", 0) < 2:
+		return None
+	if group.get("first_in") is None or group.get("last") is None:
+		return None
+	return round((group["last"] - group["first_in"]).total_seconds() / 3600.0, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -616,105 +613,105 @@ def worked_hours_for(group: Optional[Dict[str, Any]]) -> Optional[float]:
 
 
 def derive_status(
-    *,
-    group: Optional[Dict[str, Any]],
-    rostered: bool,
-    day_off: bool,
-    is_holiday: bool,
-    exempt: bool,
-    late_minutes: Optional[int],
-    grace: int,
-    is_past: bool,
+	*,
+	group: dict[str, Any] | None,
+	rostered: bool,
+	day_off: bool,
+	is_holiday: bool,
+	exempt: bool,
+	late_minutes: int | None,
+	grace: int,
+	is_past: bool,
 ) -> str:
-    """Pick one of the eight contract statuses for one employee-day.
+	"""Pick one of the eight contract statuses for one employee-day.
 
-    Evidence outranks expectation. Somebody who clocked in is graded on the
-    clock even if the rota says they were off -- the alternative is a screen
-    that reports "off" for a person who was standing in the branch, which is the
-    one thing a manager would never forgive it for.
-    """
-    if group and group.get("count", 0) > 0:
-        if late_minutes is None:
-            # A punch HRMS could not attach to any shift: arrived outside the
-            # window, not "no data".
-            return STATUS_LATE_UNMATCHED
-        return STATUS_LATE if late_minutes > grace else STATUS_PRESENT
+	Evidence outranks expectation. Somebody who clocked in is graded on the
+	clock even if the rota says they were off -- the alternative is a screen
+	that reports "off" for a person who was standing in the branch, which is the
+	one thing a manager would never forgive it for.
+	"""
+	if group and group.get("count", 0) > 0:
+		if late_minutes is None:
+			# A punch HRMS could not attach to any shift: arrived outside the
+			# window, not "no data".
+			return STATUS_LATE_UNMATCHED
+		return STATUS_LATE if late_minutes > grace else STATUS_PRESENT
 
-    if day_off:
-        return STATUS_OFF
-    if is_holiday:
-        return STATUS_HOLIDAY
-    if not rostered:
-        # Includes every date past the end of the generated roster horizon. See
-        # the module docstring: that is a fact about the Shift Schedule
-        # generator, never about the person.
-        return STATUS_NOT_ROSTERED
-    if exempt:
-        # No clock-in obligation, so silence is not absence.
-        return STATUS_NOT_ROSTERED
-    if not is_past:
-        return STATUS_PENDING
-    return STATUS_ABSENT
+	if day_off:
+		return STATUS_OFF
+	if is_holiday:
+		return STATUS_HOLIDAY
+	if not rostered:
+		# Includes every date past the end of the generated roster horizon. See
+		# the module docstring: that is a fact about the Shift Schedule
+		# generator, never about the person.
+		return STATUS_NOT_ROSTERED
+	if exempt:
+		# No clock-in obligation, so silence is not absence.
+		return STATUS_NOT_ROSTERED
+	if not is_past:
+		return STATUS_PENDING
+	return STATUS_ABSENT
 
 
 def build_cell(
-    *,
-    date_str: str,
-    shift_type: Optional[str],
-    shift_location: Optional[str],
-    scheduled_start: Optional[str],
-    scheduled_end: Optional[str],
-    group: Optional[Dict[str, Any]],
-    day_off_row: Optional[Dict[str, Any]],
-    is_holiday: bool,
-    is_cover: bool,
-    exempt: bool,
-    grace: int,
-    today: date_cls,
-    location_row: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """One calendar cell, in the exact shape the contract fixes."""
-    late = late_minutes_for(group)
-    status = derive_status(
-        group=group,
-        rostered=bool(shift_type),
-        day_off=bool(day_off_row),
-        is_holiday=bool(is_holiday),
-        exempt=bool(exempt),
-        late_minutes=late,
-        grace=grace,
-        is_past=getdate(date_str) < today,
-    )
+	*,
+	date_str: str,
+	shift_type: str | None,
+	shift_location: str | None,
+	scheduled_start: str | None,
+	scheduled_end: str | None,
+	group: dict[str, Any] | None,
+	day_off_row: dict[str, Any] | None,
+	is_holiday: bool,
+	is_cover: bool,
+	exempt: bool,
+	grace: int,
+	today: date_cls,
+	location_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+	"""One calendar cell, in the exact shape the contract fixes."""
+	late = late_minutes_for(group)
+	status = derive_status(
+		group=group,
+		rostered=bool(shift_type),
+		day_off=bool(day_off_row),
+		is_holiday=bool(is_holiday),
+		exempt=bool(exempt),
+		late_minutes=late,
+		grace=grace,
+		is_past=getdate(date_str) < today,
+	)
 
-    count = int(group.get("count", 0)) if group else 0
-    return {
-        "date": date_str,
-        "status": status,
-        "shift_type": shift_type,
-        "shift_location": shift_location,
-        "scheduled_start": scheduled_start,
-        "scheduled_end": scheduled_end,
-        "first_in": _dt_text(group.get("first_in")) if group else None,
-        "last_out": _dt_text(group.get("last")) if (group and count >= 2) else None,
-        "late_minutes": late,
-        "worked_hours": worked_hours_for(group),
-        "checkin_count": count,
-        "offshift": bool(group.get("shift_start") is None) if group else False,
-        "geo_ok": _geo_ok(group.get("coords") if group else [], location_row),
-        "day_off": (
-            {
-                "off_type": day_off_row.get("off_type"),
-                "covered_by": day_off_row.get("covered_by"),
-                "covered_by_name": day_off_row.get("covered_by_name"),
-            }
-            if day_off_row
-            else None
-        ),
-        "is_cover": bool(is_cover),
-        # Additive (buddy-punch flagging); old clients ignore unknown keys.
-        "device_flags": device_flags_for(group),
-        "device_flag_detail": device_detail_for(group),
-    }
+	count = int(group.get("count", 0)) if group else 0
+	return {
+		"date": date_str,
+		"status": status,
+		"shift_type": shift_type,
+		"shift_location": shift_location,
+		"scheduled_start": scheduled_start,
+		"scheduled_end": scheduled_end,
+		"first_in": _dt_text(group.get("first_in")) if group else None,
+		"last_out": _dt_text(group.get("last")) if (group and count >= 2) else None,
+		"late_minutes": late,
+		"worked_hours": worked_hours_for(group),
+		"checkin_count": count,
+		"offshift": bool(group.get("shift_start") is None) if group else False,
+		"geo_ok": _geo_ok(group.get("coords") if group else [], location_row),
+		"day_off": (
+			{
+				"off_type": day_off_row.get("off_type"),
+				"covered_by": day_off_row.get("covered_by"),
+				"covered_by_name": day_off_row.get("covered_by_name"),
+			}
+			if day_off_row
+			else None
+		),
+		"is_cover": bool(is_cover),
+		# Additive (buddy-punch flagging); old clients ignore unknown keys.
+		"device_flags": device_flags_for(group),
+		"device_flag_detail": device_detail_for(group),
+	}
 
 
 # ---------------------------------------------------------------------------
@@ -722,113 +719,113 @@ def build_cell(
 # ---------------------------------------------------------------------------
 
 
-def totals_for(cells: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    """Roll a pile of cells into the contract's totals block.
+def totals_for(cells: Iterable[dict[str, Any]]) -> dict[str, Any]:
+	"""Roll a pile of cells into the contract's totals block.
 
-    ``late_minutes`` here is the sum of POSITIVE lateness only. Cell-level
-    lateness is signed so an early arrival is visible, but summing the signed
-    values would let a week of early starts cancel out a day of being an hour
-    late and report a punctual month.
+	``late_minutes`` here is the sum of POSITIVE lateness only. Cell-level
+	lateness is signed so an early arrival is visible, but summing the signed
+	values would let a week of early starts cancel out a day of being an hour
+	late and report a punctual month.
 
-    Every status that can appear in a cell has a counter, so the block can be
-    checked against itself:
+	Every status that can appear in a cell has a counter, so the block can be
+	checked against itself:
 
-        rostered_days == present_days + late_days + late_unmatched_days + absent_days
+	    rostered_days == present_days + late_days + late_unmatched_days + absent_days
 
-    That invariant is what makes ``attendance_rate`` verifiable from the numbers
-    printed next to it. ``late_unmatched_days`` and ``pending_days`` were added
-    after the client shipped: without them a header could not be reconciled with
-    its own rows, and the two statuses that explain the gap were invisible.
-    ``pending_days`` is reported but deliberately stays OUT of ``rostered_days``
-    -- see the module docstring.
-    """
-    rostered = present = late = late_unmatched = absent = pending = off = showed = 0
-    worked = 0.0
-    late_total = 0
+	That invariant is what makes ``attendance_rate`` verifiable from the numbers
+	printed next to it. ``late_unmatched_days`` and ``pending_days`` were added
+	after the client shipped: without them a header could not be reconciled with
+	its own rows, and the two statuses that explain the gap were invisible.
+	``pending_days`` is reported but deliberately stays OUT of ``rostered_days``
+	-- see the module docstring.
+	"""
+	rostered = present = late = late_unmatched = absent = pending = off = showed = 0
+	worked = 0.0
+	late_total = 0
 
-    for cell in cells:
-        status = cell.get("status")
-        if status in JUDGED_STATUSES:
-            rostered += 1
-        if status in SHOWED_STATUSES:
-            showed += 1
-        if status == STATUS_PRESENT:
-            present += 1
-        elif status == STATUS_LATE:
-            late += 1
-        elif status == STATUS_LATE_UNMATCHED:
-            late_unmatched += 1
-        elif status == STATUS_ABSENT:
-            absent += 1
-        elif status == STATUS_PENDING:
-            pending += 1
-        elif status == STATUS_OFF:
-            off += 1
+	for cell in cells:
+		status = cell.get("status")
+		if status in JUDGED_STATUSES:
+			rostered += 1
+		if status in SHOWED_STATUSES:
+			showed += 1
+		if status == STATUS_PRESENT:
+			present += 1
+		elif status == STATUS_LATE:
+			late += 1
+		elif status == STATUS_LATE_UNMATCHED:
+			late_unmatched += 1
+		elif status == STATUS_ABSENT:
+			absent += 1
+		elif status == STATUS_PENDING:
+			pending += 1
+		elif status == STATUS_OFF:
+			off += 1
 
-        worked += flt(cell.get("worked_hours") or 0)
-        minutes = cell.get("late_minutes")
-        if minutes and minutes > 0:
-            late_total += int(minutes)
+		worked += flt(cell.get("worked_hours") or 0)
+		minutes = cell.get("late_minutes")
+		if minutes and minutes > 0:
+			late_total += int(minutes)
 
-    return {
-        "rostered_days": rostered,
-        "present_days": present,
-        "late_days": late,
-        "late_unmatched_days": late_unmatched,
-        "absent_days": absent,
-        "pending_days": pending,
-        "off_days": off,
-        "worked_hours": round(worked, 2),
-        "late_minutes": late_total,
-        # Zero rostered days is a real month for a new joiner or an exempt
-        # employee. Dividing would 500 the whole screen for everybody else on it.
-        "attendance_rate": round(showed / rostered, 4) if rostered else 0.0,
-        # 0.0 when nobody showed: with no arrivals there is no punctuality to
-        # claim, and 1.0 would read as a perfect record.
-        "punctuality_rate": round(present / showed, 4) if showed else 0.0,
-    }
+	return {
+		"rostered_days": rostered,
+		"present_days": present,
+		"late_days": late,
+		"late_unmatched_days": late_unmatched,
+		"absent_days": absent,
+		"pending_days": pending,
+		"off_days": off,
+		"worked_hours": round(worked, 2),
+		"late_minutes": late_total,
+		# Zero rostered days is a real month for a new joiner or an exempt
+		# employee. Dividing would 500 the whole screen for everybody else on it.
+		"attendance_rate": round(showed / rostered, 4) if rostered else 0.0,
+		# 0.0 when nobody showed: with no arrivals there is no punctuality to
+		# claim, and 1.0 would read as a perfect record.
+		"punctuality_rate": round(present / showed, 4) if showed else 0.0,
+	}
 
 
-def day_totals_for(cells: Iterable[Dict[str, Any]]) -> Dict[str, int]:
-    """The counters the day board shows.
+def day_totals_for(cells: Iterable[dict[str, Any]]) -> dict[str, int]:
+	"""The counters the day board shows.
 
-    ``rostered`` counts everybody who owed a shift today, ``pending`` included --
-    a live board is watched mid-shift, and hiding the people who have not arrived
-    yet is exactly the number a manager is looking for. So, here:
+	``rostered`` counts everybody who owed a shift today, ``pending`` included --
+	a live board is watched mid-shift, and hiding the people who have not arrived
+	yet is exactly the number a manager is looking for. So, here:
 
-        rostered == present + late + late_unmatched + absent + pending
+	    rostered == present + late + late_unmatched + absent + pending
 
-    ``late_unmatched`` is an added key. Without it a branch header did not add up
-    to the rows printed underneath it, and the missing person was always the one
-    who had turned up outside their window -- the row a manager most needs to ask
-    about.
-    """
-    counts = {
-        "rostered": 0,
-        "present": 0,
-        "late": 0,
-        "late_unmatched": 0,
-        "absent": 0,
-        "pending": 0,
-        "off": 0,
-    }
-    for cell in cells:
-        status = cell.get("status")
-        if status in JUDGED_STATUSES or status == STATUS_PENDING:
-            counts["rostered"] += 1
-        if status == STATUS_PRESENT:
-            counts["present"] += 1
-        elif status == STATUS_LATE:
-            counts["late"] += 1
-        elif status == STATUS_LATE_UNMATCHED:
-            counts["late_unmatched"] += 1
-        elif status == STATUS_ABSENT:
-            counts["absent"] += 1
-        elif status == STATUS_PENDING:
-            counts["pending"] += 1
-        elif status == STATUS_OFF:
-            counts["off"] += 1
-    return counts
+	``late_unmatched`` is an added key. Without it a branch header did not add up
+	to the rows printed underneath it, and the missing person was always the one
+	who had turned up outside their window -- the row a manager most needs to ask
+	about.
+	"""
+	counts = {
+		"rostered": 0,
+		"present": 0,
+		"late": 0,
+		"late_unmatched": 0,
+		"absent": 0,
+		"pending": 0,
+		"off": 0,
+	}
+	for cell in cells:
+		status = cell.get("status")
+		if status in JUDGED_STATUSES or status == STATUS_PENDING:
+			counts["rostered"] += 1
+		if status == STATUS_PRESENT:
+			counts["present"] += 1
+		elif status == STATUS_LATE:
+			counts["late"] += 1
+		elif status == STATUS_LATE_UNMATCHED:
+			counts["late_unmatched"] += 1
+		elif status == STATUS_ABSENT:
+			counts["absent"] += 1
+		elif status == STATUS_PENDING:
+			counts["pending"] += 1
+		elif status == STATUS_OFF:
+			counts["off"] += 1
+	return counts
 
 
 # ---------------------------------------------------------------------------
@@ -837,377 +834,365 @@ def day_totals_for(cells: Iterable[Dict[str, Any]]) -> Dict[str, int]:
 
 
 def _date_range(start: date_cls, end: date_cls) -> Iterable[date_cls]:
-    return roster_service._daterange(start, end)
+	return roster_service._daterange(start, end)
 
 
-def _fetch_checkins(employees: List[str], start: date_cls, end: date_cls) -> List[Dict[str, Any]]:
-    """Raw check-ins covering the range, padded on both sides.
+def _fetch_checkins(employees: list[str], start: date_cls, end: date_cls) -> list[dict[str, Any]]:
+	"""Raw check-ins covering the range, padded on both sides.
 
-    The window runs from the day BEFORE ``start`` to the day AFTER ``end``
-    because a shift on either boundary can own punches on the neighbouring
-    calendar day: a 16:00 -> 01:00 shift starting on the last of the month is
-    clocked out of on the first of the next one. Groups outside the range are
-    discarded after grouping, not before.
-    """
-    if not employees:
-        return []
-    window = [
-        f"{add_days(start, -1)} 00:00:00",
-        f"{add_days(end, 2)} 00:00:00",
-    ]
-    filters = {"employee": ("in", employees), "time": ("between", window)}
-    # Device-flag columns exist only once the after_migrate seeder has run; ask
-    # for them only when present so an un-migrated site keeps every other field.
-    fields = list(CHECKIN_FIELDS)
-    try:
-        meta = frappe.get_meta(CHECKIN_DOCTYPE)
-        fields += [f for f in CHECKIN_FLAG_FIELDS if meta.has_field(f)]
-    except Exception:
-        pass
-    try:
-        return frappe.get_all(CHECKIN_DOCTYPE, filters=filters, fields=fields, order_by="time asc")
-    except Exception:
-        try:
-            return frappe.get_all(
-                CHECKIN_DOCTYPE,
-                filters=filters,
-                fields=CHECKIN_FIELDS_MINIMAL,
-                order_by="time asc",
-            )
-        except Exception:
-            # Returning [] here would render every rostered person as absent --
-            # a confident, wrong report. Fail the request instead, so the
-            # screen shows that it could not load.
-            try:
-                frappe.log_error(title="Attendance: Employee Checkin read failed")
-            except Exception:
-                pass
-            raise
+	The window runs from the day BEFORE ``start`` to the day AFTER ``end``
+	because a shift on either boundary can own punches on the neighbouring
+	calendar day: a 16:00 -> 01:00 shift starting on the last of the month is
+	clocked out of on the first of the next one. Groups outside the range are
+	discarded after grouping, not before.
+	"""
+	if not employees:
+		return []
+	window = [
+		f"{add_days(start, -1)} 00:00:00",
+		f"{add_days(end, 2)} 00:00:00",
+	]
+	filters = {"employee": ("in", employees), "time": ("between", window)}
+	# Device-flag columns exist only once the after_migrate seeder has run; ask
+	# for them only when present so an un-migrated site keeps every other field.
+	fields = list(CHECKIN_FIELDS)
+	try:
+		meta = frappe.get_meta(CHECKIN_DOCTYPE)
+		fields += [f for f in CHECKIN_FLAG_FIELDS if meta.has_field(f)]
+	except Exception:
+		pass
+	try:
+		return frappe.get_all(CHECKIN_DOCTYPE, filters=filters, fields=fields, order_by="time asc")
+	except Exception:
+		try:
+			return frappe.get_all(
+				CHECKIN_DOCTYPE,
+				filters=filters,
+				fields=CHECKIN_FIELDS_MINIMAL,
+				order_by="time asc",
+			)
+		except Exception:
+			# Returning [] here would render every rostered person as absent --
+			# a confident, wrong report. Fail the request instead, so the
+			# screen shows that it could not load.
+			try:
+				frappe.log_error(title="Attendance: Employee Checkin read failed")
+			except Exception:
+				pass
+			raise
 
 
 def _checkin_visible(
-    row: Dict[str, Any],
-    redacted: Set[Tuple[str, str]],
-    roster_cells: Dict[str, Dict[str, Dict[str, Any]]],
-    shift_times: Dict[str, Tuple[Optional[str], Optional[str]]],
-    start: date_cls,
+	row: dict[str, Any],
+	redacted: set[tuple[str, str]],
+	roster_cells: dict[str, dict[str, dict[str, Any]]],
+	shift_times: dict[str, tuple[str | None, str | None]],
+	start: date_cls,
 ) -> bool:
-    """May a branch-scoped caller see this raw punch at all?
+	"""May a branch-scoped caller see this raw punch at all?
 
-    Decided on the RAW row, before grouping, so every derived field -- status,
-    first in, worked hours, geo_ok, the coordinate list -- is computed only from
-    punches the caller is allowed to see.
+	Decided on the RAW row, before grouping, so every derived field -- status,
+	first in, worked hours, geo_ok, the coordinate list -- is computed only from
+	punches the caller is allowed to see.
 
-    The day a punch belongs to mirrors ``group_checkins``: its shift_start date,
-    else its wall clock. That fallback is the hole: a check-out past the
-    previous shift's window matches no shift and is dated by the clock, so the
-    02:30 check-out from a Dokki night shift lands on the next day. If that
-    next day is a Nasr City day, the Nasr City manager would get its GPS. So an
-    unmatched punch EARLIER than its day's scheduled start is treated as the
-    tail of the previous day, and hidden unless the previous day is also the
-    caller's -- or when the previous day is before the range, and so unknown.
-    """
-    employee = row.get("employee")
-    try:
-        when = get_datetime(row.get("time"))
-    except Exception:
-        return False
-    if not employee or when is None:
-        return False
+	The day a punch belongs to mirrors ``group_checkins``: its shift_start date,
+	else its wall clock. That fallback is the hole: a check-out past the
+	previous shift's window matches no shift and is dated by the clock, so the
+	02:30 check-out from a Dokki night shift lands on the next day. If that
+	next day is a Nasr City day, the Nasr City manager would get its GPS. So an
+	unmatched punch EARLIER than its day's scheduled start is treated as the
+	tail of the previous day, and hidden unless the previous day is also the
+	caller's -- or when the previous day is before the range, and so unknown.
+	"""
+	employee = row.get("employee")
+	try:
+		when = get_datetime(row.get("time"))
+	except Exception:
+		return False
+	if not employee or when is None:
+		return False
 
-    shift_start = None
-    if row.get("shift_start"):
-        try:
-            shift_start = get_datetime(row.get("shift_start"))
-        except Exception:
-            shift_start = None
+	shift_start = None
+	if row.get("shift_start"):
+		try:
+			shift_start = get_datetime(row.get("shift_start"))
+		except Exception:
+			shift_start = None
 
-    day = getdate(shift_start or when)
-    key = str(day)
-    if (employee, key) in redacted:
-        return False
-    if shift_start is not None:
-        return True
+	day = getdate(shift_start or when)
+	key = str(day)
+	if (employee, key) in redacted:
+		return False
+	if shift_start is not None:
+		return True
 
-    assignment = roster_cells.get(employee, {}).get(key) or {}
-    scheduled_start = shift_times.get(assignment.get("shift_type") or "", (None, None))[0]
-    if not scheduled_start:
-        return True
-    try:
-        hour, minute = (int(part) for part in str(scheduled_start).split(":")[:2])
-    except Exception:
-        return True
-    if (when.hour, when.minute) >= (hour, minute):
-        return True
+	assignment = roster_cells.get(employee, {}).get(key) or {}
+	scheduled_start = shift_times.get(assignment.get("shift_type") or "", (None, None))[0]
+	if not scheduled_start:
+		return True
+	try:
+		hour, minute = (int(part) for part in str(scheduled_start).split(":")[:2])
+	except Exception:
+		return True
+	if (when.hour, when.minute) >= (hour, minute):
+		return True
 
-    previous = add_days(day, -1)
-    if getdate(previous) < getdate(start):
-        return False
-    return (employee, str(getdate(previous))) not in redacted
+	previous = add_days(day, -1)
+	if getdate(previous) < getdate(start):
+		return False
+	return (employee, str(getdate(previous))) not in redacted
 
 
 def build_grid(
-    start: date_cls,
-    end: date_cls,
-    shift_location: Optional[str] = None,
-    employee: Optional[str] = None,
-    today: Optional[date_cls] = None,
-) -> Dict[str, Any]:
-    """Every employee in scope, with one cell per day of the range.
+	start: date_cls,
+	end: date_cls,
+	shift_location: str | None = None,
+	employee: str | None = None,
+	today: date_cls | None = None,
+) -> dict[str, Any]:
+	"""Every employee in scope, with one cell per day of the range.
 
-    The roster half mirrors ``roster_service.get_month`` deliberately: same
-    readable-status filter, same "an employee belongs to whichever branches
-    their shifts point at" rule, same exclusion of non-Active staff. Two screens
-    disagreeing about who works where would be worse than either being wrong.
-    """
-    start = getdate(start)
-    end = getdate(end)
-    _refuse_long_range(start, end, MAX_GRID_DAYS)
-    today = getdate(today) if today else getdate()
-    allowed = allowed_shift_locations()
+	The roster half mirrors ``roster_service.get_month`` deliberately: same
+	readable-status filter, same "an employee belongs to whichever branches
+	their shifts point at" rule, same exclusion of non-Active staff. Two screens
+	disagreeing about who works where would be worse than either being wrong.
+	"""
+	start = getdate(start)
+	end = getdate(end)
+	_refuse_long_range(start, end, MAX_GRID_DAYS)
+	today = getdate(today) if today else getdate()
+	allowed = allowed_shift_locations()
 
-    assignment_filters: Dict[str, Any] = {
-        "docstatus": 1,
-        "status": ("in", roster_service.READABLE_ASSIGNMENT_STATUSES),
-        "start_date": ("<=", end),
-    }
-    day_off_filters: Dict[str, Any] = {"off_date": ("between", [start, end])}
-    if employee:
-        assignment_filters["employee"] = employee
-        day_off_filters["employee"] = employee
+	assignment_filters: dict[str, Any] = {
+		"docstatus": 1,
+		"status": ("in", roster_service.READABLE_ASSIGNMENT_STATUSES),
+		"start_date": ("<=", end),
+	}
+	day_off_filters: dict[str, Any] = {"off_date": ("between", [start, end])}
+	if employee:
+		assignment_filters["employee"] = employee
+		day_off_filters["employee"] = employee
 
-    assignments = frappe.get_all(
-        "Shift Assignment",
-        filters=assignment_filters,
-        or_filters=[["end_date", ">=", start], ["end_date", "is", "not set"]],
-        fields=["name", "employee", "shift_type", "shift_location", "start_date", "end_date"],
-    )
+	assignments = frappe.get_all(
+		"Shift Assignment",
+		filters=assignment_filters,
+		or_filters=[["end_date", ">=", start], ["end_date", "is", "not set"]],
+		fields=["name", "employee", "shift_type", "shift_location", "start_date", "end_date"],
+	)
 
-    day_offs = frappe.get_all(
-        roster_service.DAY_OFF_DOCTYPE,
-        filters=day_off_filters,
-        fields=[
-            "name",
-            "employee",
-            "off_date",
-            "off_type",
-            "shift_location",
-            "covered_by",
-            "covered_by_name",
-        ],
-    )
+	day_offs = frappe.get_all(
+		roster_service.DAY_OFF_DOCTYPE,
+		filters=day_off_filters,
+		fields=[
+			"name",
+			"employee",
+			"off_date",
+			"off_type",
+			"shift_location",
+			"covered_by",
+			"covered_by_name",
+		],
+	)
 
-    # A cover is recorded on the OTHER person's day-off row, so it has to be
-    # indexed separately from the day-off itself -- otherwise the colleague who
-    # absorbed the day looks like an ordinary rostered day and the screen cannot
-    # explain why they are on a twelve-hour shift.
-    covers: Set[Tuple[str, str]] = set()
-    for row in day_offs:
-        if row.get("covered_by"):
-            covers.add((row["covered_by"], str(getdate(row["off_date"]))))
+	# A cover is recorded on the OTHER person's day-off row, so it has to be
+	# indexed separately from the day-off itself -- otherwise the colleague who
+	# absorbed the day looks like an ordinary rostered day and the screen cannot
+	# explain why they are on a twelve-hour shift.
+	covers: set[tuple[str, str]] = set()
+	for row in day_offs:
+		if row.get("covered_by"):
+			covers.add((row["covered_by"], str(getdate(row["off_date"]))))
 
-    locations_by_employee: Dict[str, Set[str]] = {}
-    for row in assignments:
-        if row.get("shift_location"):
-            locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
-    for row in day_offs:
-        if row.get("shift_location"):
-            locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
+	locations_by_employee: dict[str, set[str]] = {}
+	for row in assignments:
+		if row.get("shift_location"):
+			locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
+	for row in day_offs:
+		if row.get("shift_location"):
+			locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
 
-    candidates: Set[str] = {row["employee"] for row in assignments}
-    candidates.update(row["employee"] for row in day_offs)
-    if employee:
-        candidates.add(employee)
-    try:
-        for row in frappe.get_all(
-            "Shift Schedule Assignment",
-            filters=(
-                {"enabled": 1, "employee": employee} if employee else {"enabled": 1}
-            ),
-            fields=["employee", "shift_location"],
-        ):
-            candidates.add(row["employee"])
-            if row.get("shift_location"):
-                locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
-    except Exception:
-        pass
+	candidates: set[str] = {row["employee"] for row in assignments}
+	candidates.update(row["employee"] for row in day_offs)
+	if employee:
+		candidates.add(employee)
+	try:
+		for row in frappe.get_all(
+			"Shift Schedule Assignment",
+			filters=({"enabled": 1, "employee": employee} if employee else {"enabled": 1}),
+			fields=["employee", "shift_location"],
+		):
+			candidates.add(row["employee"])
+			if row.get("shift_location"):
+				locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
+	except Exception:
+		pass
 
-    def in_scope(name: str) -> bool:
-        locs = locations_by_employee.get(name, set())
-        if shift_location and shift_location not in locs:
-            return False
-        if allowed is None:
-            return True
-        # Somebody with no Shift Location at all is invisible to a branch-scoped
-        # manager on purpose: an unlocated employee is geofenced nowhere, so no
-        # branch can claim them.
-        return bool(locs.intersection(allowed))
+	def in_scope(name: str) -> bool:
+		locs = locations_by_employee.get(name, set())
+		if shift_location and shift_location not in locs:
+			return False
+		if allowed is None:
+			return True
+		# Somebody with no Shift Location at all is invisible to a branch-scoped
+		# manager on purpose: an unlocated employee is geofenced nowhere, so no
+		# branch can claim them.
+		return bool(locs.intersection(allowed))
 
-    names = sorted(n for n in candidates if in_scope(n))
+	names = sorted(n for n in candidates if in_scope(n))
 
-    employee_rows: Dict[str, Dict[str, Any]] = {}
-    if names:
-        fields = ["name", "employee_name", "designation", "department", "status"]
-        if _employee_exempt_field_exists():
-            fields.append(EMPLOYEE_EXEMPT_FIELD)
-        for row in frappe.get_all("Employee", filters={"name": ("in", names)}, fields=fields):
-            employee_rows[row["name"]] = row
+	employee_rows: dict[str, dict[str, Any]] = {}
+	if names:
+		fields = ["name", "employee_name", "designation", "department", "status"]
+		if _employee_exempt_field_exists():
+			fields.append(EMPLOYEE_EXEMPT_FIELD)
+		for row in frappe.get_all("Employee", filters={"name": ("in", names)}, fields=fields):
+			employee_rows[row["name"]] = row
 
-    # Resigned staff keep their historic assignments. They are excluded for the
-    # same reason the roster excludes them -- except when one is asked for by
-    # name, because "why does last month's report not contain the person who
-    # left in it" is a question with no good answer.
-    names = [
-        n
-        for n in names
-        if n == employee or (employee_rows.get(n, {}).get("status") == "Active")
-    ]
+	# Resigned staff keep their historic assignments. They are excluded for the
+	# same reason the roster excludes them -- except when one is asked for by
+	# name, because "why does last month's report not contain the person who
+	# left in it" is a question with no good answer.
+	names = [n for n in names if n == employee or (employee_rows.get(n, {}).get("status") == "Active")]
 
-    shift_times = shift_time_map()
-    locations = shift_location_map()
-    holidays = _holidays(names, start, end)
+	shift_times = shift_time_map()
+	locations = shift_location_map()
+	holidays = _holidays(names, start, end)
 
-    roster_cells: Dict[str, Dict[str, Dict[str, Any]]] = {n: {} for n in names}
-    # Every branch an employee is rostered at on a day, not just the last row
-    # read. Two assignments can overlap (HRMS permits it from Desk and from
-    # schedule generation); keeping only one let a day be attributed to the
-    # caller's branch while its punches belonged to the other.
-    day_locations: Dict[Tuple[str, str], Set[Optional[str]]] = {}
-    lookup = set(names)
-    for row in assignments:
-        name = row["employee"]
-        if name not in lookup:
-            continue
-        first = max(getdate(row["start_date"]), start)
-        last = min(getdate(row["end_date"]), end) if row.get("end_date") else end
-        for day in _date_range(first, last):
-            roster_cells[name][str(day)] = row
-            day_locations.setdefault((name, str(day)), set()).add(
-                row.get("shift_location") or None
-            )
+	roster_cells: dict[str, dict[str, dict[str, Any]]] = {n: {} for n in names}
+	# Every branch an employee is rostered at on a day, not just the last row
+	# read. Two assignments can overlap (HRMS permits it from Desk and from
+	# schedule generation); keeping only one let a day be attributed to the
+	# caller's branch while its punches belonged to the other.
+	day_locations: dict[tuple[str, str], set[str | None]] = {}
+	lookup = set(names)
+	for row in assignments:
+		name = row["employee"]
+		if name not in lookup:
+			continue
+		first = max(getdate(row["start_date"]), start)
+		last = min(getdate(row["end_date"]), end) if row.get("end_date") else end
+		for day in _date_range(first, last):
+			roster_cells[name][str(day)] = row
+			day_locations.setdefault((name, str(day)), set()).add(row.get("shift_location") or None)
 
-    day_off_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for row in day_offs:
-        day_off_index[(row["employee"], str(getdate(row["off_date"])))] = row
+	day_off_index: dict[tuple[str, str], dict[str, Any]] = {}
+	for row in day_offs:
+		day_off_index[(row["employee"], str(getdate(row["off_date"])))] = row
 
-    # Scope is decided PER DAY, not per person. ``in_scope`` admits an employee
-    # if any of their shifts ever touched one of the caller's branches -- right
-    # for who appears on the screen, wrong for what it shows about them.
-    # Somebody who covered one day at Nasr City would otherwise hand the Nasr
-    # City manager a year of their arrival times and raw GPS at Dokki; with a
-    # zero or mis-set radius, that GPS is a home address. A day is redacted
-    # unless EVERY branch it is rostered at is the caller's -- a day with no
-    # branch at all included.
-    redacted: Set[Tuple[str, str]] = set()
-    if allowed is not None:
-        for name in names:
-            for day in _date_range(start, end):
-                key = str(day)
-                locs = set(day_locations.get((name, key), set()))
-                if not locs:
-                    day_off_row = day_off_index.get((name, key))
-                    locs = {(day_off_row or {}).get("shift_location") or None}
-                if any(loc not in allowed for loc in locs):
-                    redacted.add((name, key))
+	# Scope is decided PER DAY, not per person. ``in_scope`` admits an employee
+	# if any of their shifts ever touched one of the caller's branches -- right
+	# for who appears on the screen, wrong for what it shows about them.
+	# Somebody who covered one day at Nasr City would otherwise hand the Nasr
+	# City manager a year of their arrival times and raw GPS at Dokki; with a
+	# zero or mis-set radius, that GPS is a home address. A day is redacted
+	# unless EVERY branch it is rostered at is the caller's -- a day with no
+	# branch at all included.
+	redacted: set[tuple[str, str]] = set()
+	if allowed is not None:
+		for name in names:
+			for day in _date_range(start, end):
+				key = str(day)
+				locs = set(day_locations.get((name, key), set()))
+				if not locs:
+					day_off_row = day_off_index.get((name, key))
+					locs = {(day_off_row or {}).get("shift_location") or None}
+				if any(loc not in allowed for loc in locs):
+					redacted.add((name, key))
 
-    raw_checkins = _fetch_checkins(names, start, end)
-    if allowed is not None:
-        raw_checkins = [
-            row
-            for row in raw_checkins
-            if _checkin_visible(row, redacted, roster_cells, shift_times, start)
-        ]
-    groups = group_checkins(raw_checkins)
+	raw_checkins = _fetch_checkins(names, start, end)
+	if allowed is not None:
+		raw_checkins = [
+			row for row in raw_checkins if _checkin_visible(row, redacted, roster_cells, shift_times, start)
+		]
+	groups = group_checkins(raw_checkins)
 
-    grace = grace_minutes()
-    employees_payload: List[Dict[str, Any]] = []
-    cells_by_employee: Dict[str, Dict[str, Dict[str, Any]]] = {}
+	grace = grace_minutes()
+	employees_payload: list[dict[str, Any]] = []
+	cells_by_employee: dict[str, dict[str, dict[str, Any]]] = {}
 
-    for name in names:
-        row = employee_rows.get(name, {})
-        designation = row.get("designation")
-        exempt = bool(row.get(EMPLOYEE_EXEMPT_FIELD))
-        employee_holidays = holidays.get(name, set())
+	for name in names:
+		row = employee_rows.get(name, {})
+		designation = row.get("designation")
+		exempt = bool(row.get(EMPLOYEE_EXEMPT_FIELD))
+		employee_holidays = holidays.get(name, set())
 
-        cells: Dict[str, Dict[str, Any]] = {}
-        for day in _date_range(start, end):
-            key = str(day)
-            assignment = roster_cells.get(name, {}).get(key) or {}
-            shift_type = assignment.get("shift_type")
-            resolved_location = assignment.get("shift_location")
-            day_off_row = day_off_index.get((name, key))
-            if not resolved_location and day_off_row:
-                resolved_location = day_off_row.get("shift_location")
-            scheduled = shift_times.get(shift_type or "", (None, None))
+		cells: dict[str, dict[str, Any]] = {}
+		for day in _date_range(start, end):
+			key = str(day)
+			assignment = roster_cells.get(name, {}).get(key) or {}
+			shift_type = assignment.get("shift_type")
+			resolved_location = assignment.get("shift_location")
+			day_off_row = day_off_index.get((name, key))
+			if not resolved_location and day_off_row:
+				resolved_location = day_off_row.get("shift_location")
+			scheduled = shift_times.get(shift_type or "", (None, None))
 
-            # A redacted day is a blank, unrostered day: no clock, no
-            # coordinates, no day-off detail.
-            if (name, key) in redacted:
-                cells[key] = build_cell(
-                    date_str=key,
-                    shift_type=None,
-                    shift_location=None,
-                    scheduled_start=None,
-                    scheduled_end=None,
-                    group=None,
-                    day_off_row=None,
-                    is_holiday=False,
-                    is_cover=False,
-                    exempt=exempt,
-                    grace=grace,
-                    today=today,
-                    location_row=None,
-                )
-                continue
+			# A redacted day is a blank, unrostered day: no clock, no
+			# coordinates, no day-off detail.
+			if (name, key) in redacted:
+				cells[key] = build_cell(
+					date_str=key,
+					shift_type=None,
+					shift_location=None,
+					scheduled_start=None,
+					scheduled_end=None,
+					group=None,
+					day_off_row=None,
+					is_holiday=False,
+					is_cover=False,
+					exempt=exempt,
+					grace=grace,
+					today=today,
+					location_row=None,
+				)
+				continue
 
-            cells[key] = build_cell(
-                date_str=key,
-                shift_type=shift_type,
-                shift_location=resolved_location,
-                scheduled_start=scheduled[0],
-                scheduled_end=scheduled[1],
-                group=groups.get((name, key)),
-                day_off_row=day_off_row,
-                is_holiday=key in employee_holidays,
-                is_cover=(name, key) in covers,
-                exempt=exempt,
-                grace=grace,
-                today=today,
-                location_row=locations.get(resolved_location) if resolved_location else None,
-            )
+			cells[key] = build_cell(
+				date_str=key,
+				shift_type=shift_type,
+				shift_location=resolved_location,
+				scheduled_start=scheduled[0],
+				scheduled_end=scheduled[1],
+				group=groups.get((name, key)),
+				day_off_row=day_off_row,
+				is_holiday=key in employee_holidays,
+				is_cover=(name, key) in covers,
+				exempt=exempt,
+				grace=grace,
+				today=today,
+				location_row=locations.get(resolved_location) if resolved_location else None,
+			)
 
-        cells_by_employee[name] = cells
-        employees_payload.append(
-            {
-                "employee": name,
-                "employee_name": row.get("employee_name") or name,
-                "designation": designation,
-                "department": row.get("department"),
-                # Only the caller's branches: the full list names every branch
-                # this person ever worked at, which is not this caller's to see.
-                "shift_locations": sorted(
-                    loc
-                    for loc in locations_by_employee.get(name, set())
-                    if allowed is None or loc in allowed
-                ),
-                "is_courier": _is_courier(name, designation),
-                "exempt": exempt,
-            }
-        )
+		cells_by_employee[name] = cells
+		employees_payload.append(
+			{
+				"employee": name,
+				"employee_name": row.get("employee_name") or name,
+				"designation": designation,
+				"department": row.get("department"),
+				# Only the caller's branches: the full list names every branch
+				# this person ever worked at, which is not this caller's to see.
+				"shift_locations": sorted(
+					loc for loc in locations_by_employee.get(name, set()) if allowed is None or loc in allowed
+				),
+				"is_courier": _is_courier(name, designation),
+				"exempt": exempt,
+			}
+		)
 
-    return {
-        "employees": employees_payload,
-        "cells": cells_by_employee,
-        "groups": groups,
-        # Consumers that bucket by branch must SKIP these, not count them: a
-        # redacted day has no branch, and bucketing it would show every shared
-        # colleague working elsewhere as an unmatched person on this board.
-        "redacted": redacted,
-        "scope": scope_payload(allowed),
-        "grace_minutes": grace,
-        "start": start,
-        "end": end,
-    }
+	return {
+		"employees": employees_payload,
+		"cells": cells_by_employee,
+		"groups": groups,
+		# Consumers that bucket by branch must SKIP these, not count them: a
+		# redacted day has no branch, and bucketing it would show every shared
+		# colleague working elsewhere as an unmatched person on this board.
+		"redacted": redacted,
+		"scope": scope_payload(allowed),
+		"grace_minutes": grace,
+		"start": start,
+		"end": end,
+	}
 
 
 # ---------------------------------------------------------------------------
@@ -1215,79 +1200,77 @@ def build_grid(
 # ---------------------------------------------------------------------------
 
 
-def month_bounds(month: Optional[str]) -> Tuple[date_cls, date_cls]:
-    return roster_service.month_bounds(month)
+def month_bounds(month: str | None) -> tuple[date_cls, date_cls]:
+	return roster_service.month_bounds(month)
 
 
-def bootstrap() -> Dict[str, Any]:
-    """Everything the screen needs before it can draw anything."""
-    allowed = allowed_shift_locations()
-    payload: Dict[str, Any] = {
-        "hrms_available": hrms_available(),
-        "shift_locations": roster_service.shift_locations() if hrms_available() else [],
-        "scope": scope_payload(allowed),
-        "grace_minutes": grace_minutes(),
-        "statuses": list(STATUSES),
-        "checkin_enforced": checkin_enforced(),
-        "notice": None,
-    }
-    if not payload["hrms_available"]:
-        payload["notice"] = _hrms_notice()
-    return payload
+def bootstrap() -> dict[str, Any]:
+	"""Everything the screen needs before it can draw anything."""
+	allowed = allowed_shift_locations()
+	payload: dict[str, Any] = {
+		"hrms_available": hrms_available(),
+		"shift_locations": roster_service.shift_locations() if hrms_available() else [],
+		"scope": scope_payload(allowed),
+		"grace_minutes": grace_minutes(),
+		"statuses": list(STATUSES),
+		"checkin_enforced": checkin_enforced(),
+		"notice": None,
+	}
+	if not payload["hrms_available"]:
+		payload["notice"] = _hrms_notice()
+	return payload
 
 
-def get_month(
-    month: Optional[str] = None, shift_location: Optional[str] = None
-) -> Dict[str, Any]:
-    """The attendance calendar: people down, days across."""
-    start, end = month_bounds(month)
-    if not hrms_available():
-        return {
-            "hrms_available": False,
-            "notice": _hrms_notice(),
-            "month": f"{start.year:04d}-{start.month:02d}",
-            "month_start": str(start),
-            "month_end": str(end),
-            "scope": scope_payload(None),
-            "grace_minutes": grace_minutes(),
-            "employees": [],
-            "totals": totals_for([]),
-        }
+def get_month(month: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
+	"""The attendance calendar: people down, days across."""
+	start, end = month_bounds(month)
+	if not hrms_available():
+		return {
+			"hrms_available": False,
+			"notice": _hrms_notice(),
+			"month": f"{start.year:04d}-{start.month:02d}",
+			"month_start": str(start),
+			"month_end": str(end),
+			"scope": scope_payload(None),
+			"grace_minutes": grace_minutes(),
+			"employees": [],
+			"totals": totals_for([]),
+		}
 
-    grid = build_grid(start, end, shift_location=shift_location)
-    employees: List[Dict[str, Any]] = []
-    every_cell: List[Dict[str, Any]] = []
+	grid = build_grid(start, end, shift_location=shift_location)
+	employees: list[dict[str, Any]] = []
+	every_cell: list[dict[str, Any]] = []
 
-    for row in grid["employees"]:
-        cells = grid["cells"].get(row["employee"], {})
-        every_cell.extend(cells.values())
-        employees.append(
-            {
-                "employee": row["employee"],
-                "employee_name": row["employee_name"],
-                "designation": row["designation"],
-                "department": row["department"],
-                "shift_locations": row["shift_locations"],
-                "is_courier": row["is_courier"],
-                "days": cells,
-                "totals": totals_for(cells.values()),
-            }
-        )
+	for row in grid["employees"]:
+		cells = grid["cells"].get(row["employee"], {})
+		every_cell.extend(cells.values())
+		employees.append(
+			{
+				"employee": row["employee"],
+				"employee_name": row["employee_name"],
+				"designation": row["designation"],
+				"department": row["department"],
+				"shift_locations": row["shift_locations"],
+				"is_courier": row["is_courier"],
+				"days": cells,
+				"totals": totals_for(cells.values()),
+			}
+		)
 
-    employees.sort(key=lambda r: (r["employee_name"] or "").lower())
-    totals = totals_for(every_cell)
-    totals["employees"] = len(employees)
+	employees.sort(key=lambda r: (r["employee_name"] or "").lower())
+	totals = totals_for(every_cell)
+	totals["employees"] = len(employees)
 
-    return {
-        "hrms_available": True,
-        "month": f"{start.year:04d}-{start.month:02d}",
-        "month_start": str(start),
-        "month_end": str(end),
-        "scope": grid["scope"],
-        "grace_minutes": grid["grace_minutes"],
-        "employees": employees,
-        "totals": totals,
-    }
+	return {
+		"hrms_available": True,
+		"month": f"{start.year:04d}-{start.month:02d}",
+		"month_start": str(start),
+		"month_end": str(end),
+		"scope": grid["scope"],
+		"grace_minutes": grid["grace_minutes"],
+		"employees": employees,
+		"totals": totals,
+	}
 
 
 #: Keys the day board copies straight off a cell. ``shift_location`` is dropped
@@ -1300,403 +1283,400 @@ def get_month(
 #: row would mislabel exactly those rows -- and they are the ones somebody opens
 #: the detail sheet for.
 _DAY_ROW_KEYS = (
-    "date",
-    "status",
-    "shift_type",
-    "scheduled_start",
-    "scheduled_end",
-    "first_in",
-    "last_out",
-    "late_minutes",
-    "worked_hours",
-    "checkin_count",
-    "offshift",
-    "geo_ok",
-    "day_off",
-    "is_cover",
-    "device_flags",
-    "device_flag_detail",
+	"date",
+	"status",
+	"shift_type",
+	"scheduled_start",
+	"scheduled_end",
+	"first_in",
+	"last_out",
+	"late_minutes",
+	"worked_hours",
+	"checkin_count",
+	"offshift",
+	"geo_ok",
+	"day_off",
+	"is_cover",
+	"device_flags",
+	"device_flag_detail",
 )
 
 
-def _day_sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
-    """Worst first: late (longest first), then unmatched, absent, pending, present."""
-    rank = DAY_ROW_RANK.get(row.get("status"), 99)
-    lateness = -int(row.get("late_minutes") or 0) if row.get("status") == STATUS_LATE else 0
-    return (rank, lateness, (row.get("employee_name") or "").lower())
+def _day_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+	"""Worst first: late (longest first), then unmatched, absent, pending, present."""
+	rank = DAY_ROW_RANK.get(row.get("status"), 99)
+	lateness = -int(row.get("late_minutes") or 0) if row.get("status") == STATUS_LATE else 0
+	return (rank, lateness, (row.get("employee_name") or "").lower())
 
 
-def _branch_sort_key(bucket: Dict[str, Any]) -> Tuple[int, str]:
-    """Named branches alphabetically; the ``null`` bucket is ALWAYS last.
+def _branch_sort_key(bucket: dict[str, Any]) -> tuple[int, str]:
+	"""Named branches alphabetically; the ``null`` bucket is ALWAYS last.
 
-    ``None`` there means "no branch could be resolved", which is a data problem
-    rather than a place. Sorting it in with the names (or first, which is what a
-    naive sort on ``or ""`` does) puts the unattributable rows above the real
-    branches at the top of the screen every morning.
-    """
-    location = bucket.get("shift_location")
-    return (1, "") if location is None else (0, str(location).lower())
-
-
-def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
-    """One day, grouped by branch, ordered by what needs attention."""
-    day = getdate(date) if date else getdate()
-    if not hrms_available():
-        return {
-            "hrms_available": False,
-            "notice": _hrms_notice(),
-            "date": str(day),
-            "scope": scope_payload(None),
-            "grace_minutes": grace_minutes(),
-            "branches": [],
-            "totals": day_totals_for([]),
-        }
-
-    grid = build_grid(day, day, shift_location=shift_location)
-    buckets: Dict[Optional[str], Dict[str, Any]] = {}
-    every_cell: List[Dict[str, Any]] = []
-
-    redacted = grid.get("redacted") or set()
-    for employee_row in grid["employees"]:
-        if (employee_row["employee"], str(day)) in redacted:
-            continue
-        cell = grid["cells"].get(employee_row["employee"], {}).get(str(day))
-        if not cell:
-            continue
-        every_cell.append(cell)
-        location = cell.get("shift_location")
-        bucket = buckets.setdefault(location, {"shift_location": location, "rows": [], "_cells": []})
-        bucket["_cells"].append(cell)
-        row = {
-            "employee": employee_row["employee"],
-            "employee_name": employee_row["employee_name"],
-            "designation": employee_row["designation"],
-            "is_courier": employee_row["is_courier"],
-        }
-        row.update({key: cell.get(key) for key in _DAY_ROW_KEYS})
-        bucket["rows"].append(row)
-
-    branches: List[Dict[str, Any]] = []
-    for bucket in buckets.values():
-        bucket["rows"].sort(key=_day_sort_key)
-        branches.append(
-            {
-                "shift_location": bucket["shift_location"],
-                "totals": day_totals_for(bucket["_cells"]),
-                "rows": bucket["rows"],
-            }
-        )
-    branches.sort(key=_branch_sort_key)
-
-    return {
-        "hrms_available": True,
-        "date": str(day),
-        "scope": grid["scope"],
-        "grace_minutes": grid["grace_minutes"],
-        "branches": branches,
-        "totals": day_totals_for(every_cell),
-    }
+	``None`` there means "no branch could be resolved", which is a data problem
+	rather than a place. Sorting it in with the names (or first, which is what a
+	naive sort on ``or ""`` does) puts the unattributable rows above the real
+	branches at the top of the screen every morning.
+	"""
+	location = bucket.get("shift_location")
+	return (1, "") if location is None else (0, str(location).lower())
 
 
-def get_employee(
-    employee: str, from_date: Optional[str] = None, to_date: Optional[str] = None
-) -> Dict[str, Any]:
-    """One person's range, day by day, with the raw check-ins behind it.
+def get_day(date: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
+	"""One day, grouped by branch, ordered by what needs attention."""
+	day = getdate(date) if date else getdate()
+	if not hrms_available():
+		return {
+			"hrms_available": False,
+			"notice": _hrms_notice(),
+			"date": str(day),
+			"scope": scope_payload(None),
+			"grace_minutes": grace_minutes(),
+			"branches": [],
+			"totals": day_totals_for([]),
+		}
 
-    The raw rows are returned alongside the derived days because every dispute
-    about a derived status ends with somebody asking what the clock actually
-    recorded, and making them open Desk to find out defeats the screen.
+	grid = build_grid(day, day, shift_location=shift_location)
+	buckets: dict[str | None, dict[str, Any]] = {}
+	every_cell: list[dict[str, Any]] = []
 
-    Carries the same ``scope`` block as the other three reads. Without it this
-    tab could not tell "your branch scope resolved to nothing" apart from "this
-    person has no days in this range" -- two states that render identically as
-    an empty screen and need opposite fixes (one is a POS Profile mapping, the
-    other is a different date range).
-    """
-    start, end = _range_bounds(from_date, to_date, MAX_EMPLOYEE_RANGE_DAYS)
-    if not hrms_available():
-        return {
-            "hrms_available": False,
-            "notice": _hrms_notice(),
-            "employee": employee,
-            "employee_name": employee,
-            "designation": None,
-            "department": None,
-            "is_courier": False,
-            "shift_locations": [],
-            "from_date": str(start),
-            "to_date": str(end),
-            "scope": scope_payload(None),
-            "grace_minutes": grace_minutes(),
-            "days": [],
-            "totals": totals_for([]),
-            "by_branch": [],
-            "checkins": [],
-        }
+	redacted = grid.get("redacted") or set()
+	for employee_row in grid["employees"]:
+		if (employee_row["employee"], str(day)) in redacted:
+			continue
+		cell = grid["cells"].get(employee_row["employee"], {}).get(str(day))
+		if not cell:
+			continue
+		every_cell.append(cell)
+		location = cell.get("shift_location")
+		bucket = buckets.setdefault(location, {"shift_location": location, "rows": [], "_cells": []})
+		bucket["_cells"].append(cell)
+		row = {
+			"employee": employee_row["employee"],
+			"employee_name": employee_row["employee_name"],
+			"designation": employee_row["designation"],
+			"is_courier": employee_row["is_courier"],
+		}
+		row.update({key: cell.get(key) for key in _DAY_ROW_KEYS})
+		bucket["rows"].append(row)
 
-    grid = build_grid(start, end, employee=employee)
-    meta = next(
-        (row for row in grid["employees"] if row["employee"] == employee),
-        {
-            "employee": employee,
-            "employee_name": frappe.db.get_value("Employee", employee, "employee_name")
-            or employee,
-            "designation": None,
-            "department": None,
-            "shift_locations": [],
-            "is_courier": False,
-        },
-    )
-    cells = grid["cells"].get(employee, {})
-    days = [cells[key] for key in sorted(cells.keys())]
+	branches: list[dict[str, Any]] = []
+	for bucket in buckets.values():
+		bucket["rows"].sort(key=_day_sort_key)
+		branches.append(
+			{
+				"shift_location": bucket["shift_location"],
+				"totals": day_totals_for(bucket["_cells"]),
+				"rows": bucket["rows"],
+			}
+		)
+	branches.sort(key=_branch_sort_key)
 
-    redacted = grid.get("redacted") or set()
-    by_branch: Dict[Optional[str], Dict[str, Any]] = {}
-    for cell in days:
-        if (employee, cell.get("date")) in redacted:
-            continue
-        location = cell.get("shift_location")
-        bucket = by_branch.setdefault(location, {"shift_location": location, "_cells": []})
-        bucket["_cells"].append(cell)
+	return {
+		"hrms_available": True,
+		"date": str(day),
+		"scope": grid["scope"],
+		"grace_minutes": grid["grace_minutes"],
+		"branches": branches,
+		"totals": day_totals_for(every_cell),
+	}
 
-    branch_rows = []
-    for bucket in by_branch.values():
-        totals = totals_for(bucket["_cells"])
-        branch_rows.append(
-            {
-                "shift_location": bucket["shift_location"],
-                "rostered_days": totals["rostered_days"],
-                "present_days": totals["present_days"],
-                "late_days": totals["late_days"],
-                "absent_days": totals["absent_days"],
-                "worked_hours": totals["worked_hours"],
-            }
-        )
-    branch_rows.sort(key=_branch_sort_key)
 
-    locations = shift_location_map()
-    checkins: List[Dict[str, Any]] = []
-    for (name, day_key), group in grid["groups"].items():
-        if name != employee or day_key not in cells:
-            continue
-        location_row = locations.get(cells[day_key].get("shift_location") or "")
-        for raw in group["rows"]:
-            lat = _float_or_none(raw.get("latitude"))
-            lng = _float_or_none(raw.get("longitude"))
-            checkins.append(
-                {
-                    "name": raw.get("name"),
-                    "time": _dt_text(raw.get("time")),
-                    "log_type": raw.get("log_type") or None,
-                    "shift": raw.get("shift") or None,
-                    "offshift": bool(raw.get("offshift")),
-                    "device_flag": raw.get("custom_device_flag") or None,
-                    "device_flag_detail": mask_tokens_in_detail(raw.get("custom_device_flag_detail")) or None,
-                    "latitude": lat,
-                    "longitude": lng,
-                    "geo_ok": _geo_ok([(lat, lng)] if lat is not None and lng is not None else [], location_row),
-                }
-            )
-    checkins.sort(key=lambda r: r.get("time") or "")
+def get_employee(employee: str, from_date: str | None = None, to_date: str | None = None) -> dict[str, Any]:
+	"""One person's range, day by day, with the raw check-ins behind it.
 
-    return {
-        "hrms_available": True,
-        "employee": employee,
-        "employee_name": meta["employee_name"],
-        "designation": meta["designation"],
-        "department": meta["department"],
-        "is_courier": meta["is_courier"],
-        "shift_locations": meta["shift_locations"],
-        "from_date": str(start),
-        "to_date": str(end),
-        "scope": grid["scope"],
-        "grace_minutes": grid["grace_minutes"],
-        "days": days,
-        "totals": totals_for(days),
-        "by_branch": branch_rows,
-        "checkins": checkins,
-    }
+	The raw rows are returned alongside the derived days because every dispute
+	about a derived status ends with somebody asking what the clock actually
+	recorded, and making them open Desk to find out defeats the screen.
+
+	Carries the same ``scope`` block as the other three reads. Without it this
+	tab could not tell "your branch scope resolved to nothing" apart from "this
+	person has no days in this range" -- two states that render identically as
+	an empty screen and need opposite fixes (one is a POS Profile mapping, the
+	other is a different date range).
+	"""
+	start, end = _range_bounds(from_date, to_date, MAX_EMPLOYEE_RANGE_DAYS)
+	if not hrms_available():
+		return {
+			"hrms_available": False,
+			"notice": _hrms_notice(),
+			"employee": employee,
+			"employee_name": employee,
+			"designation": None,
+			"department": None,
+			"is_courier": False,
+			"shift_locations": [],
+			"from_date": str(start),
+			"to_date": str(end),
+			"scope": scope_payload(None),
+			"grace_minutes": grace_minutes(),
+			"days": [],
+			"totals": totals_for([]),
+			"by_branch": [],
+			"checkins": [],
+		}
+
+	grid = build_grid(start, end, employee=employee)
+	meta = next(
+		(row for row in grid["employees"] if row["employee"] == employee),
+		{
+			"employee": employee,
+			"employee_name": frappe.db.get_value("Employee", employee, "employee_name") or employee,
+			"designation": None,
+			"department": None,
+			"shift_locations": [],
+			"is_courier": False,
+		},
+	)
+	cells = grid["cells"].get(employee, {})
+	days = [cells[key] for key in sorted(cells.keys())]
+
+	redacted = grid.get("redacted") or set()
+	by_branch: dict[str | None, dict[str, Any]] = {}
+	for cell in days:
+		if (employee, cell.get("date")) in redacted:
+			continue
+		location = cell.get("shift_location")
+		bucket = by_branch.setdefault(location, {"shift_location": location, "_cells": []})
+		bucket["_cells"].append(cell)
+
+	branch_rows = []
+	for bucket in by_branch.values():
+		totals = totals_for(bucket["_cells"])
+		branch_rows.append(
+			{
+				"shift_location": bucket["shift_location"],
+				"rostered_days": totals["rostered_days"],
+				"present_days": totals["present_days"],
+				"late_days": totals["late_days"],
+				"absent_days": totals["absent_days"],
+				"worked_hours": totals["worked_hours"],
+			}
+		)
+	branch_rows.sort(key=_branch_sort_key)
+
+	locations = shift_location_map()
+	checkins: list[dict[str, Any]] = []
+	for (name, day_key), group in grid["groups"].items():
+		if name != employee or day_key not in cells:
+			continue
+		location_row = locations.get(cells[day_key].get("shift_location") or "")
+		for raw in group["rows"]:
+			lat = _float_or_none(raw.get("latitude"))
+			lng = _float_or_none(raw.get("longitude"))
+			checkins.append(
+				{
+					"name": raw.get("name"),
+					"time": _dt_text(raw.get("time")),
+					"log_type": raw.get("log_type") or None,
+					"shift": raw.get("shift") or None,
+					"offshift": bool(raw.get("offshift")),
+					"device_flag": raw.get("custom_device_flag") or None,
+					"device_flag_detail": mask_tokens_in_detail(raw.get("custom_device_flag_detail")) or None,
+					"latitude": lat,
+					"longitude": lng,
+					"geo_ok": _geo_ok(
+						[(lat, lng)] if lat is not None and lng is not None else [], location_row
+					),
+				}
+			)
+	checkins.sort(key=lambda r: r.get("time") or "")
+
+	return {
+		"hrms_available": True,
+		"employee": employee,
+		"employee_name": meta["employee_name"],
+		"designation": meta["designation"],
+		"department": meta["department"],
+		"is_courier": meta["is_courier"],
+		"shift_locations": meta["shift_locations"],
+		"from_date": str(start),
+		"to_date": str(end),
+		"scope": grid["scope"],
+		"grace_minutes": grid["grace_minutes"],
+		"days": days,
+		"totals": totals_for(days),
+		"by_branch": branch_rows,
+		"checkins": checkins,
+	}
 
 
 def _range_bounds(
-    from_date: Optional[str],
-    to_date: Optional[str],
-    max_days: Optional[int] = None,
-) -> Tuple[date_cls, date_cls]:
-    """Default to the current month; tolerate a reversed pair by swapping it.
+	from_date: str | None,
+	to_date: str | None,
+	max_days: int | None = None,
+) -> tuple[date_cls, date_cls]:
+	"""Default to the current month; tolerate a reversed pair by swapping it.
 
-    A reversed pair is a slip worth forgiving; an over-long one is not, because
-    serving it can take the server down (see ``MAX_SUMMARY_RANGE_DAYS``). It is
-    refused rather than silently truncated: a report quietly covering less than
-    the manager asked for would be read as the whole period.
-    """
-    if from_date and to_date:
-        start, end = getdate(from_date), getdate(to_date)
-    elif from_date:
-        start = getdate(from_date)
-        end = getdate(get_last_day(start))
-    elif to_date:
-        end = getdate(to_date)
-        start = getdate(get_first_day(end))
-    else:
-        today = getdate()
-        start, end = getdate(get_first_day(today)), getdate(get_last_day(today))
-    if end < start:
-        start, end = end, start
-    if max_days is not None:
-        _refuse_long_range(start, end, max_days)
-    return start, end
+	A reversed pair is a slip worth forgiving; an over-long one is not, because
+	serving it can take the server down (see ``MAX_SUMMARY_RANGE_DAYS``). It is
+	refused rather than silently truncated: a report quietly covering less than
+	the manager asked for would be read as the whole period.
+	"""
+	if from_date and to_date:
+		start, end = getdate(from_date), getdate(to_date)
+	elif from_date:
+		start = getdate(from_date)
+		end = getdate(get_last_day(start))
+	elif to_date:
+		end = getdate(to_date)
+		start = getdate(get_first_day(end))
+	else:
+		today = getdate()
+		start, end = getdate(get_first_day(today)), getdate(get_last_day(today))
+	if end < start:
+		start, end = end, start
+	if max_days is not None:
+		_refuse_long_range(start, end, max_days)
+	return start, end
 
 
 def _refuse_long_range(start: date_cls, end: date_cls, max_days: int) -> None:
-    span = (getdate(end) - getdate(start)).days + 1
-    if span > max_days:
-        frappe.throw(
-            _("That range covers {0} days. Choose a range of {1} days or fewer.").format(
-                span, max_days
-            )
-        )
+	span = (getdate(end) - getdate(start)).days + 1
+	if span > max_days:
+		frappe.throw(
+			_("That range covers {0} days. Choose a range of {1} days or fewer.").format(span, max_days)
+		)
 
 
 GROUP_BY_CHOICES = ("branch", "employee", "day")
 
 
 def get_summary(
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-    group_by: str = "branch",
-    shift_location: Optional[str] = None,
-) -> Dict[str, Any]:
-    """The same cells, rolled up three different ways.
+	from_date: str | None = None,
+	to_date: str | None = None,
+	group_by: str = "branch",
+	shift_location: str | None = None,
+) -> dict[str, Any]:
+	"""The same cells, rolled up three different ways.
 
-    All three groupings share one pass over one grid, so a branch total, an
-    employee total and a day total for the same range are arithmetically the
-    same numbers -- three separate queries would drift the moment one of them
-    filtered differently.
+	All three groupings share one pass over one grid, so a branch total, an
+	employee total and a day total for the same range are arithmetically the
+	same numbers -- three separate queries would drift the moment one of them
+	filtered differently.
 
-    Guarantees on ``key`` and ``label``:
+	Guarantees on ``key`` and ``label``:
 
-    * ``group_by="day"`` -> ``key`` is a bare ISO ``YYYY-MM-DD`` and ``label`` is
-      the same string. The client renders the date itself. This is an
-      Arabic-first UI: a date formatted on the server follows the server's
-      locale, not the app's, and a formatted key cannot be parsed back into a
-      date to drill into.
-    * ``group_by="branch"`` -> ``key`` is the Shift Location name, or ``None``
-      for the unattributable bucket; ``label`` is a display string and IS
-      translated ("No branch").
-    * ``group_by="employee"`` -> ``key`` is the employee id and ``label`` is
-      their name.
-    """
-    group_by = (group_by or "branch").strip().lower()
-    if group_by not in GROUP_BY_CHOICES:
-        group_by = "branch"
-    start, end = _range_bounds(from_date, to_date, MAX_SUMMARY_RANGE_DAYS)
+	* ``group_by="day"`` -> ``key`` is a bare ISO ``YYYY-MM-DD`` and ``label`` is
+	  the same string. The client renders the date itself. This is an
+	  Arabic-first UI: a date formatted on the server follows the server's
+	  locale, not the app's, and a formatted key cannot be parsed back into a
+	  date to drill into.
+	* ``group_by="branch"`` -> ``key`` is the Shift Location name, or ``None``
+	  for the unattributable bucket; ``label`` is a display string and IS
+	  translated ("No branch").
+	* ``group_by="employee"`` -> ``key`` is the employee id and ``label`` is
+	  their name.
+	"""
+	group_by = (group_by or "branch").strip().lower()
+	if group_by not in GROUP_BY_CHOICES:
+		group_by = "branch"
+	start, end = _range_bounds(from_date, to_date, MAX_SUMMARY_RANGE_DAYS)
 
-    if not hrms_available():
-        empty = totals_for([])
-        empty["avg_late_minutes"] = 0.0
-        empty["employees"] = 0
-        return {
-            "hrms_available": False,
-            "notice": _hrms_notice(),
-            "from_date": str(start),
-            "to_date": str(end),
-            "group_by": group_by,
-            "scope": scope_payload(None),
-            "grace_minutes": grace_minutes(),
-            "rows": [],
-            "totals": empty,
-        }
+	if not hrms_available():
+		empty = totals_for([])
+		empty["avg_late_minutes"] = 0.0
+		empty["employees"] = 0
+		return {
+			"hrms_available": False,
+			"notice": _hrms_notice(),
+			"from_date": str(start),
+			"to_date": str(end),
+			"group_by": group_by,
+			"scope": scope_payload(None),
+			"grace_minutes": grace_minutes(),
+			"rows": [],
+			"totals": empty,
+		}
 
-    grid = build_grid(start, end, shift_location=shift_location)
-    meta_by_employee = {row["employee"]: row for row in grid["employees"]}
+	grid = build_grid(start, end, shift_location=shift_location)
+	meta_by_employee = {row["employee"]: row for row in grid["employees"]}
 
-    buckets: Dict[Any, Dict[str, Any]] = {}
-    every_cell: List[Dict[str, Any]] = []
-    all_employees: Set[str] = set()
+	buckets: dict[Any, dict[str, Any]] = {}
+	every_cell: list[dict[str, Any]] = []
+	all_employees: set[str] = set()
 
-    redacted = grid.get("redacted") or set()
-    for name, cells in grid["cells"].items():
-        meta = meta_by_employee.get(name, {})
-        for key in sorted(cells.keys()):
-            if (name, key) in redacted:
-                continue
-            cell = cells[key]
-            every_cell.append(cell)
-            all_employees.add(name)
+	redacted = grid.get("redacted") or set()
+	for name, cells in grid["cells"].items():
+		meta = meta_by_employee.get(name, {})
+		for key in sorted(cells.keys()):
+			if (name, key) in redacted:
+				continue
+			cell = cells[key]
+			every_cell.append(cell)
+			all_employees.add(name)
 
-            if group_by == "branch":
-                bucket_key = cell.get("shift_location")
-                label = bucket_key or _("No branch")
-                row_employee = None
-                row_location = bucket_key
-            elif group_by == "employee":
-                bucket_key = name
-                label = meta.get("employee_name") or name
-                row_employee = name
-                row_location = (meta.get("shift_locations") or [None])[0]
-            else:
-                # ``key`` is the cell's own ISO date, already "YYYY-MM-DD".
-                # Formatting it here would be wrong twice over: this is an
-                # Arabic-first UI, so a server-rendered date would not follow the
-                # app's locale, and a formatted key cannot be parsed back. The
-                # label is the same bare string for the same reason -- the client
-                # formats it.
-                bucket_key = str(getdate(key))
-                label = bucket_key
-                row_employee = None
-                row_location = None
+			if group_by == "branch":
+				bucket_key = cell.get("shift_location")
+				label = bucket_key or _("No branch")
+				row_employee = None
+				row_location = bucket_key
+			elif group_by == "employee":
+				bucket_key = name
+				label = meta.get("employee_name") or name
+				row_employee = name
+				row_location = (meta.get("shift_locations") or [None])[0]
+			else:
+				# ``key`` is the cell's own ISO date, already "YYYY-MM-DD".
+				# Formatting it here would be wrong twice over: this is an
+				# Arabic-first UI, so a server-rendered date would not follow the
+				# app's locale, and a formatted key cannot be parsed back. The
+				# label is the same bare string for the same reason -- the client
+				# formats it.
+				bucket_key = str(getdate(key))
+				label = bucket_key
+				row_employee = None
+				row_location = None
 
-            bucket = buckets.setdefault(
-                bucket_key,
-                {
-                    "key": bucket_key,
-                    "label": label,
-                    "employee": row_employee,
-                    "shift_location": row_location,
-                    "_cells": [],
-                    "_employees": set(),
-                },
-            )
-            bucket["_cells"].append(cell)
-            bucket["_employees"].add(name)
+			bucket = buckets.setdefault(
+				bucket_key,
+				{
+					"key": bucket_key,
+					"label": label,
+					"employee": row_employee,
+					"shift_location": row_location,
+					"_cells": [],
+					"_employees": set(),
+				},
+			)
+			bucket["_cells"].append(cell)
+			bucket["_employees"].add(name)
 
-    rows: List[Dict[str, Any]] = []
-    for bucket in buckets.values():
-        totals = totals_for(bucket["_cells"])
-        totals["avg_late_minutes"] = (
-            round(totals["late_minutes"] / totals["late_days"], 2) if totals["late_days"] else 0.0
-        )
-        row = {
-            "key": bucket["key"],
-            "label": bucket["label"],
-            "employee": bucket["employee"],
-            "shift_location": bucket["shift_location"],
-            "employees": len(bucket["_employees"]),
-        }
-        row.update(totals)
-        rows.append(row)
+	rows: list[dict[str, Any]] = []
+	for bucket in buckets.values():
+		totals = totals_for(bucket["_cells"])
+		totals["avg_late_minutes"] = (
+			round(totals["late_minutes"] / totals["late_days"], 2) if totals["late_days"] else 0.0
+		)
+		row = {
+			"key": bucket["key"],
+			"label": bucket["label"],
+			"employee": bucket["employee"],
+			"shift_location": bucket["shift_location"],
+			"employees": len(bucket["_employees"]),
+		}
+		row.update(totals)
+		rows.append(row)
 
-    if group_by == "day":
-        rows.sort(key=lambda r: str(r["key"]))
-    elif group_by == "branch":
-        rows.sort(key=_branch_sort_key)
-    else:
-        rows.sort(key=lambda r: (r["label"] or "").lower())
+	if group_by == "day":
+		rows.sort(key=lambda r: str(r["key"]))
+	elif group_by == "branch":
+		rows.sort(key=_branch_sort_key)
+	else:
+		rows.sort(key=lambda r: (r["label"] or "").lower())
 
-    totals = totals_for(every_cell)
-    totals["avg_late_minutes"] = (
-        round(totals["late_minutes"] / totals["late_days"], 2) if totals["late_days"] else 0.0
-    )
-    totals["employees"] = len(all_employees)
+	totals = totals_for(every_cell)
+	totals["avg_late_minutes"] = (
+		round(totals["late_minutes"] / totals["late_days"], 2) if totals["late_days"] else 0.0
+	)
+	totals["employees"] = len(all_employees)
 
-    return {
-        "hrms_available": True,
-        "from_date": str(start),
-        "to_date": str(end),
-        "group_by": group_by,
-        "scope": grid["scope"],
-        "grace_minutes": grid["grace_minutes"],
-        "rows": rows,
-        "totals": totals,
-    }
+	return {
+		"hrms_available": True,
+		"from_date": str(start),
+		"to_date": str(end),
+		"group_by": group_by,
+		"scope": grid["scope"],
+		"grace_minutes": grid["grace_minutes"],
+		"rows": rows,
+		"totals": totals,
+	}

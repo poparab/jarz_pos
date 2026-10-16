@@ -22,7 +22,10 @@
 	};
 
 	const openCancelledInvoiceDialog = (frm) => {
-		const stateField = getExistingField(frm, ["custom_sales_invoice_state", "sales_invoice_state"]);
+		const stateField = getExistingField(frm, [
+			"custom_sales_invoice_state",
+			"sales_invoice_state",
+		]);
 		const acceptanceField = getExistingField(frm, ["custom_acceptance_status"]);
 
 		const fields = [];
@@ -72,7 +75,9 @@
 
 						const message = response.message || {};
 						if (!message.success) {
-							frappe.msgprint(message.error || __("Unable to update the cancelled invoice."));
+							frappe.msgprint(
+								message.error || __("Unable to update the cancelled invoice.")
+							);
 							return;
 						}
 
@@ -98,15 +103,22 @@
 				return;
 			}
 
-			const stateField = getExistingField(frm, ["custom_sales_invoice_state", "sales_invoice_state"]);
+			const stateField = getExistingField(frm, [
+				"custom_sales_invoice_state",
+				"sales_invoice_state",
+			]);
 			const acceptanceField = getExistingField(frm, ["custom_acceptance_status"]);
 			if (!stateField && !acceptanceField) {
 				return;
 			}
 
-			frm.add_custom_button(__("Update Cancelled Fields"), () => {
-				openCancelledInvoiceDialog(frm);
-			}, __("Actions"));
+			frm.add_custom_button(
+				__("Update Cancelled Fields"),
+				() => {
+					openCancelledInvoiceDialog(frm);
+				},
+				__("Actions")
+			);
 		},
 	});
 })();

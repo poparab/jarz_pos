@@ -9,8 +9,7 @@
 const PREVIEW_METHOD = "jarz_pos.api.delivery_slots.preview_timetable_slots";
 
 function render_slot_preview(frm) {
-	const wrapper = frm.fields_dict.slot_preview
-		&& frm.fields_dict.slot_preview.$wrapper;
+	const wrapper = frm.fields_dict.slot_preview && frm.fields_dict.slot_preview.$wrapper;
 	if (!wrapper) return;
 
 	const slot_minutes = cint(frm.doc.slot_hours) * 60 + cint(frm.doc.slot_minutes);
@@ -43,9 +42,7 @@ function render_slot_preview(frm) {
 			wrapper.html(build_preview_html(r.message));
 		})
 		.catch(() => {
-			wrapper.html(
-				`<div class="text-danger">Could not build the slot preview.</div>`
-			);
+			wrapper.html(`<div class="text-danger">Could not build the slot preview.</div>`);
 		});
 }
 
@@ -58,9 +55,7 @@ function format_duration(minutes) {
 }
 
 function build_preview_html(data) {
-	const header_bits = [
-		`Slot length: <b>${format_duration(data.slot_duration_minutes)}</b>`,
-	];
+	const header_bits = [`Slot length: <b>${format_duration(data.slot_duration_minutes)}</b>`];
 	if (data.last_slot_duration_minutes) {
 		header_bits.push(
 			`Custom last slot: <b>${format_duration(data.last_slot_duration_minutes)}</b>`
@@ -70,10 +65,11 @@ function build_preview_html(data) {
 
 	const rows = (data.days || [])
 		.map((day) => {
-			const hours = day.configured && day.opening_time
-				? `${day.opening_time.slice(0, 5)} – ${day.closing_time.slice(0, 5)}` +
-					(day.same_day === "Next Day" ? " <span class='text-muted'>(+1d)</span>" : "")
-				: `<span class="text-muted">—</span>`;
+			const hours =
+				day.configured && day.opening_time
+					? `${day.opening_time.slice(0, 5)} – ${day.closing_time.slice(0, 5)}` +
+					  (day.same_day === "Next Day" ? " <span class='text-muted'>(+1d)</span>" : "")
+					: `<span class="text-muted">—</span>`;
 
 			const chips = (day.slots || [])
 				.map((slot) => {
@@ -85,7 +81,9 @@ function build_preview_html(data) {
 				.join("");
 
 			const note = day.note
-				? `<div class="${day.slot_count ? "text-warning" : "text-muted"}" style="margin-top:4px">${frappe.utils.escape_html(day.note)}</div>`
+				? `<div class="${
+						day.slot_count ? "text-warning" : "text-muted"
+				  }" style="margin-top:4px">${frappe.utils.escape_html(day.note)}</div>`
 				: "";
 
 			return `

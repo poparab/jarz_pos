@@ -49,19 +49,13 @@ def _group_of(code):
 class TestNaming(unittest.TestCase):
 	def test_small_item_code(self):
 		self.assertEqual(sj.small_item_code("Molten Medium"), "Molten Small")
-		self.assertEqual(
-			sj.small_item_code("Chocolate Hazelnut Medium"), "Chocolate Hazelnut Small"
-		)
+		self.assertEqual(sj.small_item_code("Chocolate Hazelnut Medium"), "Chocolate Hazelnut Small")
 		self.assertIsNone(sj.small_item_code("Molten Large"))
 		self.assertIsNone(sj.small_item_code("Medium"))
 
 	def test_small_label_code_normalises_the_212_spellings(self):
-		self.assertEqual(
-			sj.small_label_code("Blueberry Jar label 212"), "Blueberry Jar Label 147"
-		)
-		self.assertEqual(
-			sj.small_label_code("RedVelvet Jar Label 212"), "RedVelvet Jar Label 147"
-		)
+		self.assertEqual(sj.small_label_code("Blueberry Jar label 212"), "Blueberry Jar Label 147")
+		self.assertEqual(sj.small_label_code("RedVelvet Jar Label 212"), "RedVelvet Jar Label 147")
 		self.assertEqual(sj.small_label_code("Mango  Jar Label 212"), "Mango Jar Label 147")
 		self.assertIsNone(sj.small_label_code("Molten Jar Label 330"))
 
@@ -164,9 +158,7 @@ class TestPriceListOnlyGuard(unittest.TestCase):
 				item_name=item_data["item_code"], stock_uom="Nos", item_group=item_group
 			)
 			mf.throw.side_effect = _throwing
-			return ic._process_regular_item(
-				item_data, MagicMock(), price_list="Standard Selling", **kwargs
-			)
+			return ic._process_regular_item(item_data, MagicMock(), price_list="Standard Selling", **kwargs)
 
 	def test_small_on_a_standard_order_is_refused(self):
 		with self.assertRaises(_Thrown) as caught:
@@ -175,9 +167,7 @@ class TestPriceListOnlyGuard(unittest.TestCase):
 		self.assertIn("B2B", str(caught.exception))
 
 	def test_medium_on_a_standard_order_is_unaffected(self):
-		result = self._run(
-			"Medium", {"item_code": "Molten Medium", "qty": 1, "rate": 120.0}
-		)
+		result = self._run("Medium", {"item_code": "Molten Medium", "qty": 1, "rate": 120.0})
 		self.assertEqual(result["rate"], 120.0)
 
 	def test_small_on_a_free_sample_order_is_allowed(self):
@@ -201,9 +191,7 @@ class TestPriceListOnlyGuard(unittest.TestCase):
 				return None
 
 			mf.db.get_value.side_effect = get_value
-			mf.get_doc.return_value = MagicMock(
-				item_name="Molten Small", stock_uom="Nos", item_group="Small"
-			)
+			mf.get_doc.return_value = MagicMock(item_name="Molten Small", stock_uom="Nos", item_group="Small")
 			mf.throw.side_effect = _throwing
 			result = ic._process_regular_item(
 				{"item_code": "Molten Small", "qty": 1, "rate": 0},

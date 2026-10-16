@@ -32,43 +32,43 @@ STATUS_RESOLVED = "Resolved"
 
 
 class JarzWooBacklogException(Document):
-    def validate(self):
-        self._default_status()
-        self._reject_duplicate()
-        self._stamp_resolution()
+	def validate(self):
+		self._default_status()
+		self._reject_duplicate()
+		self._stamp_resolution()
 
-    def _default_status(self):
-        if not (self.status or "").strip():
-            self.status = STATUS_OPEN
+	def _default_status(self):
+		if not (self.status or "").strip():
+			self.status = STATUS_OPEN
 
-    def _reject_duplicate(self):
-        """One row per Sales Invoice -- there is only one kind of exception here."""
-        if not self.sales_invoice:
-            return
+	def _reject_duplicate(self):
+		"""One row per Sales Invoice -- there is only one kind of exception here."""
+		if not self.sales_invoice:
+			return
 
-        clash = frappe.db.exists(
-            self.doctype,
-            {
-                "sales_invoice": self.sales_invoice,
-                "name": ["!=", self.name or ""],
-            },
-        )
-        if clash:
-            frappe.throw(
-                _("{0} already has an open backlog exception ({1}).").format(
-                    frappe.bold(self.sales_invoice), clash
-                ),
-                frappe.DuplicateEntryError,
-            )
+		clash = frappe.db.exists(
+			self.doctype,
+			{
+				"sales_invoice": self.sales_invoice,
+				"name": ["!=", self.name or ""],
+			},
+		)
+		if clash:
+			frappe.throw(
+				_("{0} already has an open backlog exception ({1}).").format(
+					frappe.bold(self.sales_invoice), clash
+				),
+				frappe.DuplicateEntryError,
+			)
 
-    def _stamp_resolution(self):
-        """Keep ``resolved_on``/``resolved_by`` honest however ``status`` was set."""
-        if (self.status or STATUS_OPEN) == STATUS_RESOLVED:
-            if not self.resolved_on:
-                self.resolved_on = frappe.utils.now_datetime()
-            if not self.resolved_by:
-                self.resolved_by = frappe.session.user
-        else:
-            # Re-opened: the previous resolution no longer describes this row.
-            self.resolved_on = None
-            self.resolved_by = None
+	def _stamp_resolution(self):
+		"""Keep ``resolved_on``/``resolved_by`` honest however ``status`` was set."""
+		if (self.status or STATUS_OPEN) == STATUS_RESOLVED:
+			if not self.resolved_on:
+				self.resolved_on = frappe.utils.now_datetime()
+			if not self.resolved_by:
+				self.resolved_by = frappe.session.user
+		else:
+			# Re-opened: the previous resolution no longer describes this row.
+			self.resolved_on = None
+			self.resolved_by = None

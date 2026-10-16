@@ -31,76 +31,74 @@ import frappe
 
 
 def execute():
-    from jarz_pos.services.delivery_handling import reconcile_payment_confirmation
+	from jarz_pos.services.delivery_handling import reconcile_payment_confirmation
 
-    rows = frappe.get_all(
-        "Sales Invoice",
-        filters={"docstatus": 1, "custom_payment_confirmation_status": "Awaiting Payment"},
-        fields=["name", "outstanding_amount", "grand_total", "custom_kanban_profile"],
-        limit_page_length=0,
-    )
-    if not rows:
-        print("reconcile_awaiting_online_payments: nothing awaiting payment")
-        return
+	rows = frappe.get_all(
+		"Sales Invoice",
+		filters={"docstatus": 1, "custom_payment_confirmation_status": "Awaiting Payment"},
+		fields=["name", "outstanding_amount", "grand_total", "custom_kanban_profile"],
+		limit_page_length=0,
+	)
+	if not rows:
+		print("reconcile_awaiting_online_payments: nothing awaiting payment")
+		return
 
-    confirmed_from_ledger = []
-    receipts_filed = []
-    amounts_resynced = []
-    needs_a_decision = []
+	confirmed_from_ledger = []
+	receipts_filed = []
+	amounts_resynced = []
+	needs_a_decision = []
 
-    for row in rows:
-        name = row["name"]
+	for row in rows:
+		name = row["name"]
 
-        # A confirmed receipt on an unpaid invoice is the one case a migration
-        # must not touch: somebody already looked at proof of transfer, so the
-        # question is whether to book the money, and that is not ours to answer.
-        if float(row.get("outstanding_amount") or 0) > 0.01:
-            confirmed_receipts = frappe.get_all(
-                "POS Payment Receipt",
-                filters={"sales_invoice": name, "status": "Confirmed"},
-                pluck="name",
-            )
-            if confirmed_receipts:
-                needs_a_decision.append((name, row.get("outstanding_amount"), confirmed_receipts))
-                continue
+		# A confirmed receipt on an unpaid invoice is the one case a migration
+		# must not touch: somebody already looked at proof of transfer, so the
+		# question is whether to book the money, and that is not ours to answer.
+		if float(row.get("outstanding_amount") or 0) > 0.01:
+			confirmed_receipts = frappe.get_all(
+				"POS Payment Receipt",
+				filters={"sales_invoice": name, "status": "Confirmed"},
+				pluck="name",
+			)
+			if confirmed_receipts:
+				needs_a_decision.append((name, row.get("outstanding_amount"), confirmed_receipts))
+				continue
 
-        try:
-            result = reconcile_payment_confirmation(name)
-        except Exception:
-            frappe.logger().error(
-                f"reconcile_awaiting_online_payments: failed on {name}"
-            )
-            continue
+		try:
+			result = reconcile_payment_confirmation(name)
+		except Exception:
+			frappe.logger().error(f"reconcile_awaiting_online_payments: failed on {name}")
+			continue
 
-        if not result:
-            continue
-        if result.get("action") == "confirmed_from_ledger":
-            confirmed_from_ledger.append((name, result.get("payment_entry")))
-        elif result.get("action") == "receipt_filed":
-            receipts_filed.append((name, result.get("receipt")))
-        elif result.get("action") == "receipt_amount_synced":
-            amounts_resynced.append((name, result.get("receipt")))
+		if not result:
+			continue
+		if result.get("action") == "confirmed_from_ledger":
+			confirmed_from_ledger.append((name, result.get("payment_entry")))
+		elif result.get("action") == "receipt_filed":
+			receipts_filed.append((name, result.get("receipt")))
+		elif result.get("action") == "receipt_amount_synced":
+			amounts_resynced.append((name, result.get("receipt")))
 
-    frappe.db.commit()
+	frappe.db.commit()
 
-    print(
-        f"reconcile_awaiting_online_payments: {len(rows)} awaiting; "
-        f"{len(confirmed_from_ledger)} already paid and now confirmed; "
-        f"{len(receipts_filed)} pending receipts filed; "
-        f"{len(amounts_resynced)} receipt amounts re-synced; "
-        f"{len(needs_a_decision)} left for a human."
-    )
-    for name, pe in confirmed_from_ledger:
-        print(f"  confirmed from ledger: {name} (payment entry {pe})")
-    for name, receipt in receipts_filed:
-        print(f"  receipt filed: {name} -> {receipt}")
-    for name, receipt in amounts_resynced:
-        print(f"  receipt amount re-synced: {name} -> {receipt}")
-    if needs_a_decision:
-        print(
-            "  NOT touched - a manager confirmed the transfer but no payment was "
-            "ever booked. Book it from the InstaPay reconciliation screen, or "
-            "reverse it if the money never arrived:"
-        )
-        for name, outstanding, receipts in needs_a_decision:
-            print(f"    {name}: {outstanding} outstanding, receipts {receipts}")
+	print(
+		f"reconcile_awaiting_online_payments: {len(rows)} awaiting; "
+		f"{len(confirmed_from_ledger)} already paid and now confirmed; "
+		f"{len(receipts_filed)} pending receipts filed; "
+		f"{len(amounts_resynced)} receipt amounts re-synced; "
+		f"{len(needs_a_decision)} left for a human."
+	)
+	for name, pe in confirmed_from_ledger:
+		print(f"  confirmed from ledger: {name} (payment entry {pe})")
+	for name, receipt in receipts_filed:
+		print(f"  receipt filed: {name} -> {receipt}")
+	for name, receipt in amounts_resynced:
+		print(f"  receipt amount re-synced: {name} -> {receipt}")
+	if needs_a_decision:
+		print(
+			"  NOT touched - a manager confirmed the transfer but no payment was "
+			"ever booked. Book it from the InstaPay reconciliation screen, or "
+			"reverse it if the money never arrived:"
+		)
+		for name, outstanding, receipts in needs_a_decision:
+			print(f"    {name}: {outstanding} outstanding, receipts {receipts}")

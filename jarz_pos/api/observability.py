@@ -33,7 +33,7 @@ def trigger_test_exception() -> dict[str, object]:
 
 	try:
 		raise RuntimeError("Jarz observability synthetic test exception")
-	except Exception as error:  # noqa: BLE001
+	except Exception as error:
 		frappe.log_error(
 			message=frappe.get_traceback(),
 			title="Jarz Observability Synthetic Test Exception",

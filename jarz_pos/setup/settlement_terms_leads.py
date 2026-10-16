@@ -34,7 +34,7 @@ import cleanly with NO top-level frappe calls.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 import frappe
 
@@ -50,87 +50,85 @@ _ANCHOR = "company_name"
 
 
 def _json_fieldtype() -> str:
-    """``JSON`` where this Frappe knows the fieldtype, else ``Long Text``.
+	"""``JSON`` where this Frappe knows the fieldtype, else ``Long Text``.
 
-    Frappe v14+ ships ``JSON`` (``frappe.model.data_fieldtypes``); the check
-    keeps the seeder correct on an older bench rather than failing the field.
-    """
-    try:
-        from frappe.model import data_fieldtypes
+	Frappe v14+ ships ``JSON`` (``frappe.model.data_fieldtypes``); the check
+	keeps the seeder correct on an older bench rather than failing the field.
+	"""
+	try:
+		from frappe.model import data_fieldtypes
 
-        if "JSON" in data_fieldtypes:
-            return "JSON"
-    except Exception:
-        pass
-    return "Long Text"
+		if "JSON" in data_fieldtypes:
+			return "JSON"
+	except Exception:
+		pass
+	return "Long Text"
 
 
-def lead_field_spec() -> Dict[str, Any]:
-    return {
-        "fieldname": LEAD_FIELD,
-        "label": "Agreed Settlement Terms",
-        "fieldtype": _json_fieldtype(),
-        "read_only": 1,
-        "no_copy": 1,
-        "insert_after": _ANCHOR,
-        "module": "jarz pos",
-        "description": (
-            "Payment terms agreed with this lead in the B2B app (cycle, days, "
-            "reminders, notes). Copied to the customer's Settlement Terms when the "
-            "lead is converted; kept here as history. Edited from the app only."
-        ),
-    }
+def lead_field_spec() -> dict[str, Any]:
+	return {
+		"fieldname": LEAD_FIELD,
+		"label": "Agreed Settlement Terms",
+		"fieldtype": _json_fieldtype(),
+		"read_only": 1,
+		"no_copy": 1,
+		"insert_after": _ANCHOR,
+		"module": "jarz pos",
+		"description": (
+			"Payment terms agreed with this lead in the B2B app (cycle, days, "
+			"reminders, notes). Copied to the customer's Settlement Terms when the "
+			"lead is converted; kept here as history. Edited from the app only."
+		),
+	}
 
 
 def _logger():
-    return frappe.logger(LOGGER_NAME, allow_site=True)
+	return frappe.logger(LOGGER_NAME, allow_site=True)
 
 
-def ensure_lead_settlement_terms_field() -> Dict[str, List[str]]:
-    """Idempotently seed ``Lead.custom_settlement_terms``. Never raises."""
-    log: Dict[str, List[str]] = {"created": [], "existing": [], "skipped": [], "warnings": []}
-    logger = _logger()
-    try:
-        if not frappe.db.exists("DocType", "Lead"):
-            log["skipped"].append("Lead: DocType not present")
-        else:
-            from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+def ensure_lead_settlement_terms_field() -> dict[str, list[str]]:
+	"""Idempotently seed ``Lead.custom_settlement_terms``. Never raises."""
+	log: dict[str, list[str]] = {"created": [], "existing": [], "skipped": [], "warnings": []}
+	logger = _logger()
+	try:
+		if not frappe.db.exists("DocType", "Lead"):
+			log["skipped"].append("Lead: DocType not present")
+		else:
+			from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
-            try:
-                already = bool(
-                    frappe.db.exists("Custom Field", {"dt": "Lead", "fieldname": LEAD_FIELD})
-                )
-            except Exception:
-                already = False
-            try:
-                create_custom_fields({"Lead": [lead_field_spec()]})
-                (log["existing"] if already else log["created"]).append(f"Lead.{LEAD_FIELD}")
-            except Exception:
-                logger.error(f"Failed to ensure Custom Field Lead.{LEAD_FIELD}", exc_info=True)
+			try:
+				already = bool(frappe.db.exists("Custom Field", {"dt": "Lead", "fieldname": LEAD_FIELD}))
+			except Exception:
+				already = False
+			try:
+				create_custom_fields({"Lead": [lead_field_spec()]})
+				(log["existing"] if already else log["created"]).append(f"Lead.{LEAD_FIELD}")
+			except Exception:
+				logger.error(f"Failed to ensure Custom Field Lead.{LEAD_FIELD}", exc_info=True)
 
-            try:
-                present = bool(frappe.db.has_column("Lead", LEAD_FIELD))
-            except Exception:
-                present = False
-            if not present:
-                log["warnings"].append(
-                    f"Lead.{LEAD_FIELD} has no database column; terms cannot be saved on "
-                    f"a Lead until the next successful migrate"
-                )
+			try:
+				present = bool(frappe.db.has_column("Lead", LEAD_FIELD))
+			except Exception:
+				present = False
+			if not present:
+				log["warnings"].append(
+					f"Lead.{LEAD_FIELD} has no database column; terms cannot be saved on "
+					f"a Lead until the next successful migrate"
+				)
 
-        if log["created"]:
-            frappe.db.commit()
+		if log["created"]:
+			frappe.db.commit()
 
-        # ERROR level on purpose: .info() is discarded on staging/production.
-        logger.error(
-            "settlement_terms_leads_setup: created=%s existing=%s skipped=%s"
-            % (log["created"], log["existing"], log["skipped"])
-        )
-        for warning in log["warnings"]:
-            logger.error("settlement_terms_leads_setup WARNING: " + warning)
-    except Exception:
-        try:
-            logger.error("ensure_lead_settlement_terms_field failed unexpectedly", exc_info=True)
-        except Exception:
-            pass
-    return log
+		# ERROR level on purpose: .info() is discarded on staging/production.
+		logger.error(
+			"settlement_terms_leads_setup: created=%s existing=%s skipped=%s"
+			% (log["created"], log["existing"], log["skipped"])
+		)
+		for warning in log["warnings"]:
+			logger.error("settlement_terms_leads_setup WARNING: " + warning)
+	except Exception:
+		try:
+			logger.error("ensure_lead_settlement_terms_field failed unexpectedly", exc_info=True)
+		except Exception:
+			pass
+	return log

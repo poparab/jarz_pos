@@ -1,18 +1,17 @@
 /* jshint esversion: 9 */
-/* globals frappe, __ */
 
-frappe.pages['recurring-expenses'].on_page_load = function (wrapper) {
+frappe.pages["recurring-expenses"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __('Recurring Expenses'),
+		title: __("Recurring Expenses"),
 		single_column: true,
 	});
 	let dash = new RecurringExpensesDashboard(page);
-	$(wrapper).data('re_dash', dash);
+	$(wrapper).data("re_dash", dash);
 };
 
-frappe.pages['recurring-expenses'].on_page_show = function (wrapper) {
-	let dash = $(wrapper).data('re_dash');
+frappe.pages["recurring-expenses"].on_page_show = function (wrapper) {
+	let dash = $(wrapper).data("re_dash");
 	if (dash) dash.refresh();
 };
 
@@ -33,9 +32,9 @@ class RecurringExpensesDashboard {
 		let me = this;
 
 		this.page.add_field({
-			fieldtype: 'Data',
-			fieldname: 'month',
-			label: __('Month (YYYY-MM)'),
+			fieldtype: "Data",
+			fieldname: "month",
+			label: __("Month (YYYY-MM)"),
 			change() {
 				let v = me.page.fields_dict.month.get_value();
 				if (v && /^\d{4}-\d{2}$/.test(v)) {
@@ -46,32 +45,38 @@ class RecurringExpensesDashboard {
 		});
 		this.page.fields_dict.month.set_value(this.month);
 
-		this.page.add_inner_button(__('Previous Month'), () => this._shift_month(-1));
-		this.page.add_inner_button(__('This Month'), () => {
+		this.page.add_inner_button(__("Previous Month"), () => this._shift_month(-1));
+		this.page.add_inner_button(__("This Month"), () => {
 			this.month = frappe.datetime.nowdate().slice(0, 7);
 			this.page.fields_dict.month.set_value(this.month);
 			this.refresh();
 		});
-		this.page.add_inner_button(__('Next Month'), () => this._shift_month(1));
+		this.page.add_inner_button(__("Next Month"), () => this._shift_month(1));
 
-		this.page.set_primary_action(__('New Recurring Expense'), () => {
-			frappe.new_doc('Jarz Recurring Expense');
+		this.page.set_primary_action(__("New Recurring Expense"), () => {
+			frappe.new_doc("Jarz Recurring Expense");
 		});
 
-		this.page.add_menu_item(__('Manage All Recurring Expenses'), () => {
-			frappe.set_route('List', 'Jarz Recurring Expense');
+		this.page.add_menu_item(__("Manage All Recurring Expenses"), () => {
+			frappe.set_route("List", "Jarz Recurring Expense");
 		});
-		this.page.add_menu_item(__('Set Up Payroll (Salary Structure)'), () => {
-			frappe.set_route('List', 'Salary Structure');
+		this.page.add_menu_item(__("Set Up Payroll (Salary Structure)"), () => {
+			frappe.set_route("List", "Salary Structure");
 		});
 	}
 
 	_shift_month(delta) {
-		let [y, m] = this.month.split('-').map(Number);
+		let [y, m] = this.month.split("-").map(Number);
 		m += delta;
-		while (m < 1) { m += 12; y -= 1; }
-		while (m > 12) { m -= 12; y += 1; }
-		this.month = `${y}-${String(m).padStart(2, '0')}`;
+		while (m < 1) {
+			m += 12;
+			y -= 1;
+		}
+		while (m > 12) {
+			m -= 12;
+			y += 1;
+		}
+		this.month = `${y}-${String(m).padStart(2, "0")}`;
 		this.page.fields_dict.month.set_value(this.month);
 		this.refresh();
 	}
@@ -145,27 +150,27 @@ class RecurringExpensesDashboard {
   <div id="re-gaps"></div>
 
   <div class="re-section">
-    <div class="re-title">${__('Monthly Run-Rate')}</div>
-    <div class="re-kpis" id="re-kpis"><div class="re-loading">${__('Loading…')}</div></div>
+    <div class="re-title">${__("Monthly Run-Rate")}</div>
+    <div class="re-kpis" id="re-kpis"><div class="re-loading">${__("Loading…")}</div></div>
   </div>
 
   <div class="re-section">
-    <div class="re-title">${__('By Category')}</div>
+    <div class="re-title">${__("By Category")}</div>
     <div class="re-box" id="re-categories"></div>
   </div>
 
   <div class="re-section">
-    <div class="re-title">${__('Salaries — live from HRMS payroll')}</div>
+    <div class="re-title">${__("Salaries — live from HRMS payroll")}</div>
     <div class="re-box" id="re-payroll"></div>
   </div>
 
   <div class="re-section">
-    <div class="re-title">${__('Registered Recurring Expenses')}</div>
+    <div class="re-title">${__("Registered Recurring Expenses")}</div>
     <div class="re-box" id="re-registry"></div>
   </div>
 
   <div class="re-section">
-    <div class="re-title">${__('Detected — recurring spend not yet registered')}</div>
+    <div class="re-title">${__("Detected — recurring spend not yet registered")}</div>
     <div class="re-box" id="re-detected"></div>
   </div>
 </div>
@@ -177,7 +182,7 @@ class RecurringExpensesDashboard {
 	refresh() {
 		let me = this;
 		frappe.call({
-			method: 'jarz_pos.api.recurring_expenses.get_recurring_expenses_overview',
+			method: "jarz_pos.api.recurring_expenses.get_recurring_expenses_overview",
 			args: { month: this.month },
 			callback(r) {
 				if (!r || !r.message) return;
@@ -185,9 +190,11 @@ class RecurringExpensesDashboard {
 				me._render();
 			},
 			error() {
-				me.page.main.find('#re-kpis').html(
-					`<div class="re-empty">${__('Could not load recurring expenses.')}</div>`
-				);
+				me.page.main
+					.find("#re-kpis")
+					.html(
+						`<div class="re-empty">${__("Could not load recurring expenses.")}</div>`
+					);
 			},
 		});
 	}
@@ -200,20 +207,20 @@ class RecurringExpensesDashboard {
 
 	_badge(status) {
 		const map = {
-			'Posted': ['b-posted', __('Posted')],
-			'Missing': ['b-missing', __('Missing')],
-			'Partial': ['b-partial', __('Partial')],
-			'Over': ['b-over', __('Over')],
-			'Not Due': ['b-notdue', __('Not due')],
-			'None': ['b-none', __('—')],
-			'Unexpected': ['b-unexpected', __('Unexpected')],
+			Posted: ["b-posted", __("Posted")],
+			Missing: ["b-missing", __("Missing")],
+			Partial: ["b-partial", __("Partial")],
+			Over: ["b-over", __("Over")],
+			"Not Due": ["b-notdue", __("Not due")],
+			None: ["b-none", __("—")],
+			Unexpected: ["b-unexpected", __("Unexpected")],
 		};
-		const [cls, label] = map[status] || ['b-none', frappe.utils.escape_html(status || '—')];
+		const [cls, label] = map[status] || ["b-none", frappe.utils.escape_html(status || "—")];
 		return `<span class="badge-re ${cls}">${label}</span>`;
 	}
 
 	_esc(v) {
-		return frappe.utils.escape_html(v == null ? '' : String(v));
+		return frappe.utils.escape_html(v == null ? "" : String(v));
 	}
 
 	// ── Render ───────────────────────────────────────────────────────────────
@@ -229,41 +236,55 @@ class RecurringExpensesDashboard {
 
 	_render_gaps() {
 		const gaps = this.data.gaps || [];
-		const icons = { critical: '⛔', warning: '⚠️', info: 'ℹ️' };
-		this.page.main.find('#re-gaps').html(
-			gaps.map(g => `
+		const icons = { critical: "⛔", warning: "⚠️", info: "ℹ️" };
+		this.page.main.find("#re-gaps").html(
+			gaps
+				.map(
+					(g) => `
 				<div class="re-alert ${this._esc(g.severity)}">
-					<span class="ico">${icons[g.severity] || 'ℹ️'}</span>
+					<span class="ico">${icons[g.severity] || "ℹ️"}</span>
 					<span>${this._esc(g.message)}</span>
-				</div>`).join('')
+				</div>`
+				)
+				.join("")
 		);
 	}
 
 	_render_kpis() {
 		const s = this.data.summary || {};
 		const variance = s.variance || 0;
-		const varianceClass = Math.abs(variance) < 0.005 ? '' : (variance < 0 ? 'neg' : 'warn');
+		const varianceClass = Math.abs(variance) < 0.005 ? "" : variance < 0 ? "neg" : "warn";
 
-		this.page.main.find('#re-kpis').html(`
+		this.page.main.find("#re-kpis").html(`
 			<div class="re-kpi info">
 				<div class="v">${this._fmt(s.total_monthly_runrate)}</div>
-				<div class="l">${__('Total Monthly Run-Rate')}</div>
-				<div class="s">${__('Salaries')} ${this._fmt(s.payroll_monthly)} · ${__('Other')} ${this._fmt(s.registry_monthly)}</div>
+				<div class="l">${__("Total Monthly Run-Rate")}</div>
+				<div class="s">${__("Salaries")} ${this._fmt(s.payroll_monthly)} · ${__("Other")} ${this._fmt(
+			s.registry_monthly
+		)}</div>
 			</div>
 			<div class="re-kpi">
 				<div class="v">${this._fmt(s.expected_this_month)}</div>
-				<div class="l">${__('Expected in')} ${this._esc(this.data.month)}</div>
-				<div class="s">${s.active_count || 0} ${__('active registered item(s)')}</div>
+				<div class="l">${__("Expected in")} ${this._esc(this.data.month)}</div>
+				<div class="s">${s.active_count || 0} ${__("active registered item(s)")}</div>
 			</div>
 			<div class="re-kpi pos">
 				<div class="v">${this._fmt(s.posted_this_month)}</div>
-				<div class="l">${__('Actually Posted to GL')}</div>
-				<div class="s">${s.items_posted || 0} ${__('matched')} · ${s.items_missing || 0} ${__('missing')}</div>
+				<div class="l">${__("Actually Posted to GL")}</div>
+				<div class="s">${s.items_posted || 0} ${__("matched")} · ${s.items_missing || 0} ${__(
+			"missing"
+		)}</div>
 			</div>
 			<div class="re-kpi ${varianceClass}">
 				<div class="v">${this._fmt(variance)}</div>
-				<div class="l">${__('Variance (Posted − Expected)')}</div>
-				<div class="s">${variance < 0 ? __('Under-posted') : (variance > 0 ? __('Over-posted') : __('Balanced'))}</div>
+				<div class="l">${__("Variance (Posted − Expected)")}</div>
+				<div class="s">${
+					variance < 0
+						? __("Under-posted")
+						: variance > 0
+						? __("Over-posted")
+						: __("Balanced")
+				}</div>
 			</div>
 		`);
 	}
@@ -271,32 +292,40 @@ class RecurringExpensesDashboard {
 	_render_categories() {
 		const cats = this.data.by_category || [];
 		if (!cats.length) {
-			this.page.main.find('#re-categories').html(
-				`<div class="re-empty">${__('Nothing registered yet.')}</div>`);
+			this.page.main
+				.find("#re-categories")
+				.html(`<div class="re-empty">${__("Nothing registered yet.")}</div>`);
 			return;
 		}
-		const max = Math.max(...cats.map(c => c.monthly || 0), 1);
+		const max = Math.max(...cats.map((c) => c.monthly || 0), 1);
 		const total = cats.reduce((a, c) => a + (c.monthly || 0), 0) || 1;
 
-		this.page.main.find('#re-categories').html(`
+		this.page.main.find("#re-categories").html(`
 			<table class="re-table">
 				<thead><tr>
-					<th>${__('Category')}</th><th class="num">${__('Items')}</th>
-					<th class="num">${__('Monthly')}</th><th class="num">${__('Share')}</th>
+					<th>${__("Category")}</th><th class="num">${__("Items")}</th>
+					<th class="num">${__("Monthly")}</th><th class="num">${__("Share")}</th>
 					<th style="width:22%">&nbsp;</th>
 				</tr></thead>
 				<tbody>
-					${cats.map(c => `
+					${cats
+						.map(
+							(c) => `
 						<tr>
-							<td>${this._esc(c.category)}${c.source === 'HRMS'
-								? ` <span class="badge-re b-over">${__('HRMS')}</span>` : ''}</td>
+							<td>${this._esc(c.category)}${
+								c.source === "HRMS"
+									? ` <span class="badge-re b-over">${__("HRMS")}</span>`
+									: ""
+							}</td>
 							<td class="num">${c.count || 0}</td>
 							<td class="num strong">${this._fmt(c.monthly)}</td>
-							<td class="num muted">${((c.monthly || 0) / total * 100).toFixed(1)}%</td>
+							<td class="num muted">${(((c.monthly || 0) / total) * 100).toFixed(1)}%</td>
 							<td><div class="re-bar-wrap">
-								<div class="re-bar" style="width:${((c.monthly || 0) / max * 100).toFixed(1)}%"></div>
+								<div class="re-bar" style="width:${(((c.monthly || 0) / max) * 100).toFixed(1)}%"></div>
 							</div></td>
-						</tr>`).join('')}
+						</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>
 		`);
@@ -310,113 +339,149 @@ class RecurringExpensesDashboard {
 		let head = `
 			<div style="margin-bottom:14px; font-size:13px;">
 				<span class="strong">${this._fmt(p.monthly_total)}</span>
-				<span class="muted"> ${__('monthly across')} ${p.employees_with_structure || 0} ${__('of')} ${p.employees_total || 0} ${__('active employees')}</span>
+				<span class="muted"> ${__("monthly across")} ${p.employees_with_structure || 0} ${__("of")} ${
+			p.employees_total || 0
+		} ${__("active employees")}</span>
 				&nbsp;${this._badge(p.status)}
-				<span class="muted"> · ${__('posted to GL')} ${this._fmt(p.posted_this_month)}</span>
+				<span class="muted"> · ${__("posted to GL")} ${this._fmt(p.posted_this_month)}</span>
 			</div>`;
 
 		let body;
 		if (!rows.length) {
 			body = `<div class="re-empty">
-				${__('No Salary Structure Assignments exist, so no salary is counted in the run-rate above.')}<br>
-				<a href="/app/salary-structure">${__('Set up Salary Structures')}</a>
+				${__("No Salary Structure Assignments exist, so no salary is counted in the run-rate above.")}<br>
+				<a href="/app/salary-structure">${__("Set up Salary Structures")}</a>
 			</div>`;
 		} else {
 			body = `
 			<table class="re-table">
 				<thead><tr>
-					<th>${__('Employee')}</th><th>${__('Designation')}</th>
-					<th>${__('Salary Structure')}</th><th>${__('Effective')}</th>
-					<th class="num">${__('Base')}</th><th class="num">${__('Variable')}</th>
-					<th class="num">${__('Monthly')}</th>
+					<th>${__("Employee")}</th><th>${__("Designation")}</th>
+					<th>${__("Salary Structure")}</th><th>${__("Effective")}</th>
+					<th class="num">${__("Base")}</th><th class="num">${__("Variable")}</th>
+					<th class="num">${__("Monthly")}</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `
+					${rows
+						.map(
+							(r) => `
 						<tr>
-							<td><a href="/app/employee/${encodeURIComponent(r.employee)}">${this._esc(r.employee_name || r.employee)}</a></td>
-							<td class="muted">${this._esc(r.designation || '—')}</td>
-							<td class="muted">${this._esc(r.salary_structure || '—')}</td>
-							<td class="muted">${this._esc(r.from_date || '—')}</td>
+							<td><a href="/app/employee/${encodeURIComponent(r.employee)}">${this._esc(
+								r.employee_name || r.employee
+							)}</a></td>
+							<td class="muted">${this._esc(r.designation || "—")}</td>
+							<td class="muted">${this._esc(r.salary_structure || "—")}</td>
+							<td class="muted">${this._esc(r.from_date || "—")}</td>
 							<td class="num">${this._fmt(r.base)}</td>
 							<td class="num">${this._fmt(r.variable)}</td>
 							<td class="num strong">${this._fmt(r.monthly)}</td>
-						</tr>`).join('')}
+						</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`;
 		}
 
-		let missingBlock = '';
+		let missingBlock = "";
 		if (missing.length) {
 			missingBlock = `
 			<div style="margin-top:16px;">
 				<div class="re-alert warning">
 					<span class="ico">⚠️</span>
-					<span>${missing.length} ${__('active employee(s) have no Salary Structure Assignment — their pay is missing from every figure on this page.')}</span>
+					<span>${missing.length} ${__(
+				"active employee(s) have no Salary Structure Assignment — their pay is missing from every figure on this page."
+			)}</span>
 				</div>
 				<table class="re-table">
 					<thead><tr>
-						<th>${__('Employee')}</th><th>${__('Designation')}</th>
-						<th>${__('Department')}</th><th>${__('Joined')}</th>
+						<th>${__("Employee")}</th><th>${__("Designation")}</th>
+						<th>${__("Department")}</th><th>${__("Joined")}</th>
 					</tr></thead>
 					<tbody>
-						${missing.map(m => `
+						${missing
+							.map(
+								(m) => `
 							<tr>
-								<td><a href="/app/employee/${encodeURIComponent(m.employee)}">${this._esc(m.employee_name || m.employee)}</a></td>
-								<td class="muted">${this._esc(m.designation || '—')}</td>
-								<td class="muted">${this._esc(m.department || '—')}</td>
-								<td class="muted">${this._esc(m.date_of_joining || '—')}</td>
-							</tr>`).join('')}
+								<td><a href="/app/employee/${encodeURIComponent(m.employee)}">${this._esc(
+									m.employee_name || m.employee
+								)}</a></td>
+								<td class="muted">${this._esc(m.designation || "—")}</td>
+								<td class="muted">${this._esc(m.department || "—")}</td>
+								<td class="muted">${this._esc(m.date_of_joining || "—")}</td>
+							</tr>`
+							)
+							.join("")}
 					</tbody>
 				</table>
 			</div>`;
 		}
 
-		this.page.main.find('#re-payroll').html(head + body + missingBlock);
+		this.page.main.find("#re-payroll").html(head + body + missingBlock);
 	}
 
 	_render_registry() {
 		const rows = this.data.registry || [];
 		if (!rows.length) {
-			this.page.main.find('#re-registry').html(`
+			this.page.main.find("#re-registry").html(`
 				<div class="re-empty">
-					${__('No recurring expenses registered yet.')}<br>
-					${__('Add rent, utilities, internet, subscriptions and service retainers so they appear in the run-rate.')}<br><br>
+					${__("No recurring expenses registered yet.")}<br>
+					${__(
+						"Add rent, utilities, internet, subscriptions and service retainers so they appear in the run-rate."
+					)}<br><br>
 					<button class="btn btn-primary btn-sm" onclick="frappe.new_doc('Jarz Recurring Expense')">
-						${__('Add the first one')}
+						${__("Add the first one")}
 					</button>
 				</div>`);
 			return;
 		}
 
-		this.page.main.find('#re-registry').html(`
+		this.page.main.find("#re-registry").html(`
 			<table class="re-table">
 				<thead><tr>
-					<th>${__('Expense')}</th><th>${__('Category')}</th><th>${__('Supplier')}</th>
-					<th>${__('Account')}</th><th>${__('Frequency')}</th><th class="num">${__('Amount')}</th>
-					<th class="num">${__('Monthly Equiv.')}</th><th class="num">${__('Posted')}</th>
-					<th>${__('Status')}</th>
+					<th>${__("Expense")}</th><th>${__("Category")}</th><th>${__("Supplier")}</th>
+					<th>${__("Account")}</th><th>${__("Frequency")}</th><th class="num">${__("Amount")}</th>
+					<th class="num">${__("Monthly Equiv.")}</th><th class="num">${__("Posted")}</th>
+					<th>${__("Status")}</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `
-						<tr${r.status !== 'Active' ? ' style="opacity:.55"' : ''}>
+					${rows
+						.map(
+							(r) => `
+						<tr${r.status !== "Active" ? ' style="opacity:.55"' : ""}>
 							<td>
-								<a href="/app/jarz-recurring-expense/${encodeURIComponent(r.name)}">${this._esc(r.expense_name)}</a>
-								${r.status !== 'Active' ? ` <span class="badge-re b-none">${this._esc(r.status)}</span>` : ''}
-								${r.shared_account ? ` <span class="badge-re b-partial" title="${__('Several items post to this same account, so the posted figure cannot be split per item.')}">${__('shared acct')}</span>` : ''}
+								<a href="/app/jarz-recurring-expense/${encodeURIComponent(r.name)}">${this._esc(
+								r.expense_name
+							)}</a>
+								${r.status !== "Active" ? ` <span class="badge-re b-none">${this._esc(r.status)}</span>` : ""}
+								${
+									r.shared_account
+										? ` <span class="badge-re b-partial" title="${__(
+												"Several items post to this same account, so the posted figure cannot be split per item."
+										  )}">${__("shared acct")}</span>`
+										: ""
+								}
 							</td>
 							<td class="muted">${this._esc(r.category)}</td>
-							<td class="muted">${this._esc(r.supplier || '—')}</td>
+							<td class="muted">${this._esc(r.supplier || "—")}</td>
 							<td class="muted">${this._esc(r.expense_account)}</td>
 							<td class="muted">${this._esc(r.frequency)}</td>
 							<td class="num">${this._fmt(r.amount)}</td>
 							<td class="num strong">${this._fmt(r.monthly_equivalent)}</td>
-							<td class="num">${r.due_this_month ? this._fmt(r.posted_amount) : '<span class="muted">—</span>'}</td>
+							<td class="num">${
+								r.due_this_month
+									? this._fmt(r.posted_amount)
+									: '<span class="muted">—</span>'
+							}</td>
 							<td>${this._badge(r.gl_status)}</td>
-						</tr>`).join('')}
+						</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>
 			<div class="muted" style="margin-top:10px; font-size:12px;">
-				${__('“Posted” is the net amount booked to that expense account during the month. Where several items share one account it is the account total, not a per-item match.')}
+				${__(
+					"“Posted” is the net amount booked to that expense account during the month. Where several items share one account it is the account total, not a per-item match."
+				)}
 			</div>
 		`);
 	}
@@ -424,23 +489,32 @@ class RecurringExpensesDashboard {
 	_render_detected() {
 		const rows = this.data.detected || [];
 		if (!rows.length) {
-			this.page.main.find('#re-detected').html(
-				`<div class="re-empty">${__('No unregistered recurring spend detected in the last 12 months.')}</div>`);
+			this.page.main
+				.find("#re-detected")
+				.html(
+					`<div class="re-empty">${__(
+						"No unregistered recurring spend detected in the last 12 months."
+					)}</div>`
+				);
 			return;
 		}
 
-		this.page.main.find('#re-detected').html(`
+		this.page.main.find("#re-detected").html(`
 			<div class="muted" style="margin-bottom:12px; font-size:12px;">
-				${__('These expense accounts were posted to in 3 or more separate months but are not linked to any registered recurring expense. They are likely recurring costs worth registering.')}
+				${__(
+					"These expense accounts were posted to in 3 or more separate months but are not linked to any registered recurring expense. They are likely recurring costs worth registering."
+				)}
 			</div>
 			<table class="re-table">
 				<thead><tr>
-					<th>${__('Account')}</th><th class="num">${__('Months Active')}</th>
-					<th class="num">${__('Entries')}</th><th class="num">${__('Avg / Month')}</th>
-					<th class="num">${__('Total (12m)')}</th><th>${__('Last Posted')}</th>
+					<th>${__("Account")}</th><th class="num">${__("Months Active")}</th>
+					<th class="num">${__("Entries")}</th><th class="num">${__("Avg / Month")}</th>
+					<th class="num">${__("Total (12m)")}</th><th>${__("Last Posted")}</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `
+					${rows
+						.map(
+							(r) => `
 						<tr>
 							<td>${this._esc(r.account)}</td>
 							<td class="num">${r.months_active}</td>
@@ -448,7 +522,9 @@ class RecurringExpensesDashboard {
 							<td class="num strong">${this._fmt(r.average_monthly)}</td>
 							<td class="num">${this._fmt(r.total)}</td>
 							<td class="muted">${this._esc(r.last_month)}</td>
-						</tr>`).join('')}
+						</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>
 		`);

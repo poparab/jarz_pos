@@ -6,22 +6,27 @@ Alternative to websocket-based notifications for mobile clients
 import base64
 import json
 import os
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Union
 
 import frappe
 from frappe import _
-from jarz_pos.constants import QUERY_LIMITS, STATUS, WS_EVENTS, ROLES
+
+from jarz_pos.constants import QUERY_LIMITS, ROLES, STATUS, WS_EVENTS
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 # Firebase Admin SDK for modern FCM V1 API
 try:
-    import firebase_admin
-    from firebase_admin import credentials, messaging
-    FIREBASE_AVAILABLE = True
+	import firebase_admin
+	from firebase_admin import credentials, messaging
+
+	FIREBASE_AVAILABLE = True
 except ImportError:
-    FIREBASE_AVAILABLE = False
-    frappe.log_error("firebase-admin package not installed. FCM notifications disabled.", "FCM Import Warning")
+	FIREBASE_AVAILABLE = False
+	frappe.log_error(
+		"firebase-admin package not installed. FCM notifications disabled.", "FCM Import Warning"
+	)
 
 # firebase_admin.exceptions.InvalidArgumentError: the SDK-wide base class some
 # firebase-admin versions re-raise messaging errors through. Imported once at
@@ -30,19 +35,19 @@ except ImportError:
 # module is in sys.modules at import time — which is also what makes it
 # mockable the same way FIREBASE_AVAILABLE / messaging already are.
 try:
-    from firebase_admin import exceptions as firebase_exceptions
+	from firebase_admin import exceptions as firebase_exceptions
 except ImportError:
-    firebase_exceptions = None
+	firebase_exceptions = None
 
 # Module-level state to throttle init-failure Error Log writes (one per process).
-_FIREBASE_INIT_STATE: Dict[str, Any] = {
-    "failed_logged": False,
-    "push_skipped_logged": False,
-    "ok": False,
-    "raw_path": None,
-    "resolved_path": None,
-    "path_source": None,
-    "path_warning": None,
+_FIREBASE_INIT_STATE: dict[str, Any] = {
+	"failed_logged": False,
+	"push_skipped_logged": False,
+	"ok": False,
+	"raw_path": None,
+	"resolved_path": None,
+	"path_source": None,
+	"path_warning": None,
 }
 
 # Per-process set of tokens whose unexpected send-errors have already been Error-Logged.
@@ -54,296 +59,297 @@ _FCM_LOGGED_ERROR_TOKENS: set = set()
 #: Sales Invoice query here rather than reinvented per call site — the two
 #: polling endpoints below carried only ``docstatus`` for long enough that they
 #: reported B2B/Desk invoices and credit notes as POS activity.
-POS_ORDER_FILTERS: Dict[str, Any] = {
-    "docstatus": 1,
-    "is_pos": 1,
-    # Credit notes inherit is_pos and the branch fields from the invoice they
-    # reverse, so a post-dispatch return looks exactly like a new order to any
-    # query that omits this.
-    "is_return": 0,
+POS_ORDER_FILTERS: dict[str, Any] = {
+	"docstatus": 1,
+	"is_pos": 1,
+	# Credit notes inherit is_pos and the branch fields from the invoice they
+	# reverse, so a post-dispatch return looks exactly like a new order to any
+	# query that omits this.
+	"is_return": 0,
 }
 
 
 @frappe.whitelist(allow_guest=False)
-def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
-    """
-    Get Sales Invoices created/modified in the last N minutes.
-    Mobile app can poll this endpoint instead of relying on websockets.
-    
-    Args:
-        minutes: Look back this many minutes for new/updated invoices
-        
-    Returns:
-        Dict with new invoices and updated invoices
-    """
-    try:
-        # Calculate cutoff time
-        cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-minutes)
+def get_recent_invoices(minutes: int = 5) -> dict[str, Any]:
+	"""
+	Get Sales Invoices created/modified in the last N minutes.
+	Mobile app can poll this endpoint instead of relying on websockets.
 
-        # Get newly created invoices
-        new_invoices = frappe.get_all(
-            "Sales Invoice",
-            filters={
-                **POS_ORDER_FILTERS,
-                "creation": [">=", cutoff]
-            },
-            fields=[
-                "name", "customer", "customer_name", "territory", "posting_date",
-                "grand_total", "net_total", "custom_sales_invoice_state", 
-                "sales_invoice_state", "status", "creation", "modified"
-            ],
-            order_by="creation desc",
-            limit=QUERY_LIMITS.NOTIFICATIONS
-        )
-        
-        # Get recently modified invoices (state changes, etc.)
-        modified_invoices = frappe.get_all(
-            "Sales Invoice",
-            filters={
-                **POS_ORDER_FILTERS,
-                "modified": [">=", cutoff],
-                "creation": ["<", cutoff]  # Don't double-count new ones
-            },
-            fields=[
-                "name", "customer", "customer_name", "territory", "posting_date",
-                "grand_total", "net_total", "custom_sales_invoice_state",
-                "sales_invoice_state", "status", "creation", "modified"
-            ],
-            order_by="modified desc",
-            limit=QUERY_LIMITS.NOTIFICATIONS
-        )
-        
-        # Format response
-        response = {
-            "success": True,
-            "timestamp": frappe.utils.now(),
-            "cutoff_time": cutoff,
-            "minutes_checked": minutes,
-            "new_invoices": [],
-            "modified_invoices": [],
-            "total_count": len(new_invoices) + len(modified_invoices)
-        }
-        
-        # Process new invoices
-        for inv in new_invoices:
-            state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"
-            response["new_invoices"].append({
-                "name": inv.name,
-                "customer_name": inv.customer_name or inv.customer,
-                "territory": inv.territory or "",
-                "posting_date": str(inv.posting_date),
-                "grand_total": float(inv.grand_total or 0),
-                "net_total": float(inv.net_total or 0),
-                "status": state,
-                "doc_status": inv.status,
-                "creation": str(inv.creation),
-                "event_type": "new_invoice"
-            })
-        
-        # Process modified invoices
-        for inv in modified_invoices:
-            state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"
-            response["modified_invoices"].append({
-                "name": inv.name,
-                "customer_name": inv.customer_name or inv.customer,
-                "territory": inv.territory or "",
-                "posting_date": str(inv.posting_date),
-                "grand_total": float(inv.grand_total or 0),
-                "net_total": float(inv.net_total or 0),
-                "status": state,
-                "doc_status": inv.status,
-                "modified": str(inv.modified),
-                "event_type": "invoice_updated"
-            })
-            
-        return response
-        
-    except Exception as e:
-        frappe.log_error(f"Notifications API error: {str(e)}", "Notifications API")
-        return {
-            "success": False,
-            "error": str(e),
-            "timestamp": frappe.utils.now()
-        }
+	Args:
+	    minutes: Look back this many minutes for new/updated invoices
 
+	Returns:
+	    Dict with new invoices and updated invoices
+	"""
+	try:
+		# Calculate cutoff time
+		cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-minutes)
 
-@frappe.whitelist(allow_guest=False) 
-def check_for_updates(last_check: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Check for any invoice updates since the last check time.
-    More efficient than get_recent_invoices for frequent polling.
-    
-    Args:
-        last_check: ISO timestamp of last check (optional)
-        
-    Returns:
-        Dict with has_updates flag and summary data
-    """
-    try:
-        # Default to 5 minutes ago if no last_check provided
-        if last_check:
-            try:
-                cutoff = frappe.utils.get_datetime(last_check)
-            except:
-                cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-5)
-        else:
-            cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-5)
-        
-        # Quick count of new/modified invoices. Must stay filter-identical to
-        # get_recent_invoices: this endpoint exists to tell the client whether
-        # calling that one is worth it, so a wider count here means the app
-        # polls for updates it will never be shown.
-        new_count = frappe.db.count(
-            "Sales Invoice",
-            filters={
-                **POS_ORDER_FILTERS,
-                "creation": [">=", cutoff]
-            }
-        )
+		# Get newly created invoices
+		new_invoices = frappe.get_all(
+			"Sales Invoice",
+			filters={**POS_ORDER_FILTERS, "creation": [">=", cutoff]},
+			fields=[
+				"name",
+				"customer",
+				"customer_name",
+				"territory",
+				"posting_date",
+				"grand_total",
+				"net_total",
+				"custom_sales_invoice_state",
+				"sales_invoice_state",
+				"status",
+				"creation",
+				"modified",
+			],
+			order_by="creation desc",
+			limit=QUERY_LIMITS.NOTIFICATIONS,
+		)
 
-        modified_count = frappe.db.count(
-            "Sales Invoice",
-            filters={
-                **POS_ORDER_FILTERS,
-                "modified": [">=", cutoff],
-                "creation": ["<", cutoff]
-            }
-        )
-        
-        has_updates = (new_count + modified_count) > 0
-        
-        return {
-            "success": True,
-            "has_updates": has_updates,
-            "new_count": new_count,
-            "modified_count": modified_count,
-            "total_updates": new_count + modified_count,
-            "last_check": str(cutoff),
-            "current_time": frappe.utils.now(),
-            "message": f"Found {new_count} new and {modified_count} modified invoices" if has_updates else "No updates found"
-        }
-        
-    except Exception as e:
-        frappe.log_error(f"Check updates error: {str(e)}", "Notifications API") 
-        return {
-            "success": False,
-            "error": str(e),
-            "timestamp": frappe.utils.now()
-        }
+		# Get recently modified invoices (state changes, etc.)
+		modified_invoices = frappe.get_all(
+			"Sales Invoice",
+			filters={
+				**POS_ORDER_FILTERS,
+				"modified": [">=", cutoff],
+				"creation": ["<", cutoff],  # Don't double-count new ones
+			},
+			fields=[
+				"name",
+				"customer",
+				"customer_name",
+				"territory",
+				"posting_date",
+				"grand_total",
+				"net_total",
+				"custom_sales_invoice_state",
+				"sales_invoice_state",
+				"status",
+				"creation",
+				"modified",
+			],
+			order_by="modified desc",
+			limit=QUERY_LIMITS.NOTIFICATIONS,
+		)
 
+		# Format response
+		response = {
+			"success": True,
+			"timestamp": frappe.utils.now(),
+			"cutoff_time": cutoff,
+			"minutes_checked": minutes,
+			"new_invoices": [],
+			"modified_invoices": [],
+			"total_count": len(new_invoices) + len(modified_invoices),
+		}
 
-@frappe.whitelist()
-def test_websocket_emission() -> Dict[str, Any]:
-    """
-    Test endpoint to manually emit websocket events for debugging.
-    Emits both new invoice and state change events.
+		# Process new invoices
+		for inv in new_invoices:
+			state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"
+			response["new_invoices"].append(
+				{
+					"name": inv.name,
+					"customer_name": inv.customer_name or inv.customer,
+					"territory": inv.territory or "",
+					"posting_date": str(inv.posting_date),
+					"grand_total": float(inv.grand_total or 0),
+					"net_total": float(inv.net_total or 0),
+					"status": state,
+					"doc_status": inv.status,
+					"creation": str(inv.creation),
+					"event_type": "new_invoice",
+				}
+			)
 
-    No longer ``allow_guest`` (changed 2026-08-19). Debugging convenience was the
-    stated reason for it, but what the endpoint actually does is inject
-    ``jarz_pos_new_invoice`` and state-change events into staff realtime rooms —
-    so unauthenticated callers could put fabricated orders on every cashier's
-    screen, indefinitely and from anywhere. A debug helper that emits to other
-    people's sessions is not a read-only probe, and there is no version of
-    "for debugging" that justifies leaving it open to the internet.
-    """
-    try:
-        timestamp = frappe.utils.now()
-        test_invoice_id = f"TEST-NOTIFY-{frappe.utils.now_datetime().strftime('%H%M%S')}"
-        
-        # Emit new invoice event
-        new_invoice_payload = {
-            "name": test_invoice_id,
-            "customer_name": "Test Customer",
-            "total": 100.0,
-            "grand_total": 120.0,
-            "status": "Received",
-            "sales_invoice_state": "Received",
-            "posting_date": str(frappe.utils.today()),
-            "posting_time": str(frappe.utils.nowtime()),
-            "pos_profile": "Test Profile",
-            "timestamp": timestamp,
-            "test_event": True
-        }
-        
-        # Aim the test at the caller: user="*" resolves to the room "user:*",
-        # which nobody joins, so this endpoint proved nothing.
-        _test_target = frappe.session.user
-        frappe.publish_realtime(WS_EVENTS.NEW_INVOICE, new_invoice_payload, user=_test_target)
-        
-        # Emit state change event (triggers kanban refresh)
-        state_change_payload = {
-            "event": WS_EVENTS.INVOICE_STATE_CHANGE,
-            "invoice_id": test_invoice_id,
-            "old_state_key": None,  # Null old_state triggers refresh
-            "new_state_key": "received",
-            "old_state": None,
-            "new_state": "Received",
-            "timestamp": timestamp,
-            "test_event": True
-        }
-        
-        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, state_change_payload, user=_test_target)
-        frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, state_change_payload, user=_test_target)
-        
-        # Also emit a generic test event
-        frappe.publish_realtime(WS_EVENTS.TEST_EVENT, {"message": "Test websocket emission", "timestamp": timestamp}, user=_test_target)
-        
-        return {
-            "success": True,
-            "message": "Test websocket events emitted successfully",
-            "events_sent": [
-                WS_EVENTS.NEW_INVOICE,
-                WS_EVENTS.INVOICE_STATE_CHANGE,
-                WS_EVENTS.KANBAN_UPDATE,
-                WS_EVENTS.TEST_EVENT,
-            ],
-            "test_invoice_id": test_invoice_id,
-            "timestamp": timestamp
-        }
-        
-    except Exception as e:
-        frappe.log_error(f"Test websocket emission error: {str(e)}", "Notifications API")
-        return {
-            "success": False,
-            "error": str(e),
-            "timestamp": frappe.utils.now()
-        }
+		# Process modified invoices
+		for inv in modified_invoices:
+			state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"
+			response["modified_invoices"].append(
+				{
+					"name": inv.name,
+					"customer_name": inv.customer_name or inv.customer,
+					"territory": inv.territory or "",
+					"posting_date": str(inv.posting_date),
+					"grand_total": float(inv.grand_total or 0),
+					"net_total": float(inv.net_total or 0),
+					"status": state,
+					"doc_status": inv.status,
+					"modified": str(inv.modified),
+					"event_type": "invoice_updated",
+				}
+			)
+
+		return response
+
+	except Exception as e:
+		frappe.log_error(f"Notifications API error: {e!s}", "Notifications API")
+		return {"success": False, "error": str(e), "timestamp": frappe.utils.now()}
 
 
 @frappe.whitelist(allow_guest=False)
-def get_websocket_debug_info() -> Dict[str, Any]:
-    """
-    Get debugging information about websocket configuration and status.
-    """
-    try:
-        import os
-        
-        # Get site config
-        site_config = frappe.get_site_config()
-        
-        return {
-            "success": True,
-            "site_name": frappe.local.site,
-            "socketio_port": site_config.get("socketio_port", "Not configured"),
-            "redis_socketio": site_config.get("redis_socketio", "Not configured"),
-            "developer_mode": site_config.get("developer_mode", False),
-            "user": frappe.session.user,
-            "timestamp": frappe.utils.now(),
-            "available_events": [
-                WS_EVENTS.NEW_INVOICE,
-                WS_EVENTS.INVOICE_STATE_CHANGE,
-                WS_EVENTS.KANBAN_UPDATE,
-                WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION,
-                WS_EVENTS.COURIER_OUTSTANDING,
-            ]
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "timestamp": frappe.utils.now()
-        }
+def check_for_updates(last_check: str | None = None) -> dict[str, Any]:
+	"""
+	Check for any invoice updates since the last check time.
+	More efficient than get_recent_invoices for frequent polling.
+
+	Args:
+	    last_check: ISO timestamp of last check (optional)
+
+	Returns:
+	    Dict with has_updates flag and summary data
+	"""
+	try:
+		# Default to 5 minutes ago if no last_check provided
+		if last_check:
+			try:
+				cutoff = frappe.utils.get_datetime(last_check)
+			except BaseException:
+				cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-5)
+		else:
+			cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-5)
+
+		# Quick count of new/modified invoices. Must stay filter-identical to
+		# get_recent_invoices: this endpoint exists to tell the client whether
+		# calling that one is worth it, so a wider count here means the app
+		# polls for updates it will never be shown.
+		new_count = frappe.db.count(
+			"Sales Invoice", filters={**POS_ORDER_FILTERS, "creation": [">=", cutoff]}
+		)
+
+		modified_count = frappe.db.count(
+			"Sales Invoice",
+			filters={**POS_ORDER_FILTERS, "modified": [">=", cutoff], "creation": ["<", cutoff]},
+		)
+
+		has_updates = (new_count + modified_count) > 0
+
+		return {
+			"success": True,
+			"has_updates": has_updates,
+			"new_count": new_count,
+			"modified_count": modified_count,
+			"total_updates": new_count + modified_count,
+			"last_check": str(cutoff),
+			"current_time": frappe.utils.now(),
+			"message": f"Found {new_count} new and {modified_count} modified invoices"
+			if has_updates
+			else "No updates found",
+		}
+
+	except Exception as e:
+		frappe.log_error(f"Check updates error: {e!s}", "Notifications API")
+		return {"success": False, "error": str(e), "timestamp": frappe.utils.now()}
+
+
+@frappe.whitelist()
+def test_websocket_emission() -> dict[str, Any]:
+	"""
+	Test endpoint to manually emit websocket events for debugging.
+	Emits both new invoice and state change events.
+
+	No longer ``allow_guest`` (changed 2026-08-19). Debugging convenience was the
+	stated reason for it, but what the endpoint actually does is inject
+	``jarz_pos_new_invoice`` and state-change events into staff realtime rooms —
+	so unauthenticated callers could put fabricated orders on every cashier's
+	screen, indefinitely and from anywhere. A debug helper that emits to other
+	people's sessions is not a read-only probe, and there is no version of
+	"for debugging" that justifies leaving it open to the internet.
+	"""
+	try:
+		timestamp = frappe.utils.now()
+		test_invoice_id = f"TEST-NOTIFY-{frappe.utils.now_datetime().strftime('%H%M%S')}"
+
+		# Emit new invoice event
+		new_invoice_payload = {
+			"name": test_invoice_id,
+			"customer_name": "Test Customer",
+			"total": 100.0,
+			"grand_total": 120.0,
+			"status": "Received",
+			"sales_invoice_state": "Received",
+			"posting_date": str(frappe.utils.today()),
+			"posting_time": str(frappe.utils.nowtime()),
+			"pos_profile": "Test Profile",
+			"timestamp": timestamp,
+			"test_event": True,
+		}
+
+		# Aim the test at the caller: user="*" resolves to the room "user:*",
+		# which nobody joins, so this endpoint proved nothing.
+		_test_target = frappe.session.user
+		frappe.publish_realtime(WS_EVENTS.NEW_INVOICE, new_invoice_payload, user=_test_target)
+
+		# Emit state change event (triggers kanban refresh)
+		state_change_payload = {
+			"event": WS_EVENTS.INVOICE_STATE_CHANGE,
+			"invoice_id": test_invoice_id,
+			"old_state_key": None,  # Null old_state triggers refresh
+			"new_state_key": "received",
+			"old_state": None,
+			"new_state": "Received",
+			"timestamp": timestamp,
+			"test_event": True,
+		}
+
+		frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, state_change_payload, user=_test_target)
+		frappe.publish_realtime(WS_EVENTS.KANBAN_UPDATE, state_change_payload, user=_test_target)
+
+		# Also emit a generic test event
+		frappe.publish_realtime(
+			WS_EVENTS.TEST_EVENT,
+			{"message": "Test websocket emission", "timestamp": timestamp},
+			user=_test_target,
+		)
+
+		return {
+			"success": True,
+			"message": "Test websocket events emitted successfully",
+			"events_sent": [
+				WS_EVENTS.NEW_INVOICE,
+				WS_EVENTS.INVOICE_STATE_CHANGE,
+				WS_EVENTS.KANBAN_UPDATE,
+				WS_EVENTS.TEST_EVENT,
+			],
+			"test_invoice_id": test_invoice_id,
+			"timestamp": timestamp,
+		}
+
+	except Exception as e:
+		frappe.log_error(f"Test websocket emission error: {e!s}", "Notifications API")
+		return {"success": False, "error": str(e), "timestamp": frappe.utils.now()}
+
+
+@frappe.whitelist(allow_guest=False)
+def get_websocket_debug_info() -> dict[str, Any]:
+	"""
+	Get debugging information about websocket configuration and status.
+	"""
+	try:
+		import os
+
+		# Get site config
+		site_config = frappe.get_site_config()
+
+		return {
+			"success": True,
+			"site_name": frappe.local.site,
+			"socketio_port": site_config.get("socketio_port", "Not configured"),
+			"redis_socketio": site_config.get("redis_socketio", "Not configured"),
+			"developer_mode": site_config.get("developer_mode", False),
+			"user": frappe.session.user,
+			"timestamp": frappe.utils.now(),
+			"available_events": [
+				WS_EVENTS.NEW_INVOICE,
+				WS_EVENTS.INVOICE_STATE_CHANGE,
+				WS_EVENTS.KANBAN_UPDATE,
+				WS_EVENTS.OUT_FOR_DELIVERY_TRANSITION,
+				WS_EVENTS.COURIER_OUTSTANDING,
+			],
+		}
+
+	except Exception as e:
+		return {"success": False, "error": str(e), "timestamp": frappe.utils.now()}
 
 
 # ---------------------------------------------------------------------------
@@ -374,8 +380,8 @@ ANDROID_ORDER_ALERT_SOUND = "jarz_order_alert_notification"
 WEBPUSH_NOTIFICATION_ICON = "/pos/icons/Icon-192.png"
 WEBPUSH_NOTIFICATION_BADGE = "/pos/icons/Icon-192.png"
 INVOICE_STATUS_NOTIFICATION_TITLES = {
-    "invoice_accepted": "Order Accepted",
-    "invoice_cancelled": "Order Cancelled",
+	"invoice_accepted": "Order Accepted",
+	"invoice_cancelled": "Order Cancelled",
 }
 
 # Android notification channels, named here rather than spelled inline at the
@@ -410,149 +416,147 @@ SETTLEMENT_REMINDER_NOTIFICATION_TYPE = "settlement_reminder"
 CHAT_WAITING_NOTIFICATION_TYPE = "chat_waiting"
 #: Push types that belong on the approvals channel.
 APPROVAL_NOTIFICATION_TYPES = (
-    EXPENSE_APPROVAL_NOTIFICATION_TYPE,
-    LABEL_STOCK_NOTIFICATION_TYPE,
-    TASK_NOTIFICATION_TYPE,
-    SETTLEMENT_REMINDER_NOTIFICATION_TYPE,
-    CHAT_WAITING_NOTIFICATION_TYPE,
+	EXPENSE_APPROVAL_NOTIFICATION_TYPE,
+	LABEL_STOCK_NOTIFICATION_TYPE,
+	TASK_NOTIFICATION_TYPE,
+	SETTLEMENT_REMINDER_NOTIFICATION_TYPE,
+	CHAT_WAITING_NOTIFICATION_TYPE,
 )
 
 
 def _get_effective_profile_for_doc(doc: Any) -> str:
-    return _pick_display_text(
-        getattr(doc, "custom_kanban_profile", None),
-        getattr(doc, "pos_profile", None),
-    )
+	return _pick_display_text(
+		getattr(doc, "custom_kanban_profile", None),
+		getattr(doc, "pos_profile", None),
+	)
 
 
 def _get_original_pos_profile_for_doc(doc: Any) -> str:
-    return _pick_display_text(getattr(doc, "pos_profile", None))
+	return _pick_display_text(getattr(doc, "pos_profile", None))
 
 
-def _get_effective_profile_for_payload(payload: Dict[str, Any]) -> str:
-    return _pick_display_text(
-        payload.get("effective_pos_profile"),
-        payload.get("kanban_profile"),
-        payload.get("custom_kanban_profile"),
-        payload.get("pos_profile"),
-    )
+def _get_effective_profile_for_payload(payload: dict[str, Any]) -> str:
+	return _pick_display_text(
+		payload.get("effective_pos_profile"),
+		payload.get("kanban_profile"),
+		payload.get("custom_kanban_profile"),
+		payload.get("pos_profile"),
+	)
 
 
 def _get_pending_alert_rows_for_profiles(
-    profiles: Sequence[str],
-    cutoff: Any,
-) -> List[Dict[str, Any]]:
-    filtered_profiles = [profile for profile in profiles if profile]
-    if not filtered_profiles:
-        return []
+	profiles: Sequence[str],
+	cutoff: Any,
+) -> list[dict[str, Any]]:
+	filtered_profiles = [profile for profile in profiles if profile]
+	if not filtered_profiles:
+		return []
 
-    # POS_ORDER_FILTERS is load-bearing here, not decoration. Without its
-    # `is_return`, a credit note from the post-dispatch return workflow surfaces
-    # as a brand-new order awaiting acceptance: it inherits
-    # `custom_kanban_profile` and `custom_acceptance_status` (both no_copy: 0)
-    # from the invoice it reverses, so a return of an order nobody had accepted
-    # yet arrives carrying "Pending" and matches every remaining condition.
-    # `custom_sales_invoice_state` does not save us either — services.invoice_return
-    # stamps credit notes "Returned", and only "Cancelled" is excluded below.
-    base_filters = {
-        **POS_ORDER_FILTERS,
-        "status": ["!=", "Cancelled"],
-        "custom_acceptance_status": ["in", [None, "", "Pending"]],
-        "custom_sales_invoice_state": ["!=", "Cancelled"],
-        "creation": [">", cutoff],
-    }
+	# POS_ORDER_FILTERS is load-bearing here, not decoration. Without its
+	# `is_return`, a credit note from the post-dispatch return workflow surfaces
+	# as a brand-new order awaiting acceptance: it inherits
+	# `custom_kanban_profile` and `custom_acceptance_status` (both no_copy: 0)
+	# from the invoice it reverses, so a return of an order nobody had accepted
+	# yet arrives carrying "Pending" and matches every remaining condition.
+	# `custom_sales_invoice_state` does not save us either — services.invoice_return
+	# stamps credit notes "Returned", and only "Cancelled" is excluded below.
+	base_filters = {
+		**POS_ORDER_FILTERS,
+		"status": ["!=", "Cancelled"],
+		"custom_acceptance_status": ["in", [None, "", "Pending"]],
+		"custom_sales_invoice_state": ["!=", "Cancelled"],
+		"creation": [">", cutoff],
+	}
 
-    effective_rows = frappe.get_all(
-        "Sales Invoice",
-        filters={
-            **base_filters,
-            "custom_kanban_profile": ["in", filtered_profiles],
-        },
-        fields=["name", "creation"],
-        order_by="creation asc",
-        limit=QUERY_LIMITS.NOTIFICATIONS,
-    )
+	effective_rows = frappe.get_all(
+		"Sales Invoice",
+		filters={
+			**base_filters,
+			"custom_kanban_profile": ["in", filtered_profiles],
+		},
+		fields=["name", "creation"],
+		order_by="creation asc",
+		limit=QUERY_LIMITS.NOTIFICATIONS,
+	)
 
-    legacy_rows = frappe.get_all(
-        "Sales Invoice",
-        filters={
-            **base_filters,
-            "pos_profile": ["in", filtered_profiles],
-        },
-        fields=["name", "creation", "custom_kanban_profile"],
-        order_by="creation asc",
-        limit=QUERY_LIMITS.NOTIFICATIONS,
-    )
+	legacy_rows = frappe.get_all(
+		"Sales Invoice",
+		filters={
+			**base_filters,
+			"pos_profile": ["in", filtered_profiles],
+		},
+		fields=["name", "creation", "custom_kanban_profile"],
+		order_by="creation asc",
+		limit=QUERY_LIMITS.NOTIFICATIONS,
+	)
 
-    deduped: Dict[str, Dict[str, Any]] = {}
+	deduped: dict[str, dict[str, Any]] = {}
 
-    for row in effective_rows:
-        name = _safe_str(row.get("name"))
-        if name and name not in deduped:
-            deduped[name] = row
+	for row in effective_rows:
+		name = _safe_str(row.get("name"))
+		if name and name not in deduped:
+			deduped[name] = row
 
-    for row in legacy_rows:
-        if _pick_display_text(row.get("custom_kanban_profile")):
-            continue
-        name = _safe_str(row.get("name"))
-        if name and name not in deduped:
-            deduped[name] = row
+	for row in legacy_rows:
+		if _pick_display_text(row.get("custom_kanban_profile")):
+			continue
+		name = _safe_str(row.get("name"))
+		if name and name not in deduped:
+			deduped[name] = row
 
-    return sorted(
-        deduped.values(),
-        key=lambda row: _safe_str(row.get("creation")),
-    )[: QUERY_LIMITS.NOTIFICATIONS]
+	return sorted(
+		deduped.values(),
+		key=lambda row: _safe_str(row.get("creation")),
+	)[: QUERY_LIMITS.NOTIFICATIONS]
 
 
 def _get_fcm_logger() -> Any:
-    try:
-        return frappe.logger("fcm")
-    except TypeError:
-        return frappe.logger()
+	try:
+		return frappe.logger("fcm")
+	except TypeError:
+		return frappe.logger()
 
 
 def _log_fcm_info(message: str) -> None:
-    try:
-        _get_fcm_logger().info(message)
-    except Exception:
-        pass
+	try:
+		_get_fcm_logger().info(message)
+	except Exception:
+		pass
 
 
 def outbound_alerts_suppressed(context: str = "") -> bool:
-    """True while a test run owns this process — no order alert may leave it.
+	"""True while a test run owns this process — no order alert may leave it.
 
-    CI's backend suite does not run against a throwaway site. It runs against
-    the LIVE staging `frontend` site (see .github/workflows/backend-tests.yml:
-    ERPNext v16's test bootstrap collides with populated master data and a
-    vanilla site cannot install jarz_pos), so a test that submits a Sales
-    Invoice fires the real `on_submit` hooks against real data.
+	CI's backend suite does not run against a throwaway site. It runs against
+	the LIVE staging `frontend` site (see .github/workflows/backend-tests.yml:
+	ERPNext v16's test bootstrap collides with populated master data and a
+	vanilla site cannot install jarz_pos), so a test that submits a Sales
+	Invoice fires the real `on_submit` hooks against real data.
 
-    `frappe.db.rollback()` in tearDown undoes the invoice. It cannot undo an
-    FCM message already handed to Google. So every push to `main` touching
-    `jarz_pos/**` rang the order alarm on every phone signed into the staging
-    app -- `test_b2b_branch_invoice_persistence` alone pushes
-    "New Order: _TEST B2B Branch <hex>" for the Nasr city branch -- and because
-    the invoice is gone by the time the alarm rings, the app can neither accept
-    nor dismiss it and keeps re-alarming until it is opened and closed by hand.
+	`frappe.db.rollback()` in tearDown undoes the invoice. It cannot undo an
+	FCM message already handed to Google. So every push to `main` touching
+	`jarz_pos/**` rang the order alarm on every phone signed into the staging
+	app -- `test_b2b_branch_invoice_persistence` alone pushes
+	"New Order: _TEST B2B Branch <hex>" for the Nasr city branch -- and because
+	the invoice is gone by the time the alarm rings, the app can neither accept
+	nor dismiss it and keeps re-alarming until it is opened and closed by hand.
 
-    Deliberately keyed on the test flag alone. `settlement_strategies._in_test_mode`
-    also treats "unittest is importable" as test mode; that is a safe fallback
-    for choosing a placeholder account, but here a false positive silences a
-    real branch's order alarm, so nothing but an actual test run counts.
-    """
+	Deliberately keyed on the test flag alone. `settlement_strategies._in_test_mode`
+	also treats "unittest is importable" as test mode; that is a safe fallback
+	for choosing a placeholder account, but here a false positive silences a
+	real branch's order alarm, so nothing but an actual test run counts.
+	"""
 
-    try:
-        in_test = bool(getattr(frappe, "in_test", False)) or bool(
-            getattr(getattr(frappe, "flags", None), "in_test", False)
-        )
-    except Exception:
-        return False
+	try:
+		in_test = bool(getattr(frappe, "in_test", False)) or bool(
+			getattr(getattr(frappe, "flags", None), "in_test", False)
+		)
+	except Exception:
+		return False
 
-    if in_test:
-        _log_fcm_info(
-            f"Push suppressed: test run in progress{f' ({context})' if context else ''}"
-        )
-    return in_test
+	if in_test:
+		_log_fcm_info(f"Push suppressed: test run in progress{f' ({context})' if context else ''}")
+	return in_test
 
 
 # Delivery gaps have to survive the trip to a server. Everything else in this
@@ -563,2117 +567,2119 @@ def outbound_alerts_suppressed(context: str = "") -> bool:
 _NOTIFICATION_GAP_THROTTLE_SECONDS = 900
 
 
-def _log_notification_gap(title: str, message: str, throttle_key: Optional[str] = None) -> None:
-    """Record a delivery gap in Error Log, throttled so volume cannot drown it.
+def _log_notification_gap(title: str, message: str, throttle_key: str | None = None) -> None:
+	"""Record a delivery gap in Error Log, throttled so volume cannot drown it.
 
-    ``throttle_key`` is shared across workers through the Redis cache rather
-    than a per-process set, because the per-process dedup on the send-error path
-    (_FCM_LOGGED_ERROR_TOKENS) is exactly what made the 2026-09-05 failures look
-    like they had stopped after 36 rows when they were still happening on every
-    order.
-    """
-    # The throttle is best-effort and is deliberately NOT in the same try as the
-    # write: if Redis is what failed, that is the moment the record matters most,
-    # and sharing one try meant a cache error silently dropped the gap entirely.
-    if throttle_key:
-        try:
-            cache_key = f"jarz_notification_gap:{throttle_key}"
-            if frappe.cache().get_value(cache_key):
-                return
-            frappe.cache().set_value(
-                cache_key, "1", expires_in_sec=_NOTIFICATION_GAP_THROTTLE_SECONDS
-            )
-        except Exception:
-            pass
+	``throttle_key`` is shared across workers through the Redis cache rather
+	than a per-process set, because the per-process dedup on the send-error path
+	(_FCM_LOGGED_ERROR_TOKENS) is exactly what made the 2026-09-05 failures look
+	like they had stopped after 36 rows when they were still happening on every
+	order.
+	"""
+	# The throttle is best-effort and is deliberately NOT in the same try as the
+	# write: if Redis is what failed, that is the moment the record matters most,
+	# and sharing one try meant a cache error silently dropped the gap entirely.
+	if throttle_key:
+		try:
+			cache_key = f"jarz_notification_gap:{throttle_key}"
+			if frappe.cache().get_value(cache_key):
+				return
+			frappe.cache().set_value(cache_key, "1", expires_in_sec=_NOTIFICATION_GAP_THROTTLE_SECONDS)
+		except Exception:
+			pass
 
-    try:
-        # defer_insert keeps this out of the caller's transaction. The whole send
-        # path runs synchronously inside Sales Invoice.on_submit, so a direct
-        # insert would be rolled back with a failed submit -- losing exactly the
-        # evidence this exists to keep -- and a failing insert could poison the
-        # invoice's own transaction.
-        frappe.log_error(message=message, title=title[:140], defer_insert=True)
-    except TypeError:
-        # Older Frappe without defer_insert.
-        try:
-            frappe.log_error(message=message, title=title[:140])
-        except Exception:
-            pass
-    except Exception:
-        # Never let reporting a gap become a second failure on the alert path.
-        pass
+	try:
+		# defer_insert keeps this out of the caller's transaction. The whole send
+		# path runs synchronously inside Sales Invoice.on_submit, so a direct
+		# insert would be rolled back with a failed submit -- losing exactly the
+		# evidence this exists to keep -- and a failing insert could poison the
+		# invoice's own transaction.
+		frappe.log_error(message=message, title=title[:140], defer_insert=True)
+	except TypeError:
+		# Older Frappe without defer_insert.
+		try:
+			frappe.log_error(message=message, title=title[:140])
+		except Exception:
+			pass
+	except Exception:
+		# Never let reporting a gap become a second failure on the alert path.
+		pass
 
 
-def _get_bench_path() -> Optional[str]:
-    try:
-        site_path = frappe.get_site_path()
-    except Exception:
-        return None
+def _get_bench_path() -> str | None:
+	try:
+		site_path = frappe.get_site_path()
+	except Exception:
+		return None
 
-    if not site_path:
-        return None
+	if not site_path:
+		return None
 
-    return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
+	return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
 
 
-def _get_site_private_files_path() -> Optional[str]:
-    try:
-        return frappe.get_site_path("private", "files")
-    except Exception:
-        return None
+def _get_site_private_files_path() -> str | None:
+	try:
+		return frappe.get_site_path("private", "files")
+	except Exception:
+		return None
 
 
 def _resolve_fcm_service_account_path(
-    raw_path: Optional[str],
-) -> Tuple[Optional[str], Optional[str], List[str]]:
-    normalized = (raw_path or "").strip()
-    if not normalized:
-        return None, None, []
+	raw_path: str | None,
+) -> tuple[str | None, str | None, list[str]]:
+	normalized = (raw_path or "").strip()
+	if not normalized:
+		return None, None, []
 
-    candidates: List[Tuple[str, str]] = []
-    bench_path = _get_bench_path()
-    private_files_path = _get_site_private_files_path()
-    basename = os.path.basename(normalized)
+	candidates: list[tuple[str, str]] = []
+	bench_path = _get_bench_path()
+	private_files_path = _get_site_private_files_path()
+	basename = os.path.basename(normalized)
 
-    def add_candidate(source: str, path: Optional[str]) -> None:
-        if not path:
-            return
-        normalized_path = os.path.normpath(path)
-        if any(existing_path == normalized_path for _, existing_path in candidates):
-            return
-        candidates.append((source, normalized_path))
+	def add_candidate(source: str, path: str | None) -> None:
+		if not path:
+			return
+		normalized_path = os.path.normpath(path)
+		if any(existing_path == normalized_path for _, existing_path in candidates):
+			return
+		candidates.append((source, normalized_path))
 
-    if os.path.isabs(normalized):
-        add_candidate("configured_path", normalized)
-        if private_files_path and basename:
-            add_candidate("private_files_basename", os.path.join(private_files_path, basename))
-        if bench_path and basename:
-            add_candidate("bench_path_basename", os.path.join(bench_path, basename))
-    else:
-        if private_files_path:
-            add_candidate("private_files", os.path.join(private_files_path, normalized))
-        if bench_path:
-            add_candidate("bench_path", os.path.join(bench_path, normalized))
-        add_candidate("working_directory", os.path.abspath(normalized))
+	if os.path.isabs(normalized):
+		add_candidate("configured_path", normalized)
+		if private_files_path and basename:
+			add_candidate("private_files_basename", os.path.join(private_files_path, basename))
+		if bench_path and basename:
+			add_candidate("bench_path_basename", os.path.join(bench_path, basename))
+	else:
+		if private_files_path:
+			add_candidate("private_files", os.path.join(private_files_path, normalized))
+		if bench_path:
+			add_candidate("bench_path", os.path.join(bench_path, normalized))
+		add_candidate("working_directory", os.path.abspath(normalized))
 
-    for source, candidate in candidates:
-        if os.path.exists(candidate):
-            return candidate, source, [path for _, path in candidates]
+	for source, candidate in candidates:
+		if os.path.exists(candidate):
+			return candidate, source, [path for _, path in candidates]
 
-    if not candidates:
-        return None, None, []
+	if not candidates:
+		return None, None, []
 
-    return candidates[0][1], candidates[0][0], [path for _, path in candidates]
-
-
-def _path_is_under(path: Optional[str], root: Optional[str]) -> bool:
-    if not path or not root:
-        return False
-
-    try:
-        normalized_path = os.path.normcase(os.path.abspath(path))
-        normalized_root = os.path.normcase(os.path.abspath(root))
-        return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
-    except Exception:
-        return False
+	return candidates[0][1], candidates[0][0], [path for _, path in candidates]
 
 
-def _get_fcm_path_warning(resolved_path: Optional[str]) -> Optional[str]:
-    private_files_path = _get_site_private_files_path()
-    if not resolved_path or not private_files_path:
-        return None
+def _path_is_under(path: str | None, root: str | None) -> bool:
+	if not path or not root:
+		return False
 
-    if _path_is_under(resolved_path, private_files_path):
-        return None
+	try:
+		normalized_path = os.path.normcase(os.path.abspath(path))
+		normalized_root = os.path.normcase(os.path.abspath(root))
+		return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
+	except Exception:
+		return False
 
-    return (
-        "Firebase service account resolves outside the site private files directory. "
-        "In Docker deployments this path may not be visible to queue workers; place the JSON under "
-        f"{private_files_path} or set fcm_service_account_path to a shared site path."
-    )
+
+def _get_fcm_path_warning(resolved_path: str | None) -> str | None:
+	private_files_path = _get_site_private_files_path()
+	if not resolved_path or not private_files_path:
+		return None
+
+	if _path_is_under(resolved_path, private_files_path):
+		return None
+
+	return (
+		"Firebase service account resolves outside the site private files directory. "
+		"In Docker deployments this path may not be visible to queue workers; place the JSON under "
+		f"{private_files_path} or set fcm_service_account_path to a shared site path."
+	)
 
 
 def _initialize_firebase_app() -> bool:
-    """Initialize Firebase Admin SDK if not already initialized."""
-    if not FIREBASE_AVAILABLE:
-        return False
+	"""Initialize Firebase Admin SDK if not already initialized."""
+	if not FIREBASE_AVAILABLE:
+		return False
 
-    try:
-        # Check if already initialized
-        firebase_admin.get_app()
-        _FIREBASE_INIT_STATE["ok"] = True
-        _FIREBASE_INIT_STATE["failed_logged"] = False
-        _FIREBASE_INIT_STATE["push_skipped_logged"] = False
-        return True
-    except ValueError:
-        # Not initialized, try to initialize
-        pass
+	try:
+		# Check if already initialized
+		firebase_admin.get_app()
+		_FIREBASE_INIT_STATE["ok"] = True
+		_FIREBASE_INIT_STATE["failed_logged"] = False
+		_FIREBASE_INIT_STATE["push_skipped_logged"] = False
+		return True
+	except ValueError:
+		# Not initialized, try to initialize
+		pass
 
-    # Try to load service account from config
-    service_account_path = frappe.local.conf.get("fcm_service_account_path")
-    service_account_json = frappe.local.conf.get("fcm_service_account")
+	# Try to load service account from config
+	service_account_path = frappe.local.conf.get("fcm_service_account_path")
+	service_account_json = frappe.local.conf.get("fcm_service_account")
 
-    def _log_init_failure(msg: str, title: str) -> None:
-        """Write to Error Log exactly once per process lifetime."""
-        if not _FIREBASE_INIT_STATE["failed_logged"]:
-            frappe.log_error(msg, title)
-            _FIREBASE_INIT_STATE["failed_logged"] = True
+	def _log_init_failure(msg: str, title: str) -> None:
+		"""Write to Error Log exactly once per process lifetime."""
+		if not _FIREBASE_INIT_STATE["failed_logged"]:
+			frappe.log_error(msg, title)
+			_FIREBASE_INIT_STATE["failed_logged"] = True
 
-    def _mark_init_state(
-        *,
-        ok: bool,
-        raw_path: Optional[str] = None,
-        resolved_path: Optional[str] = None,
-        path_source: Optional[str] = None,
-    ) -> None:
-        _FIREBASE_INIT_STATE["ok"] = ok
-        _FIREBASE_INIT_STATE["raw_path"] = raw_path
-        _FIREBASE_INIT_STATE["resolved_path"] = resolved_path
-        _FIREBASE_INIT_STATE["path_source"] = path_source
-        _FIREBASE_INIT_STATE["path_warning"] = _get_fcm_path_warning(resolved_path)
+	def _mark_init_state(
+		*,
+		ok: bool,
+		raw_path: str | None = None,
+		resolved_path: str | None = None,
+		path_source: str | None = None,
+	) -> None:
+		_FIREBASE_INIT_STATE["ok"] = ok
+		_FIREBASE_INIT_STATE["raw_path"] = raw_path
+		_FIREBASE_INIT_STATE["resolved_path"] = resolved_path
+		_FIREBASE_INIT_STATE["path_source"] = path_source
+		_FIREBASE_INIT_STATE["path_warning"] = _get_fcm_path_warning(resolved_path)
 
-    try:
-        if service_account_path:
-            resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(
-                service_account_path
-            )
-            if not resolved_path or not os.path.exists(resolved_path):
-                _mark_init_state(
-                    ok=False,
-                    raw_path=service_account_path,
-                    resolved_path=resolved_path,
-                    path_source=path_source,
-                )
-                _log_init_failure(
-                    frappe.as_json(
-                        {
-                            "configured_path": service_account_path,
-                            "resolved_path": resolved_path,
-                            "path_source": path_source,
-                            "candidate_paths": candidate_paths,
-                            "site": getattr(frappe.local, "site", None),
-                        }
-                    ),
-                    "FCM Init Failed",
-                )
-                return False
+	try:
+		if service_account_path:
+			resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(
+				service_account_path
+			)
+			if not resolved_path or not os.path.exists(resolved_path):
+				_mark_init_state(
+					ok=False,
+					raw_path=service_account_path,
+					resolved_path=resolved_path,
+					path_source=path_source,
+				)
+				_log_init_failure(
+					frappe.as_json(
+						{
+							"configured_path": service_account_path,
+							"resolved_path": resolved_path,
+							"path_source": path_source,
+							"candidate_paths": candidate_paths,
+							"site": getattr(frappe.local, "site", None),
+						}
+					),
+					"FCM Init Failed",
+				)
+				return False
 
-            cred = credentials.Certificate(resolved_path)
-            firebase_admin.initialize_app(cred)
-            _mark_init_state(
-                ok=True,
-                raw_path=service_account_path,
-                resolved_path=resolved_path,
-                path_source=path_source,
-            )
-            _FIREBASE_INIT_STATE["failed_logged"] = False
-            _FIREBASE_INIT_STATE["push_skipped_logged"] = False
-            return True
-        elif service_account_json:
-            if isinstance(service_account_json, str):
-                service_account_json = json.loads(service_account_json)
-            cred = credentials.Certificate(service_account_json)
-            firebase_admin.initialize_app(cred)
-            _mark_init_state(ok=True)
-            _FIREBASE_INIT_STATE["failed_logged"] = False
-            _FIREBASE_INIT_STATE["push_skipped_logged"] = False
-            return True
-        else:
-            _mark_init_state(ok=False)
-            _log_init_failure(
-                "No Firebase service account configured in site_config "
-                "(fcm_service_account_path or fcm_service_account)",
-                "FCM Init Failed",
-            )
-            return False
-    except Exception:
-        _mark_init_state(
-            ok=False,
-            raw_path=service_account_path,
-            resolved_path=_FIREBASE_INIT_STATE.get("resolved_path"),
-            path_source=_FIREBASE_INIT_STATE.get("path_source"),
-        )
-        _log_init_failure(frappe.get_traceback(), "Firebase initialization failed")
-        return False
+			cred = credentials.Certificate(resolved_path)
+			firebase_admin.initialize_app(cred)
+			_mark_init_state(
+				ok=True,
+				raw_path=service_account_path,
+				resolved_path=resolved_path,
+				path_source=path_source,
+			)
+			_FIREBASE_INIT_STATE["failed_logged"] = False
+			_FIREBASE_INIT_STATE["push_skipped_logged"] = False
+			return True
+		elif service_account_json:
+			if isinstance(service_account_json, str):
+				service_account_json = json.loads(service_account_json)
+			cred = credentials.Certificate(service_account_json)
+			firebase_admin.initialize_app(cred)
+			_mark_init_state(ok=True)
+			_FIREBASE_INIT_STATE["failed_logged"] = False
+			_FIREBASE_INIT_STATE["push_skipped_logged"] = False
+			return True
+		else:
+			_mark_init_state(ok=False)
+			_log_init_failure(
+				"No Firebase service account configured in site_config "
+				"(fcm_service_account_path or fcm_service_account)",
+				"FCM Init Failed",
+			)
+			return False
+	except Exception:
+		_mark_init_state(
+			ok=False,
+			raw_path=service_account_path,
+			resolved_path=_FIREBASE_INIT_STATE.get("resolved_path"),
+			path_source=_FIREBASE_INIT_STATE.get("path_source"),
+		)
+		_log_init_failure(frappe.get_traceback(), "Firebase initialization failed")
+		return False
 
 
 @frappe.whitelist(allow_guest=False)
-def health_check_firebase() -> Dict[str, Any]:
-    """Return Firebase SDK readiness without sending any push notification.
+def health_check_firebase() -> dict[str, Any]:
+	"""Return Firebase SDK readiness without sending any push notification.
 
-    Response fields:
-    - ok (bool): True if SDK is initialized and ready.
-    - sdk_available (bool): True if the firebase-admin package is installed.
-    - reason (str): Human-readable status or error description.
-    - resolved_path (str | None): Absolute path to the service-account file (if configured).
-    - raw_path (str | None): Raw path value from site_config.
-    - path_source (str | None): Which resolution path source won.
-    - file_exists (bool): Whether the resolved file exists.
-    """
-    if not FIREBASE_AVAILABLE:
-        return {
-            "ok": False,
-            "sdk_available": False,
-            "reason": "firebase-admin package is not installed",
-            "resolved_path": None,
-            "raw_path": None,
-            "path_source": None,
-            "file_exists": False,
-        }
+	Response fields:
+	- ok (bool): True if SDK is initialized and ready.
+	- sdk_available (bool): True if the firebase-admin package is installed.
+	- reason (str): Human-readable status or error description.
+	- resolved_path (str | None): Absolute path to the service-account file (if configured).
+	- raw_path (str | None): Raw path value from site_config.
+	- path_source (str | None): Which resolution path source won.
+	- file_exists (bool): Whether the resolved file exists.
+	"""
+	if not FIREBASE_AVAILABLE:
+		return {
+			"ok": False,
+			"sdk_available": False,
+			"reason": "firebase-admin package is not installed",
+			"resolved_path": None,
+			"raw_path": None,
+			"path_source": None,
+			"file_exists": False,
+		}
 
-    raw_path = frappe.local.conf.get("fcm_service_account_path")
-    resolved_path: Optional[str] = None
-    path_source: Optional[str] = None
-    candidate_paths: List[str] = []
+	raw_path = frappe.local.conf.get("fcm_service_account_path")
+	resolved_path: str | None = None
+	path_source: str | None = None
+	candidate_paths: list[str] = []
 
-    if raw_path:
-        resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(raw_path)
-    file_exists = bool(resolved_path and os.path.exists(resolved_path))
-    path_warning = _get_fcm_path_warning(resolved_path)
+	if raw_path:
+		resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(raw_path)
+	file_exists = bool(resolved_path and os.path.exists(resolved_path))
+	path_warning = _get_fcm_path_warning(resolved_path)
 
-    try:
-        firebase_admin.get_app()
-        return {
-            "ok": True,
-            "sdk_available": True,
-            "reason": "Firebase app already initialized",
-            "resolved_path": resolved_path,
-            "raw_path": raw_path,
-            "path_source": path_source,
-            "file_exists": file_exists,
-            "warning": _FIREBASE_INIT_STATE.get("path_warning") or path_warning,
-        }
-    except ValueError:
-        pass
+	try:
+		firebase_admin.get_app()
+		return {
+			"ok": True,
+			"sdk_available": True,
+			"reason": "Firebase app already initialized",
+			"resolved_path": resolved_path,
+			"raw_path": raw_path,
+			"path_source": path_source,
+			"file_exists": file_exists,
+			"warning": _FIREBASE_INIT_STATE.get("path_warning") or path_warning,
+		}
+	except ValueError:
+		pass
 
-    ok = _initialize_firebase_app()
-    if ok:
-        return {
-            "ok": True,
-            "sdk_available": True,
-            "reason": "Firebase app initialized successfully",
-            "resolved_path": _FIREBASE_INIT_STATE.get("resolved_path") or resolved_path,
-            "raw_path": _FIREBASE_INIT_STATE.get("raw_path") or raw_path,
-            "path_source": _FIREBASE_INIT_STATE.get("path_source") or path_source,
-            "file_exists": bool(
-                (_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
-                and os.path.exists(_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
-            ),
-            "warning": _FIREBASE_INIT_STATE.get("path_warning") or path_warning,
-        }
+	ok = _initialize_firebase_app()
+	if ok:
+		return {
+			"ok": True,
+			"sdk_available": True,
+			"reason": "Firebase app initialized successfully",
+			"resolved_path": _FIREBASE_INIT_STATE.get("resolved_path") or resolved_path,
+			"raw_path": _FIREBASE_INIT_STATE.get("raw_path") or raw_path,
+			"path_source": _FIREBASE_INIT_STATE.get("path_source") or path_source,
+			"file_exists": bool(
+				(_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
+				and os.path.exists(_FIREBASE_INIT_STATE.get("resolved_path") or resolved_path)
+			),
+			"warning": _FIREBASE_INIT_STATE.get("path_warning") or path_warning,
+		}
 
-    if resolved_path and not file_exists:
-        reason = "Service account file not found at resolved path"
-    elif not frappe.local.conf.get("fcm_service_account_path") and not frappe.local.conf.get("fcm_service_account"):
-        reason = "No service account configured in site_config"
-    else:
-        reason = "Firebase initialization failed \u2014 check Error Log for details"
+	if resolved_path and not file_exists:
+		reason = "Service account file not found at resolved path"
+	elif not frappe.local.conf.get("fcm_service_account_path") and not frappe.local.conf.get(
+		"fcm_service_account"
+	):
+		reason = "No service account configured in site_config"
+	else:
+		reason = "Firebase initialization failed \u2014 check Error Log for details"
 
-    return {
-        "ok": False,
-        "sdk_available": True,
-        "reason": reason,
-        "resolved_path": resolved_path,
-        "raw_path": raw_path,
-        "path_source": path_source,
-        "file_exists": file_exists,
-        "candidate_paths": candidate_paths,
-        "warning": path_warning,
-    }
+	return {
+		"ok": False,
+		"sdk_available": True,
+		"reason": reason,
+		"resolved_path": resolved_path,
+		"raw_path": raw_path,
+		"path_source": path_source,
+		"file_exists": file_exists,
+		"candidate_paths": candidate_paths,
+		"warning": path_warning,
+	}
 
 
 def _disable_token(token: str) -> None:
-    """Disable a Jarz Mobile Device token when FCM reports it as invalid."""
-    devices = frappe.get_all(
-        "Jarz Mobile Device",
-        filters={"token": token},
-        fields=["name", "enabled", "user", "platform", "last_seen"],
-    )
-    if not devices:
-        return
+	"""Disable a Jarz Mobile Device token when FCM reports it as invalid."""
+	devices = frappe.get_all(
+		"Jarz Mobile Device",
+		filters={"token": token},
+		fields=["name", "enabled", "user", "platform", "last_seen"],
+	)
+	if not devices:
+		return
 
-    for row in devices:
-        docname = row.get("name")
-        if not docname:
-            continue
+	for row in devices:
+		docname = row.get("name")
+		if not docname:
+			continue
 
-        doc = frappe.get_doc("Jarz Mobile Device", docname)
-        if not doc.enabled:
-            continue
+		doc = frappe.get_doc("Jarz Mobile Device", docname)
+		if not doc.enabled:
+			continue
 
-        # Bypass duplicate-token validation by updating directly in DB
-        frappe.db.set_value(
-            "Jarz Mobile Device",
-            docname,
-            "enabled",
-            0,
-            update_modified=False,
-        )
-        frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
+		# Bypass duplicate-token validation by updating directly in DB
+		frappe.db.set_value(
+			"Jarz Mobile Device",
+			docname,
+			"enabled",
+			0,
+			update_modified=False,
+		)
+		frappe.logger().info(f"Disabled stale FCM token {token} for device {docname}")
 
-        # This is the moment a person stops being reachable. It used to be
-        # announced only through frappe.logger().info(), which the servers
-        # discard, so the fleet shrank invisibly: two accounts lost push on
-        # 2026-09-07 and the only trace was the row itself. Record who, and
-        # whether they are still working, so the gap is answerable later.
-        user = row.get("user") or "<unknown>"
-        remaining = frappe.db.count(
-            "Jarz Mobile Device", {"user": user, "enabled": 1}
-        )
-        _log_notification_gap(
-            f"Push token disabled for {user}",
-            (
-                f"FCM rejected the token for {user} "
-                f"(platform={row.get('platform')}, device={docname}, "
-                f"last_seen={row.get('last_seen')}), so it was disabled. "
-                f"That user now has {remaining} enabled device(s). "
-                + (
-                    "They can no longer be reached by push at all until the app "
-                    "re-registers a token — which only happens when they reopen "
-                    "and sign in to the app."
-                    if remaining == 0
-                    else "Other devices remain reachable."
-                )
-            ),
-            throttle_key=f"disable:{docname}",
-        )
+		# This is the moment a person stops being reachable. It used to be
+		# announced only through frappe.logger().info(), which the servers
+		# discard, so the fleet shrank invisibly: two accounts lost push on
+		# 2026-09-07 and the only trace was the row itself. Record who, and
+		# whether they are still working, so the gap is answerable later.
+		user = row.get("user") or "<unknown>"
+		remaining = frappe.db.count("Jarz Mobile Device", {"user": user, "enabled": 1})
+		_log_notification_gap(
+			f"Push token disabled for {user}",
+			(
+				f"FCM rejected the token for {user} "
+				f"(platform={row.get('platform')}, device={docname}, "
+				f"last_seen={row.get('last_seen')}), so it was disabled. "
+				f"That user now has {remaining} enabled device(s). "
+				+ (
+					"They can no longer be reached by push at all until the app "
+					"re-registers a token — which only happens when they reopen "
+					"and sign in to the app."
+					if remaining == 0
+					else "Other devices remain reachable."
+				)
+			),
+			throttle_key=f"disable:{docname}",
+		)
 
 
-def _get_mobile_device_rows_by_token(token: str) -> List[Dict[str, Any]]:
-    return frappe.get_all(
-        "Jarz Mobile Device",
-        filters={"token": token},
-        fields=["name", "user", "enabled", "modified"],
-        order_by="enabled desc, modified desc",
-    )
+def _get_mobile_device_rows_by_token(token: str) -> list[dict[str, Any]]:
+	return frappe.get_all(
+		"Jarz Mobile Device",
+		filters={"token": token},
+		fields=["name", "user", "enabled", "modified"],
+		order_by="enabled desc, modified desc",
+	)
 
 
-def _is_enabled_mobile_device(row: Dict[str, Any]) -> bool:
-    try:
-        return int(row.get("enabled") or 0) == 1
-    except (TypeError, ValueError):
-        return False
+def _is_enabled_mobile_device(row: dict[str, Any]) -> bool:
+	try:
+		return int(row.get("enabled") or 0) == 1
+	except (TypeError, ValueError):
+		return False
 
 
-def _select_mobile_device_row(rows: Sequence[Dict[str, Any]], user: str) -> Optional[Dict[str, Any]]:
-    if not rows:
-        return None
+def _select_mobile_device_row(rows: Sequence[dict[str, Any]], user: str) -> dict[str, Any] | None:
+	if not rows:
+		return None
 
-    for candidates in (
-        [row for row in rows if row.get("user") == user and _is_enabled_mobile_device(row)],
-        [row for row in rows if _is_enabled_mobile_device(row)],
-        [row for row in rows if row.get("user") == user],
-        list(rows),
-    ):
-        if candidates:
-            return candidates[0]
+	for candidates in (
+		[row for row in rows if row.get("user") == user and _is_enabled_mobile_device(row)],
+		[row for row in rows if _is_enabled_mobile_device(row)],
+		[row for row in rows if row.get("user") == user],
+		list(rows),
+	):
+		if candidates:
+			return candidates[0]
 
-    return None
-
-
-def _prune_duplicate_mobile_device_rows(rows: Sequence[Dict[str, Any]], keep_name: str) -> None:
-    for row in rows:
-        docname = row.get("name")
-        if not docname or docname == keep_name:
-            continue
-
-        try:
-            frappe.delete_doc(
-                "Jarz Mobile Device",
-                docname,
-                ignore_permissions=True,
-                force=True,
-            )
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Failed pruning duplicate mobile device row {docname}",
-            )
+	return None
 
 
-def _update_mobile_device_row(docname: str, payload: Dict[str, Any]) -> Any:
-    values = dict(payload)
-    values["last_seen"] = frappe.utils.now_datetime()
-    frappe.db.set_value("Jarz Mobile Device", docname, values, update_modified=True)
-    return frappe.get_doc("Jarz Mobile Device", docname)
+def _prune_duplicate_mobile_device_rows(rows: Sequence[dict[str, Any]], keep_name: str) -> None:
+	for row in rows:
+		docname = row.get("name")
+		if not docname or docname == keep_name:
+			continue
+
+		try:
+			frappe.delete_doc(
+				"Jarz Mobile Device",
+				docname,
+				ignore_permissions=True,
+				force=True,
+			)
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Failed pruning duplicate mobile device row {docname}",
+			)
 
 
-def _upsert_mobile_device(payload: Dict[str, Any]) -> Any:
-    token = payload["token"]
-    user = payload["user"]
-    rows = _get_mobile_device_rows_by_token(token)
-    selected = _select_mobile_device_row(rows, user)
+def _update_mobile_device_row(docname: str, payload: dict[str, Any]) -> Any:
+	values = dict(payload)
+	values["last_seen"] = frappe.utils.now_datetime()
+	frappe.db.set_value("Jarz Mobile Device", docname, values, update_modified=True)
+	return frappe.get_doc("Jarz Mobile Device", docname)
 
-    if selected:
-        _prune_duplicate_mobile_device_rows(rows, selected["name"])
-        return _update_mobile_device_row(selected["name"], payload)
 
-    doc = frappe.get_doc({"doctype": "Jarz Mobile Device", **payload})
-    try:
-        doc.insert(ignore_permissions=True)
-        return doc
-    except Exception:
-        rows = _get_mobile_device_rows_by_token(token)
-        selected = _select_mobile_device_row(rows, user)
-        if not selected:
-            raise
+def _upsert_mobile_device(payload: dict[str, Any]) -> Any:
+	token = payload["token"]
+	user = payload["user"]
+	rows = _get_mobile_device_rows_by_token(token)
+	selected = _select_mobile_device_row(rows, user)
 
-        _prune_duplicate_mobile_device_rows(rows, selected["name"])
-        return _update_mobile_device_row(selected["name"], payload)
+	if selected:
+		_prune_duplicate_mobile_device_rows(rows, selected["name"])
+		return _update_mobile_device_row(selected["name"], payload)
+
+	doc = frappe.get_doc({"doctype": "Jarz Mobile Device", **payload})
+	try:
+		doc.insert(ignore_permissions=True)
+		return doc
+	except Exception:
+		rows = _get_mobile_device_rows_by_token(token)
+		selected = _select_mobile_device_row(rows, user)
+		if not selected:
+			raise
+
+		_prune_duplicate_mobile_device_rows(rows, selected["name"])
+		return _update_mobile_device_row(selected["name"], payload)
+
 
 @frappe.whitelist(allow_guest=False)
 def register_mobile_device(
-    token: str,
-    platform: Optional[str] = None,
-    device_name: Optional[str] = None,
-    app_version: Optional[str] = None,
-    pos_profiles: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Register or refresh an FCM token for the signed-in user."""
+	token: str,
+	platform: str | None = None,
+	device_name: str | None = None,
+	app_version: str | None = None,
+	pos_profiles: str | None = None,
+) -> dict[str, Any]:
+	"""Register or refresh an FCM token for the signed-in user."""
 
-    token = (token or "").strip()
-    if not token:
-        frappe.throw("token is required")
+	token = (token or "").strip()
+	if not token:
+		frappe.throw("token is required")
 
-    if len(token) > 2048:
-        frappe.throw(_("FCM token is unexpectedly long"))
+	if len(token) > 2048:
+		frappe.throw(_("FCM token is unexpectedly long"))
 
-    user = frappe.session.user
-    if not user or user == "Guest":
-        frappe.throw("Authentication required to register device")
+	user = frappe.session.user
+	if not user or user == "Guest":
+		frappe.throw("Authentication required to register device")
 
-    try:
-        payload = {
-            "token": token,
-            "user": user,
-            "platform": (platform or "Android").title(),
-            "device_name": device_name,
-            "app_version": app_version,
-            "enabled": 1,
-            "pos_profiles": _normalise_pos_profile_payload(pos_profiles),
-        }
+	try:
+		payload = {
+			"token": token,
+			"user": user,
+			"platform": (platform or "Android").title(),
+			"device_name": device_name,
+			"app_version": app_version,
+			"enabled": 1,
+			"pos_profiles": _normalise_pos_profile_payload(pos_profiles),
+		}
 
-        doc = _upsert_mobile_device(payload)
+		doc = _upsert_mobile_device(payload)
 
-        return {"success": True, "device": doc.name}
-    except Exception as exc:
-        frappe.log_error(frappe.get_traceback(), "register_mobile_device failed")
-        frappe.throw(f"Unable to register device: {exc}")
+		return {"success": True, "device": doc.name}
+	except Exception as exc:
+		frappe.log_error(frappe.get_traceback(), "register_mobile_device failed")
+		frappe.throw(f"Unable to register device: {exc}")
 
 
 @frappe.whitelist(allow_guest=False)
 def register_device_token(
-    token: str,
-    platform: Optional[str] = None,
-    device_name: Optional[str] = None,
-    app_version: Optional[str] = None,
-    pos_profiles: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Backward-compatible alias for older mobile and startup callers."""
+	token: str,
+	platform: str | None = None,
+	device_name: str | None = None,
+	app_version: str | None = None,
+	pos_profiles: str | None = None,
+) -> dict[str, Any]:
+	"""Backward-compatible alias for older mobile and startup callers."""
 
-    return register_mobile_device(
-        token=token,
-        platform=platform,
-        device_name=device_name,
-        app_version=app_version,
-        pos_profiles=pos_profiles,
-    )
-
-
-@frappe.whitelist(allow_guest=False)
-def accept_invoice(invoice_name: str) -> Dict[str, Any]:
-    """Backward-compatible alias for older accept endpoint callers."""
-
-    return acknowledge_invoice(invoice_name)
+	return register_mobile_device(
+		token=token,
+		platform=platform,
+		device_name=device_name,
+		app_version=app_version,
+		pos_profiles=pos_profiles,
+	)
 
 
 @frappe.whitelist(allow_guest=False)
-def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
-    """Mark an invoice alert as accepted by the current user."""
+def accept_invoice(invoice_name: str) -> dict[str, Any]:
+	"""Backward-compatible alias for older accept endpoint callers."""
 
-    if not invoice_name:
-        frappe.throw("invoice_name is required")
-
-    user = frappe.session.user
-    doc = frappe.get_doc("Sales Invoice", invoice_name)
-
-    if doc.docstatus != 1:
-        frappe.throw("Invoice must be submitted before acknowledgement")
-
-    # Belt and braces for the filters above: a client holding a cached alert
-    # from before this fix would otherwise stamp a credit note "Accepted" and
-    # push an "Order Accepted" notification for an order that never existed.
-    if int(getattr(doc, "is_return", 0) or 0):
-        frappe.throw(_("A credit note is not an order and cannot be accepted"))
-
-    _ensure_user_can_accept(doc, user)
-
-    current_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
-    if current_status == "Accepted":
-        return {
-            "success": True,
-            "already": True,
-            "accepted_by": getattr(doc, "custom_accepted_by", None),
-            "accepted_on": getattr(doc, "custom_accepted_on", None),
-        }
-
-    accepted_on = frappe.utils.now_datetime()
-    frappe.db.set_value(
-        "Sales Invoice",
-        doc.name,
-        {
-            "custom_acceptance_status": "Accepted",
-            "custom_accepted_by": user,
-            "custom_accepted_on": accepted_on,
-        },
-        update_modified=True,
-    )
-
-    payload = _build_invoice_alert_payload(doc)
-    payload.update({
-        "acceptance_status": "Accepted",
-        "requires_acceptance": False,
-        "accepted_by": user,
-        "accepted_on": accepted_on.isoformat(),
-        "territory": _pick_display_text(getattr(doc, "territory", None)),
-    })
-
-    recipients = _resolve_recipients_for_payload(payload)
-    if not outbound_alerts_suppressed("invoice_accepted"):
-        _publish_invoice_accepted(payload, recipients)
-        _push_invoice_accepted(payload, recipients)
-
-    return {
-        "success": True,
-        "accepted_by": user,
-        "accepted_on": accepted_on.isoformat(),
-    }
+	return acknowledge_invoice(invoice_name)
 
 
 @frappe.whitelist(allow_guest=False)
-def get_pending_alerts() -> Dict[str, Any]:
-    """Return unaccepted invoices for the caller's authorised POS profiles."""
+def acknowledge_invoice(invoice_name: str) -> dict[str, Any]:
+	"""Mark an invoice alert as accepted by the current user."""
 
-    user = frappe.session.user
-    profiles = _get_profiles_for_user(user)
-    if not profiles:
-        return {"success": True, "alerts": []}
+	if not invoice_name:
+		frappe.throw("invoice_name is required")
 
-    cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-12)
-    rows = _get_pending_alert_rows_for_profiles(profiles, cutoff)
+	user = frappe.session.user
+	doc = frappe.get_doc("Sales Invoice", invoice_name)
 
-    alerts: List[Dict[str, Any]] = []
-    for row in rows:
-        try:
-            inv_doc = frappe.get_doc("Sales Invoice", row.name)
-            payload = _build_invoice_alert_payload(inv_doc)
-            if payload:
-                alerts.append(payload)
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), f"Failed building alert payload for {row.name}")
+	if doc.docstatus != 1:
+		frappe.throw("Invoice must be submitted before acknowledgement")
 
-    return {"success": True, "alerts": alerts}
+	# Belt and braces for the filters above: a client holding a cached alert
+	# from before this fix would otherwise stamp a credit note "Accepted" and
+	# push an "Order Accepted" notification for an order that never existed.
+	if int(getattr(doc, "is_return", 0) or 0):
+		frappe.throw(_("A credit note is not an order and cannot be accepted"))
+
+	_ensure_user_can_accept(doc, user)
+
+	current_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
+	if current_status == "Accepted":
+		return {
+			"success": True,
+			"already": True,
+			"accepted_by": getattr(doc, "custom_accepted_by", None),
+			"accepted_on": getattr(doc, "custom_accepted_on", None),
+		}
+
+	accepted_on = frappe.utils.now_datetime()
+	frappe.db.set_value(
+		"Sales Invoice",
+		doc.name,
+		{
+			"custom_acceptance_status": "Accepted",
+			"custom_accepted_by": user,
+			"custom_accepted_on": accepted_on,
+		},
+		update_modified=True,
+	)
+
+	payload = _build_invoice_alert_payload(doc)
+	payload.update(
+		{
+			"acceptance_status": "Accepted",
+			"requires_acceptance": False,
+			"accepted_by": user,
+			"accepted_on": accepted_on.isoformat(),
+			"territory": _pick_display_text(getattr(doc, "territory", None)),
+		}
+	)
+
+	recipients = _resolve_recipients_for_payload(payload)
+	if not outbound_alerts_suppressed("invoice_accepted"):
+		_publish_invoice_accepted(payload, recipients)
+		_push_invoice_accepted(payload, recipients)
+
+	return {
+		"success": True,
+		"accepted_by": user,
+		"accepted_on": accepted_on.isoformat(),
+	}
+
+
+@frappe.whitelist(allow_guest=False)
+def get_pending_alerts() -> dict[str, Any]:
+	"""Return unaccepted invoices for the caller's authorised POS profiles."""
+
+	user = frappe.session.user
+	profiles = _get_profiles_for_user(user)
+	if not profiles:
+		return {"success": True, "alerts": []}
+
+	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-12)
+	rows = _get_pending_alert_rows_for_profiles(profiles, cutoff)
+
+	alerts: list[dict[str, Any]] = []
+	for row in rows:
+		try:
+			inv_doc = frappe.get_doc("Sales Invoice", row.name)
+			payload = _build_invoice_alert_payload(inv_doc)
+			if payload:
+				alerts.append(payload)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), f"Failed building alert payload for {row.name}")
+
+	return {"success": True, "alerts": alerts}
 
 
 def handle_invoice_submission(doc: Any) -> None:
-    """Emit realtime and push notifications for a newly submitted invoice."""
+	"""Emit realtime and push notifications for a newly submitted invoice."""
 
-    # A credit note is an accounting correction, never an incoming order — and
-    # this hook is what actually reaches staff, unlike `get_pending_alerts`
-    # which they have to open the app to see.
-    #
-    # The acceptance-status filter that guards the pending-alerts query is no
-    # protection here: nothing downstream looks at it, so a credit note whose
-    # inherited status is "Accepted" still pushed a full "New Order" alert.
-    # Confirmed on staging: ACC-SINV-2026-17056 (a return of an Out for
-    # Delivery order) inherited custom_kanban_profile "Nasr city" and pushed to
-    # all 10 users on that branch.
-    if int(getattr(doc, "is_return", 0) or 0):
-        return
+	# A credit note is an accounting correction, never an incoming order — and
+	# this hook is what actually reaches staff, unlike `get_pending_alerts`
+	# which they have to open the app to see.
+	#
+	# The acceptance-status filter that guards the pending-alerts query is no
+	# protection here: nothing downstream looks at it, so a credit note whose
+	# inherited status is "Accepted" still pushed a full "New Order" alert.
+	# Confirmed on staging: ACC-SINV-2026-17056 (a return of an Out for
+	# Delivery order) inherited custom_kanban_profile "Nasr city" and pushed to
+	# all 10 users on that branch.
+	if int(getattr(doc, "is_return", 0) or 0):
+		return
 
-    effective_profile = _get_effective_profile_for_doc(doc)
+	effective_profile = _get_effective_profile_for_doc(doc)
 
-    # Skip invoices without a branch identifier (e.g. WooCommerce orders)
-    # because they have no profile-scoped recipients.
-    if not effective_profile:
-        return
+	# Skip invoices without a branch identifier (e.g. WooCommerce orders)
+	# because they have no profile-scoped recipients.
+	if not effective_profile:
+		return
 
-    try:
-        frappe.logger().info(
-            "Invoice submit hook triggered for "
-            f"{getattr(doc, 'name', '?')} "
-            f"pos_profile={getattr(doc, 'pos_profile', None)} "
-            f"custom_kanban_profile={getattr(doc, 'custom_kanban_profile', None)} "
-            f"effective_profile={effective_profile}"
-        )
-        payload = _build_invoice_alert_payload(doc)
-        if not payload:
-            frappe.log_error(f"Empty payload for invoice {getattr(doc, 'name', '?')}", "Invoice Notification Skipped")
-            return
+	try:
+		frappe.logger().info(
+			"Invoice submit hook triggered for "
+			f"{getattr(doc, 'name', '?')} "
+			f"pos_profile={getattr(doc, 'pos_profile', None)} "
+			f"custom_kanban_profile={getattr(doc, 'custom_kanban_profile', None)} "
+			f"effective_profile={effective_profile}"
+		)
+		payload = _build_invoice_alert_payload(doc)
+		if not payload:
+			frappe.log_error(
+				f"Empty payload for invoice {getattr(doc, 'name', '?')}", "Invoice Notification Skipped"
+			)
+			return
 
-        # Log the payload for debugging
-        if frappe.conf.get("developer_mode"):
-            frappe.msgprint(f"Invoice alert payload: requires_acceptance={payload.get('requires_acceptance')}, acceptance_status={payload.get('acceptance_status')}")
+		# Log the payload for debugging
+		if frappe.conf.get("developer_mode"):
+			frappe.msgprint(
+				f"Invoice alert payload: requires_acceptance={payload.get('requires_acceptance')}, acceptance_status={payload.get('acceptance_status')}"
+			)
 
-        recipients = _resolve_recipients_for_payload(payload)
-        frappe.logger().info(
-            f"Invoice notification payload ready invoice={payload.get('invoice_id')} recipients={len(recipients)} requires_acceptance={payload.get('requires_acceptance')}"
-        )
-        
-        # Emit realtime notification
-        _publish_invoice_alert(payload, recipients)
-        
-        # Send push notification
-        push_result = _push_new_invoice(payload, recipients)
-        _log_fcm_info(
-            "Invoice notification processed "
-            f"invoice={payload.get('invoice_id')} recipients={len(recipients)} "
-            f"fcm_status={push_result.get('fcm', {}).get('status')} "
-            f"fcm_success={push_result.get('fcm', {}).get('success_count', 0)} "
-            f"vapid_success={push_result.get('vapid', {}).get('success_count', 0)}"
-        )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
+		recipients = _resolve_recipients_for_payload(payload)
+		frappe.logger().info(
+			f"Invoice notification payload ready invoice={payload.get('invoice_id')} recipients={len(recipients)} requires_acceptance={payload.get('requires_acceptance')}"
+		)
+
+		# Emit realtime notification
+		_publish_invoice_alert(payload, recipients)
+
+		# Send push notification
+		push_result = _push_new_invoice(payload, recipients)
+		_log_fcm_info(
+			"Invoice notification processed "
+			f"invoice={payload.get('invoice_id')} recipients={len(recipients)} "
+			f"fcm_status={push_result.get('fcm', {}).get('status')} "
+			f"fcm_success={push_result.get('fcm', {}).get('success_count', 0)} "
+			f"vapid_success={push_result.get('vapid', {}).get('success_count', 0)}"
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
 
 
-def notify_invoice_reassignment(invoice: Union[str, Any], new_kanban_profile: str) -> None:
-    """Re-issue invoice alerts for the new effective Kanban branch after reassignment.
+def notify_invoice_reassignment(invoice: str | Any, new_kanban_profile: str) -> None:
+	"""Re-issue invoice alerts for the new effective Kanban branch after reassignment.
 
-    Args:
-        invoice: Sales Invoice doc or name to notify for.
-        new_kanban_profile: Effective Kanban profile that should receive the alert.
+	Args:
+	    invoice: Sales Invoice doc or name to notify for.
+	    new_kanban_profile: Effective Kanban profile that should receive the alert.
 
-    The persisted Sales Invoice.pos_profile is not changed here. For legacy
-    consumers, the emitted alert payload still mirrors the effective branch into
-    both `pos_profile` and `kanban_profile`.
-    """
+	The persisted Sales Invoice.pos_profile is not changed here. For legacy
+	consumers, the emitted alert payload still mirrors the effective branch into
+	both `pos_profile` and `kanban_profile`.
+	"""
 
-    if not new_kanban_profile:
-        return
+	if not new_kanban_profile:
+		return
 
-    if outbound_alerts_suppressed("invoice_reassignment"):
-        return
+	if outbound_alerts_suppressed("invoice_reassignment"):
+		return
 
-    try:
-        doc = invoice if not isinstance(invoice, str) else frappe.get_doc("Sales Invoice", invoice)
-        if not doc:
-            return
+	try:
+		doc = invoice if not isinstance(invoice, str) else frappe.get_doc("Sales Invoice", invoice)
+		if not doc:
+			return
 
-        payload = _build_invoice_alert_payload(doc)
-        if not payload:
-            return
+		payload = _build_invoice_alert_payload(doc)
+		if not payload:
+			return
 
-        payload["kanban_profile"] = new_kanban_profile
-        payload["custom_kanban_profile"] = new_kanban_profile
-        payload["effective_pos_profile"] = new_kanban_profile
-        payload["acceptance_status"] = "Pending"
-        payload["requires_acceptance"] = True
-        payload = _enrich_invoice_display_fields(payload)
+		payload["kanban_profile"] = new_kanban_profile
+		payload["custom_kanban_profile"] = new_kanban_profile
+		payload["effective_pos_profile"] = new_kanban_profile
+		payload["acceptance_status"] = "Pending"
+		payload["requires_acceptance"] = True
+		payload = _enrich_invoice_display_fields(payload)
 
-        recipients = _resolve_recipients_for_payload(payload)
-        _publish_invoice_alert(payload, recipients)
-        _push_new_invoice(payload, recipients)
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"notify_invoice_reassignment failed for {getattr(invoice, 'name', invoice)}",
-        )
+		recipients = _resolve_recipients_for_payload(payload)
+		_publish_invoice_alert(payload, recipients)
+		_push_new_invoice(payload, recipients)
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"notify_invoice_reassignment failed for {getattr(invoice, 'name', invoice)}",
+		)
 
 
 def notify_invoice_cancellation(
-    invoice: Union[str, Any],
-    reason: str,
-    *,
-    notes: Optional[str] = None,
-    credit_note: Optional[str] = None,
+	invoice: str | Any,
+	reason: str,
+	*,
+	notes: str | None = None,
+	credit_note: str | None = None,
 ) -> None:
-    """Notify relevant users that an invoice has been cancelled from the Kanban board."""
+	"""Notify relevant users that an invoice has been cancelled from the Kanban board."""
 
-    if outbound_alerts_suppressed("invoice_cancellation"):
-        return
+	if outbound_alerts_suppressed("invoice_cancellation"):
+		return
 
-    try:
-        if isinstance(invoice, str):
-            doc = frappe.get_doc("Sales Invoice", invoice)
-        else:
-            doc = invoice
+	try:
+		if isinstance(invoice, str):
+			doc = frappe.get_doc("Sales Invoice", invoice)
+		else:
+			doc = invoice
 
-        payload = _build_invoice_alert_payload(doc) or {}
-        payload.update(
-            {
-                "invoice_id": getattr(doc, "name", ""),
-                "event": "invoice_cancelled",
-                "reason": reason,
-                "notes": notes or "",
-                "credit_note": credit_note,
-                "timestamp": frappe.utils.now_datetime().isoformat(),
-                "sales_invoice_state": STATUS.CANCELLED,
-                "cancelled_by": frappe.session.user,
-            }
-        )
+		payload = _build_invoice_alert_payload(doc) or {}
+		payload.update(
+			{
+				"invoice_id": getattr(doc, "name", ""),
+				"event": "invoice_cancelled",
+				"reason": reason,
+				"notes": notes or "",
+				"credit_note": credit_note,
+				"timestamp": frappe.utils.now_datetime().isoformat(),
+				"sales_invoice_state": STATUS.CANCELLED,
+				"cancelled_by": frappe.session.user,
+			}
+		)
 
-        if not payload.get("pos_profile"):
-            payload["pos_profile"] = getattr(doc, "pos_profile", None)
-        if not payload.get("kanban_profile"):
-            payload["kanban_profile"] = getattr(doc, "custom_kanban_profile", None)
-        if not payload.get("territory"):
-            payload["territory"] = _pick_display_text(getattr(doc, "territory", None))
+		if not payload.get("pos_profile"):
+			payload["pos_profile"] = getattr(doc, "pos_profile", None)
+		if not payload.get("kanban_profile"):
+			payload["kanban_profile"] = getattr(doc, "custom_kanban_profile", None)
+		if not payload.get("territory"):
+			payload["territory"] = _pick_display_text(getattr(doc, "territory", None))
 
-        recipients = _resolve_recipients_for_payload(payload)
-        _publish_to_recipients(WS_EVENTS.INVOICE_CANCELLED, payload, recipients)
+		recipients = _resolve_recipients_for_payload(payload)
+		_publish_to_recipients(WS_EVENTS.INVOICE_CANCELLED, payload, recipients)
 
-        data_payload = _prepare_invoice_status_data_payload("invoice_cancelled", payload)
+		data_payload = _prepare_invoice_status_data_payload("invoice_cancelled", payload)
 
-        tokens = _get_tokens_for_users(recipients)
-        if tokens:
-            _send_fcm_notifications(tokens, data_payload)
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"notify_invoice_cancellation failed for {getattr(invoice, 'name', invoice)}",
-        )
+		tokens = _get_tokens_for_users(recipients)
+		if tokens:
+			_send_fcm_notifications(tokens, data_payload)
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"notify_invoice_cancellation failed for {getattr(invoice, 'name', invoice)}",
+		)
 
 
 def _pick_display_text(*values: Any, fallback: str = "") -> str:
-    for value in values:
-        text = _safe_str(value).strip()
-        if text:
-            return text
-    return fallback
+	for value in values:
+		text = _safe_str(value).strip()
+		if text:
+			return text
+	return fallback
 
 
 def _format_total_display(value: Any) -> str:
-    try:
-        return f"{float(value or 0):.2f}"
-    except (TypeError, ValueError):
-        return "0.00"
+	try:
+		return f"{float(value or 0):.2f}"
+	except (TypeError, ValueError):
+		return "0.00"
 
 
 def _format_qty_display(value: Any) -> str:
-    try:
-        qty = float(value or 0)
-    except (TypeError, ValueError):
-        return "0"
+	try:
+		qty = float(value or 0)
+	except (TypeError, ValueError):
+		return "0"
 
-    if qty.is_integer():
-        return str(int(qty))
-    return f"{qty:g}"
+	if qty.is_integer():
+		return str(int(qty))
+	return f"{qty:g}"
 
 
 def _parse_item_count(value: Any) -> int:
-    try:
-        return max(int(float(_safe_str(value) or 0)), 0)
-    except (TypeError, ValueError):
-        return 0
+	try:
+		return max(int(float(_safe_str(value) or 0)), 0)
+	except (TypeError, ValueError):
+		return 0
 
 
 def _item_count_summary(item_count: Any) -> str:
-    count = _parse_item_count(item_count)
-    if count == 1:
-        return "1 item"
-    if count > 1:
-        return f"{count} items"
-    return "No items"
+	count = _parse_item_count(item_count)
+	if count == 1:
+		return "1 item"
+	if count > 1:
+		return f"{count} items"
+	return "No items"
 
 
-def _summarize_items(items: Sequence[Dict[str, Any]]) -> str:
-    summary_parts: List[str] = []
-    for item in list(items)[:5]:
-        item_label = _pick_display_text(
-            item.get("item_name"),
-            item.get("item_code"),
-            fallback=DEFAULT_ITEM_LABEL,
-        )
-        summary_parts.append(f"{item_label} x {_format_qty_display(item.get('qty', 0))}")
+def _summarize_items(items: Sequence[dict[str, Any]]) -> str:
+	summary_parts: list[str] = []
+	for item in list(items)[:5]:
+		item_label = _pick_display_text(
+			item.get("item_name"),
+			item.get("item_code"),
+			fallback=DEFAULT_ITEM_LABEL,
+		)
+		summary_parts.append(f"{item_label} x {_format_qty_display(item.get('qty', 0))}")
 
-    if summary_parts:
-        return ", ".join(summary_parts)
-    return _item_count_summary(len(items))
-
-
-def _enrich_invoice_display_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
-    raw_items = payload.get("items")
-    items = raw_items if isinstance(raw_items, list) else []
-    item_count = len(items) if isinstance(raw_items, list) else _parse_item_count(payload.get("item_count"))
-    item_summary = _pick_display_text(
-        payload.get("item_summary"),
-        fallback=_summarize_items(items) if items else _item_count_summary(item_count),
-    )
-    customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
-    branch_display = _pick_display_text(
-        payload.get("branch_display"),
-        payload.get("effective_pos_profile"),
-        payload.get("kanban_profile"),
-        payload.get("custom_kanban_profile"),
-        payload.get("pos_profile"),
-    )
-    total_display = _pick_display_text(
-        payload.get("total_display"),
-        fallback=_format_total_display(payload.get("grand_total")),
-    )
-
-    body_parts: List[str] = []
-    if branch_display:
-        body_parts.append(branch_display)
-    body_parts.append(f"Total: {total_display}")
-    if item_summary:
-        body_parts.append(item_summary)
-
-    payload.update(
-        {
-            "customer_name": customer_name,
-            "branch_display": branch_display,
-            "total_display": total_display,
-            "item_count": item_count,
-            "item_summary": item_summary,
-            "title": _pick_display_text(
-                payload.get("title"),
-                fallback=f"{DEFAULT_NEW_ORDER_TITLE}: {customer_name}",
-            ),
-            "body": _pick_display_text(
-                payload.get("body"),
-                fallback=" | ".join(body_parts),
-            ),
-        }
-    )
-    return payload
+	if summary_parts:
+		return ", ".join(summary_parts)
+	return _item_count_summary(len(items))
 
 
-def _resolve_notification_content(data_payload: Dict[str, str]) -> Tuple[str, str]:
-    title = _pick_display_text(data_payload.get("title"))
-    body = _pick_display_text(data_payload.get("body"))
-    if title and body:
-        return title, body
+def _enrich_invoice_display_fields(payload: dict[str, Any]) -> dict[str, Any]:
+	raw_items = payload.get("items")
+	items = raw_items if isinstance(raw_items, list) else []
+	item_count = len(items) if isinstance(raw_items, list) else _parse_item_count(payload.get("item_count"))
+	item_summary = _pick_display_text(
+		payload.get("item_summary"),
+		fallback=_summarize_items(items) if items else _item_count_summary(item_count),
+	)
+	customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
+	branch_display = _pick_display_text(
+		payload.get("branch_display"),
+		payload.get("effective_pos_profile"),
+		payload.get("kanban_profile"),
+		payload.get("custom_kanban_profile"),
+		payload.get("pos_profile"),
+	)
+	total_display = _pick_display_text(
+		payload.get("total_display"),
+		fallback=_format_total_display(payload.get("grand_total")),
+	)
 
-    if data_payload.get("type") == "new_invoice":
-        display_payload = _enrich_invoice_display_fields(dict(data_payload))
-        title = title or _pick_display_text(display_payload.get("title"), fallback=DEFAULT_NEW_ORDER_TITLE)
-        body = body or _pick_display_text(display_payload.get("body"), fallback="Open Jarz POS for details")
-        return title, body
+	body_parts: list[str] = []
+	if branch_display:
+		body_parts.append(branch_display)
+	body_parts.append(f"Total: {total_display}")
+	if item_summary:
+		body_parts.append(item_summary)
 
-    fallback_title = _pick_display_text(
-        data_payload.get("customer_name"),
-        _safe_str(data_payload.get("type")).replace("_", " ").title(),
-        fallback="Jarz POS",
-    )
-    fallback_body = _pick_display_text(
-        data_payload.get("reason"),
-        data_payload.get("invoice_id"),
-        fallback="Open Jarz POS for details",
-    )
-    return title or fallback_title, body or fallback_body
+	payload.update(
+		{
+			"customer_name": customer_name,
+			"branch_display": branch_display,
+			"total_display": total_display,
+			"item_count": item_count,
+			"item_summary": item_summary,
+			"title": _pick_display_text(
+				payload.get("title"),
+				fallback=f"{DEFAULT_NEW_ORDER_TITLE}: {customer_name}",
+			),
+			"body": _pick_display_text(
+				payload.get("body"),
+				fallback=" | ".join(body_parts),
+			),
+		}
+	)
+	return payload
+
+
+def _resolve_notification_content(data_payload: dict[str, str]) -> tuple[str, str]:
+	title = _pick_display_text(data_payload.get("title"))
+	body = _pick_display_text(data_payload.get("body"))
+	if title and body:
+		return title, body
+
+	if data_payload.get("type") == "new_invoice":
+		display_payload = _enrich_invoice_display_fields(dict(data_payload))
+		title = title or _pick_display_text(display_payload.get("title"), fallback=DEFAULT_NEW_ORDER_TITLE)
+		body = body or _pick_display_text(display_payload.get("body"), fallback="Open Jarz POS for details")
+		return title, body
+
+	fallback_title = _pick_display_text(
+		data_payload.get("customer_name"),
+		_safe_str(data_payload.get("type")).replace("_", " ").title(),
+		fallback="Jarz POS",
+	)
+	fallback_body = _pick_display_text(
+		data_payload.get("reason"),
+		data_payload.get("invoice_id"),
+		fallback="Open Jarz POS for details",
+	)
+	return title or fallback_title, body or fallback_body
 
 
 def _get_webpush_link() -> str:
-    get_url = getattr(frappe.utils, "get_url", None)
-    if callable(get_url):
-        try:
-            base = get_url().rstrip("/")
-            return f"{base}/pos/"
-        except Exception:
-            pass
+	get_url = getattr(frappe.utils, "get_url", None)
+	if callable(get_url):
+		try:
+			base = get_url().rstrip("/")
+			return f"{base}/pos/"
+		except Exception:
+			pass
 
-    return "/pos/"
-
-
-def _build_webpush_config(data_payload: Dict[str, str], title: str, body: str) -> Optional[Any]:
-    webpush_config_cls = getattr(messaging, "WebpushConfig", None)
-    webpush_notification_cls = getattr(messaging, "WebpushNotification", None)
-    webpush_fcm_options_cls = getattr(messaging, "WebpushFCMOptions", None)
-
-    if not webpush_config_cls or not webpush_notification_cls:
-        return None
-
-    # Same collapse rule as the Android tag, and the same reason it must not be
-    # invoice_id alone: a web tag REPLACES the notification already showing.
-    # For anything that is not an invoice, invoice_id is empty and this fell
-    # through to the message TYPE -- identical for every expense approval, so
-    # the second request would silently replace the first in the tray and a
-    # manager would answer one of two. notification_id equals invoice_id on
-    # every invoice path, so nothing there changes.
-    notification_tag = _pick_display_text(
-        data_payload.get("invoice_id"),
-        data_payload.get("notification_id"),
-        data_payload.get("type"),
-        fallback="jarz_pos",
-    )
-    webpush_notification = webpush_notification_cls(
-        title=title,
-        body=body,
-        icon=WEBPUSH_NOTIFICATION_ICON,
-        badge=WEBPUSH_NOTIFICATION_BADGE,
-        tag=notification_tag,
-        require_interaction=data_payload.get("type") == "new_invoice",
-    )
-
-    webpush_kwargs: Dict[str, Any] = {
-        "headers": {
-            "Urgency": "high" if data_payload.get("type") == "new_invoice" else "normal"
-        },
-        "notification": webpush_notification,
-    }
-
-    if webpush_fcm_options_cls:
-        webpush_kwargs["fcm_options"] = webpush_fcm_options_cls(link=_get_webpush_link())
-
-    return webpush_config_cls(**webpush_kwargs)
+	return "/pos/"
 
 
-def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
-    if not doc or not getattr(doc, "name", None):
-        return {}
+def _build_webpush_config(data_payload: dict[str, str], title: str, body: str) -> Any | None:
+	webpush_config_cls = getattr(messaging, "WebpushConfig", None)
+	webpush_notification_cls = getattr(messaging, "WebpushNotification", None)
+	webpush_fcm_options_cls = getattr(messaging, "WebpushFCMOptions", None)
 
-    invoice_id = getattr(doc, "name", "")
+	if not webpush_config_cls or not webpush_notification_cls:
+		return None
 
-    # Ensure acceptance fields are set BEFORE building payload
-    _ensure_acceptance_defaults(doc)
-    
-    # Reload the document to get the latest acceptance status
-    try:
-        doc = frappe.get_doc("Sales Invoice", invoice_id)
-    except Exception:
-        pass  # Use the doc we have if reload fails
+	# Same collapse rule as the Android tag, and the same reason it must not be
+	# invoice_id alone: a web tag REPLACES the notification already showing.
+	# For anything that is not an invoice, invoice_id is empty and this fell
+	# through to the message TYPE -- identical for every expense approval, so
+	# the second request would silently replace the first in the tray and a
+	# manager would answer one of two. notification_id equals invoice_id on
+	# every invoice path, so nothing there changes.
+	notification_tag = _pick_display_text(
+		data_payload.get("invoice_id"),
+		data_payload.get("notification_id"),
+		data_payload.get("type"),
+		fallback="jarz_pos",
+	)
+	webpush_notification = webpush_notification_cls(
+		title=title,
+		body=body,
+		icon=WEBPUSH_NOTIFICATION_ICON,
+		badge=WEBPUSH_NOTIFICATION_BADGE,
+		tag=notification_tag,
+		require_interaction=data_payload.get("type") == "new_invoice",
+	)
 
-    pos_profile = _get_original_pos_profile_for_doc(doc)
-    custom_kanban_profile = _pick_display_text(getattr(doc, "custom_kanban_profile", None))
-    effective_profile = _get_effective_profile_for_doc(doc)
-    if not effective_profile:
-        return {}
+	webpush_kwargs: dict[str, Any] = {
+		"headers": {"Urgency": "high" if data_payload.get("type") == "new_invoice" else "normal"},
+		"notification": webpush_notification,
+	}
 
-    customer = _pick_display_text(
-        getattr(doc, "customer_name", None),
-        fallback=DEFAULT_WALK_IN_CUSTOMER,
-    )
-    state = (
-        getattr(doc, "custom_sales_invoice_state", None)
-        or getattr(doc, "sales_invoice_state", None)
-        or getattr(doc, "status", None)
-        or "Received"
-    )
+	if webpush_fcm_options_cls:
+		webpush_kwargs["fcm_options"] = webpush_fcm_options_cls(link=_get_webpush_link())
 
-    items: List[Dict[str, Any]] = []
-    try:
-        for row in getattr(doc, "items", [])[:15]:
-            item_code = _pick_display_text(getattr(row, "item_code", None))
-            items.append(
-                {
-                    "item_code": item_code,
-                    "item_name": _pick_display_text(
-                        getattr(row, "item_name", None),
-                        item_code,
-                        fallback=DEFAULT_ITEM_LABEL,
-                    ),
-                    "qty": float(getattr(row, "qty", 0) or 0),
-                }
-            )
-    except Exception:
-        pass
-
-    acceptance_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
-
-    payload: Dict[str, Any] = {
-        "invoice_id": invoice_id,
-        "name": invoice_id,
-        "woo_order_id": normalize_woo_order_id(getattr(doc, "woo_order_id", None)),
-        "customer_name": customer,
-        "grand_total": float(getattr(doc, "grand_total", 0) or 0),
-        "net_total": float(getattr(doc, "net_total", 0) or 0),
-        "outstanding": float(getattr(doc, "outstanding_amount", 0) or 0),
-        "sales_invoice_state": state,
-        "posting_date": str(getattr(doc, "posting_date", "")),
-        "posting_time": str(getattr(doc, "posting_time", "")),
-        "pos_profile": pos_profile,
-        "kanban_profile": effective_profile,
-        "custom_kanban_profile": custom_kanban_profile or None,
-        "effective_pos_profile": effective_profile,
-        "custom_is_pickup": bool(getattr(doc, "custom_is_pickup", 0)),
-        "delivery_date": _safe_str(getattr(doc, "custom_delivery_date", None)),
-        "delivery_time_from": _safe_str(getattr(doc, "custom_delivery_time_from", None)),
-        "requires_acceptance": acceptance_status != "Accepted",
-        "acceptance_status": acceptance_status or "Pending",
-        "timestamp": frappe.utils.now_datetime().isoformat(),
-        "items": items,
-    }
-
-    return _enrich_invoice_display_fields(payload)
+	return webpush_config_cls(**webpush_kwargs)
 
 
-def _resolve_recipients_for_payload(payload: Dict[str, Any]) -> List[str]:
-    effective_profile = _get_effective_profile_for_payload(payload)
-    if not effective_profile:
-        return []
+def _build_invoice_alert_payload(doc: Any) -> dict[str, Any]:
+	if not doc or not getattr(doc, "name", None):
+		return {}
 
-    return _get_users_for_pos_profiles([effective_profile])
+	invoice_id = getattr(doc, "name", "")
+
+	# Ensure acceptance fields are set BEFORE building payload
+	_ensure_acceptance_defaults(doc)
+
+	# Reload the document to get the latest acceptance status
+	try:
+		doc = frappe.get_doc("Sales Invoice", invoice_id)
+	except Exception:
+		pass  # Use the doc we have if reload fails
+
+	pos_profile = _get_original_pos_profile_for_doc(doc)
+	custom_kanban_profile = _pick_display_text(getattr(doc, "custom_kanban_profile", None))
+	effective_profile = _get_effective_profile_for_doc(doc)
+	if not effective_profile:
+		return {}
+
+	customer = _pick_display_text(
+		getattr(doc, "customer_name", None),
+		fallback=DEFAULT_WALK_IN_CUSTOMER,
+	)
+	state = (
+		getattr(doc, "custom_sales_invoice_state", None)
+		or getattr(doc, "sales_invoice_state", None)
+		or getattr(doc, "status", None)
+		or "Received"
+	)
+
+	items: list[dict[str, Any]] = []
+	try:
+		for row in getattr(doc, "items", [])[:15]:
+			item_code = _pick_display_text(getattr(row, "item_code", None))
+			items.append(
+				{
+					"item_code": item_code,
+					"item_name": _pick_display_text(
+						getattr(row, "item_name", None),
+						item_code,
+						fallback=DEFAULT_ITEM_LABEL,
+					),
+					"qty": float(getattr(row, "qty", 0) or 0),
+				}
+			)
+	except Exception:
+		pass
+
+	acceptance_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
+
+	payload: dict[str, Any] = {
+		"invoice_id": invoice_id,
+		"name": invoice_id,
+		"woo_order_id": normalize_woo_order_id(getattr(doc, "woo_order_id", None)),
+		"customer_name": customer,
+		"grand_total": float(getattr(doc, "grand_total", 0) or 0),
+		"net_total": float(getattr(doc, "net_total", 0) or 0),
+		"outstanding": float(getattr(doc, "outstanding_amount", 0) or 0),
+		"sales_invoice_state": state,
+		"posting_date": str(getattr(doc, "posting_date", "")),
+		"posting_time": str(getattr(doc, "posting_time", "")),
+		"pos_profile": pos_profile,
+		"kanban_profile": effective_profile,
+		"custom_kanban_profile": custom_kanban_profile or None,
+		"effective_pos_profile": effective_profile,
+		"custom_is_pickup": bool(getattr(doc, "custom_is_pickup", 0)),
+		"delivery_date": _safe_str(getattr(doc, "custom_delivery_date", None)),
+		"delivery_time_from": _safe_str(getattr(doc, "custom_delivery_time_from", None)),
+		"requires_acceptance": acceptance_status != "Accepted",
+		"acceptance_status": acceptance_status or "Pending",
+		"timestamp": frappe.utils.now_datetime().isoformat(),
+		"items": items,
+	}
+
+	return _enrich_invoice_display_fields(payload)
+
+
+def _resolve_recipients_for_payload(payload: dict[str, Any]) -> list[str]:
+	effective_profile = _get_effective_profile_for_payload(payload)
+	if not effective_profile:
+		return []
+
+	return _get_users_for_pos_profiles([effective_profile])
 
 
 def _ensure_acceptance_defaults(doc: Any) -> None:
-    """Ensure acceptance status is set to Pending if not already set."""
-    try:
-        current_status = getattr(doc, "custom_acceptance_status", None)
-        # If status is already set (Pending or Accepted), don't change it
-        if current_status in ("Pending", "Accepted"):
-            return
-        
-        # Set default to Pending for new invoices
-        frappe.db.set_value(
-            "Sales Invoice",
-            doc.name,
-            {
-                "custom_acceptance_status": "Pending",
-                "custom_accepted_by": None,
-                "custom_accepted_on": None,
-            },
-            update_modified=False,
-        )
-        setattr(doc, "custom_acceptance_status", "Pending")
-        setattr(doc, "custom_accepted_by", None)
-        setattr(doc, "custom_accepted_on", None)
-        
-        if frappe.conf.get("developer_mode"):
-            frappe.msgprint(f"Set acceptance status to Pending for {doc.name}")
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), f"Failed to set acceptance defaults for {getattr(doc, 'name', '?')}")
+	"""Ensure acceptance status is set to Pending if not already set."""
+	try:
+		current_status = getattr(doc, "custom_acceptance_status", None)
+		# If status is already set (Pending or Accepted), don't change it
+		if current_status in ("Pending", "Accepted"):
+			return
+
+		# Set default to Pending for new invoices
+		frappe.db.set_value(
+			"Sales Invoice",
+			doc.name,
+			{
+				"custom_acceptance_status": "Pending",
+				"custom_accepted_by": None,
+				"custom_accepted_on": None,
+			},
+			update_modified=False,
+		)
+		doc.custom_acceptance_status = "Pending"
+		doc.custom_accepted_by = None
+		doc.custom_accepted_on = None
+
+		if frappe.conf.get("developer_mode"):
+			frappe.msgprint(f"Set acceptance status to Pending for {doc.name}")
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(), f"Failed to set acceptance defaults for {getattr(doc, 'name', '?')}"
+		)
 
 
-def _publish_to_recipients(
-    event: str, payload: Dict[str, Any], recipients: Sequence[str]
-) -> None:
-    """Emit *event* to each recipient individually.
+def _publish_to_recipients(event: str, payload: dict[str, Any], recipients: Sequence[str]) -> None:
+	"""Emit *event* to each recipient individually.
 
-    ``publish_realtime(user=[...])`` builds the room ``user:['a@b.com', ...]``,
-    which no socket ever joins — the events looked delivered and went nowhere.
-    The old ``"*"`` fallback was equally dead *and*, had it worked, would have
-    broadcast the order to every branch. Emitting one room per user is the only
-    form Frappe actually routes.
-    """
-    cleaned = sorted({str(u).strip() for u in (recipients or []) if str(u or "").strip()})
-    if not cleaned:
-        frappe.logger().warning(
-            f"NOTIFY: no recipients for {event} on {payload.get('invoice_id') or payload.get('name')}"
-        )
-        return
+	``publish_realtime(user=[...])`` builds the room ``user:['a@b.com', ...]``,
+	which no socket ever joins — the events looked delivered and went nowhere.
+	The old ``"*"`` fallback was equally dead *and*, had it worked, would have
+	broadcast the order to every branch. Emitting one room per user is the only
+	form Frappe actually routes.
+	"""
+	cleaned = sorted({str(u).strip() for u in (recipients or []) if str(u or "").strip()})
+	if not cleaned:
+		frappe.logger().warning(
+			f"NOTIFY: no recipients for {event} on {payload.get('invoice_id') or payload.get('name')}"
+		)
+		return
 
-    for user in cleaned:
-        try:
-            frappe.publish_realtime(event, payload, user=user)
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), f"publish_realtime {event} failed for {user}")
+	for user in cleaned:
+		try:
+			frappe.publish_realtime(event, payload, user=user)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), f"publish_realtime {event} failed for {user}")
 
 
-def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
-    try:
-        _publish_to_recipients(WS_EVENTS.NEW_INVOICE, payload, recipients)
+def _publish_invoice_alert(payload: dict[str, Any], recipients: Sequence[str]) -> None:
+	try:
+		_publish_to_recipients(WS_EVENTS.NEW_INVOICE, payload, recipients)
 
-        if frappe.conf.get("developer_mode"):
-            frappe.msgprint(
-                f"Published jarz_pos_new_invoice event for {payload.get('invoice_id')} "
-                f"to {len(recipients) if recipients else 0} users"
-            )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_new_invoice failed")
+		if frappe.conf.get("developer_mode"):
+			frappe.msgprint(
+				f"Published jarz_pos_new_invoice event for {payload.get('invoice_id')} "
+				f"to {len(recipients) if recipients else 0} users"
+			)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_new_invoice failed")
 
 
-def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
-    try:
-        _publish_to_recipients(WS_EVENTS.INVOICE_ACCEPTED, payload, recipients)
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_invoice_accepted failed")
+def _publish_invoice_accepted(payload: dict[str, Any], recipients: Sequence[str]) -> None:
+	try:
+		_publish_to_recipients(WS_EVENTS.INVOICE_ACCEPTED, payload, recipients)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_invoice_accepted failed")
 
 
 # ── VAPID web push ────────────────────────────────────────────────────────────
 
 
-def _generate_vapid_keys() -> Tuple[str, str]:
-    """Generate a P-256 EC key pair for VAPID.
+def _generate_vapid_keys() -> tuple[str, str]:
+	"""Generate a P-256 EC key pair for VAPID.
 
-    Returns (public_key_base64url, private_key_pem).
-    The public key is the raw uncompressed EC point (65 bytes) in base64url with no padding.
-    The private key is PEM format accepted by pywebpush.
-    """
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives import serialization
+	Returns (public_key_base64url, private_key_pem).
+	The public key is the raw uncompressed EC point (65 bytes) in base64url with no padding.
+	The private key is PEM format accepted by pywebpush.
+	"""
+	from cryptography.hazmat.primitives import serialization
+	from cryptography.hazmat.primitives.asymmetric import ec
 
-    private_key = ec.generate_private_key(ec.SECP256R1())
+	private_key = ec.generate_private_key(ec.SECP256R1())
 
-    pub_bytes = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.X962,
-        format=serialization.PublicFormat.UncompressedPoint,
-    )
-    public_key_b64url = base64.urlsafe_b64encode(pub_bytes).rstrip(b"=").decode("ascii")
+	pub_bytes = private_key.public_key().public_bytes(
+		encoding=serialization.Encoding.X962,
+		format=serialization.PublicFormat.UncompressedPoint,
+	)
+	public_key_b64url = base64.urlsafe_b64encode(pub_bytes).rstrip(b"=").decode("ascii")
 
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("ascii")
+	private_pem = private_key.private_bytes(
+		encoding=serialization.Encoding.PEM,
+		format=serialization.PrivateFormat.TraditionalOpenSSL,
+		encryption_algorithm=serialization.NoEncryption(),
+	).decode("ascii")
 
-    return public_key_b64url, private_pem
+	return public_key_b64url, private_pem
 
 
 def _load_vapid_from_private_key(private_key_pem: str) -> Any:
-    """Build a py_vapid Vapid object from the stored private key.
+	"""Build a py_vapid Vapid object from the stored private key.
 
-    The key is persisted as PEM by ``_generate_vapid_keys``. pywebpush's
-    ``webpush()`` helper routes a *string* ``vapid_private_key`` through
-    ``Vapid.from_string()``, which in py_vapid >= 1.9 expects base64url-encoded
-    DER — NOT PEM — and raises an ASN.1 "invalid length" error on a PEM string,
-    killing every push before any request reaches the push service. Passing a
-    pre-built ``Vapid`` object bypasses that path and is version-robust.
-    """
-    from py_vapid import Vapid02
+	The key is persisted as PEM by ``_generate_vapid_keys``. pywebpush's
+	``webpush()`` helper routes a *string* ``vapid_private_key`` through
+	``Vapid.from_string()``, which in py_vapid >= 1.9 expects base64url-encoded
+	DER — NOT PEM — and raises an ASN.1 "invalid length" error on a PEM string,
+	killing every push before any request reaches the push service. Passing a
+	pre-built ``Vapid`` object bypasses that path and is version-robust.
+	"""
+	from py_vapid import Vapid02
 
-    key = (private_key_pem or "").strip()
-    if "BEGIN" in key:
-        return Vapid02.from_pem(key.encode("ascii"))
-    # Fallback for keys already stored as raw base64url DER.
-    return Vapid02.from_string(private_key=key)
-
-
-def _get_or_create_vapid_keys() -> Tuple[str, str]:
-    """Return existing VAPID keys from settings, generating them on first call."""
-    settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
-    public_key = (settings.vapid_public_key or "").strip()
-    private_key = (settings.vapid_private_key or "").strip()
-
-    if public_key and private_key:
-        return public_key, private_key
-
-    public_key, private_key = _generate_vapid_keys()
-    frappe.db.set_value(
-        "Jarz POS Settings",
-        "Jarz POS Settings",
-        {"vapid_public_key": public_key, "vapid_private_key": private_key},
-    )
-    frappe.db.commit()
-    return public_key, private_key
+	key = (private_key_pem or "").strip()
+	if "BEGIN" in key:
+		return Vapid02.from_pem(key.encode("ascii"))
+	# Fallback for keys already stored as raw base64url DER.
+	return Vapid02.from_string(private_key=key)
 
 
-@frappe.whitelist(allow_guest=False)
-def get_vapid_public_key() -> Dict[str, str]:
-    """Return the VAPID application server public key, generating it on first call."""
-    public_key, _ = _get_or_create_vapid_keys()
-    return {"public_key": public_key}
+def _get_or_create_vapid_keys() -> tuple[str, str]:
+	"""Return existing VAPID keys from settings, generating them on first call."""
+	settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
+	public_key = (settings.vapid_public_key or "").strip()
+	private_key = (settings.vapid_private_key or "").strip()
+
+	if public_key and private_key:
+		return public_key, private_key
+
+	public_key, private_key = _generate_vapid_keys()
+	frappe.db.set_value(
+		"Jarz POS Settings",
+		"Jarz POS Settings",
+		{"vapid_public_key": public_key, "vapid_private_key": private_key},
+	)
+	frappe.db.commit()
+	return public_key, private_key
 
 
 @frappe.whitelist(allow_guest=False)
-def register_vapid_subscription(subscription_json: str, browser: Optional[str] = None) -> Dict[str, Any]:
-    """Register or refresh a VAPID web push subscription for the signed-in user."""
-    sub_json = (subscription_json or "").strip()
-    if not sub_json:
-        frappe.throw(_("subscription_json is required"))
-
-    try:
-        parsed = json.loads(sub_json)
-    except (json.JSONDecodeError, ValueError):
-        frappe.throw(_("subscription_json must be valid JSON"))
-
-    if not parsed.get("endpoint"):
-        frappe.throw(_("subscription_json must contain an 'endpoint' field"))
-
-    keys = parsed.get("keys") or {}
-    if not keys.get("p256dh") or not keys.get("auth"):
-        frappe.throw(_("subscription_json 'keys' must contain 'p256dh' and 'auth' fields"))
-
-    user = frappe.session.user
-    if not user or user == "Guest":
-        frappe.throw(_("Authentication required"))
-
-    endpoint = parsed["endpoint"]
-
-    try:
-        existing = frappe.get_all(
-            "Jarz Web Push Subscription",
-            filters={"endpoint": endpoint},
-            fields=["name"],
-            limit=1,
-        )
-        if existing:
-            frappe.db.set_value(
-                "Jarz Web Push Subscription",
-                existing[0]["name"],
-                {
-                    "user": user,
-                    "subscription_json": sub_json,
-                    "browser": browser,
-                    "enabled": 1,
-                    "last_seen": frappe.utils.now_datetime(),
-                },
-                update_modified=True,
-            )
-            return {"success": True, "subscription": existing[0]["name"]}
-
-        doc = frappe.get_doc({
-            "doctype": "Jarz Web Push Subscription",
-            "user": user,
-            "subscription_json": sub_json,
-            "endpoint": endpoint,
-            "browser": browser,
-            "enabled": 1,
-        })
-        doc.insert(ignore_permissions=True)
-        return {"success": True, "subscription": doc.name}
-    except Exception as exc:
-        frappe.log_error(frappe.get_traceback(), "register_vapid_subscription failed")
-        frappe.throw(f"Unable to register web push subscription: {exc}")
+def get_vapid_public_key() -> dict[str, str]:
+	"""Return the VAPID application server public key, generating it on first call."""
+	public_key, _ = _get_or_create_vapid_keys()
+	return {"public_key": public_key}
 
 
-def _get_vapid_subscriptions_for_users(users: Sequence[str]) -> List[str]:
-    if not users:
-        return []
+@frappe.whitelist(allow_guest=False)
+def register_vapid_subscription(subscription_json: str, browser: str | None = None) -> dict[str, Any]:
+	"""Register or refresh a VAPID web push subscription for the signed-in user."""
+	sub_json = (subscription_json or "").strip()
+	if not sub_json:
+		frappe.throw(_("subscription_json is required"))
 
-    rows = frappe.get_all(
-        "Jarz Web Push Subscription",
-        filters={"user": ["in", list(users)], "enabled": 1},
-        fields=["subscription_json", "endpoint"],
-    )
-    seen_endpoints: set = set()
-    result: List[str] = []
-    for row in rows:
-        endpoint = row.get("endpoint") or ""
-        sub_json = row.get("subscription_json") or ""
-        if endpoint and sub_json and endpoint not in seen_endpoints:
-            seen_endpoints.add(endpoint)
-            result.append(sub_json)
-    return result
+	try:
+		parsed = json.loads(sub_json)
+	except (json.JSONDecodeError, ValueError):
+		frappe.throw(_("subscription_json must be valid JSON"))
+
+	if not parsed.get("endpoint"):
+		frappe.throw(_("subscription_json must contain an 'endpoint' field"))
+
+	keys = parsed.get("keys") or {}
+	if not keys.get("p256dh") or not keys.get("auth"):
+		frappe.throw(_("subscription_json 'keys' must contain 'p256dh' and 'auth' fields"))
+
+	user = frappe.session.user
+	if not user or user == "Guest":
+		frappe.throw(_("Authentication required"))
+
+	endpoint = parsed["endpoint"]
+
+	try:
+		existing = frappe.get_all(
+			"Jarz Web Push Subscription",
+			filters={"endpoint": endpoint},
+			fields=["name"],
+			limit=1,
+		)
+		if existing:
+			frappe.db.set_value(
+				"Jarz Web Push Subscription",
+				existing[0]["name"],
+				{
+					"user": user,
+					"subscription_json": sub_json,
+					"browser": browser,
+					"enabled": 1,
+					"last_seen": frappe.utils.now_datetime(),
+				},
+				update_modified=True,
+			)
+			return {"success": True, "subscription": existing[0]["name"]}
+
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarz Web Push Subscription",
+				"user": user,
+				"subscription_json": sub_json,
+				"endpoint": endpoint,
+				"browser": browser,
+				"enabled": 1,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		return {"success": True, "subscription": doc.name}
+	except Exception as exc:
+		frappe.log_error(frappe.get_traceback(), "register_vapid_subscription failed")
+		frappe.throw(f"Unable to register web push subscription: {exc}")
+
+
+def _get_vapid_subscriptions_for_users(users: Sequence[str]) -> list[str]:
+	if not users:
+		return []
+
+	rows = frappe.get_all(
+		"Jarz Web Push Subscription",
+		filters={"user": ["in", list(users)], "enabled": 1},
+		fields=["subscription_json", "endpoint"],
+	)
+	seen_endpoints: set = set()
+	result: list[str] = []
+	for row in rows:
+		endpoint = row.get("endpoint") or ""
+		sub_json = row.get("subscription_json") or ""
+		if endpoint and sub_json and endpoint not in seen_endpoints:
+			seen_endpoints.add(endpoint)
+			result.append(sub_json)
+	return result
 
 
 def _disable_vapid_subscription(endpoint: str) -> None:
-    if not endpoint:
-        return
-    try:
-        rows = frappe.get_all(
-            "Jarz Web Push Subscription",
-            filters={"endpoint": endpoint},
-            fields=["name"],
-        )
-        for row in rows:
-            frappe.db.set_value(
-                "Jarz Web Push Subscription",
-                row["name"],
-                "enabled",
-                0,
-                update_modified=False,
-            )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Failed to disable VAPID subscription")
+	if not endpoint:
+		return
+	try:
+		rows = frappe.get_all(
+			"Jarz Web Push Subscription",
+			filters={"endpoint": endpoint},
+			fields=["name"],
+		)
+		for row in rows:
+			frappe.db.set_value(
+				"Jarz Web Push Subscription",
+				row["name"],
+				"enabled",
+				0,
+				update_modified=False,
+			)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Failed to disable VAPID subscription")
 
 
-def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Send standard VAPID web push notifications (iOS Safari PWA, Chrome, Firefox, Edge)."""
-    result: Dict[str, Any] = {
-        "ok": False,
-        "status": "pending",
-        "total": len(subscriptions),
-        "success_count": 0,
-        "failure_count": 0,
-        "errors": [],
-    }
+def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: dict[str, Any]) -> dict[str, Any]:
+	"""Send standard VAPID web push notifications (iOS Safari PWA, Chrome, Firefox, Edge)."""
+	result: dict[str, Any] = {
+		"ok": False,
+		"status": "pending",
+		"total": len(subscriptions),
+		"success_count": 0,
+		"failure_count": 0,
+		"errors": [],
+	}
 
-    if not subscriptions:
-        result["ok"] = True
-        result["status"] = "skipped_no_subscriptions"
-        return result
+	if not subscriptions:
+		result["ok"] = True
+		result["status"] = "skipped_no_subscriptions"
+		return result
 
-    try:
-        from pywebpush import webpush as vapid_webpush, WebPushException  # type: ignore[import]
-    except ImportError:
-        result["status"] = "skipped_pywebpush_not_installed"
-        frappe.log_error("pywebpush not installed — VAPID push skipped", "VAPID Push Warning")
-        return result
+	try:
+		from pywebpush import WebPushException
+		from pywebpush import webpush as vapid_webpush  # type: ignore[import]
+	except ImportError:
+		result["status"] = "skipped_pywebpush_not_installed"
+		frappe.log_error("pywebpush not installed — VAPID push skipped", "VAPID Push Warning")
+		return result
 
-    try:
-        public_key, private_key_pem = _get_or_create_vapid_keys()
-    except Exception:
-        result["status"] = "skipped_vapid_keys_unavailable"
-        frappe.log_error(frappe.get_traceback(), "VAPID key retrieval failed")
-        return result
+	try:
+		public_key, private_key_pem = _get_or_create_vapid_keys()
+	except Exception:
+		result["status"] = "skipped_vapid_keys_unavailable"
+		frappe.log_error(frappe.get_traceback(), "VAPID key retrieval failed")
+		return result
 
-    try:
-        vapid_key = _load_vapid_from_private_key(private_key_pem)
-    except Exception:
-        result["status"] = "skipped_vapid_key_invalid"
-        frappe.log_error(frappe.get_traceback(), "VAPID private key could not be parsed")
-        return result
+	try:
+		vapid_key = _load_vapid_from_private_key(private_key_pem)
+	except Exception:
+		result["status"] = "skipped_vapid_key_invalid"
+		frappe.log_error(frappe.get_traceback(), "VAPID private key could not be parsed")
+		return result
 
-    settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
-    vapid_subject = (settings.vapid_subject or "").strip() or "https://erp.orderjarz.com"
+	settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
+	vapid_subject = (settings.vapid_subject or "").strip() or "https://erp.orderjarz.com"
 
-    title, body = _resolve_notification_content(data_payload)
-    push_data = json.dumps({
-        "type": data_payload.get("type", ""),
-        "title": title,
-        "body": body,
-        "invoice_id": data_payload.get("invoice_id", ""),
-        "notification_id": data_payload.get("notification_id", ""),
-        "pos_profile": data_payload.get("pos_profile", ""),
-        # Settlement reminders: the service worker tags and links by shop.
-        "customer": data_payload.get("customer", ""),
-        "kind": data_payload.get("kind", ""),
-        "url": _get_webpush_link(),
-    })
+	title, body = _resolve_notification_content(data_payload)
+	push_data = json.dumps(
+		{
+			"type": data_payload.get("type", ""),
+			"title": title,
+			"body": body,
+			"invoice_id": data_payload.get("invoice_id", ""),
+			"notification_id": data_payload.get("notification_id", ""),
+			"pos_profile": data_payload.get("pos_profile", ""),
+			# Settlement reminders: the service worker tags and links by shop.
+			"customer": data_payload.get("customer", ""),
+			"kind": data_payload.get("kind", ""),
+			"url": _get_webpush_link(),
+		}
+	)
 
-    for sub_json in subscriptions:
-        endpoint = ""
-        try:
-            parsed = json.loads(sub_json)
-            endpoint = parsed.get("endpoint", "") if isinstance(parsed, dict) else ""
-            vapid_webpush(
-                subscription_info=parsed,
-                data=push_data,
-                vapid_private_key=vapid_key,
-                vapid_claims={"sub": vapid_subject},
-            )
-            result["success_count"] += 1
-        except WebPushException as ex:
-            status_code = getattr(getattr(ex, "response", None), "status_code", None)
-            _log_fcm_info(
-                f"VAPID push failed: status={status_code} "
-                f"endpoint=...{endpoint[-40:] if endpoint else '?'}"
-            )
-            if status_code in (404, 410):
-                _disable_vapid_subscription(endpoint)
-            result["failure_count"] += 1
-            result["errors"].append(f"status={status_code}")
-        except Exception as exc:
-            result["failure_count"] += 1
-            result["errors"].append(str(exc)[:120])
-            frappe.log_error(frappe.get_traceback(), "VAPID push failed unexpectedly")
+	for sub_json in subscriptions:
+		endpoint = ""
+		try:
+			parsed = json.loads(sub_json)
+			endpoint = parsed.get("endpoint", "") if isinstance(parsed, dict) else ""
+			vapid_webpush(
+				subscription_info=parsed,
+				data=push_data,
+				vapid_private_key=vapid_key,
+				vapid_claims={"sub": vapid_subject},
+			)
+			result["success_count"] += 1
+		except WebPushException as ex:
+			status_code = getattr(getattr(ex, "response", None), "status_code", None)
+			_log_fcm_info(
+				f"VAPID push failed: status={status_code} "
+				f"endpoint=...{endpoint[-40:] if endpoint else '?'}"
+			)
+			if status_code in (404, 410):
+				_disable_vapid_subscription(endpoint)
+			result["failure_count"] += 1
+			result["errors"].append(f"status={status_code}")
+		except Exception as exc:
+			result["failure_count"] += 1
+			result["errors"].append(str(exc)[:120])
+			frappe.log_error(frappe.get_traceback(), "VAPID push failed unexpectedly")
 
-    if result["failure_count"] == 0:
-        result["ok"] = True
-        result["status"] = "success"
-    elif result["success_count"] > 0:
-        result["ok"] = True
-        result["status"] = "partial"
-    else:
-        result["status"] = "failed"
+	if result["failure_count"] == 0:
+		result["ok"] = True
+		result["status"] = "success"
+	elif result["success_count"] > 0:
+		result["ok"] = True
+		result["status"] = "partial"
+	else:
+		result["status"] = "failed"
 
-    return result
-
-
-def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
-    data = _prepare_invoice_data_payload("new_invoice", payload)
-
-    # Both channels are resolved before either is judged: a branch working
-    # entirely on the web PWA has web-push subscriptions and no Jarz Mobile
-    # Device rows at all, and logging the gap off the FCM count alone reported
-    # it as unreachable on every order -- drowning the real signal in the one
-    # place this reporting exists to keep clear.
-    tokens, token_platforms = _get_token_targets_for_users(recipients)
-    vapid_subs = _get_vapid_subscriptions_for_users(recipients)
-
-    # FCM path (Android / iOS native app)
-    if tokens:
-        _log_fcm_info(
-            f"FCM send: new_invoice; recipients={len(recipients)}; "
-            f"tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
-        )
-        fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
-    else:
-        _log_fcm_info(f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}")
-        fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
-        fcm_result["ok"] = True
-        # "Nobody on this order has a device" is the branch-got-nothing event.
-        # It is the one outcome a complaint is actually made about, and it was
-        # the quietest thing in the module: skipped_no_tokens is reported ok.
-        if recipients and not vapid_subs:
-            _log_notification_gap(
-                "Order alert reached nobody (no live device)",
-                (
-                    f"Invoice {payload.get('invoice_id')} for profile "
-                    f"{_get_effective_profile_for_payload(payload) or '<none>'} resolved "
-                    f"{len(recipients)} recipient(s) but ZERO enabled push tokens and ZERO "
-                    f"web-push subscriptions, so no phone or tablet was alerted. "
-                    f"Recipients: {', '.join(sorted(recipients))}. "
-                    "Each of them must reopen and sign in to the Jarz POS app to "
-                    "register a device token. Run "
-                    "jarz_pos.api.notifications.notification_health for the full "
-                    "per-branch picture."
-                ),
-                throttle_key=f"notokens:{_get_effective_profile_for_payload(payload)}",
-            )
-
-    # VAPID path (W3C Web Push — iOS Safari PWA, Chrome, Firefox, Edge)
-    if vapid_subs:
-        _log_fcm_info(
-            f"VAPID send: new_invoice; recipients={len(recipients)}; "
-            f"subscriptions={len(vapid_subs)}; invoice={payload.get('invoice_id')}"
-        )
-        vapid_result = _send_vapid_notifications(vapid_subs, data)
-    else:
-        vapid_result = {
-            "ok": True,
-            "status": "skipped_no_subscriptions",
-            "success_count": 0,
-            "failure_count": 0,
-        }
-
-    return {
-        "ok": fcm_result.get("ok", False) or vapid_result.get("ok", False),
-        "status": fcm_result.get("status"),
-        "success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
-        "failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
-        "fcm": fcm_result,
-        "vapid": vapid_result,
-    }
+	return result
 
 
-def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
-    customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
-    territory = _pick_display_text(payload.get("territory"))
-    pos_profile = _pick_display_text(payload.get("pos_profile"))
-    effective_profile = _get_effective_profile_for_payload(payload)
-    title_prefix = INVOICE_STATUS_NOTIFICATION_TITLES.get(
-        event_type,
-        _safe_str(event_type).replace("_", " ").title(),
-    )
-    title = f"{title_prefix}: {customer_name}"
+def _push_new_invoice(payload: dict[str, Any], recipients: Sequence[str]) -> dict[str, Any]:
+	data = _prepare_invoice_data_payload("new_invoice", payload)
 
-    body_parts: List[str] = []
-    if territory:
-        body_parts.append(f"Territory: {territory}")
-    if effective_profile:
-        body_parts.append(f"POS Profile: {effective_profile}")
+	# Both channels are resolved before either is judged: a branch working
+	# entirely on the web PWA has web-push subscriptions and no Jarz Mobile
+	# Device rows at all, and logging the gap off the FCM count alone reported
+	# it as unreachable on every order -- drowning the real signal in the one
+	# place this reporting exists to keep clear.
+	tokens, token_platforms = _get_token_targets_for_users(recipients)
+	vapid_subs = _get_vapid_subscriptions_for_users(recipients)
 
-    if event_type == "invoice_accepted":
-        accepted_by = _pick_display_text(payload.get("accepted_by"))
-        if accepted_by:
-            body_parts.append(f"By: {accepted_by}")
-    elif event_type == "invoice_cancelled":
-        reason = _pick_display_text(payload.get("reason"))
-        if reason:
-            body_parts.append(f"Reason: {reason}")
+	# FCM path (Android / iOS native app)
+	if tokens:
+		_log_fcm_info(
+			f"FCM send: new_invoice; recipients={len(recipients)}; "
+			f"tokens={len(tokens)}; invoice={payload.get('invoice_id')}"
+		)
+		fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
+	else:
+		_log_fcm_info(f"FCM skip: no tokens for new_invoice; recipients={len(recipients)}")
+		fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+		fcm_result["ok"] = True
+		# "Nobody on this order has a device" is the branch-got-nothing event.
+		# It is the one outcome a complaint is actually made about, and it was
+		# the quietest thing in the module: skipped_no_tokens is reported ok.
+		if recipients and not vapid_subs:
+			_log_notification_gap(
+				"Order alert reached nobody (no live device)",
+				(
+					f"Invoice {payload.get('invoice_id')} for profile "
+					f"{_get_effective_profile_for_payload(payload) or '<none>'} resolved "
+					f"{len(recipients)} recipient(s) but ZERO enabled push tokens and ZERO "
+					f"web-push subscriptions, so no phone or tablet was alerted. "
+					f"Recipients: {', '.join(sorted(recipients))}. "
+					"Each of them must reopen and sign in to the Jarz POS app to "
+					"register a device token. Run "
+					"jarz_pos.api.notifications.notification_health for the full "
+					"per-branch picture."
+				),
+				throttle_key=f"notokens:{_get_effective_profile_for_payload(payload)}",
+			)
 
-    body = " | ".join(body_parts)
+	# VAPID path (W3C Web Push — iOS Safari PWA, Chrome, Firefox, Edge)
+	if vapid_subs:
+		_log_fcm_info(
+			f"VAPID send: new_invoice; recipients={len(recipients)}; "
+			f"subscriptions={len(vapid_subs)}; invoice={payload.get('invoice_id')}"
+		)
+		vapid_result = _send_vapid_notifications(vapid_subs, data)
+	else:
+		vapid_result = {
+			"ok": True,
+			"status": "skipped_no_subscriptions",
+			"success_count": 0,
+			"failure_count": 0,
+		}
 
-    data: Dict[str, str] = {
-        "type": event_type,
-        "invoice_id": _safe_str(payload.get("invoice_id")),
-        "notification_id": _safe_str(
-            payload.get("notification_id") or payload.get("invoice_id")
-        ),
-        "customer_name": customer_name,
-        "territory": territory,
-        "pos_profile": pos_profile,
-        "kanban_profile": _pick_display_text(payload.get("kanban_profile")),
-        "custom_kanban_profile": _pick_display_text(payload.get("custom_kanban_profile")),
-        "effective_pos_profile": effective_profile,
-        "timestamp": _pick_display_text(
-            payload.get("timestamp"),
-            fallback=frappe.utils.now_datetime().isoformat(),
-        ),
-        "sales_invoice_state": _pick_display_text(payload.get("sales_invoice_state")),
-        "title": title,
-        "body": body,
-    }
-
-    if event_type == "invoice_accepted":
-        data["accepted_by"] = _pick_display_text(payload.get("accepted_by"))
-        data["accepted_on"] = _pick_display_text(payload.get("accepted_on"))
-    elif event_type == "invoice_cancelled":
-        data["reason"] = _pick_display_text(payload.get("reason"))
-        data["notes"] = _pick_display_text(payload.get("notes"))
-        data["credit_note"] = _pick_display_text(payload.get("credit_note"))
-
-    return data
-
-
-def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
-    # Platforms are threaded through here for the same reason as the new-invoice
-    # push: this is the message that carries stopAlarm, and it only reaches the
-    # native service if it is shaped data-only for Android.
-    tokens, token_platforms = _get_token_targets_for_users(recipients)
-    if not tokens:
-        result = _new_fcm_send_result(tokens, "skipped_no_tokens")
-        result["ok"] = True
-        return result
-
-    data = _prepare_invoice_status_data_payload("invoice_accepted", payload)
-    _log_fcm_info(
-        f"FCM send: invoice_accepted; recipients={len(recipients)}; tokens={len(tokens)}"
-    )
-    return _send_fcm_notifications(tokens, data, platforms=token_platforms)
+	return {
+		"ok": fcm_result.get("ok", False) or vapid_result.get("ok", False),
+		"status": fcm_result.get("status"),
+		"success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+		"failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+		"fcm": fcm_result,
+		"vapid": vapid_result,
+	}
 
 
-def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
-    display_payload = _enrich_invoice_display_fields(dict(payload))
-    timestamp = display_payload.get("timestamp") or frappe.utils.now_datetime().isoformat()
-    data: Dict[str, str] = {
-        "type": event_type,
-        "invoice_id": display_payload.get("invoice_id", ""),
-        "notification_id": display_payload.get("invoice_id", ""),
-        "customer_name": display_payload.get("customer_name", ""),
-        "pos_profile": display_payload.get("pos_profile", "") or "",
-        "kanban_profile": _pick_display_text(display_payload.get("kanban_profile")),
-        "custom_kanban_profile": _pick_display_text(display_payload.get("custom_kanban_profile")),
-        "effective_pos_profile": _get_effective_profile_for_payload(display_payload),
-        "grand_total": str(display_payload.get("grand_total", 0)),
-        "sales_invoice_state": display_payload.get("sales_invoice_state", ""),
-        "timestamp": timestamp,
-        "requires_acceptance": "1" if display_payload.get("requires_acceptance") else "0",
-        "item_summary": display_payload.get("item_summary", ""),
-        "branch_display": display_payload.get("branch_display", "") or "",
-        "total_display": display_payload.get("total_display", "0.00"),
-        "item_count": str(display_payload.get("item_count", 0)),
-        "title": display_payload.get("title", "") or "",
-        "body": display_payload.get("body", "") or "",
-    }
+def _prepare_invoice_status_data_payload(event_type: str, payload: dict[str, Any]) -> dict[str, str]:
+	customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
+	territory = _pick_display_text(payload.get("territory"))
+	pos_profile = _pick_display_text(payload.get("pos_profile"))
+	effective_profile = _get_effective_profile_for_payload(payload)
+	title_prefix = INVOICE_STATUS_NOTIFICATION_TITLES.get(
+		event_type,
+		_safe_str(event_type).replace("_", " ").title(),
+	)
+	title = f"{title_prefix}: {customer_name}"
 
-    # FCM data values must all be strings, so the Woo id is stringified here and
-    # parsed back on the client. Omitted entirely for POS-native orders.
-    woo_order_id = normalize_woo_order_id(display_payload.get("woo_order_id"))
-    if woo_order_id is not None:
-        data["woo_order_id"] = str(woo_order_id)
+	body_parts: list[str] = []
+	if territory:
+		body_parts.append(f"Territory: {territory}")
+	if effective_profile:
+		body_parts.append(f"POS Profile: {effective_profile}")
 
-    delivery_date = display_payload.get("delivery_date")
-    if delivery_date:
-        data["delivery_date"] = delivery_date
-    delivery_time = display_payload.get("delivery_time_from")
-    if delivery_time:
-        data["delivery_time"] = delivery_time
+	if event_type == "invoice_accepted":
+		accepted_by = _pick_display_text(payload.get("accepted_by"))
+		if accepted_by:
+			body_parts.append(f"By: {accepted_by}")
+	elif event_type == "invoice_cancelled":
+		reason = _pick_display_text(payload.get("reason"))
+		if reason:
+			body_parts.append(f"Reason: {reason}")
 
-    items_json = json.dumps(display_payload.get("items", []), default=str)
-    data["items"] = items_json
-    return data
+	body = " | ".join(body_parts)
+
+	data: dict[str, str] = {
+		"type": event_type,
+		"invoice_id": _safe_str(payload.get("invoice_id")),
+		"notification_id": _safe_str(payload.get("notification_id") or payload.get("invoice_id")),
+		"customer_name": customer_name,
+		"territory": territory,
+		"pos_profile": pos_profile,
+		"kanban_profile": _pick_display_text(payload.get("kanban_profile")),
+		"custom_kanban_profile": _pick_display_text(payload.get("custom_kanban_profile")),
+		"effective_pos_profile": effective_profile,
+		"timestamp": _pick_display_text(
+			payload.get("timestamp"),
+			fallback=frappe.utils.now_datetime().isoformat(),
+		),
+		"sales_invoice_state": _pick_display_text(payload.get("sales_invoice_state")),
+		"title": title,
+		"body": body,
+	}
+
+	if event_type == "invoice_accepted":
+		data["accepted_by"] = _pick_display_text(payload.get("accepted_by"))
+		data["accepted_on"] = _pick_display_text(payload.get("accepted_on"))
+	elif event_type == "invoice_cancelled":
+		data["reason"] = _pick_display_text(payload.get("reason"))
+		data["notes"] = _pick_display_text(payload.get("notes"))
+		data["credit_note"] = _pick_display_text(payload.get("credit_note"))
+
+	return data
+
+
+def _push_invoice_accepted(payload: dict[str, Any], recipients: Sequence[str]) -> dict[str, Any]:
+	# Platforms are threaded through here for the same reason as the new-invoice
+	# push: this is the message that carries stopAlarm, and it only reaches the
+	# native service if it is shaped data-only for Android.
+	tokens, token_platforms = _get_token_targets_for_users(recipients)
+	if not tokens:
+		result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+		result["ok"] = True
+		return result
+
+	data = _prepare_invoice_status_data_payload("invoice_accepted", payload)
+	_log_fcm_info(f"FCM send: invoice_accepted; recipients={len(recipients)}; tokens={len(tokens)}")
+	return _send_fcm_notifications(tokens, data, platforms=token_platforms)
+
+
+def _prepare_invoice_data_payload(event_type: str, payload: dict[str, Any]) -> dict[str, str]:
+	display_payload = _enrich_invoice_display_fields(dict(payload))
+	timestamp = display_payload.get("timestamp") or frappe.utils.now_datetime().isoformat()
+	data: dict[str, str] = {
+		"type": event_type,
+		"invoice_id": display_payload.get("invoice_id", ""),
+		"notification_id": display_payload.get("invoice_id", ""),
+		"customer_name": display_payload.get("customer_name", ""),
+		"pos_profile": display_payload.get("pos_profile", "") or "",
+		"kanban_profile": _pick_display_text(display_payload.get("kanban_profile")),
+		"custom_kanban_profile": _pick_display_text(display_payload.get("custom_kanban_profile")),
+		"effective_pos_profile": _get_effective_profile_for_payload(display_payload),
+		"grand_total": str(display_payload.get("grand_total", 0)),
+		"sales_invoice_state": display_payload.get("sales_invoice_state", ""),
+		"timestamp": timestamp,
+		"requires_acceptance": "1" if display_payload.get("requires_acceptance") else "0",
+		"item_summary": display_payload.get("item_summary", ""),
+		"branch_display": display_payload.get("branch_display", "") or "",
+		"total_display": display_payload.get("total_display", "0.00"),
+		"item_count": str(display_payload.get("item_count", 0)),
+		"title": display_payload.get("title", "") or "",
+		"body": display_payload.get("body", "") or "",
+	}
+
+	# FCM data values must all be strings, so the Woo id is stringified here and
+	# parsed back on the client. Omitted entirely for POS-native orders.
+	woo_order_id = normalize_woo_order_id(display_payload.get("woo_order_id"))
+	if woo_order_id is not None:
+		data["woo_order_id"] = str(woo_order_id)
+
+	delivery_date = display_payload.get("delivery_date")
+	if delivery_date:
+		data["delivery_date"] = delivery_date
+	delivery_time = display_payload.get("delivery_time_from")
+	if delivery_time:
+		data["delivery_time"] = delivery_time
+
+	items_json = json.dumps(display_payload.get("items", []), default=str)
+	data["items"] = items_json
+	return data
 
 
 def _is_invalid_token_error(exc: Exception) -> bool:
-    """Return True when *exc* indicates an FCM token is no longer valid.
+	"""Return True when *exc* indicates an FCM token is no longer valid.
 
-    Checks (in order):
-    1. SDK exception class (UnregisteredError, SenderIdMismatchError,
-       InvalidArgumentError).
-    2. error_code / code attribute on the exception, normalised so both SDK
-       spellings match.
-    3. Case-insensitive substring match against known error strings.
+	Checks (in order):
+	1. SDK exception class (UnregisteredError, SenderIdMismatchError,
+	   InvalidArgumentError).
+	2. error_code / code attribute on the exception, normalised so both SDK
+	   spellings match.
+	3. Case-insensitive substring match against known error strings.
 
-    The code check used to compare directly against a set mixing two
-    conventions — ``{"registration-token-not-registered", "invalid-argument",
-    "NOT_FOUND"}`` — because ``"invalid-argument"`` is the *JavaScript* SDK's
-    spelling. The Python ``firebase-admin`` SDK actually raises
-    ``INVALID_ARGUMENT`` (uppercase, underscored) with message
-    ``"Invalid argument."``, which matched neither the code set nor the
-    message substrings, so a permanently-rejected token was never disabled
-    and kept being retried forever (54 Error Log rows in two days on
-    production). The code is now normalised — uppercased, with ``-`` and
-    ``_`` treated as equivalent — before comparing, so both
-    ``"invalid-argument"`` and ``"INVALID_ARGUMENT"`` match the same rule.
-    """
-    if FIREBASE_AVAILABLE:
-        error_class_names = ["UnregisteredError", "SenderIdMismatchError"]
-        # Only present on newer firebase-admin releases; the getattr guard
-        # below already makes this optional, but list it explicitly so the
-        # intent (and the class it targets) is visible in one place.
-        error_class_names.append("InvalidArgumentError")
-        for error_class_name in error_class_names:
-            error_class = getattr(messaging, error_class_name, None)
-            if error_class and isinstance(exc, error_class):
-                return True
-        # firebase_admin.exceptions.InvalidArgumentError is the SDK-wide base
-        # (messaging errors are re-raised through it on some versions).
-        fb_invalid_argument_error = getattr(firebase_exceptions, "InvalidArgumentError", None)
-        if fb_invalid_argument_error and isinstance(exc, fb_invalid_argument_error):
-            return True
+	The code check used to compare directly against a set mixing two
+	conventions — ``{"registration-token-not-registered", "invalid-argument",
+	"NOT_FOUND"}`` — because ``"invalid-argument"`` is the *JavaScript* SDK's
+	spelling. The Python ``firebase-admin`` SDK actually raises
+	``INVALID_ARGUMENT`` (uppercase, underscored) with message
+	``"Invalid argument."``, which matched neither the code set nor the
+	message substrings, so a permanently-rejected token was never disabled
+	and kept being retried forever (54 Error Log rows in two days on
+	production). The code is now normalised — uppercased, with ``-`` and
+	``_`` treated as equivalent — before comparing, so both
+	``"invalid-argument"`` and ``"INVALID_ARGUMENT"`` match the same rule.
+	"""
+	if FIREBASE_AVAILABLE:
+		error_class_names = ["UnregisteredError", "SenderIdMismatchError"]
+		# Only present on newer firebase-admin releases; the getattr guard
+		# below already makes this optional, but list it explicitly so the
+		# intent (and the class it targets) is visible in one place.
+		error_class_names.append("InvalidArgumentError")
+		for error_class_name in error_class_names:
+			error_class = getattr(messaging, error_class_name, None)
+			if error_class and isinstance(exc, error_class):
+				return True
+		# firebase_admin.exceptions.InvalidArgumentError is the SDK-wide base
+		# (messaging errors are re-raised through it on some versions).
+		fb_invalid_argument_error = getattr(firebase_exceptions, "InvalidArgumentError", None)
+		if fb_invalid_argument_error and isinstance(exc, fb_invalid_argument_error):
+			return True
 
-    code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
-    normalised_code = str(code or "").strip().upper().replace("-", "_")
-    if normalised_code in {
-        "REGISTRATION_TOKEN_NOT_REGISTERED",
-        "INVALID_ARGUMENT",
-        "NOT_FOUND",
-    }:
-        return True
+	code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
+	normalised_code = str(code or "").strip().upper().replace("-", "_")
+	if normalised_code in {
+		"REGISTRATION_TOKEN_NOT_REGISTERED",
+		"INVALID_ARGUMENT",
+		"NOT_FOUND",
+	}:
+		return True
 
-    msg = str(exc).lower()
-    return any(s in msg for s in (
-        "notregistered",
-        "registration-token-not-registered",
-        "requested entity was not found",
-        "invalid registration",
-        "invalid argument",
-    ))
-
-
-def _new_fcm_send_result(tokens: Sequence[str], status: str = "pending") -> Dict[str, Any]:
-    return {
-        "ok": False,
-        "status": status,
-        "initialized": False,
-        "requested_token_count": len(list(tokens or [])),
-        "unique_token_count": 0,
-        "attempted_count": 0,
-        "success_count": 0,
-        "failure_count": 0,
-        "invalid_token_count": 0,
-        "unexpected_failure_count": 0,
-        "dropped_token_count": 0,
-        "duplicate_token_count": 0,
-        # Set once the safety cap in _record_fcm_send_error trips: tokens that
-        # classified as INVALID_ARGUMENT after that point are counted here
-        # (and folded into unexpected_failure_count) instead of being disabled.
-        "suppressed_invalid_token_count": 0,
-    }
+	msg = str(exc).lower()
+	return any(
+		s in msg
+		for s in (
+			"notregistered",
+			"registration-token-not-registered",
+			"requested entity was not found",
+			"invalid registration",
+			"invalid argument",
+		)
+	)
 
 
-def _normalise_fcm_tokens(tokens: Sequence[str]) -> Tuple[List[str], int]:
-    seen: set[str] = set()
-    normalised: List[str] = []
-    duplicate_count = 0
+def _new_fcm_send_result(tokens: Sequence[str], status: str = "pending") -> dict[str, Any]:
+	return {
+		"ok": False,
+		"status": status,
+		"initialized": False,
+		"requested_token_count": len(list(tokens or [])),
+		"unique_token_count": 0,
+		"attempted_count": 0,
+		"success_count": 0,
+		"failure_count": 0,
+		"invalid_token_count": 0,
+		"unexpected_failure_count": 0,
+		"dropped_token_count": 0,
+		"duplicate_token_count": 0,
+		# Set once the safety cap in _record_fcm_send_error trips: tokens that
+		# classified as INVALID_ARGUMENT after that point are counted here
+		# (and folded into unexpected_failure_count) instead of being disabled.
+		"suppressed_invalid_token_count": 0,
+	}
 
-    for token in tokens or []:
-        token_value = _safe_str(token).strip()
-        if not token_value:
-            continue
-        if token_value in seen:
-            duplicate_count += 1
-            continue
-        seen.add(token_value)
-        normalised.append(token_value)
 
-    return normalised, duplicate_count
+def _normalise_fcm_tokens(tokens: Sequence[str]) -> tuple[list[str], int]:
+	seen: set[str] = set()
+	normalised: list[str] = []
+	duplicate_count = 0
+
+	for token in tokens or []:
+		token_value = _safe_str(token).strip()
+		if not token_value:
+			continue
+		if token_value in seen:
+			duplicate_count += 1
+			continue
+		seen.add(token_value)
+		normalised.append(token_value)
+
+	return normalised, duplicate_count
 
 
-def _normalise_fcm_data_payload(data_payload: Dict[str, Any]) -> Dict[str, str]:
-    data: Dict[str, str] = {}
-    for key, value in (data_payload or {}).items():
-        if value is None:
-            data[str(key)] = ""
-        elif isinstance(value, bool):
-            data[str(key)] = "1" if value else "0"
-        else:
-            data[str(key)] = str(value)
-    return data
+def _normalise_fcm_data_payload(data_payload: dict[str, Any]) -> dict[str, str]:
+	data: dict[str, str] = {}
+	for key, value in (data_payload or {}).items():
+		if value is None:
+			data[str(key)] = ""
+		elif isinstance(value, bool):
+			data[str(key)] = "1" if value else "0"
+		else:
+			data[str(key)] = str(value)
+	return data
 
 
 def _log_fcm_push_skipped_once(message: str) -> None:
-    if _FIREBASE_INIT_STATE.get("push_skipped_logged"):
-        _log_fcm_info(message)
-        return
+	if _FIREBASE_INIT_STATE.get("push_skipped_logged"):
+		_log_fcm_info(message)
+		return
 
-    frappe.log_error(message, "FCM Push Skipped")
-    _FIREBASE_INIT_STATE["push_skipped_logged"] = True
-
-
-def _fcm_invalid_token_disable_cap_would_trip(result: Dict[str, Any]) -> bool:
-    """Would disabling ONE more token push this run over the safety cap?
-
-    Checked prospectively, before the next disable, so the run never disables
-    more than FCM_INVALID_TOKEN_DISABLE_CAP_RATIO of the attempted tokens.
-    Never trips for tiny batches (see FCM_INVALID_TOKEN_DISABLE_CAP_MIN_ATTEMPTED)
-    — a lone token or a pair of tokens both going bad is unremarkable; it is
-    only the fleet-wide pattern that indicates a payload regression rather than
-    dead devices.
-    """
-    attempted = result.get("attempted_count", 0)
-    if attempted <= FCM_INVALID_TOKEN_DISABLE_CAP_MIN_ATTEMPTED:
-        return False
-
-    prospective_invalid = result.get("invalid_token_count", 0) + 1
-    return prospective_invalid > attempted * FCM_INVALID_TOKEN_DISABLE_CAP_RATIO
+	frappe.log_error(message, "FCM Push Skipped")
+	_FIREBASE_INIT_STATE["push_skipped_logged"] = True
 
 
-def _log_fcm_invalid_token_disable_cap_tripped(result: Dict[str, Any]) -> None:
-    """One loud Error Log per run when the disable cap trips (not per token)."""
-    attempted = result.get("attempted_count", 0)
-    already_disabled = result.get("invalid_token_count", 0)
-    frappe.log_error(
-        title="FCM invalid-token cap tripped",
-        message=(
-            "More than half of the FCM tokens attempted in this send run "
-            f"({already_disabled} disabled out of {attempted} attempted before the "
-            "cap tripped) reported INVALID_ARGUMENT. That code is the firebase-admin "
-            "SDK's generic argument error: it also fires for a malformed message "
-            "(a non-string data value, an oversized payload, a bad apns/android "
-            "config) and every token in this run shares one payload. Mass "
-            "INVALID_ARGUMENT across a batch is far more likely to be a payload "
-            "regression than every device failing at once, so token disabling was "
-            "suppressed for the remainder of this run; the remaining failures are "
-            "recorded as unexpected instead. Check the outbound FCM message "
-            "(data values, apns/android config) for a recent regression before "
-            "assuming the tokens are dead."
-        ),
-    )
+def _fcm_invalid_token_disable_cap_would_trip(result: dict[str, Any]) -> bool:
+	"""Would disabling ONE more token push this run over the safety cap?
+
+	Checked prospectively, before the next disable, so the run never disables
+	more than FCM_INVALID_TOKEN_DISABLE_CAP_RATIO of the attempted tokens.
+	Never trips for tiny batches (see FCM_INVALID_TOKEN_DISABLE_CAP_MIN_ATTEMPTED)
+	— a lone token or a pair of tokens both going bad is unremarkable; it is
+	only the fleet-wide pattern that indicates a payload regression rather than
+	dead devices.
+	"""
+	attempted = result.get("attempted_count", 0)
+	if attempted <= FCM_INVALID_TOKEN_DISABLE_CAP_MIN_ATTEMPTED:
+		return False
+
+	prospective_invalid = result.get("invalid_token_count", 0) + 1
+	return prospective_invalid > attempted * FCM_INVALID_TOKEN_DISABLE_CAP_RATIO
 
 
-def _record_fcm_send_error(token: str, send_err: Exception, result: Dict[str, Any]) -> None:
-    result["failure_count"] += 1
-
-    if _is_invalid_token_error(send_err):
-        cap_already_tripped = result.get("suppressed_invalid_token_count", 0) > 0
-        if cap_already_tripped or _fcm_invalid_token_disable_cap_would_trip(result):
-            first_trip = not cap_already_tripped
-            result["suppressed_invalid_token_count"] += 1
-            result["unexpected_failure_count"] += 1
-            if first_trip:
-                _log_fcm_invalid_token_disable_cap_tripped(result)
-            return
-
-        result["invalid_token_count"] += 1
-        _log_fcm_info(f"FCM invalid token (disabling): {str(send_err)}")
-        try:
-            _disable_token(token)
-        except Exception:
-            frappe.log_error(frappe.get_traceback(), "FCM Token Disable Failed")
-        return
-
-    result["unexpected_failure_count"] += 1
-    if token not in _FCM_LOGGED_ERROR_TOKENS:
-        frappe.log_error(
-            f"Failed to send FCM to token: {str(send_err)}", "FCM Send Error"
-        )
-        _FCM_LOGGED_ERROR_TOKENS.add(token)
+def _log_fcm_invalid_token_disable_cap_tripped(result: dict[str, Any]) -> None:
+	"""One loud Error Log per run when the disable cap trips (not per token)."""
+	attempted = result.get("attempted_count", 0)
+	already_disabled = result.get("invalid_token_count", 0)
+	frappe.log_error(
+		title="FCM invalid-token cap tripped",
+		message=(
+			"More than half of the FCM tokens attempted in this send run "
+			f"({already_disabled} disabled out of {attempted} attempted before the "
+			"cap tripped) reported INVALID_ARGUMENT. That code is the firebase-admin "
+			"SDK's generic argument error: it also fires for a malformed message "
+			"(a non-string data value, an oversized payload, a bad apns/android "
+			"config) and every token in this run shares one payload. Mass "
+			"INVALID_ARGUMENT across a batch is far more likely to be a payload "
+			"regression than every device failing at once, so token disabling was "
+			"suppressed for the remainder of this run; the remaining failures are "
+			"recorded as unexpected instead. Check the outbound FCM message "
+			"(data values, apns/android config) for a recent regression before "
+			"assuming the tokens are dead."
+		),
+	)
 
 
-def _finalise_fcm_send_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    if result["failure_count"] == 0:
-        result["ok"] = True
-        if result["success_count"] > 0:
-            result["status"] = "sent"
-        elif result["status"] == "pending":
-            result["status"] = "skipped_no_messages"
-        return result
+def _record_fcm_send_error(token: str, send_err: Exception, result: dict[str, Any]) -> None:
+	result["failure_count"] += 1
 
-    result["ok"] = False
-    if result["success_count"] > 0:
-        result["status"] = "partial_failure"
-    else:
-        result["status"] = "failed"
-    return result
+	if _is_invalid_token_error(send_err):
+		cap_already_tripped = result.get("suppressed_invalid_token_count", 0) > 0
+		if cap_already_tripped or _fcm_invalid_token_disable_cap_would_trip(result):
+			first_trip = not cap_already_tripped
+			result["suppressed_invalid_token_count"] += 1
+			result["unexpected_failure_count"] += 1
+			if first_trip:
+				_log_fcm_invalid_token_disable_cap_tripped(result)
+			return
+
+		result["invalid_token_count"] += 1
+		_log_fcm_info(f"FCM invalid token (disabling): {send_err!s}")
+		try:
+			_disable_token(token)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "FCM Token Disable Failed")
+		return
+
+	result["unexpected_failure_count"] += 1
+	if token not in _FCM_LOGGED_ERROR_TOKENS:
+		frappe.log_error(f"Failed to send FCM to token: {send_err!s}", "FCM Send Error")
+		_FCM_LOGGED_ERROR_TOKENS.add(token)
 
 
-def _is_android_target(platform: Optional[str]) -> bool:
-    return (platform or "").strip().lower() == "android"
+def _finalise_fcm_send_result(result: dict[str, Any]) -> dict[str, Any]:
+	if result["failure_count"] == 0:
+		result["ok"] = True
+		if result["success_count"] > 0:
+			result["status"] = "sent"
+		elif result["status"] == "pending":
+			result["status"] = "skipped_no_messages"
+		return result
+
+	result["ok"] = False
+	if result["success_count"] > 0:
+		result["status"] = "partial_failure"
+	else:
+		result["status"] = "failed"
+	return result
+
+
+def _is_android_target(platform: str | None) -> bool:
+	return (platform or "").strip().lower() == "android"
 
 
 def _send_fcm_notifications(
-    tokens: Sequence[str],
-    data_payload: Dict[str, Any],
-    platforms: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
-    """Send FCM push notifications using Firebase Admin SDK (V1 API)."""
-    result = _new_fcm_send_result(tokens)
-    normalised_tokens, duplicate_count = _normalise_fcm_tokens(tokens)
-    result["unique_token_count"] = len(normalised_tokens)
-    result["duplicate_token_count"] = duplicate_count
+	tokens: Sequence[str],
+	data_payload: dict[str, Any],
+	platforms: dict[str, str] | None = None,
+) -> dict[str, Any]:
+	"""Send FCM push notifications using Firebase Admin SDK (V1 API)."""
+	result = _new_fcm_send_result(tokens)
+	normalised_tokens, duplicate_count = _normalise_fcm_tokens(tokens)
+	result["unique_token_count"] = len(normalised_tokens)
+	result["duplicate_token_count"] = duplicate_count
 
-    if not normalised_tokens:
-        result["ok"] = True
-        result["status"] = "skipped_no_tokens"
-        return result
+	if not normalised_tokens:
+		result["ok"] = True
+		result["status"] = "skipped_no_tokens"
+		return result
 
-    if not _initialize_firebase_app():
-        result["status"] = "skipped_init_failed"
-        _log_fcm_push_skipped_once("Firebase not initialized. Skipping FCM push.")
-        return result
+	if not _initialize_firebase_app():
+		result["status"] = "skipped_init_failed"
+		_log_fcm_push_skipped_once("Firebase not initialized. Skipping FCM push.")
+		return result
 
-    result["initialized"] = True
-    batch_tokens = normalised_tokens[:MAX_FCM_TOKENS_PER_BATCH]
-    result["attempted_count"] = len(batch_tokens)
-    result["dropped_token_count"] = max(len(normalised_tokens) - len(batch_tokens), 0)
-    if result["dropped_token_count"]:
-        _log_fcm_info(
-            f"FCM token batch truncated: attempted={len(batch_tokens)} "
-            f"dropped={result['dropped_token_count']}"
-        )
-    
-    # Build the message
-    try:
-        data = _normalise_fcm_data_payload(data_payload)
-        msg_type = data.get("type", "")
-        title, body = _resolve_notification_content(data)
-        if msg_type == "new_invoice":
-            notification = messaging.Notification(title=title, body=body)
-            android_notification = messaging.AndroidNotification(
-                sound=ANDROID_ORDER_ALERT_SOUND,
-                channel_id='jarz_order_alerts',
-                tag=data.get("invoice_id", "")
-            )
-        else:
-            notification = messaging.Notification(title=title, body=body)
+	result["initialized"] = True
+	batch_tokens = normalised_tokens[:MAX_FCM_TOKENS_PER_BATCH]
+	result["attempted_count"] = len(batch_tokens)
+	result["dropped_token_count"] = max(len(normalised_tokens) - len(batch_tokens), 0)
+	if result["dropped_token_count"]:
+		_log_fcm_info(
+			f"FCM token batch truncated: attempted={len(batch_tokens)} "
+			f"dropped={result['dropped_token_count']}"
+		)
 
-            # Use shift channel for shift events, the approvals channel for
-            # things waiting on a decision, order alerts for everything else.
-            if msg_type in ("shift_started", "shift_ended"):
-                android_channel_id = ANDROID_SHIFT_CHANNEL_ID
-            elif msg_type in APPROVAL_NOTIFICATION_TYPES:
-                android_channel_id = ANDROID_APPROVAL_CHANNEL_ID
-            else:
-                android_channel_id = ANDROID_ORDER_ALERT_CHANNEL_ID
+	# Build the message
+	try:
+		data = _normalise_fcm_data_payload(data_payload)
+		msg_type = data.get("type", "")
+		title, body = _resolve_notification_content(data)
+		if msg_type == "new_invoice":
+			notification = messaging.Notification(title=title, body=body)
+			android_notification = messaging.AndroidNotification(
+				sound=ANDROID_ORDER_ALERT_SOUND,
+				channel_id="jarz_order_alerts",
+				tag=data.get("invoice_id", ""),
+			)
+		else:
+			notification = messaging.Notification(title=title, body=body)
 
-            android_notification = messaging.AndroidNotification(
-                sound='default',
-                channel_id=android_channel_id,
-                # A tag COLLAPSES: a second notification carrying it replaces
-                # the first in the tray. invoice_id alone was fine while every
-                # message here was about an invoice, but it is empty for
-                # anything else -- and two expense approvals sharing the empty
-                # tag would mean the second one hides the first, so a manager
-                # sees one request and pays one of two. notification_id is the
-                # per-event id every payload builder already sets (and equals
-                # invoice_id on the invoice paths, so nothing there changes).
-                tag=_pick_display_text(
-                    data.get("invoice_id"), data.get("notification_id")
-                ),
-            )
+			# Use shift channel for shift events, the approvals channel for
+			# things waiting on a decision, order alerts for everything else.
+			if msg_type in ("shift_started", "shift_ended"):
+				android_channel_id = ANDROID_SHIFT_CHANNEL_ID
+			elif msg_type in APPROVAL_NOTIFICATION_TYPES:
+				android_channel_id = ANDROID_APPROVAL_CHANNEL_ID
+			else:
+				android_channel_id = ANDROID_ORDER_ALERT_CHANNEL_ID
 
-        android_config_kwargs = {"priority": 'high'}
-        if android_notification is not None:
-            android_config_kwargs["notification"] = android_notification
-        android_config = messaging.AndroidConfig(**android_config_kwargs)
+			android_notification = messaging.AndroidNotification(
+				sound="default",
+				channel_id=android_channel_id,
+				# A tag COLLAPSES: a second notification carrying it replaces
+				# the first in the tray. invoice_id alone was fine while every
+				# message here was about an invoice, but it is empty for
+				# anything else -- and two expense approvals sharing the empty
+				# tag would mean the second one hides the first, so a manager
+				# sees one request and pays one of two. notification_id is the
+				# per-event id every payload builder already sets (and equals
+				# invoice_id on the invoice paths, so nothing there changes).
+				tag=_pick_display_text(data.get("invoice_id"), data.get("notification_id")),
+			)
 
-        # The data-only shape for the Android order alert.
-        #
-        # When an FCM message carries a notification payload and the app is
-        # backgrounded or killed, the Android SDK renders the tray entry itself
-        # and never calls JarzFirebaseMessagingService.onMessageReceived. That
-        # service is the ONLY path that starts the order alarm on Android (Dart
-        # passes triggerNativeEffects:false there) and the only one that draws
-        # the real alert. So the alarm rang in the foreground and nowhere else:
-        # a closed tablet showed a plain tray line with no sound and no
-        # full-screen intent -- the "alerts don't reach the branch" report.
-        #
-        # `android.notification` has to come off as well as the top-level one.
-        # FCM merges it downstream, so leaving it attached can still hand the
-        # message to the SDK display path -- and with no title or body in it,
-        # the tray entry would be WORSE than before while the alarm still never
-        # fired. sound/channel_id/tag only ever applied to an SDK-rendered
-        # notification, which is precisely the path being avoided.
-        #
-        # ttl bounds the replay: a data-only alert runs startAlarm on arrival,
-        # so without it a tablet that was offline for an hour reconnects and
-        # alarms for a dozen orders that were delivered long ago. FCM's default
-        # is four weeks.
-        android_data_only_config = messaging.AndroidConfig(
-            priority="high",
-            ttl=ANDROID_ORDER_ALERT_TTL_SECONDS,
-        )
+		android_config_kwargs = {"priority": "high"}
+		if android_notification is not None:
+			android_config_kwargs["notification"] = android_notification
+		android_config = messaging.AndroidConfig(**android_config_kwargs)
 
-        webpush_config = _build_webpush_config(data, title, body)
+		# The data-only shape for the Android order alert.
+		#
+		# When an FCM message carries a notification payload and the app is
+		# backgrounded or killed, the Android SDK renders the tray entry itself
+		# and never calls JarzFirebaseMessagingService.onMessageReceived. That
+		# service is the ONLY path that starts the order alarm on Android (Dart
+		# passes triggerNativeEffects:false there) and the only one that draws
+		# the real alert. So the alarm rang in the foreground and nowhere else:
+		# a closed tablet showed a plain tray line with no sound and no
+		# full-screen intent -- the "alerts don't reach the branch" report.
+		#
+		# `android.notification` has to come off as well as the top-level one.
+		# FCM merges it downstream, so leaving it attached can still hand the
+		# message to the SDK display path -- and with no title or body in it,
+		# the tray entry would be WORSE than before while the alarm still never
+		# fired. sound/channel_id/tag only ever applied to an SDK-rendered
+		# notification, which is precisely the path being avoided.
+		#
+		# ttl bounds the replay: a data-only alert runs startAlarm on arrival,
+		# so without it a tablet that was offline for an hour reconnects and
+		# alarms for a dozen orders that were delivered long ago. FCM's default
+		# is four weeks.
+		android_data_only_config = messaging.AndroidConfig(
+			priority="high",
+			ttl=ANDROID_ORDER_ALERT_TTL_SECONDS,
+		)
 
-        # Which types must reach onMessageReceived on Android.
-        #
-        # new_invoice: it is what calls startAlarm.
-        # invoice_accepted: it is what calls stopAlarm.
-        #
-        # The second one is not optional, and it is the pair that matters. Once
-        # new_invoice is data-only, the alarm can START on a backgrounded or
-        # killed tablet -- which it never could before. If the accept were left
-        # carrying a notification block, the SDK would draw its tray line and
-        # onMessageReceived would NOT run, so stopAlarm never fires and the
-        # tablet rings until someone physically opens the app. The alert
-        # notification is setOngoing(true)/setAutoCancel(false), so it does not
-        # clear itself either. Shipping the start without the stop would be
-        # worse than shipping neither.
-        #
-        # The cost is the "Order Accepted" tray line: the native handler stops
-        # the alarm and cancels the notification without drawing one. Losing an
-        # informational notice is a fair trade against a tablet that will not
-        # stop ringing, and it needs no app release to fix later.
-        #
-        # invoice_cancelled and the shift events stay as they were. Neither
-        # touches the alarm, and the native service does not render them all --
-        # invoice_cancelled has no branch in the `when` at all -- so making them
-        # data-only would replace a tray line with silence for nothing.
-        ANDROID_DATA_ONLY_TYPES = ("new_invoice", "invoice_accepted")
-        reshape_for_android = msg_type in ANDROID_DATA_ONLY_TYPES and bool(platforms)
+		webpush_config = _build_webpush_config(data, title, body)
 
-        # Send to each token and keep per-token accounting for partial failures.
-        messages = []
-        for token in batch_tokens:
-            android_target = reshape_for_android and _is_android_target(
-                platforms.get(token)
-            )
-            message_kwargs = {
-                "data": data,
-                "android": android_data_only_config if android_target else android_config,
-                "token": token,
-            }
-            # Web and iOS keep the notification block: the service worker and
-            # APNs need it to display anything.
-            if notification is not None and not android_target:
-                message_kwargs["notification"] = notification
-            if webpush_config is not None and not android_target:
-                message_kwargs["webpush"] = webpush_config
-            message = messaging.Message(**message_kwargs)
-            messages.append(message)
+		# Which types must reach onMessageReceived on Android.
+		#
+		# new_invoice: it is what calls startAlarm.
+		# invoice_accepted: it is what calls stopAlarm.
+		#
+		# The second one is not optional, and it is the pair that matters. Once
+		# new_invoice is data-only, the alarm can START on a backgrounded or
+		# killed tablet -- which it never could before. If the accept were left
+		# carrying a notification block, the SDK would draw its tray line and
+		# onMessageReceived would NOT run, so stopAlarm never fires and the
+		# tablet rings until someone physically opens the app. The alert
+		# notification is setOngoing(true)/setAutoCancel(false), so it does not
+		# clear itself either. Shipping the start without the stop would be
+		# worse than shipping neither.
+		#
+		# The cost is the "Order Accepted" tray line: the native handler stops
+		# the alarm and cancels the notification without drawing one. Losing an
+		# informational notice is a fair trade against a tablet that will not
+		# stop ringing, and it needs no app release to fix later.
+		#
+		# invoice_cancelled and the shift events stay as they were. Neither
+		# touches the alarm, and the native service does not render them all --
+		# invoice_cancelled has no branch in the `when` at all -- so making them
+		# data-only would replace a tray line with silence for nothing.
+		ANDROID_DATA_ONLY_TYPES = ("new_invoice", "invoice_accepted")
+		reshape_for_android = msg_type in ANDROID_DATA_ONLY_TYPES and bool(platforms)
 
-        # Send all messages
-        if messages:
-            # Send individually for now (can batch with MulticastMessage if needed)
-            for message in messages:
-                try:
-                    response = messaging.send(message)
-                    result["success_count"] += 1
-                    _log_fcm_info(f"FCM message sent successfully: {response}")
-                except Exception as send_err:
-                    _record_fcm_send_error(message.token, send_err, result)
+		# Send to each token and keep per-token accounting for partial failures.
+		messages = []
+		for token in batch_tokens:
+			android_target = reshape_for_android and _is_android_target(platforms.get(token))
+			message_kwargs = {
+				"data": data,
+				"android": android_data_only_config if android_target else android_config,
+				"token": token,
+			}
+			# Web and iOS keep the notification block: the service worker and
+			# APNs need it to display anything.
+			if notification is not None and not android_target:
+				message_kwargs["notification"] = notification
+			if webpush_config is not None and not android_target:
+				message_kwargs["webpush"] = webpush_config
+			message = messaging.Message(**message_kwargs)
+			messages.append(message)
 
-        return _finalise_fcm_send_result(result)
-    except Exception:
-        result["status"] = "failed_exception"
-        result["failure_count"] = result["failure_count"] or result["attempted_count"]
-        frappe.log_error(frappe.get_traceback(), "FCM push failed")
-        return result
+		# Send all messages
+		if messages:
+			# Send individually for now (can batch with MulticastMessage if needed)
+			for message in messages:
+				try:
+					response = messaging.send(message)
+					result["success_count"] += 1
+					_log_fcm_info(f"FCM message sent successfully: {response}")
+				except Exception as send_err:
+					_record_fcm_send_error(message.token, send_err, result)
+
+		return _finalise_fcm_send_result(result)
+	except Exception:
+		result["status"] = "failed_exception"
+		result["failure_count"] = result["failure_count"] or result["attempted_count"]
+		frappe.log_error(frappe.get_traceback(), "FCM push failed")
+		return result
 
 
 def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
-    for idx in range(0, len(items), size):
-        yield items[idx : idx + size]
+	for idx in range(0, len(items), size):
+		yield items[idx : idx + size]
 
 
 def _get_token_targets_for_users(
-    users: Sequence[str],
-) -> Tuple[List[str], Dict[str, str]]:
-    """Return the enabled tokens for *users*, and each one's platform.
+	users: Sequence[str],
+) -> tuple[list[str], dict[str, str]]:
+	"""Return the enabled tokens for *users*, and each one's platform.
 
-    Platform comes back from the SAME query as the token rather than a second
-    lookup keyed on the token. `Jarz Mobile Device.token` is Long Text, which
-    MariaDB cannot index, so a `token in (...)` filter over a 500-token batch is
-    a full scan with a ~80KB statement -- on a path that runs synchronously
-    inside Sales Invoice.on_submit. Reading both columns at once also removes
-    the orphan case entirely: every token here provably has a row, because this
-    is the query the tokens came from.
-    """
-    if not users:
-        return [], {}
+	Platform comes back from the SAME query as the token rather than a second
+	lookup keyed on the token. `Jarz Mobile Device.token` is Long Text, which
+	MariaDB cannot index, so a `token in (...)` filter over a 500-token batch is
+	a full scan with a ~80KB statement -- on a path that runs synchronously
+	inside Sales Invoice.on_submit. Reading both columns at once also removes
+	the orphan case entirely: every token here provably has a row, because this
+	is the query the tokens came from.
+	"""
+	if not users:
+		return [], {}
 
-    rows = frappe.get_all(
-        "Jarz Mobile Device",
-        filters={"user": ["in", list(users)], "enabled": 1},
-        fields=["token", "platform"],
-        # Deterministic, so a duplicate row for one token cannot resolve to a
-        # different platform run to run.
-        order_by="modified desc",
-    )
+	rows = frappe.get_all(
+		"Jarz Mobile Device",
+		filters={"user": ["in", list(users)], "enabled": 1},
+		fields=["token", "platform"],
+		# Deterministic, so a duplicate row for one token cannot resolve to a
+		# different platform run to run.
+		order_by="modified desc",
+	)
 
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    deduped: List[str] = []
-    platforms: Dict[str, str] = {}
-    for row in rows:
-        token = row.get("token")
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        deduped.append(token)
-        platforms[token] = row.get("platform") or ""
-    return deduped, platforms
-
-
-def _get_tokens_for_users(users: Sequence[str]) -> List[str]:
-    return _get_token_targets_for_users(users)[0]
+	# Deduplicate while preserving order
+	seen: set[str] = set()
+	deduped: list[str] = []
+	platforms: dict[str, str] = {}
+	for row in rows:
+		token = row.get("token")
+		if not token or token in seen:
+			continue
+		seen.add(token)
+		deduped.append(token)
+		platforms[token] = row.get("platform") or ""
+	return deduped, platforms
 
 
-def _get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
-    filtered = [p for p in profiles if p]
-    if not filtered:
-        return []
-
-    try:
-        rows = frappe.get_all(
-            "POS Profile User",
-            filters={"parent": ["in", filtered], "parenttype": "POS Profile"},
-            fields=["user"],
-        )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Failed to load POS Profile users")
-        return []
-
-    users: List[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        user = row.get("user")
-        if user and user not in seen:
-            seen.add(user)
-            users.append(user)
-    return users
+def _get_tokens_for_users(users: Sequence[str]) -> list[str]:
+	return _get_token_targets_for_users(users)[0]
 
 
-def _get_users_with_roles(roles: Sequence[str]) -> List[str]:
-    """Enabled users holding any of *roles*, sorted for a stable recipient list.
+def _get_users_for_pos_profiles(profiles: Sequence[str]) -> list[str]:
+	filtered = [p for p in profiles if p]
+	if not filtered:
+		return []
 
-    Administrator is deliberately NOT filtered out, matching
-    ``services.label_stock._alert_recipients``: on a site where it holds the
-    only copy of the role, excluding it would mean the alert reached nobody at
-    all and did so silently.
-    """
-    wanted = sorted({str(r).strip() for r in (roles or []) if str(r or "").strip()})
-    if not wanted:
-        return []
+	try:
+		rows = frappe.get_all(
+			"POS Profile User",
+			filters={"parent": ["in", filtered], "parenttype": "POS Profile"},
+			fields=["user"],
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Failed to load POS Profile users")
+		return []
 
-    try:
-        rows = frappe.get_all(
-            "Has Role",
-            filters={"role": ["in", wanted], "parenttype": "User"},
-            pluck="parent",
-        )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Failed to load users for roles")
-        return []
-
-    users: List[str] = []
-    seen: set = set()
-    for user in rows or []:
-        if not user or user == "Guest" or user in seen:
-            continue
-        seen.add(user)
-        try:
-            if frappe.db.get_value("User", user, "enabled"):
-                users.append(user)
-        except Exception:
-            continue
-    return sorted(users)
+	users: list[str] = []
+	seen: set[str] = set()
+	for row in rows:
+		user = row.get("user")
+		if user and user not in seen:
+			seen.add(user)
+			users.append(user)
+	return users
 
 
-def _get_profiles_for_user(user: str) -> List[str]:
-    if not user or user == "Guest":
-        return []
+def _get_users_with_roles(roles: Sequence[str]) -> list[str]:
+	"""Enabled users holding any of *roles*, sorted for a stable recipient list.
 
-    rows = frappe.get_all(
-        "POS Profile User",
-        filters={"user": user, "parenttype": "POS Profile"},
-        fields=["parent"],
-    )
+	Administrator is deliberately NOT filtered out, matching
+	``services.label_stock._alert_recipients``: on a site where it holds the
+	only copy of the role, excluding it would mean the alert reached nobody at
+	all and did so silently.
+	"""
+	wanted = sorted({str(r).strip() for r in (roles or []) if str(r or "").strip()})
+	if not wanted:
+		return []
 
-    profiles: List[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        parent = row.get("parent")
-        if parent and parent not in seen:
-            seen.add(parent)
-            profiles.append(parent)
-    return profiles
+	try:
+		rows = frappe.get_all(
+			"Has Role",
+			filters={"role": ["in", wanted], "parenttype": "User"},
+			pluck="parent",
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Failed to load users for roles")
+		return []
+
+	users: list[str] = []
+	seen: set = set()
+	for user in rows or []:
+		if not user or user == "Guest" or user in seen:
+			continue
+		seen.add(user)
+		try:
+			if frappe.db.get_value("User", user, "enabled"):
+				users.append(user)
+		except Exception:
+			continue
+	return sorted(users)
+
+
+def _get_profiles_for_user(user: str) -> list[str]:
+	if not user or user == "Guest":
+		return []
+
+	rows = frappe.get_all(
+		"POS Profile User",
+		filters={"user": user, "parenttype": "POS Profile"},
+		fields=["parent"],
+	)
+
+	profiles: list[str] = []
+	seen: set[str] = set()
+	for row in rows:
+		parent = row.get("parent")
+		if parent and parent not in seen:
+			seen.add(parent)
+			profiles.append(parent)
+	return profiles
 
 
 def _ensure_user_can_accept(doc: Any, user: str) -> None:
-    if user in {ROLES.ADMINISTRATOR, ROLES.SYSTEM_MANAGER}:
-        return
+	if user in {ROLES.ADMINISTRATOR, ROLES.SYSTEM_MANAGER}:
+		return
 
-    effective_profile = _get_effective_profile_for_doc(doc)
-    authorised_users = _get_users_for_pos_profiles([effective_profile] if effective_profile else [])
-    if user not in authorised_users:
-        frappe.throw("You are not allowed to accept orders for this POS profile", frappe.PermissionError)
+	effective_profile = _get_effective_profile_for_doc(doc)
+	authorised_users = _get_users_for_pos_profiles([effective_profile] if effective_profile else [])
+	if user not in authorised_users:
+		frappe.throw("You are not allowed to accept orders for this POS profile", frappe.PermissionError)
 
 
-def _normalise_pos_profile_payload(pos_profiles: Optional[str]) -> Optional[str]:
-    if not pos_profiles:
-        return None
-    try:
-        if isinstance(pos_profiles, str):
-            parsed = json.loads(pos_profiles)
-        else:
-            parsed = pos_profiles
-        if isinstance(parsed, (list, tuple)):
-            return json.dumps([str(p) for p in parsed])
-    except Exception:
-        return None
-    return None
+def _normalise_pos_profile_payload(pos_profiles: str | None) -> str | None:
+	if not pos_profiles:
+		return None
+	try:
+		if isinstance(pos_profiles, str):
+			parsed = json.loads(pos_profiles)
+		else:
+			parsed = pos_profiles
+		if isinstance(parsed, (list, tuple)):
+			return json.dumps([str(p) for p in parsed])
+	except Exception:
+		return None
+	return None
 
 
 def _safe_str(value: Any) -> str:
-    if value in (None, ""):
-        return ""
-    return str(value)
+	if value in (None, ""):
+		return ""
+	return str(value)
+
 
 # ── Expense approval alerts ───────────────────────────────────────────────────
 #
@@ -2691,346 +2697,337 @@ def _safe_str(value: Any) -> str:
 
 
 def _expense_approval_recipients(
-    requested_by: Optional[str] = None,
-) -> Tuple[List[str], List[str]]:
-    """(holders, recipients) for an expense request.
+	requested_by: str | None = None,
+) -> tuple[list[str], list[str]]:
+	"""(holders, recipients) for an expense request.
 
-    Both halves are returned because an empty recipients has two causes that
-    an admin must not be asked to confuse: nobody holds the role at all (a
-    configuration fault), or the only holder is the person who filed the request
-    (normal -- a manager's own expense is submitted on the spot).
-    """
-    holders = _get_users_with_roles([ROLES.JARZ_MANAGER])
-    requester = _safe_str(requested_by).strip()
-    if not requester:
-        return holders, list(holders)
-    return holders, [u for u in holders if u != requester]
-
-
-def _build_expense_approval_payload(doc: Any) -> Dict[str, Any]:
-    """The realtime payload for a pending expense request."""
-    name = _safe_str(getattr(doc, "name", ""))
-    if not name:
-        return {}
-
-    requested_by = _safe_str(getattr(doc, "requested_by", ""))
-    requested_by_name = requested_by
-    if requested_by:
-        try:
-            requested_by_name = (
-                frappe.db.get_value("User", requested_by, "full_name") or requested_by
-            )
-        except Exception:
-            requested_by_name = requested_by
-
-    return {
-        "expense_id": name,
-        "notification_id": name,
-        "amount": frappe.utils.flt(getattr(doc, "amount", 0)),
-        "currency": _safe_str(getattr(doc, "currency", "")),
-        "reason_label": _pick_display_text(
-            getattr(doc, "reason_label", None), getattr(doc, "reason_account", None)
-        ),
-        "payment_source_label": _pick_display_text(
-            getattr(doc, "payment_source_label", None),
-            getattr(doc, "paying_account", None),
-        ),
-        "pos_profile": _pick_display_text(getattr(doc, "pos_profile", None)),
-        "company": _pick_display_text(getattr(doc, "company", None)),
-        "expense_date": _safe_str(getattr(doc, "expense_date", "")),
-        # The month the row is FILED under, which is what the expenses screen
-        # filters on. A request dated 31 Aug and filed on 1 Sept lives in
-        # 2026-08, so a client that refreshed "the current month" would not
-        # show the very request this notification announces.
-        "expense_month": _safe_str(getattr(doc, "expense_month", "")),
-        "remarks": _pick_display_text(getattr(doc, "remarks", None)),
-        "requested_by": requested_by,
-        "requested_by_name": requested_by_name,
-        "timestamp": frappe.utils.now_datetime().isoformat(),
-    }
+	Both halves are returned because an empty recipients has two causes that
+	an admin must not be asked to confuse: nobody holds the role at all (a
+	configuration fault), or the only holder is the person who filed the request
+	(normal -- a manager's own expense is submitted on the spot).
+	"""
+	holders = _get_users_with_roles([ROLES.JARZ_MANAGER])
+	requester = _safe_str(requested_by).strip()
+	if not requester:
+		return holders, list(holders)
+	return holders, [u for u in holders if u != requester]
 
 
-def _prepare_expense_approval_data_payload(payload: Dict[str, Any]) -> Dict[str, str]:
-    """Flatten the payload into the string-only map FCM and web push carry."""
-    amount = _format_total_display(payload.get("amount"))
-    currency = _pick_display_text(payload.get("currency"))
-    requester = _pick_display_text(
-        payload.get("requested_by_name"),
-        payload.get("requested_by"),
-        fallback="Someone",
-    )
-    reason = _pick_display_text(payload.get("reason_label"))
-    source = _pick_display_text(payload.get("payment_source_label"))
+def _build_expense_approval_payload(doc: Any) -> dict[str, Any]:
+	"""The realtime payload for a pending expense request."""
+	name = _safe_str(getattr(doc, "name", ""))
+	if not name:
+		return {}
 
-    money = f"{amount} {currency}".strip()
-    title = f"Expense approval: {money}"
+	requested_by = _safe_str(getattr(doc, "requested_by", ""))
+	requested_by_name = requested_by
+	if requested_by:
+		try:
+			requested_by_name = frappe.db.get_value("User", requested_by, "full_name") or requested_by
+		except Exception:
+			requested_by_name = requested_by
 
-    body_parts: List[str] = [f"From: {requester}"]
-    if reason:
-        body_parts.append(f"For: {reason}")
-    if source:
-        body_parts.append(f"Paid from: {source}")
-
-    return {
-        "type": EXPENSE_APPROVAL_NOTIFICATION_TYPE,
-        "expense_id": _safe_str(payload.get("expense_id")),
-        # Distinct per request, so two pending expenses cannot collapse into one
-        # tray entry on Android -- see the tag comment in _send_fcm_notifications.
-        "notification_id": _safe_str(
-            payload.get("notification_id") or payload.get("expense_id")
-        ),
-        "amount": amount,
-        "currency": currency,
-        "reason_label": reason,
-        "payment_source_label": source,
-        "pos_profile": _pick_display_text(payload.get("pos_profile")),
-        "company": _pick_display_text(payload.get("company")),
-        "expense_date": _safe_str(payload.get("expense_date")),
-        "expense_month": _safe_str(payload.get("expense_month")),
-        "requested_by": _safe_str(payload.get("requested_by")),
-        "requested_by_name": requester,
-        "remarks": _pick_display_text(payload.get("remarks")),
-        "timestamp": _pick_display_text(
-            payload.get("timestamp"),
-            fallback=frappe.utils.now_datetime().isoformat(),
-        ),
-        "title": title,
-        "body": " | ".join(body_parts),
-    }
+	return {
+		"expense_id": name,
+		"notification_id": name,
+		"amount": frappe.utils.flt(getattr(doc, "amount", 0)),
+		"currency": _safe_str(getattr(doc, "currency", "")),
+		"reason_label": _pick_display_text(
+			getattr(doc, "reason_label", None), getattr(doc, "reason_account", None)
+		),
+		"payment_source_label": _pick_display_text(
+			getattr(doc, "payment_source_label", None),
+			getattr(doc, "paying_account", None),
+		),
+		"pos_profile": _pick_display_text(getattr(doc, "pos_profile", None)),
+		"company": _pick_display_text(getattr(doc, "company", None)),
+		"expense_date": _safe_str(getattr(doc, "expense_date", "")),
+		# The month the row is FILED under, which is what the expenses screen
+		# filters on. A request dated 31 Aug and filed on 1 Sept lives in
+		# 2026-08, so a client that refreshed "the current month" would not
+		# show the very request this notification announces.
+		"expense_month": _safe_str(getattr(doc, "expense_month", "")),
+		"remarks": _pick_display_text(getattr(doc, "remarks", None)),
+		"requested_by": requested_by,
+		"requested_by_name": requested_by_name,
+		"timestamp": frappe.utils.now_datetime().isoformat(),
+	}
 
 
-def send_expense_approval_alert(expense: str) -> Dict[str, Any]:
-    """Background-worker entry point for the expense approval alert.
+def _prepare_expense_approval_data_payload(payload: dict[str, Any]) -> dict[str, str]:
+	"""Flatten the payload into the string-only map FCM and web push carry."""
+	amount = _format_total_display(payload.get("amount"))
+	currency = _pick_display_text(payload.get("currency"))
+	requester = _pick_display_text(
+		payload.get("requested_by_name"),
+		payload.get("requested_by"),
+		fallback="Someone",
+	)
+	reason = _pick_display_text(payload.get("reason_label"))
+	source = _pick_display_text(payload.get("payment_source_label"))
 
-    Takes the NAME, not the document: RQ serialises its arguments, and a
-    half-built Document does not survive the trip.
+	money = f"{amount} {currency}".strip()
+	title = f"Expense approval: {money}"
 
-    The fan-out belongs here rather than inline in after_insert because it
-    is one blocking HTTP request PER DEVICE, serially -- measured on production
-    at 3 Android tokens plus 6 web-push subscriptions for 5 managers, so nine
-    round trips the cashier would otherwise wait through with the insert's
-    transaction still open. Queued with enqueue_after_commit by the caller,
-    which also means no HTTP, no frappe.db.commit() from the VAPID key
-    bootstrap, and no Error Log insert can touch that transaction at all: the
-    expense is durable before any of this runs.
-    """
-    name = _safe_str(expense).strip()
-    if not name:
-        return {"ok": False, "status": "skipped_no_expense"}
-    try:
-        doc = frappe.get_doc("Jarz Expense Request", name)
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(), "expense_approval_alert_load_failed"
-        )
-        return {"ok": False, "status": "failed_load"}
-    return notify_expense_approval_required(doc)
+	body_parts: list[str] = [f"From: {requester}"]
+	if reason:
+		body_parts.append(f"For: {reason}")
+	if source:
+		body_parts.append(f"Paid from: {source}")
+
+	return {
+		"type": EXPENSE_APPROVAL_NOTIFICATION_TYPE,
+		"expense_id": _safe_str(payload.get("expense_id")),
+		# Distinct per request, so two pending expenses cannot collapse into one
+		# tray entry on Android -- see the tag comment in _send_fcm_notifications.
+		"notification_id": _safe_str(payload.get("notification_id") or payload.get("expense_id")),
+		"amount": amount,
+		"currency": currency,
+		"reason_label": reason,
+		"payment_source_label": source,
+		"pos_profile": _pick_display_text(payload.get("pos_profile")),
+		"company": _pick_display_text(payload.get("company")),
+		"expense_date": _safe_str(payload.get("expense_date")),
+		"expense_month": _safe_str(payload.get("expense_month")),
+		"requested_by": _safe_str(payload.get("requested_by")),
+		"requested_by_name": requester,
+		"remarks": _pick_display_text(payload.get("remarks")),
+		"timestamp": _pick_display_text(
+			payload.get("timestamp"),
+			fallback=frappe.utils.now_datetime().isoformat(),
+		),
+		"title": title,
+		"body": " | ".join(body_parts),
+	}
 
 
-def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
-    """Alert every JARZ Manager that *doc* is waiting for a decision.
+def send_expense_approval_alert(expense: str) -> dict[str, Any]:
+	"""Background-worker entry point for the expense approval alert.
 
-    Never raises. Spending money is the point of the document and being told
-    about it is not, so a push that cannot be sent must not roll back the
-    request that triggered it -- the caller in
-    ``Jarz Expense Request.after_insert`` runs inside the insert's transaction.
-    """
-    result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
-    try:
-        payload = _build_expense_approval_payload(doc)
-        if not payload:
-            result["status"] = "skipped_no_doc"
-            return result
+	Takes the NAME, not the document: RQ serialises its arguments, and a
+	half-built Document does not survive the trip.
 
-        # Before anything leaves the process, and before the gap logging
-        # below: CI's backend suite runs against the LIVE staging site, so a
-        # test that inserts a Jarz Expense Request fires this for real. The
-        # rollback in tearDown undoes the row; it cannot undo an FCM message
-        # already handed to Google, nor an Error Log claiming staging has no
-        # manager.
-        if outbound_alerts_suppressed("expense_approval_required"):
-            result["status"] = "suppressed_test_run"
-            return result
+	The fan-out belongs here rather than inline in after_insert because it
+	is one blocking HTTP request PER DEVICE, serially -- measured on production
+	at 3 Android tokens plus 6 web-push subscriptions for 5 managers, so nine
+	round trips the cashier would otherwise wait through with the insert's
+	transaction still open. Queued with enqueue_after_commit by the caller,
+	which also means no HTTP, no frappe.db.commit() from the VAPID key
+	bootstrap, and no Error Log insert can touch that transaction at all: the
+	expense is durable before any of this runs.
+	"""
+	name = _safe_str(expense).strip()
+	if not name:
+		return {"ok": False, "status": "skipped_no_expense"}
+	try:
+		doc = frappe.get_doc("Jarz Expense Request", name)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "expense_approval_alert_load_failed")
+		return {"ok": False, "status": "failed_load"}
+	return notify_expense_approval_required(doc)
 
-        holders, recipients = _expense_approval_recipients(payload.get("requested_by"))
-        result["recipients"] = len(recipients)
 
-        if not recipients:
-            result["status"] = "skipped_no_recipients"
-            # Two different situations, and telling an admin the wrong one sends
-            # them to fix a role grant that is already correct. "No holders" is a
-            # configuration fault worth raising; "the only holder is the person
-            # who filed it" is normal -- a manager's own request is submitted on
-            # the spot and needs nobody's answer.
-            if not holders:
-                _log_notification_gap(
-                    "Expense approval reached nobody (no manager holds the role)",
-                    (
-                        f"Expense {payload.get('expense_id')} needs approval but ZERO "
-                        f"enabled users hold the {ROLES.JARZ_MANAGER} role, so no one "
-                        "was asked. Grant the role in Desk (User > Roles) to whoever "
-                        "approves expenses."
-                    ),
-                    throttle_key="expense_approval:no_recipients",
-                )
-            else:
-                result["status"] = "skipped_requester_is_sole_manager"
-            return result
+def notify_expense_approval_required(doc: Any) -> dict[str, Any]:
+	"""Alert every JARZ Manager that *doc* is waiting for a decision.
 
-        _publish_to_recipients(
-            WS_EVENTS.EXPENSE_APPROVAL_REQUESTED, payload, recipients
-        )
+	Never raises. Spending money is the point of the document and being told
+	about it is not, so a push that cannot be sent must not roll back the
+	request that triggered it -- the caller in
+	``Jarz Expense Request.after_insert`` runs inside the insert's transaction.
+	"""
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+	try:
+		payload = _build_expense_approval_payload(doc)
+		if not payload:
+			result["status"] = "skipped_no_doc"
+			return result
 
-        data = _prepare_expense_approval_data_payload(payload)
-        tokens, token_platforms = _get_token_targets_for_users(recipients)
-        vapid_subs = _get_vapid_subscriptions_for_users(recipients)
+		# Before anything leaves the process, and before the gap logging
+		# below: CI's backend suite runs against the LIVE staging site, so a
+		# test that inserts a Jarz Expense Request fires this for real. The
+		# rollback in tearDown undoes the row; it cannot undo an FCM message
+		# already handed to Google, nor an Error Log claiming staging has no
+		# manager.
+		if outbound_alerts_suppressed("expense_approval_required"):
+			result["status"] = "suppressed_test_run"
+			return result
 
-        if tokens:
-            _log_fcm_info(
-                f"FCM send: expense_approval_required; recipients={len(recipients)}; "
-                f"tokens={len(tokens)}; expense={payload.get('expense_id')}"
-            )
-            fcm_result = _send_fcm_notifications(
-                tokens, data, platforms=token_platforms
-            )
-        else:
-            fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
-            fcm_result["ok"] = True
-            if not vapid_subs:
-                _log_notification_gap(
-                    "Expense approval reached no device",
-                    (
-                        f"Expense {payload.get('expense_id')} resolved "
-                        f"{len(recipients)} manager(s) but ZERO enabled push tokens "
-                        "and ZERO web-push subscriptions, so no phone was alerted. "
-                        f"Recipients: {', '.join(recipients)}."
-                    ),
-                    throttle_key="expense_approval:notokens",
-                )
+		holders, recipients = _expense_approval_recipients(payload.get("requested_by"))
+		result["recipients"] = len(recipients)
 
-        if vapid_subs:
-            vapid_result = _send_vapid_notifications(vapid_subs, data)
-        else:
-            vapid_result = {
-                "ok": True,
-                "status": "skipped_no_subscriptions",
-                "success_count": 0,
-                "failure_count": 0,
-            }
+		if not recipients:
+			result["status"] = "skipped_no_recipients"
+			# Two different situations, and telling an admin the wrong one sends
+			# them to fix a role grant that is already correct. "No holders" is a
+			# configuration fault worth raising; "the only holder is the person
+			# who filed it" is normal -- a manager's own request is submitted on
+			# the spot and needs nobody's answer.
+			if not holders:
+				_log_notification_gap(
+					"Expense approval reached nobody (no manager holds the role)",
+					(
+						f"Expense {payload.get('expense_id')} needs approval but ZERO "
+						f"enabled users hold the {ROLES.JARZ_MANAGER} role, so no one "
+						"was asked. Grant the role in Desk (User > Roles) to whoever "
+						"approves expenses."
+					),
+					throttle_key="expense_approval:no_recipients",
+				)
+			else:
+				result["status"] = "skipped_requester_is_sole_manager"
+			return result
 
-        result.update(
-            {
-                "ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
-                "status": fcm_result.get("status"),
-                "success_count": fcm_result.get("success_count", 0)
-                + vapid_result.get("success_count", 0),
-                "failure_count": fcm_result.get("failure_count", 0)
-                + vapid_result.get("failure_count", 0),
-                "fcm": fcm_result,
-                "vapid": vapid_result,
-            }
-        )
-        return result
-    except Exception:
-        # defer_insert, for the same reason _log_notification_gap uses it: this
-        # can run inside the caller's transaction, and if the failure being
-        # logged is itself a DB error the transaction is already unusable -- a
-        # direct Error Log insert would raise out of this except clause and roll
-        # back the expense the notification is merely ABOUT.
-        frappe.log_error(
-            frappe.get_traceback(),
-            "expense_approval_notification_failed",
-            defer_insert=True,
-        )
-        result["ok"] = False
-        result["status"] = "failed_exception"
-        return result
+		_publish_to_recipients(WS_EVENTS.EXPENSE_APPROVAL_REQUESTED, payload, recipients)
+
+		data = _prepare_expense_approval_data_payload(payload)
+		tokens, token_platforms = _get_token_targets_for_users(recipients)
+		vapid_subs = _get_vapid_subscriptions_for_users(recipients)
+
+		if tokens:
+			_log_fcm_info(
+				f"FCM send: expense_approval_required; recipients={len(recipients)}; "
+				f"tokens={len(tokens)}; expense={payload.get('expense_id')}"
+			)
+			fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
+		else:
+			fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+			fcm_result["ok"] = True
+			if not vapid_subs:
+				_log_notification_gap(
+					"Expense approval reached no device",
+					(
+						f"Expense {payload.get('expense_id')} resolved "
+						f"{len(recipients)} manager(s) but ZERO enabled push tokens "
+						"and ZERO web-push subscriptions, so no phone was alerted. "
+						f"Recipients: {', '.join(recipients)}."
+					),
+					throttle_key="expense_approval:notokens",
+				)
+
+		if vapid_subs:
+			vapid_result = _send_vapid_notifications(vapid_subs, data)
+		else:
+			vapid_result = {
+				"ok": True,
+				"status": "skipped_no_subscriptions",
+				"success_count": 0,
+				"failure_count": 0,
+			}
+
+		result.update(
+			{
+				"ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
+				"status": fcm_result.get("status"),
+				"success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+				"failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+				"fcm": fcm_result,
+				"vapid": vapid_result,
+			}
+		)
+		return result
+	except Exception:
+		# defer_insert, for the same reason _log_notification_gap uses it: this
+		# can run inside the caller's transaction, and if the failure being
+		# logged is itself a DB error the transaction is already unusable -- a
+		# direct Error Log insert would raise out of this except clause and roll
+		# back the expense the notification is merely ABOUT.
+		frappe.log_error(
+			frappe.get_traceback(),
+			"expense_approval_notification_failed",
+			defer_insert=True,
+		)
+		result["ok"] = False
+		result["status"] = "failed_exception"
+		return result
 
 
 def notify_label_stock_alert(
-    snapshots: Sequence[Dict[str, Any]], recipients: Sequence[str]
-) -> Dict[str, Any]:
-    """Push ONE daily digest of the B2B labels that need printing.
+	snapshots: Sequence[dict[str, Any]], recipients: Sequence[str]
+) -> dict[str, Any]:
+	"""Push ONE daily digest of the B2B labels that need printing.
 
-    Until this existed the daily label alert wrote a Desk bell entry and a
-    realtime event nothing in the app subscribed to, so a shortage reached a
-    phone only if somebody happened to open the labels screen. One push per
-    run rather than per label: five low labels are one decision about one
-    print order, and the per-day notification_id makes a re-run replace the
-    tray entry instead of stacking a second one. Never raises.
-    """
-    result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": len(recipients or [])}
-    try:
-        due = [s for s in snapshots or [] if s]
-        if not due or not recipients:
-            result["status"] = "skipped_nothing_due" if not due else "skipped_no_recipients"
-            return result
-        if outbound_alerts_suppressed("label_stock_alert"):
-            result["status"] = "suppressed_test_run"
-            return result
+	Until this existed the daily label alert wrote a Desk bell entry and a
+	realtime event nothing in the app subscribed to, so a shortage reached a
+	phone only if somebody happened to open the labels screen. One push per
+	run rather than per label: five low labels are one decision about one
+	print order, and the per-day notification_id makes a re-run replace the
+	tray entry instead of stacking a second one. Never raises.
+	"""
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": len(recipients or [])}
+	try:
+		due = [s for s in snapshots or [] if s]
+		if not due or not recipients:
+			result["status"] = "skipped_nothing_due" if not due else "skipped_no_recipients"
+			return result
+		if outbound_alerts_suppressed("label_stock_alert"):
+			result["status"] = "suppressed_test_run"
+			return result
 
-        out = sum(1 for s in due if s.get("status") == "Out of Stock")
-        title = (
-            f"Labels: {len(due)} need printing"
-            + (f" ({out} out of stock)" if out else "")
-        )
-        lines = []
-        for snap in due[:4]:
-            size = f" {snap.get('size')}" if snap.get("size") else ""
-            lines.append(
-                f"{snap.get('customer_name')} - {snap.get('label_title')}{size}: "
-                f"{snap.get('on_hand_qty')} left"
-            )
-        if len(due) > 4:
-            lines.append(f"+{len(due) - 4} more")
+		out = sum(1 for s in due if s.get("status") == "Out of Stock")
+		title = f"Labels: {len(due)} need printing" + (f" ({out} out of stock)" if out else "")
+		lines = []
+		for snap in due[:4]:
+			size = f" {snap.get('size')}" if snap.get("size") else ""
+			lines.append(
+				f"{snap.get('customer_name')} - {snap.get('label_title')}{size}: "
+				f"{snap.get('on_hand_qty')} left"
+			)
+		if len(due) > 4:
+			lines.append(f"+{len(due) - 4} more")
 
-        today = _safe_str(frappe.utils.today())
-        data = {
-            "type": LABEL_STOCK_NOTIFICATION_TYPE,
-            "notification_id": f"label-stock-{today}",
-            "count": str(len(due)),
-            "out_of_stock": str(out),
-            "labels": ",".join(_safe_str(s.get("name")) for s in due[:20]),
-            "timestamp": frappe.utils.now_datetime().isoformat(),
-            "title": title,
-            "body": " | ".join(lines),
-        }
+		today = _safe_str(frappe.utils.today())
+		data = {
+			"type": LABEL_STOCK_NOTIFICATION_TYPE,
+			"notification_id": f"label-stock-{today}",
+			"count": str(len(due)),
+			"out_of_stock": str(out),
+			"labels": ",".join(_safe_str(s.get("name")) for s in due[:20]),
+			"timestamp": frappe.utils.now_datetime().isoformat(),
+			"title": title,
+			"body": " | ".join(lines),
+		}
 
-        tokens, token_platforms = _get_token_targets_for_users(list(recipients))
-        vapid_subs = _get_vapid_subscriptions_for_users(list(recipients))
-        if tokens:
-            fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
-        else:
-            fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
-            fcm_result["ok"] = True
-        if vapid_subs:
-            vapid_result = _send_vapid_notifications(vapid_subs, data)
-        else:
-            vapid_result = {"ok": True, "status": "skipped_no_subscriptions",
-                            "success_count": 0, "failure_count": 0}
-        if not tokens and not vapid_subs:
-            _log_notification_gap(
-                "Label stock alert reached no device",
-                (
-                    f"{len(due)} label(s) need printing and {len(recipients)} "
-                    "recipient(s) resolved, but none has a push token or web-push "
-                    f"subscription. Recipients: {', '.join(recipients)}."
-                ),
-                throttle_key="label_stock:notokens",
-            )
+		tokens, token_platforms = _get_token_targets_for_users(list(recipients))
+		vapid_subs = _get_vapid_subscriptions_for_users(list(recipients))
+		if tokens:
+			fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
+		else:
+			fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+			fcm_result["ok"] = True
+		if vapid_subs:
+			vapid_result = _send_vapid_notifications(vapid_subs, data)
+		else:
+			vapid_result = {
+				"ok": True,
+				"status": "skipped_no_subscriptions",
+				"success_count": 0,
+				"failure_count": 0,
+			}
+		if not tokens and not vapid_subs:
+			_log_notification_gap(
+				"Label stock alert reached no device",
+				(
+					f"{len(due)} label(s) need printing and {len(recipients)} "
+					"recipient(s) resolved, but none has a push token or web-push "
+					f"subscription. Recipients: {', '.join(recipients)}."
+				),
+				throttle_key="label_stock:notokens",
+			)
 
-        result.update({
-            "ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
-            "status": fcm_result.get("status"),
-            "success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
-            "failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
-        })
-        return result
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "label_stock_notification_failed")
-        result["ok"] = False
-        result["status"] = "failed_exception"
-        return result
+		result.update(
+			{
+				"ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
+				"status": fcm_result.get("status"),
+				"success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+				"failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+			}
+		)
+		return result
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "label_stock_notification_failed")
+		result["ok"] = False
+		result["status"] = "failed_exception"
+		return result
 
 
 # ── Task Board ────────────────────────────────────────────────────────────────
@@ -3046,291 +3043,286 @@ def notify_label_stock_alert(
 # push can never hold -- or roll back -- the request that caused it.
 
 
-def _json_safe_task_extra(extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Strings (and lists of strings) only: RQ pickles the job kwargs, and a
-    date or a Document in here is a job that dies before it starts."""
-    out: Dict[str, Any] = {}
-    for key, value in (extra or {}).items():
-        if isinstance(value, (list, tuple, set)):
-            out[str(key)] = [_safe_str(v) for v in value]
-        else:
-            out[str(key)] = _safe_str(value)
-    return out
+def _json_safe_task_extra(extra: dict[str, Any] | None) -> dict[str, Any]:
+	"""Strings (and lists of strings) only: RQ pickles the job kwargs, and a
+	date or a Document in here is a job that dies before it starts."""
+	out: dict[str, Any] = {}
+	for key, value in (extra or {}).items():
+		if isinstance(value, (list, tuple, set)):
+			out[str(key)] = [_safe_str(v) for v in value]
+		else:
+			out[str(key)] = _safe_str(value)
+	return out
 
 
 def enqueue_task_notification(
-    task: Any,
-    event: str,
-    recipients: Sequence[str],
-    actor: Optional[str] = None,
-    extra: Optional[Dict[str, Any]] = None,
+	task: Any,
+	event: str,
+	recipients: Sequence[str],
+	actor: str | None = None,
+	extra: dict[str, Any] | None = None,
 ) -> bool:
-    """Queue a task push for after the current transaction commits. Never raises.
+	"""Queue a task push for after the current transaction commits. Never raises.
 
-    Returns True when a job was queued. Nothing is queued when every recipient
-    is the actor, or during a test run (CI runs against the live staging site,
-    and a queued job is not undone by the tearDown rollback).
-    """
-    try:
-        from jarz_pos.services.task_board import clean_recipients
+	Returns True when a job was queued. Nothing is queued when every recipient
+	is the actor, or during a test run (CI runs against the live staging site,
+	and a queued job is not undone by the tearDown rollback).
+	"""
+	try:
+		from jarz_pos.services.task_board import clean_recipients
 
-        name = _safe_str(getattr(task, "name", None) or task).strip()
-        cleaned = clean_recipients(recipients, actor)
-        if not name or not cleaned:
-            return False
-        if outbound_alerts_suppressed(f"task_notification:{event}"):
-            return False
-        # NOTE the job kwarg is ``task_event``, not ``event``: frappe.enqueue has
-        # its own ``event`` parameter and would silently swallow ours.
-        frappe.enqueue(
-            "jarz_pos.api.notifications.run_task_notification_job",
-            queue="short",
-            enqueue_after_commit=True,
-            task=name,
-            task_event=_safe_str(event),
-            recipients=cleaned,
-            actor=_safe_str(actor),
-            extra=_json_safe_task_extra(extra),
-        )
-        return True
-    except Exception:
-        try:
-            frappe.log_error(
-                frappe.get_traceback(), "task_notification_enqueue_failed", defer_insert=True
-            )
-        except Exception:
-            pass
-        return False
+		name = _safe_str(getattr(task, "name", None) or task).strip()
+		cleaned = clean_recipients(recipients, actor)
+		if not name or not cleaned:
+			return False
+		if outbound_alerts_suppressed(f"task_notification:{event}"):
+			return False
+		# NOTE the job kwarg is ``task_event``, not ``event``: frappe.enqueue has
+		# its own ``event`` parameter and would silently swallow ours.
+		frappe.enqueue(
+			"jarz_pos.api.notifications.run_task_notification_job",
+			queue="short",
+			enqueue_after_commit=True,
+			task=name,
+			task_event=_safe_str(event),
+			recipients=cleaned,
+			actor=_safe_str(actor),
+			extra=_json_safe_task_extra(extra),
+		)
+		return True
+	except Exception:
+		try:
+			frappe.log_error(frappe.get_traceback(), "task_notification_enqueue_failed", defer_insert=True)
+		except Exception:
+			pass
+		return False
 
 
 def run_task_notification_job(
-    task: str,
-    task_event: str,
-    recipients: Sequence[str],
-    actor: Optional[str] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Background-worker entry point (see enqueue_task_notification)."""
-    return send_task_notification(task, task_event, recipients, actor, extra)
+	task: str,
+	task_event: str,
+	recipients: Sequence[str],
+	actor: str | None = None,
+	extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+	"""Background-worker entry point (see enqueue_task_notification)."""
+	return send_task_notification(task, task_event, recipients, actor, extra)
 
 
 def send_task_notification(
-    task: Any,
-    event: str,
-    recipients: Sequence[str],
-    actor: Optional[str] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Deliver one Task Board event to *recipients*. Never raises.
+	task: Any,
+	event: str,
+	recipients: Sequence[str],
+	actor: str | None = None,
+	extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+	"""Deliver one Task Board event to *recipients*. Never raises.
 
-    *task* is a Jarz Task name (or anything with ``.name``). Sends the realtime
-    ``jarz_task_updated`` event to each recipient, then a ``task_notification``
-    push (FCM + web push). A recipient with no device is recorded as a
-    notification gap rather than passing silently.
-    """
-    result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
-    try:
-        from jarz_pos.services.task_board import clean_recipients, notification_text
+	*task* is a Jarz Task name (or anything with ``.name``). Sends the realtime
+	``jarz_task_updated`` event to each recipient, then a ``task_notification``
+	push (FCM + web push). A recipient with no device is recorded as a
+	notification gap rather than passing silently.
+	"""
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+	try:
+		from jarz_pos.services.task_board import clean_recipients, notification_text
 
-        name = _safe_str(getattr(task, "name", None) or task).strip()
-        if not name:
-            result["status"] = "skipped_no_task"
-            return result
-        if outbound_alerts_suppressed(f"task_notification:{event}"):
-            result["status"] = "suppressed_test_run"
-            return result
+		name = _safe_str(getattr(task, "name", None) or task).strip()
+		if not name:
+			result["status"] = "skipped_no_task"
+			return result
+		if outbound_alerts_suppressed(f"task_notification:{event}"):
+			result["status"] = "suppressed_test_run"
+			return result
 
-        cleaned = clean_recipients(recipients, actor)
-        result["recipients"] = len(cleaned)
-        if not cleaned:
-            result["status"] = "skipped_no_recipients"
-            return result
+		cleaned = clean_recipients(recipients, actor)
+		result["recipients"] = len(cleaned)
+		if not cleaned:
+			result["status"] = "skipped_no_recipients"
+			return result
 
-        info = frappe.db.get_value("Jarz Task", name, ["title"], as_dict=True)
-        if not info:
-            result["status"] = "skipped_task_missing"
-            return result
+		info = frappe.db.get_value("Jarz Task", name, ["title"], as_dict=True)
+		if not info:
+			result["status"] = "skipped_task_missing"
+			return result
 
-        actor_id = _safe_str(actor).strip()
-        actor_name = "Jarz"
-        if actor_id:
-            try:
-                actor_name = frappe.db.get_value("User", actor_id, "full_name") or actor_id
-            except Exception:
-                actor_name = actor_id
+		actor_id = _safe_str(actor).strip()
+		actor_name = "Jarz"
+		if actor_id:
+			try:
+				actor_name = frappe.db.get_value("User", actor_id, "full_name") or actor_id
+			except Exception:
+				actor_name = actor_id
 
-        title, body = notification_text(event, _safe_str(info.get("title")), actor_name, extra or {})
-        now = frappe.utils.now_datetime()
-        data = {
-            "type": TASK_NOTIFICATION_TYPE,
-            "event": _safe_str(event),
-            "task_id": name,
-            # Per event AND per moment: two different events on one task must
-            # not collapse into one tray entry (see the tag note in
-            # _send_fcm_notifications), and neither must two comments.
-            "notification_id": f"task-{name}-{_safe_str(event)}-{int(now.timestamp())}",
-            "title": title,
-            "body": body,
-            "actor": actor_id,
-            "actor_name": _safe_str(actor_name),
-            "timestamp": now.isoformat(),
-        }
+		title, body = notification_text(event, _safe_str(info.get("title")), actor_name, extra or {})
+		now = frappe.utils.now_datetime()
+		data = {
+			"type": TASK_NOTIFICATION_TYPE,
+			"event": _safe_str(event),
+			"task_id": name,
+			# Per event AND per moment: two different events on one task must
+			# not collapse into one tray entry (see the tag note in
+			# _send_fcm_notifications), and neither must two comments.
+			"notification_id": f"task-{name}-{_safe_str(event)}-{int(now.timestamp())}",
+			"title": title,
+			"body": body,
+			"actor": actor_id,
+			"actor_name": _safe_str(actor_name),
+			"timestamp": now.isoformat(),
+		}
 
-        _publish_to_recipients(
-            WS_EVENTS.TASK_UPDATED, {"task": name, "event": _safe_str(event)}, cleaned
-        )
+		_publish_to_recipients(WS_EVENTS.TASK_UPDATED, {"task": name, "event": _safe_str(event)}, cleaned)
 
-        tokens, token_platforms = _get_token_targets_for_users(cleaned)
-        vapid_subs = _get_vapid_subscriptions_for_users(cleaned)
-        if tokens:
-            fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
-        else:
-            fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
-            fcm_result["ok"] = True
-        if vapid_subs:
-            vapid_result = _send_vapid_notifications(vapid_subs, data)
-        else:
-            vapid_result = {"ok": True, "status": "skipped_no_subscriptions",
-                            "success_count": 0, "failure_count": 0}
-        if not tokens and not vapid_subs:
-            _log_notification_gap(
-                "Task notification reached no device",
-                (
-                    f"Task {name} event '{event}' resolved {len(cleaned)} recipient(s) "
-                    "but none has an enabled push token or web-push subscription. "
-                    f"Recipients: {', '.join(cleaned)}."
-                ),
-                throttle_key="task_notification:notokens",
-            )
+		tokens, token_platforms = _get_token_targets_for_users(cleaned)
+		vapid_subs = _get_vapid_subscriptions_for_users(cleaned)
+		if tokens:
+			fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
+		else:
+			fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+			fcm_result["ok"] = True
+		if vapid_subs:
+			vapid_result = _send_vapid_notifications(vapid_subs, data)
+		else:
+			vapid_result = {
+				"ok": True,
+				"status": "skipped_no_subscriptions",
+				"success_count": 0,
+				"failure_count": 0,
+			}
+		if not tokens and not vapid_subs:
+			_log_notification_gap(
+				"Task notification reached no device",
+				(
+					f"Task {name} event '{event}' resolved {len(cleaned)} recipient(s) "
+					"but none has an enabled push token or web-push subscription. "
+					f"Recipients: {', '.join(cleaned)}."
+				),
+				throttle_key="task_notification:notokens",
+			)
 
-        result.update({
-            "ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
-            "status": fcm_result.get("status"),
-            "success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
-            "failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
-        })
-        return result
-    except Exception:
-        try:
-            frappe.log_error(
-                frappe.get_traceback(), "task_notification_failed", defer_insert=True
-            )
-        except Exception:
-            pass
-        result["ok"] = False
-        result["status"] = "failed_exception"
-        return result
+		result.update(
+			{
+				"ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
+				"status": fcm_result.get("status"),
+				"success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+				"failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+			}
+		)
+		return result
+	except Exception:
+		try:
+			frappe.log_error(frappe.get_traceback(), "task_notification_failed", defer_insert=True)
+		except Exception:
+			pass
+		result["ok"] = False
+		result["status"] = "failed_exception"
+		return result
 
 
 def _ensure_notification_health_access() -> None:
-    roles = set(frappe.get_roles())
-    allowed = set(ROLES.MANAGER) | {ROLES.SYSTEM_MANAGER, ROLES.ADMINISTRATOR}
-    if not roles.intersection(allowed):
-        frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
+	roles = set(frappe.get_roles())
+	allowed = set(ROLES.MANAGER) | {ROLES.SYSTEM_MANAGER, ROLES.ADMINISTRATOR}
+	if not roles.intersection(allowed):
+		frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
 @frappe.whitelist(allow_guest=False)
-def notification_health() -> Dict[str, Any]:
-    """Report, per POS profile, who can actually be reached by push.
+def notification_health() -> dict[str, Any]:
+	"""Report, per POS profile, who can actually be reached by push.
 
-    Managers only. Every query below uses frappe.get_all, which ignores
-    permissions, and the answer is a staff roster: who works which branch, their
-    email addresses, their device platforms and when each was last used. That is
-    not a cashier's to read, and allow_guest=False alone would have handed it to
-    any authenticated user on the site.
+	Managers only. Every query below uses frappe.get_all, which ignores
+	permissions, and the answer is a staff roster: who works which branch, their
+	email addresses, their device platforms and when each was last used. That is
+	not a cashier's to read, and allow_guest=False alone would have handed it to
+	any authenticated user on the site.
 
-    Written after 2026-09-07, when branches reported missing order alerts and
-    there was no way to answer "who is reachable right now?" without querying
-    the database by hand. Coverage is the number that matters: a profile whose
-    recipients hold no enabled device is a branch that will be told nothing,
-    and until this endpoint existed that state was indistinguishable from a
-    healthy one.
-    """
-    _ensure_notification_health_access()
+	Written after 2026-09-07, when branches reported missing order alerts and
+	there was no way to answer "who is reachable right now?" without querying
+	the database by hand. Coverage is the number that matters: a profile whose
+	recipients hold no enabled device is a branch that will be told nothing,
+	and until this endpoint existed that state was indistinguishable from a
+	healthy one.
+	"""
+	_ensure_notification_health_access()
 
-    now = frappe.utils.now_datetime()
-    stale_after_days = 30
+	now = frappe.utils.now_datetime()
+	stale_after_days = 30
 
-    devices = frappe.get_all(
-        "Jarz Mobile Device",
-        filters={"enabled": 1},
-        fields=["user", "platform", "last_seen"],
-        limit_page_length=0,
-    )
-    live: Dict[str, List[Dict[str, Any]]] = {}
-    for row in devices:
-        last_seen = row.get("last_seen")
-        age_days = None
-        if last_seen:
-            try:
-                age_days = (now - last_seen).days
-            except Exception:
-                age_days = None
-        live.setdefault(row.get("user"), []).append(
-            {
-                "platform": row.get("platform"),
-                "last_seen": str(last_seen) if last_seen else None,
-                "age_days": age_days,
-                "stale": age_days is not None and age_days > stale_after_days,
-            }
-        )
+	devices = frappe.get_all(
+		"Jarz Mobile Device",
+		filters={"enabled": 1},
+		fields=["user", "platform", "last_seen"],
+		limit_page_length=0,
+	)
+	live: dict[str, list[dict[str, Any]]] = {}
+	for row in devices:
+		last_seen = row.get("last_seen")
+		age_days = None
+		if last_seen:
+			try:
+				age_days = (now - last_seen).days
+			except Exception:
+				age_days = None
+		live.setdefault(row.get("user"), []).append(
+			{
+				"platform": row.get("platform"),
+				"last_seen": str(last_seen) if last_seen else None,
+				"age_days": age_days,
+				"stale": age_days is not None and age_days > stale_after_days,
+			}
+		)
 
-    memberships = frappe.get_all(
-        "POS Profile User",
-        filters={"parenttype": "POS Profile"},
-        fields=["parent", "user"],
-        limit_page_length=0,
-    )
-    by_profile: Dict[str, List[str]] = {}
-    for row in memberships:
-        by_profile.setdefault(row.get("parent"), []).append(row.get("user"))
+	memberships = frappe.get_all(
+		"POS Profile User",
+		filters={"parenttype": "POS Profile"},
+		fields=["parent", "user"],
+		limit_page_length=0,
+	)
+	by_profile: dict[str, list[str]] = {}
+	for row in memberships:
+		by_profile.setdefault(row.get("parent"), []).append(row.get("user"))
 
-    profiles_out: List[Dict[str, Any]] = []
-    for profile in frappe.get_all(
-        "POS Profile", fields=["name", "disabled"], limit_page_length=0
-    ):
-        users = sorted(set(by_profile.get(profile.get("name"), [])))
-        reachable, unreachable, stale_only = [], [], []
-        for user in users:
-            entries = live.get(user) or []
-            if not entries:
-                unreachable.append(user)
-            elif all(e["stale"] for e in entries):
-                # Counted apart from reachable on purpose. Folding stale in made
-                # blackout unreachable-by-construction for the one population
-                # most likely to be dark: a branch whose every token last
-                # checked in months ago read as healthy.
-                stale_only.append(user)
-            else:
-                reachable.append(user)
-        profiles_out.append(
-            {
-                "pos_profile": profile.get("name"),
-                "stale_only": len(stale_only),
-                "disabled": bool(profile.get("disabled")),
-                "recipients": len(users),
-                "reachable": len(reachable),
-                "unreachable_users": unreachable,
-                "stale_token_users": stale_only,
-                # The alert for this profile would reach no device at all.
-                # A disabled profile takes no orders, so it is never a blackout.
-                "blackout": (
-                    bool(users)
-                    and not reachable
-                    and not stale_only
-                    and not profile.get("disabled")
-                ),
-            }
-        )
+	profiles_out: list[dict[str, Any]] = []
+	for profile in frappe.get_all("POS Profile", fields=["name", "disabled"], limit_page_length=0):
+		users = sorted(set(by_profile.get(profile.get("name"), [])))
+		reachable, unreachable, stale_only = [], [], []
+		for user in users:
+			entries = live.get(user) or []
+			if not entries:
+				unreachable.append(user)
+			elif all(e["stale"] for e in entries):
+				# Counted apart from reachable on purpose. Folding stale in made
+				# blackout unreachable-by-construction for the one population
+				# most likely to be dark: a branch whose every token last
+				# checked in months ago read as healthy.
+				stale_only.append(user)
+			else:
+				reachable.append(user)
+		profiles_out.append(
+			{
+				"pos_profile": profile.get("name"),
+				"stale_only": len(stale_only),
+				"disabled": bool(profile.get("disabled")),
+				"recipients": len(users),
+				"reachable": len(reachable),
+				"unreachable_users": unreachable,
+				"stale_token_users": stale_only,
+				# The alert for this profile would reach no device at all.
+				# A disabled profile takes no orders, so it is never a blackout.
+				"blackout": (
+					bool(users) and not reachable and not stale_only and not profile.get("disabled")
+				),
+			}
+		)
 
-    return {
-        "success": True,
-        "generated_at": now.isoformat(),
-        "stale_after_days": stale_after_days,
-        "enabled_devices_total": sum(len(v) for v in live.values()),
-        "profiles": profiles_out,
-        # health_check_firebase() also returns resolved/raw/candidate paths for
-        # the service-account file. Those are server filesystem details and have
-        # no place in a roster report, so only the verdict is carried through.
-        "firebase_ok": bool((health_check_firebase() or {}).get("ok")),
-    }
+	return {
+		"success": True,
+		"generated_at": now.isoformat(),
+		"stale_after_days": stale_after_days,
+		"enabled_devices_total": sum(len(v) for v in live.values()),
+		"profiles": profiles_out,
+		# health_check_firebase() also returns resolved/raw/candidate paths for
+		# the service-account file. Those are server filesystem details and have
+		# no place in a roster report, so only the verdict is carried through.
+		"firebase_ok": bool((health_check_firebase() or {}).get("ok")),
+	}

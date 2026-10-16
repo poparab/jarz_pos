@@ -33,55 +33,55 @@ RESOLVED_STATUSES = (STATUS_TERRITORY_CORRECTED, STATUS_ACCEPTED, STATUS_IGNORED
 
 
 class JarzTerritoryException(Document):
-    def validate(self):
-        self._default_status()
-        self._reject_duplicate()
-        self._stamp_resolution()
+	def validate(self):
+		self._default_status()
+		self._reject_duplicate()
+		self._stamp_resolution()
 
-    def _default_status(self):
-        if not (self.status or "").strip():
-            self.status = STATUS_OPEN
+	def _default_status(self):
+		if not (self.status or "").strip():
+			self.status = STATUS_OPEN
 
-    def _reject_duplicate(self):
-        """One row per (invoice, exception type) -- the whole point is idempotency.
+	def _reject_duplicate(self):
+		"""One row per (invoice, exception type) -- the whole point is idempotency.
 
-        A second row for the same pair would show a reviewer the same crossing
-        twice and make "how many are open" meaningless.
-        """
-        if not self.sales_invoice or not self.exception_type:
-            return
+		A second row for the same pair would show a reviewer the same crossing
+		twice and make "how many are open" meaningless.
+		"""
+		if not self.sales_invoice or not self.exception_type:
+			return
 
-        clash = frappe.db.exists(
-            self.doctype,
-            {
-                "sales_invoice": self.sales_invoice,
-                "exception_type": self.exception_type,
-                "name": ["!=", self.name or ""],
-            },
-        )
-        if clash:
-            frappe.throw(
-                _("{0} is already recorded against {1} ({2}).").format(
-                    frappe.bold(self.exception_type),
-                    frappe.bold(self.sales_invoice),
-                    clash,
-                ),
-                frappe.DuplicateEntryError,
-            )
+		clash = frappe.db.exists(
+			self.doctype,
+			{
+				"sales_invoice": self.sales_invoice,
+				"exception_type": self.exception_type,
+				"name": ["!=", self.name or ""],
+			},
+		)
+		if clash:
+			frappe.throw(
+				_("{0} is already recorded against {1} ({2}).").format(
+					frappe.bold(self.exception_type),
+					frappe.bold(self.sales_invoice),
+					clash,
+				),
+				frappe.DuplicateEntryError,
+			)
 
-    def _stamp_resolution(self):
-        """Keep ``resolved_on``/``resolved_by`` honest however the status was set.
+	def _stamp_resolution(self):
+		"""Keep ``resolved_on``/``resolved_by`` honest however the status was set.
 
-        Both fields are read-only on the form, so a manager who picks a status
-        from the list view or the Desk form would otherwise leave them empty and
-        the audit trail would say nobody ever closed anything.
-        """
-        if (self.status or STATUS_OPEN) in RESOLVED_STATUSES:
-            if not self.resolved_on:
-                self.resolved_on = frappe.utils.now_datetime()
-            if not self.resolved_by:
-                self.resolved_by = frappe.session.user
-        else:
-            # Re-opened: the previous resolution no longer describes this row.
-            self.resolved_on = None
-            self.resolved_by = None
+		Both fields are read-only on the form, so a manager who picks a status
+		from the list view or the Desk form would otherwise leave them empty and
+		the audit trail would say nobody ever closed anything.
+		"""
+		if (self.status or STATUS_OPEN) in RESOLVED_STATUSES:
+			if not self.resolved_on:
+				self.resolved_on = frappe.utils.now_datetime()
+			if not self.resolved_by:
+				self.resolved_by = frappe.session.user
+		else:
+			# Re-opened: the previous resolution no longer describes this row.
+			self.resolved_on = None
+			self.resolved_by = None

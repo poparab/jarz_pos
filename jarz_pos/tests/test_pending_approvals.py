@@ -15,7 +15,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 if "frappe" not in sys.modules:
 	fake_frappe = types.ModuleType("frappe")
 
@@ -98,9 +97,11 @@ class TestExpensesQueue(unittest.TestCase):
 			calls["filters"] = filters
 			return count
 
-		with patch.dict(sys.modules, {"jarz_pos.api.expenses": fake_expenses}), \
-			patch.object(approvals.frappe.db, "count", side_effect=fake_count, create=True), \
-			patch.object(approvals.frappe, "get_all", return_value=rows, create=True):
+		with (
+			patch.dict(sys.modules, {"jarz_pos.api.expenses": fake_expenses}),
+			patch.object(approvals.frappe.db, "count", side_effect=fake_count, create=True),
+			patch.object(approvals.frappe, "get_all", return_value=rows, create=True),
+		):
 			return approvals._expenses_queue(), calls
 
 	def test_non_manager_gets_no_expense_queue(self):
@@ -108,9 +109,7 @@ class TestExpensesQueue(unittest.TestCase):
 		self.assertIsNone(result)
 
 	def test_counts_pending_approval_only_not_rejected_drafts(self):
-		result, calls = self._run(
-			is_manager=True, count=1, rows=[{"expense_month": "2026-08"}]
-		)
+		result, calls = self._run(is_manager=True, count=1, rows=[{"expense_month": "2026-08"}])
 		self.assertEqual(calls["filters"], {"docstatus": 0, "status": "Pending Approval"})
 		self.assertEqual(result, {"count": 1, "oldest_month": "2026-08"})
 
@@ -126,8 +125,10 @@ class TestErrorLogThrottle(unittest.TestCase):
 			get_value=lambda k: store.get(k),
 			set_value=lambda k, v, expires_in_sec=None: store.__setitem__(k, v),
 		)
-		with patch.object(approvals.frappe, "cache", return_value=cache, create=True), \
-			patch.object(approvals.frappe, "log_error", create=True) as log_error:
+		with (
+			patch.object(approvals.frappe, "cache", return_value=cache, create=True),
+			patch.object(approvals.frappe, "log_error", create=True) as log_error,
+		):
 			approvals._log("expenses")
 			approvals._log("expenses")
 			approvals._log("payment_receipts")
@@ -142,9 +143,11 @@ class TestPaymentReceiptsQueue(unittest.TestCase):
 			RECEIPT_STATUS_UNCONFIRMED="Unconfirmed",
 		)
 		package = sys.modules["jarz_pos.api"]
-		with patch.dict(sys.modules, {"jarz_pos.api.payment_receipts": fake}), \
-			patch.object(package, "payment_receipts", fake, create=True), \
-			patch.object(approvals.frappe.db, "count", return_value=99, create=True) as count:
+		with (
+			patch.dict(sys.modules, {"jarz_pos.api.payment_receipts": fake}),
+			patch.object(package, "payment_receipts", fake, create=True),
+			patch.object(approvals.frappe.db, "count", return_value=99, create=True) as count,
+		):
 			result = approvals._payment_receipts_queue()
 		self.assertEqual(result, {"count": 0})
 		count.assert_not_called()

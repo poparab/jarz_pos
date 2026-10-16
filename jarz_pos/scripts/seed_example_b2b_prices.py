@@ -93,9 +93,7 @@ def _upsert_item_price(item_code, price_list, rate):
 	)
 	if existing:
 		# Update the (first) existing Item Price rate; never delete duplicates.
-		frappe.db.set_value(
-			"Item Price", existing[0], "price_list_rate", rate, update_modified=True
-		)
+		frappe.db.set_value("Item Price", existing[0], "price_list_rate", rate, update_modified=True)
 		return True
 
 	doc = frappe.get_doc(
@@ -135,8 +133,7 @@ def _ensure_item_prices(summary):
 						summary["item_prices_set"] += 1
 				except Exception:
 					log.error(
-						f"Failed to set Item Price for item '{code}' on "
-						f"price list '{price_list}'",
+						f"Failed to set Item Price for item '{code}' on " f"price list '{price_list}'",
 						exc_info=True,
 					)
 
@@ -152,12 +149,9 @@ def _ensure_customer_groups(summary):
 	for name, price_list in CUSTOMER_GROUP_PRICE_LISTS.items():
 		try:
 			if frappe.db.exists("Customer Group", name):
-				frappe.db.set_value(
-					"Customer Group", name, "default_price_list", price_list
-				)
+				frappe.db.set_value("Customer Group", name, "default_price_list", price_list)
 				log.info(
-					f"Customer Group already present: {name} "
-					f"(default_price_list set -> {price_list})"
+					f"Customer Group already present: {name} " f"(default_price_list set -> {price_list})"
 				)
 				continue
 			doc = frappe.get_doc(
@@ -171,9 +165,7 @@ def _ensure_customer_groups(summary):
 			)
 			doc.insert(ignore_permissions=True)
 			summary["customer_groups"] += 1
-			log.info(
-				f"Customer Group created: {name} (default_price_list={price_list})"
-			)
+			log.info(f"Customer Group created: {name} (default_price_list={price_list})")
 		except Exception:
 			log.error(f"Failed to ensure Customer Group '{name}'", exc_info=True)
 
@@ -214,9 +206,7 @@ def _ensure_lead_sources(summary):
 		log.error("Failed to read Lead.source field meta", exc_info=True)
 
 	if not frappe.db.exists("DocType", "Lead Source"):
-		log.warning(
-			"Lead Source DocType does not exist; skipping lead source seeding"
-		)
+		log.warning("Lead Source DocType does not exist; skipping lead source seeding")
 		summary["lead_sources_skipped"] = True
 		return
 

@@ -4,21 +4,23 @@ This module contains tests for the kanban API endpoints.
 
 import unittest
 from unittest.mock import patch
+
 import frappe
+
 from jarz_pos.api.kanban import (
 	_build_invoice_search_or_filters,
-	_has_narrowing_filters,
 	_get_invoice_latest_notes,
 	_get_invoice_note_counts,
+	_has_narrowing_filters,
 	_sort_kanban_columns,
-	get_kanban_columns,
-	get_kanban_invoices,
+	add_invoice_note,
 	get_invoice_details,
 	get_invoice_notes,
-	add_invoice_note,
+	get_kanban_columns,
 	get_kanban_filters,
+	get_kanban_invoices,
 )
-from jarz_pos.utils.invoice_utils import get_address_details, apply_invoice_filters
+from jarz_pos.utils.invoice_utils import apply_invoice_filters, get_address_details
 
 
 class TestKanbanAPI(unittest.TestCase):
@@ -55,7 +57,7 @@ class TestKanbanAPI(unittest.TestCase):
 				)
 				field.insert(ignore_permissions=True)
 		except Exception as e:
-			frappe.log_error(f"Error ensuring custom field exists: {str(e)}", "Kanban Test")
+			frappe.log_error(f"Error ensuring custom field exists: {e!s}", "Kanban Test")
 
 	def test_get_kanban_columns(self):
 		"""Test the get_kanban_columns endpoint."""
@@ -78,12 +80,8 @@ class TestKanbanAPI(unittest.TestCase):
 
 	def test_apply_invoice_filters_amount_bounds(self):
 		"""Zero is a real lower bound, and an upper bound alone must still apply."""
-		self.assertEqual(
-			apply_invoice_filters({"amountFrom": 0})["grand_total"], [">=", 0.0]
-		)
-		self.assertEqual(
-			apply_invoice_filters({"amountTo": 500})["grand_total"], ["<=", 500.0]
-		)
+		self.assertEqual(apply_invoice_filters({"amountFrom": 0})["grand_total"], [">=", 0.0])
+		self.assertEqual(apply_invoice_filters({"amountTo": 500})["grand_total"], ["<=", 500.0])
 		self.assertEqual(
 			apply_invoice_filters({"amountFrom": 100, "amountTo": 500})["grand_total"],
 			["between", [100.0, 500.0]],

@@ -3,8 +3,8 @@
 This module tests manager dashboard and order management API endpoints.
 """
 
-from contextlib import nullcontext
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -150,8 +150,13 @@ class TestManagerAPI(unittest.TestCase):
 			lambda doctype, **kwargs: ["Dokki"] if doctype == "POS Profile" else []
 		)
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access", side_effect=AssertionError("dashboard gate should not run")):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch(
+				"jarz_pos.api.manager._ensure_manager_dashboard_access",
+				side_effect=AssertionError("dashboard gate should not run"),
+			),
+		):
 			result = get_transfer_target_branches()
 
 		self.assertEqual(
@@ -311,15 +316,19 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.has_permission.return_value = True
 		mock_frappe.enqueue.return_value = {"success": True, "request_id": "amd-INV-AMD-001-1234"}
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
-			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+			patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+			patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+		):
 			result = submit_invoice_amendment(invoice_id="INV-AMD-001", cart_json="[]")
 
 		self.assertTrue(result.get("success"))
 		self.assertTrue(mock_frappe.enqueue.called)
-		self.assertEqual(mock_frappe.enqueue.call_args.args[0], "jarz_pos.api.manager._run_invoice_amendment_job")
+		self.assertEqual(
+			mock_frappe.enqueue.call_args.args[0], "jarz_pos.api.manager._run_invoice_amendment_job"
+		)
 		self.assertEqual(mock_frappe.enqueue.call_args.kwargs["queue"], "short")
 		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["now"])
 		self.assertTrue(mock_frappe.enqueue.call_args.kwargs["job_id"].startswith("amd-INV-AMD-001-"))
@@ -346,10 +355,12 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.has_permission.return_value = True
 		mock_frappe.enqueue.return_value = {"success": True, "request_id": "amd-INV-AMD-ZERO-001-1234"}
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
-			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+			patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+			patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+		):
 			result = submit_invoice_amendment(
 				invoice_id="INV-AMD-ZERO-001",
 				cart_json="[]",
@@ -380,12 +391,16 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.session.user = "manager@example.com"
 		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.has_permission.return_value = True
-		mock_frappe.get_doc.side_effect = lambda doctype, name: source_invoice if name == "INV-AMD-002" else replacement_invoice
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: source_invoice if name == "INV-AMD-002" else replacement_invoice
+		)
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
-			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value="INV-AMD-002-1"), \
-			 patch("jarz_pos.api.manager.format_invoice_data", return_value={"name": "INV-AMD-002-1"}):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+			patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value="INV-AMD-002-1"),
+			patch("jarz_pos.api.manager.format_invoice_data", return_value={"name": "INV-AMD-002-1"}),
+		):
 			result = submit_invoice_amendment(invoice_id="INV-AMD-002", cart_json="[]")
 
 		self.assertTrue(result.get("success"))
@@ -414,10 +429,12 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.get_doc.return_value = source_invoice
 		mock_frappe.enqueue.return_value = {"success": True, "request_id": "amd-INV-AMD-STAFF-001-1234"}
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]), \
-				 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+			patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+		):
 			result = submit_invoice_amendment(
 				invoice_id="INV-AMD-STAFF-001",
 				cart_json="[]",
@@ -460,11 +477,13 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.get_doc.return_value = source_invoice
 		mock_frappe.throw.side_effect = _raise_frappe
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-				 patch("jarz_pos.utils.access_control.is_unrestricted_user", return_value=False), \
-				 patch("jarz_pos.utils.access_control.ensure_user_pos_profiles", return_value=["Nasr city"]), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+			patch("jarz_pos.utils.access_control.is_unrestricted_user", return_value=False),
+			patch("jarz_pos.utils.access_control.ensure_user_pos_profiles", return_value=["Nasr city"]),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]),
+		):
 			with self.assertRaises(BranchAccessError):
 				submit_invoice_amendment(
 					invoice_id="INV-AMD-STAFF-002",
@@ -498,7 +517,9 @@ class TestManagerAPI(unittest.TestCase):
 
 		payment_entry = MagicMock()
 		payment_entry.name = "PE-001"
-		payment_entry.get.side_effect = lambda fieldname, default=None: 1 if fieldname == "docstatus" else default
+		payment_entry.get.side_effect = (
+			lambda fieldname, default=None: 1 if fieldname == "docstatus" else default
+		)
 		payment_entry.cancel = MagicMock()
 		payment_entry.flags = SimpleNamespace(ignore_permissions=False)
 
@@ -521,14 +542,21 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.db.sql.return_value = [[1]]
 		mock_frappe.db.set_value = MagicMock()
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}), \
-			 patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-001"]), \
-			 patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()), \
-			 patch("jarz_pos.api.manager._create_amendment_invoice", return_value={"invoice_name": "INV-AMD-003-1"}) as mock_create_invoice, \
-			 patch("jarz_pos.api.manager.format_invoice_data", return_value={"name": "INV-AMD-003-1"}):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+			patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+			patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-001"]),
+			patch(
+				"jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()
+			),
+			patch(
+				"jarz_pos.api.manager._create_amendment_invoice",
+				return_value={"invoice_name": "INV-AMD-003-1"},
+			) as mock_create_invoice,
+			patch("jarz_pos.api.manager.format_invoice_data", return_value={"name": "INV-AMD-003-1"}),
+		):
 			result = _run_invoice_amendment_job(
 				invoice_id="INV-AMD-003",
 				request_id="amd-INV-AMD-003-1234",
@@ -587,14 +615,19 @@ class TestManagerAPI(unittest.TestCase):
 		invoice.add_comment = MagicMock()
 
 		meta = MagicMock()
-		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {
-			"custom_kanban_profile",
-			"set_warehouse",
-			"custom_sales_invoice_state",
-			"custom_acceptance_status",
-			"custom_accepted_by",
-			"custom_accepted_on",
-		} else None
+		meta.get_field.side_effect = (
+			lambda fieldname: object()
+			if fieldname
+			in {
+				"custom_kanban_profile",
+				"set_warehouse",
+				"custom_sales_invoice_state",
+				"custom_acceptance_status",
+				"custom_accepted_by",
+				"custom_accepted_on",
+			}
+			else None
+		)
 
 		mock_frappe = MagicMock()
 		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
@@ -604,15 +637,13 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.get_all.return_value = []
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "disabled"): 0,
-				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
-				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-				("Item", "SERVICE-001", "is_stock_item"): 0,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "disabled"): 0,
+			("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+			("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+			("Item", "ITEM-001", "is_stock_item"): 1,
+			("Item", "SERVICE-001", "is_stock_item"): 0,
+		}.get((doctype, name, field))
 
 		def _set_value(_doctype, _name, field, value, update_modified=True):
 			if _doctype == "Sales Invoice":
@@ -623,16 +654,20 @@ class TestManagerAPI(unittest.TestCase):
 				item_row_2.warehouse = value
 
 		mock_frappe.db.set_value.side_effect = _set_value
-		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		)
 		mock_frappe.get_meta.return_value = meta
 		mock_frappe.has_permission.return_value = True
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
-			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]), \
-			 patch("jarz_pos.api.manager.notify_invoice_reassignment") as mock_notify, \
-			 patch("jarz_pos.api.manager.publish_to_branches") as mock_publish, \
-			 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]),
+			patch("jarz_pos.api.manager.notify_invoice_reassignment") as mock_notify,
+			patch("jarz_pos.api.manager.publish_to_branches") as mock_publish,
+			patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]),
+		):
 			result = update_invoice_branch(invoice_id="INV-001", new_branch="Nasr city")
 
 		self.assertTrue(result.get("success"))
@@ -687,14 +722,19 @@ class TestManagerAPI(unittest.TestCase):
 		invoice.add_comment = MagicMock()
 
 		meta = MagicMock()
-		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {
-			"custom_kanban_profile",
-			"set_warehouse",
-			"custom_sales_invoice_state",
-			"custom_acceptance_status",
-			"custom_accepted_by",
-			"custom_accepted_on",
-		} else None
+		meta.get_field.side_effect = (
+			lambda fieldname: object()
+			if fieldname
+			in {
+				"custom_kanban_profile",
+				"set_warehouse",
+				"custom_sales_invoice_state",
+				"custom_acceptance_status",
+				"custom_accepted_by",
+				"custom_accepted_on",
+			}
+			else None
+		)
 
 		mock_frappe = MagicMock()
 		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
@@ -703,14 +743,12 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.get_all.return_value = []
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "disabled"): 0,
-				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
-				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "disabled"): 0,
+			("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+			("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+			("Item", "ITEM-001", "is_stock_item"): 1,
+		}.get((doctype, name, field))
 
 		def _set_value(_doctype, _name, field, value, update_modified=True):
 			if _doctype == "Sales Invoice":
@@ -719,13 +757,17 @@ class TestManagerAPI(unittest.TestCase):
 				item_row.warehouse = value
 
 		mock_frappe.db.set_value.side_effect = _set_value
-		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		)
 		mock_frappe.get_meta.return_value = meta
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki", "Nasr city"]), \
-				 patch("jarz_pos.api.manager.notify_invoice_reassignment"), \
-				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki", "Nasr city"]),
+			patch("jarz_pos.api.manager.notify_invoice_reassignment"),
+			patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]),
+		):
 			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-001", new_branch="Nasr city")
 
 		self.assertTrue(result.get("success"))
@@ -755,14 +797,19 @@ class TestManagerAPI(unittest.TestCase):
 		invoice.add_comment = MagicMock()
 
 		meta = MagicMock()
-		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {
-			"custom_kanban_profile",
-			"set_warehouse",
-			"custom_sales_invoice_state",
-			"custom_acceptance_status",
-			"custom_accepted_by",
-			"custom_accepted_on",
-		} else None
+		meta.get_field.side_effect = (
+			lambda fieldname: object()
+			if fieldname
+			in {
+				"custom_kanban_profile",
+				"set_warehouse",
+				"custom_sales_invoice_state",
+				"custom_acceptance_status",
+				"custom_accepted_by",
+				"custom_accepted_on",
+			}
+			else None
+		)
 
 		mock_frappe = MagicMock()
 		mock_frappe.flags = SimpleNamespace(ignore_permissions=False, ignore_validate=False)
@@ -771,14 +818,12 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.get_all.return_value = []
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "disabled"): 0,
-				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
-				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "disabled"): 0,
+			("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+			("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+			("Item", "ITEM-001", "is_stock_item"): 1,
+		}.get((doctype, name, field))
 
 		def _set_value(_doctype, _name, field, value, update_modified=True):
 			if _doctype == "Sales Invoice":
@@ -787,15 +832,19 @@ class TestManagerAPI(unittest.TestCase):
 				item_row.warehouse = value
 
 		mock_frappe.db.set_value.side_effect = _set_value
-		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		)
 		mock_frappe.get_meta.return_value = meta
 
 		# Staff is assigned ONLY to the source branch ("Dokki"), NOT to the target ("Nasr city").
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]), \
-				 patch("jarz_pos.api.manager.notify_invoice_reassignment"), \
-				 patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+			patch("jarz_pos.api.manager.notify_invoice_reassignment"),
+			patch("jarz_pos.api.manager._get_state_field_options", return_value=["Received", "In Progress"]),
+		):
 			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-002", new_branch="Nasr city")
 
 		self.assertTrue(result.get("success"))
@@ -836,20 +885,26 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: 0 if (doctype, name, field) == ("POS Profile", "Nasr city", "disabled") else None
+			lambda doctype, name, field: 0
+			if (doctype, name, field) == ("POS Profile", "Nasr city", "disabled")
+			else None
 		)
-		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		)
 		mock_frappe.PermissionError = Exception
 		mock_frappe.throw.side_effect = _raise_frappe
 
 		# Staff is assigned to "Mohandessin" only; the invoice's source branch is "Dokki".
 		# The guard runs for real inside utils.access_control, so it is steered by
 		# its own inputs and raises the real BranchAccessError.
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False), \
-				 patch("jarz_pos.utils.access_control.is_unrestricted_user", return_value=False), \
-				 patch("jarz_pos.utils.access_control.ensure_user_pos_profiles", return_value=["Mohandessin"]), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Mohandessin"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._has_manager_dashboard_access", return_value=False),
+			patch("jarz_pos.utils.access_control.is_unrestricted_user", return_value=False),
+			patch("jarz_pos.utils.access_control.ensure_user_pos_profiles", return_value=["Mohandessin"]),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Mohandessin"]),
+		):
 			result = update_invoice_branch(invoice_id="INV-STAFF-TRANSFER-003", new_branch="Nasr city")
 
 		self.assertFalse(result.get("success"))
@@ -866,11 +921,15 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: 1 if (doctype, name, field) == ("POS Profile", "Closed Branch", "disabled") else None
+			lambda doctype, name, field: 1
+			if (doctype, name, field) == ("POS Profile", "Closed Branch", "disabled")
+			else None
 		)
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+		):
 			result = update_invoice_branch(invoice_id="INV-001", new_branch="Closed Branch")
 
 		self.assertFalse(result.get("success"))
@@ -892,27 +951,31 @@ class TestManagerAPI(unittest.TestCase):
 		)
 
 		meta = MagicMock()
-		meta.get_field.side_effect = lambda fieldname: object() if fieldname in {"custom_kanban_profile", "custom_sales_invoice_state"} else None
+		meta.get_field.side_effect = (
+			lambda fieldname: object()
+			if fieldname in {"custom_kanban_profile", "custom_sales_invoice_state"}
+			else None
+		)
 
 		mock_frappe = MagicMock()
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.get_all.return_value = []
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "disabled"): 0,
-				("POS Profile", "Nasr city", "warehouse"): None,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "disabled"): 0,
+			("POS Profile", "Nasr city", "warehouse"): None,
+		}.get((doctype, name, field))
 		mock_frappe.get_doc.return_value = invoice
 		mock_frappe.get_meta.return_value = meta
 		mock_frappe.has_permission.return_value = True
 		mock_frappe.ValidationError = Exception
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
-			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]),
+		):
 			result = update_invoice_branch(invoice_id="INV-002", new_branch="Nasr city")
 
 		self.assertFalse(result.get("success"))
@@ -934,25 +997,27 @@ class TestManagerAPI(unittest.TestCase):
 		)
 
 		meta = MagicMock()
-		meta.get_field.side_effect = lambda fieldname: object() if fieldname == "custom_kanban_profile" else None
+		meta.get_field.side_effect = (
+			lambda fieldname: object() if fieldname == "custom_kanban_profile" else None
+		)
 
 		mock_frappe = MagicMock()
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.get_roles.return_value = ["JARZ Manager"]
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
 		mock_frappe.get_all.return_value = ["DN-001"]
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "disabled"): 0,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "disabled"): 0,
+		}.get((doctype, name, field))
 		mock_frappe.get_doc.return_value = invoice
 		mock_frappe.get_meta.return_value = meta
 		mock_frappe.has_permission.return_value = True
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"), \
-			 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Nasr city"]),
+		):
 			result = update_invoice_branch(invoice_id="INV-003", new_branch="Nasr city")
 
 		self.assertFalse(result.get("success"))
@@ -971,22 +1036,37 @@ class TestManagerAPI(unittest.TestCase):
 		# warehouse and Delivery Note checks joined in), one for their stock rows.
 		def _sql(query, params=None, as_dict=False, **kwargs):
 			if "FROM `tabSales Invoice` si" in query:
-				return [{
-					"name": "INV-004", "company": "Jarz", "customer": "CUST-004",
-					"posting_date": None, "grand_total": 0,
-					"operational_profile": "Nasr city", "profile_found": "Nasr city",
-					"profile_warehouse": "Stores - Nasr city",
-					"warehouse_found": "Stores - Nasr city", "warehouse_company": "Jarz",
-				}]
+				return [
+					{
+						"name": "INV-004",
+						"company": "Jarz",
+						"customer": "CUST-004",
+						"posting_date": None,
+						"grand_total": 0,
+						"operational_profile": "Nasr city",
+						"profile_found": "Nasr city",
+						"profile_warehouse": "Stores - Nasr city",
+						"warehouse_found": "Stores - Nasr city",
+						"warehouse_company": "Jarz",
+					}
+				]
 			if "FROM `tabSales Invoice Item` sii" in query:
-				return [{"parent": "INV-004", "name": "SII-020", "item_code": "ITEM-001",
-						 "warehouse": "Stores - Dokki"}]
+				return [
+					{
+						"parent": "INV-004",
+						"name": "SII-020",
+						"item_code": "ITEM-001",
+						"warehouse": "Stores - Dokki",
+					}
+				]
 			return []
 
 		mock_frappe.db.sql.side_effect = _sql
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+		):
 			result = get_invoice_warehouse_alignment_report(limit=25)
 
 		self.assertTrue(result.get("success"))
@@ -1040,33 +1120,48 @@ class TestManagerAPI(unittest.TestCase):
 		# one query for candidate invoices, one for their stock rows.
 		def _sql(query, params=None, as_dict=False, **kwargs):
 			if "FROM `tabSales Invoice` si" in query:
-				return [{
-					"name": "INV-005", "company": "Jarz", "customer": "CUST-005",
-					"posting_date": None, "grand_total": 0,
-					"operational_profile": "Nasr city", "profile_found": "Nasr city",
-					"profile_warehouse": "Stores - Nasr city",
-					"warehouse_found": "Stores - Nasr city", "warehouse_company": "Jarz",
-				}]
+				return [
+					{
+						"name": "INV-005",
+						"company": "Jarz",
+						"customer": "CUST-005",
+						"posting_date": None,
+						"grand_total": 0,
+						"operational_profile": "Nasr city",
+						"profile_found": "Nasr city",
+						"profile_warehouse": "Stores - Nasr city",
+						"warehouse_found": "Stores - Nasr city",
+						"warehouse_company": "Jarz",
+					}
+				]
 			if "FROM `tabSales Invoice Item` sii" in query:
-				return [{"parent": "INV-005", "name": "SII-021", "item_code": "ITEM-001",
-						 "warehouse": "Stores - Dokki"}]
+				return [
+					{
+						"parent": "INV-005",
+						"name": "SII-021",
+						"item_code": "ITEM-001",
+						"warehouse": "Stores - Dokki",
+					}
+				]
 			return []
 
 		mock_frappe.db.sql.side_effect = _sql
 		mock_frappe.get_all.side_effect = _get_all
-		mock_frappe.get_doc.side_effect = lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: invoice if doctype == "Sales Invoice" else MagicMock()
+		)
 		mock_frappe.get_meta.return_value = meta
 		mock_frappe.db.set_value.side_effect = _set_value
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
-				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+			("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+			("Item", "ITEM-001", "is_stock_item"): 1,
+		}.get((doctype, name, field))
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+		):
 			result = repair_invoice_warehouse_alignment(limit=25, apply_changes=1)
 
 		self.assertTrue(result.get("success"))
@@ -1091,8 +1186,10 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.get_doc.return_value = invoice
 		mock_frappe.has_permission.return_value = True
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+		):
 			result = update_cancelled_invoice_status_fields(
 				invoice_id="INV-OPEN-001",
 				sales_invoice_state="Cancelled",
@@ -1118,9 +1215,13 @@ class TestManagerAPI(unittest.TestCase):
 
 		def _get_field(fieldname):
 			if fieldname == "custom_sales_invoice_state":
-				return SimpleNamespace(options="Received\nIn Progress\nOut for Delivery\nDelivered\nCancelled")
+				return SimpleNamespace(
+					options="Received\nIn Progress\nOut for Delivery\nDelivered\nCancelled"
+				)
 			if fieldname == "sales_invoice_state":
-				return SimpleNamespace(options="Received\nIn Progress\nOut for Delivery\nDelivered\nCancelled")
+				return SimpleNamespace(
+					options="Received\nIn Progress\nOut for Delivery\nDelivered\nCancelled"
+				)
 			if fieldname == "custom_acceptance_status":
 				return SimpleNamespace(options="Pending\nAccepted")
 			if fieldname in {"custom_accepted_by", "custom_accepted_on"}:
@@ -1142,8 +1243,10 @@ class TestManagerAPI(unittest.TestCase):
 
 		mock_frappe.db.set_value.side_effect = _set_value
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._ensure_manager_dashboard_access"):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._ensure_manager_dashboard_access"),
+		):
 			result = update_cancelled_invoice_status_fields(
 				invoice_id="INV-CANCELLED-001",
 				sales_invoice_state="In Progress",
@@ -1282,11 +1385,23 @@ class TestManagerAPI(unittest.TestCase):
 				return "Nada Starter"
 			if doctype == "User" and name == "closer@example.com" and fieldname == "full_name":
 				return "Sara Closer"
-			if doctype == "Employee" and isinstance(name, dict) and name.get("user_id") == "opener@example.com":
+			if (
+				doctype == "Employee"
+				and isinstance(name, dict)
+				and name.get("user_id") == "opener@example.com"
+			):
 				return {"name": "EMP-OPEN", "employee_name": "Omar"}
-			if doctype == "Employee" and isinstance(name, dict) and name.get("user_id") == "second@example.com":
+			if (
+				doctype == "Employee"
+				and isinstance(name, dict)
+				and name.get("user_id") == "second@example.com"
+			):
 				return {"name": "EMP-START", "employee_name": "Nada"}
-			if doctype == "Employee" and isinstance(name, dict) and name.get("user_id") == "closer@example.com":
+			if (
+				doctype == "Employee"
+				and isinstance(name, dict)
+				and name.get("user_id") == "closer@example.com"
+			):
 				return {"name": "EMP-CLOSE", "employee_name": "Sara"}
 			if doctype == "Journal Entry" and isinstance(name, dict) and fieldname == "name":
 				return "JE-SHIFT-0001"
@@ -1298,12 +1413,20 @@ class TestManagerAPI(unittest.TestCase):
 		def _resolve_account(_company, profile, *_args, **_kwargs):
 			return f"{profile} - J"
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._current_user_shift_monitor_profiles", return_value=["Dokki", "Nasr city"]), \
-			 patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki", "Nasr city"]), \
-			 patch("jarz_pos.services.courier_carry.get_carried_balances", return_value=_EMPTY_COURIER_OUTSTANDING), \
-			 patch("jarz_pos.services.courier_carry.get_shift_carry_stats_bulk", return_value={}), \
-			 patch("jarz_pos.api.shift._resolve_pos_profile_account", side_effect=_resolve_account):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch(
+				"jarz_pos.api.manager._current_user_shift_monitor_profiles",
+				return_value=["Dokki", "Nasr city"],
+			),
+			patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki", "Nasr city"]),
+			patch(
+				"jarz_pos.services.courier_carry.get_carried_balances",
+				return_value=_EMPTY_COURIER_OUTSTANDING,
+			),
+			patch("jarz_pos.services.courier_carry.get_shift_carry_stats_bulk", return_value={}),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", side_effect=_resolve_account),
+		):
 			result = get_pos_shift_monitor(from_date="2026-06-05", to_date="2026-06-05")
 
 		self.assertTrue(result.get("success"))
@@ -1366,7 +1489,10 @@ class TestManagerAPI(unittest.TestCase):
 		mock_frappe.get_roles.return_value = ["System Manager"]
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.get_all.return_value = [{"name": "POS-OPE-0001"}]
-		mock_frappe.get_doc.side_effect = lambda doctype, name: opening if doctype == "POS Opening Entry" else closing
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: opening if doctype == "POS Opening Entry" else closing
+		)
+
 		def _db_get_value(doctype, name, fieldname, *args, **kwargs):
 			# Employee is looked up by filter dict, not by name — an unhashable
 			# key, so it has to be handled before the tuple lookup below.
@@ -1385,12 +1511,17 @@ class TestManagerAPI(unittest.TestCase):
 
 		mock_frappe.db.get_value.side_effect = _db_get_value
 
-		with patch("jarz_pos.api.manager.frappe", mock_frappe), \
-			 patch("jarz_pos.api.manager._current_user_shift_monitor_profiles", return_value=["Dokki"]), \
-			 patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki"]), \
-			 patch("jarz_pos.services.courier_carry.get_carried_balances", return_value=_EMPTY_COURIER_OUTSTANDING), \
-			 patch("jarz_pos.services.courier_carry.get_shift_carry_stats_bulk", return_value={}), \
-			 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"):
+		with (
+			patch("jarz_pos.api.manager.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._current_user_shift_monitor_profiles", return_value=["Dokki"]),
+			patch("jarz_pos.api.manager._get_all_active_pos_profiles", return_value=["Dokki"]),
+			patch(
+				"jarz_pos.services.courier_carry.get_carried_balances",
+				return_value=_EMPTY_COURIER_OUTSTANDING,
+			),
+			patch("jarz_pos.services.courier_carry.get_shift_carry_stats_bulk", return_value={}),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+		):
 			result = get_pos_shift_monitor(status="closed")
 
 		self.assertEqual(len(result["shifts"]), 1)
@@ -1451,10 +1582,7 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			if doctype == "Payment Entry Reference":
 				if allocations is not None:
 					return list(allocations)
-				return [
-					{"parent": row.get("name"), "allocated_amount": 150.0}
-					for row in (pe_rows or [])
-				]
+				return [{"parent": row.get("name"), "allocated_amount": 150.0} for row in (pe_rows or [])]
 			return list(pe_rows or [])
 
 		mf.get_all.side_effect = _get_all
@@ -1478,8 +1606,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": None}],
 			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
 		)
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]),
+		):
 			self.assertEqual(_resolve_amendment_employee_payment(self._source(), None), "cash")
 
 		pe_calls = [c for c in mf.get_all.call_args_list if c.args[0] == "Payment Entry"]
@@ -1496,8 +1626,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			pe_rows=[{"name": "PE-1", "paid_to": "Unknown - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
 			account={},
 		)
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]),
+		):
 			self.assertEqual(_resolve_amendment_employee_payment(self._source(), None), "cash")
 
 	def test_a_cash_label_without_a_payment_is_still_credit(self):
@@ -1505,8 +1637,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 		from jarz_pos.api.manager import _resolve_amendment_employee_payment
 
 		mf = self._frappe(pe_rows=[])
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=[]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=[]),
+		):
 			self.assertIsNone(
 				_resolve_amendment_employee_payment(self._source(custom_payment_method="Cash"), None)
 			)
@@ -1518,8 +1652,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			pe_rows=[{"name": "PE-1", "paid_to": "Bank Account - J", "reference_no": "IPY-123"}],
 			account={"account_type": "Bank", "parent_account": "Bank Accounts - J"},
 		)
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]),
+		):
 			self.assertIsNone(_resolve_amendment_employee_payment(self._source(), None))
 
 	def test_a_non_employee_order_never_derives_cash(self):
@@ -1547,8 +1683,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			account=self._TILL_ACCOUNT,
 			allocations=[{"parent": "PE-1", "allocated_amount": 100.0}],
 		)
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]),
+		):
 			with self.assertRaises(EmployeePaymentUnresolvedError) as ctx:
 				_resolve_amendment_employee_payment(self._source(grand_total=300.0), None)
 
@@ -1569,8 +1707,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 				{"parent": "PE-2", "allocated_amount": 200.0},
 			],
 		)
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1", "PE-2"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1", "PE-2"]),
+		):
 			self.assertEqual(
 				_resolve_amendment_employee_payment(self._source(grand_total=300.0), None), "cash"
 			)
@@ -1587,8 +1727,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 				account=self._TILL_ACCOUNT,
 				allocations=[{"parent": "PE-1", "allocated_amount": allocated}],
 			)
-			with patch("jarz_pos.api.manager.frappe", mf), \
-				 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+			with (
+				patch("jarz_pos.api.manager.frappe", mf),
+				patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]),
+			):
 				return _resolve_amendment_employee_payment(self._source(grand_total=300.0), None)
 
 		self.assertEqual(_resolve(299.996), "cash")
@@ -1603,8 +1745,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			account=self._TILL_ACCOUNT,
 			allocations=[{"parent": "PE-1", "allocated_amount": 300.0}],
 		)
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1"]),
+		):
 			self.assertEqual(
 				_resolve_amendment_employee_payment(
 					self._source(grand_total=300.25, rounded_total=300.0), None
@@ -1631,8 +1775,10 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			allocations=[{"parent": "PE-1", "allocated_amount": 100.0}],
 		)
 		mf.db.get_value.side_effect = lambda doctype, name, *a, **k: accounts.get(name)
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1", "PE-2"]):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_submitted_payment_entries", return_value=["PE-1", "PE-2"]),
+		):
 			with self.assertRaises(EmployeePaymentUnresolvedError):
 				_resolve_amendment_employee_payment(self._source(grand_total=300.0), None)
 
@@ -1649,7 +1795,9 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 
 		payment_entry = MagicMock()
 		payment_entry.name = "PE-1"
-		payment_entry.get.side_effect = lambda fieldname, default=None: 1 if fieldname == "docstatus" else default
+		payment_entry.get.side_effect = (
+			lambda fieldname, default=None: 1 if fieldname == "docstatus" else default
+		)
 		payment_entry.flags = SimpleNamespace(ignore_permissions=False)
 		payment_entry.cancel.side_effect = lambda: trace.append("cancel_pe") if trace is not None else None
 
@@ -1659,21 +1807,28 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 		}[(doctype, name)]
 		creation = MagicMock(return_value={"invoice_name": "INV-EMP-AMD-001-1"})
 
-		with patch("jarz_pos.api.manager.frappe", mf), \
-			 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-			 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}), \
-			 patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None), \
-			 patch("jarz_pos.api.manager.resolve_order_territory", return_value=None), \
-			 patch("jarz_pos.api.manager._resolve_amendment_delivery_income", return_value=None), \
-			 patch("jarz_pos.api.manager._resolve_amendment_price_list", return_value=None), \
-			 patch("jarz_pos.api.manager._find_submitted_payment_entries", find_pes or MagicMock(return_value=["PE-1"])), \
-			 patch("jarz_pos.api.manager._find_active_custom_shipping_requests", return_value=[]), \
-			 patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()), \
-			 patch("jarz_pos.api.manager._create_amendment_invoice", creation), \
-			 patch("jarz_pos.api.manager._mark_source_invoice_as_amended"), \
-			 patch("jarz_pos.api.manager._add_invoice_audit_comment"), \
-			 patch("jarz_pos.api.manager._carry_over_invoice_notes"), \
-			 patch("jarz_pos.api.manager._build_invoice_amendment_response", return_value={"success": True}):
+		with (
+			patch("jarz_pos.api.manager.frappe", mf),
+			patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+			patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}),
+			patch("jarz_pos.api.manager.assert_pos_profile_matches_territory", return_value=None),
+			patch("jarz_pos.api.manager.resolve_order_territory", return_value=None),
+			patch("jarz_pos.api.manager._resolve_amendment_delivery_income", return_value=None),
+			patch("jarz_pos.api.manager._resolve_amendment_price_list", return_value=None),
+			patch(
+				"jarz_pos.api.manager._find_submitted_payment_entries",
+				find_pes or MagicMock(return_value=["PE-1"]),
+			),
+			patch("jarz_pos.api.manager._find_active_custom_shipping_requests", return_value=[]),
+			patch(
+				"jarz_pos.api.manager._temporary_invoice_creation_form_context", return_value=nullcontext()
+			),
+			patch("jarz_pos.api.manager._create_amendment_invoice", creation),
+			patch("jarz_pos.api.manager._mark_source_invoice_as_amended"),
+			patch("jarz_pos.api.manager._add_invoice_audit_comment"),
+			patch("jarz_pos.api.manager._carry_over_invoice_notes"),
+			patch("jarz_pos.api.manager._build_invoice_amendment_response", return_value={"success": True}),
+		):
 			result = _run_invoice_amendment_job(
 				invoice_id=source.name,
 				request_id="amd-emp-1",
@@ -1685,7 +1840,9 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 	def test_job_recreates_a_till_paid_employee_order_as_cash(self):
 		trace = []
 		mf = self._frappe(
-			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
+			pe_rows=[
+				{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}
+			],
 			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
 			trace=trace,
 		)
@@ -1702,9 +1859,7 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 
 	def test_job_keeps_a_credit_employee_order_on_credit(self):
 		mf = self._frappe(pe_rows=[])
-		result, creation, _ = self._run_job(
-			self._source(), mf, find_pes=MagicMock(return_value=[])
-		)
+		result, creation, _ = self._run_job(self._source(), mf, find_pes=MagicMock(return_value=[]))
 
 		self.assertTrue(result.get("success"), result)
 		self.assertIsNone(creation.call_args.kwargs["employee_payment"])
@@ -1760,13 +1915,16 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 	@staticmethod
 	def _ignored_method_warnings(mf):
 		return [
-			c for c in mf.logger.return_value.warning.call_args_list
+			c
+			for c in mf.logger.return_value.warning.call_args_list
 			if c.args and "amendment_employee_payment_method" in str(c.args[0])
 		]
 
 	def test_job_ignores_the_client_method_on_a_cash_employee_order(self):
 		mf = self._frappe(
-			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
+			pe_rows=[
+				{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}
+			],
 			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
 		)
 		result, creation, _ = self._run_job(self._source(), mf, payment_method="Instapay")
@@ -1806,13 +1964,13 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 				self.assertTrue(result.get("success"), result)
 				self.assertIsNone(creation.call_args.kwargs["employee_payment"])
 				self.assertIsNone(creation.call_args.args[9])
-				self.assertEqual(
-					len(self._ignored_method_warnings(mf)), 1 if client_method else 0
-				)
+				self.assertEqual(len(self._ignored_method_warnings(mf)), 1 if client_method else 0)
 
 	def test_job_logs_nothing_when_the_client_method_already_agrees(self):
 		mf = self._frappe(
-			pe_rows=[{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}],
+			pe_rows=[
+				{"name": "PE-1", "paid_to": "Nasr City - J", "reference_no": "EMP-CASH-INV-EMP-AMD-001"}
+			],
 			account={"account_type": "Cash", "parent_account": "Cash In Hand - J"},
 		)
 		result, creation, _ = self._run_job(self._source(), mf, payment_method="Cash")
@@ -1845,10 +2003,14 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 			mf.enqueue.return_value = {"success": True}
 			mf.utils.flt.side_effect = lambda value=0, precision=None: float(value or 0)
 			mf.parse_json.side_effect = lambda value: value
-			with patch("jarz_pos.api.manager.frappe", mf), \
-				 patch("jarz_pos.api.manager._ensure_profile_scoped_invoice_access"), \
-				 patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None), \
-				 patch("jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}):
+			with (
+				patch("jarz_pos.api.manager.frappe", mf),
+				patch("jarz_pos.api.manager._ensure_profile_scoped_invoice_access"),
+				patch("jarz_pos.api.manager._find_existing_amendment_invoice", return_value=None),
+				patch(
+					"jarz_pos.api.manager.get_invoice_amendment_eligibility", return_value={"can_amend": True}
+				),
+			):
 				submit_invoice_amendment(
 					invoice_id=source.name,
 					cart_json='[{"item_code":"JAR-M","qty":1,"rate":150}]',
@@ -1862,4 +2024,3 @@ class TestEmployeeOrderAmendmentPayment(unittest.TestCase):
 		self.assertIsNone(without["employee_payment"])
 		self.assertEqual(with_cash["employee_payment"], "cash")
 		self.assertNotEqual(without["job_id"], with_cash["job_id"])
-

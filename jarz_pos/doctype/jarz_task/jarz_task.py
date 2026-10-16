@@ -19,17 +19,17 @@ from jarz_pos.services import task_board as tb
 
 
 class JarzTask(Document):
-    def validate(self):
-        self.title = " ".join(str(self.title or "").split())[: tb.TITLE_MAX_LENGTH]
-        if not self.title:
-            frappe.throw(frappe._("Title is required"))
-        if self.status not in tb.STATUSES:
-            self.status = tb.STATUS_TODO
-        if self.priority not in tb.PRIORITIES:
-            self.priority = tb.PRIORITY_NORMAL
-        if not self.created_by:
-            self.created_by = frappe.session.user
-        for row in self.get("subtasks") or []:
-            row.title = " ".join(str(row.title or "").split())[: tb.TITLE_MAX_LENGTH]
-            if not row.created_by:
-                row.created_by = frappe.session.user
+	def validate(self):
+		self.title = " ".join(str(self.title or "").split())[: tb.TITLE_MAX_LENGTH]
+		if not self.title:
+			frappe.throw(frappe._("Title is required"))
+		if self.status not in tb.STATUSES:
+			self.status = tb.STATUS_TODO
+		if self.priority not in tb.PRIORITIES:
+			self.priority = tb.PRIORITY_NORMAL
+		if not self.created_by:
+			self.created_by = frappe.session.user
+		for row in self.get("subtasks") or []:
+			row.title = " ".join(str(row.title or "").split())[: tb.TITLE_MAX_LENGTH]
+			if not row.created_by:
+				row.created_by = frappe.session.user

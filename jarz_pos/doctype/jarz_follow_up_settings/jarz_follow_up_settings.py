@@ -8,4 +8,4 @@ from frappe.model.document import Document
 
 
 class JarzFollowupSettings(Document):
-    pass
+	pass

@@ -58,8 +58,18 @@ ignore = [
     "F405", # can't detect undefined names from * import
     "F722", # syntax error in forward type annotation
     "W191", # indentation contains tabs
+    "UP031", # %-formatting - used on purpose in SQL builders and %.*f / %04d formats
+    "RUF005", # a + [x] -> [*a, x] can change the result type, so keep concatenation
+    "UP038", # isinstance(x, (A, B)) - style only, deprecated in later ruff
 ]
 typing-modules = ["frappe.types.DF"]
+# Characters used on purpose in user-facing text: en dash, multiplication sign,
+# information sign, minus sign, and Arabic letters and digits in Arabic strings.
+allowed-confusables = ["–", "×", "ℹ", "ا", "ه", "−", "٠"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures: class-level mock data, list(...)[0] lookups, and values kept for readability.
+"jarz_pos/tests/**" = ["RUF012", "RUF015", "F841"]
 
 [tool.ruff.format]
 quote-style = "double"

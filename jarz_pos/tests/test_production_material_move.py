@@ -32,349 +32,340 @@ ELSEWHERE = "Raw Material - J"
 
 
 class Thrown(Exception):
-    """What a wired-up ``frappe.throw`` raises in these tests."""
+	"""What a wired-up ``frappe.throw`` raises in these tests."""
 
 
 def _throw(message, *_args, **_kwargs):
-    raise Thrown(str(message))
+	raise Thrown(str(message))
 
 
 class FakeStockEntry:
-    """Just enough Stock Entry to see what the endpoint built."""
+	"""Just enough Stock Entry to see what the endpoint built."""
 
-    def __init__(self):
-        self.doctype = "Stock Entry"
-        self.items = []
-        self.flags = SimpleNamespace(ignore_permissions=False)
-        self.name = "MAT-STE-jarz-2026-99999"
-        self.inserted = False
-        self.submitted = False
-        self.stock_entry_type = None
-        self.purpose = None
-        self.company = None
+	def __init__(self):
+		self.doctype = "Stock Entry"
+		self.items = []
+		self.flags = SimpleNamespace(ignore_permissions=False)
+		self.name = "MAT-STE-jarz-2026-99999"
+		self.inserted = False
+		self.submitted = False
+		self.stock_entry_type = None
+		self.purpose = None
+		self.company = None
 
-    def append(self, field, row):
-        assert field == "items"
-        self.items.append(dict(row))
+	def append(self, field, row):
+		assert field == "items"
+		self.items.append(dict(row))
 
-    def insert(self):
-        self.inserted = True
+	def insert(self):
+		self.inserted = True
 
-    def submit(self):
-        assert self.inserted, "submitted without inserting"
-        self.submitted = True
+	def submit(self):
+		assert self.inserted, "submitted without inserting"
+		self.submitted = True
 
 
 class MoveTestCase(unittest.TestCase):
-    """Shared wiring: a company, a BOM component, and stock in the wrong store."""
+	"""Shared wiring: a company, a BOM component, and stock in the wrong store."""
 
-    def setUp(self):
-        self.entry = FakeStockEntry()
-        self.invalidate = MagicMock()
-        self.stock = {(ITEM, ELSEWHERE): 4.336, (ITEM, HOME): 0.0}
-        # What `Warehouse.warehouse_type` reads back for the source. None is an
-        # ordinary store; the non-sellable cases set it per test.
-        self.warehouse_type = None
+	def setUp(self):
+		self.entry = FakeStockEntry()
+		self.invalidate = MagicMock()
+		self.stock = {(ITEM, ELSEWHERE): 4.336, (ITEM, HOME): 0.0}
+		# What `Warehouse.warehouse_type` reads back for the source. None is an
+		# ordinary store; the non-sellable cases set it per test.
+		self.warehouse_type = None
 
-    def _call(self, *, roles=OPERATOR, demanded=(HOME,), is_component=True, **kwargs):
-        from jarz_pos.api import manufacturing
+	def _call(self, *, roles=OPERATOR, demanded=(HOME,), is_component=True, **kwargs):
+		from jarz_pos.api import manufacturing
 
-        payload = {"item_code": ITEM, "from_warehouse": ELSEWHERE, "qty": 4.0}
-        payload.update(kwargs)
+		payload = {"item_code": ITEM, "from_warehouse": ELSEWHERE, "qty": 4.0}
+		payload.update(kwargs)
 
-        with patch(
-            "jarz_pos.api.manufacturing._resolve_user_roles", return_value=set(roles)
-        ), patch(
-            "jarz_pos.api.manufacturing._get_default_company", return_value=COMPANY
-        ), patch(
-            "jarz_pos.api.manufacturing._is_bom_component", return_value=is_component
-        ), patch(
-            "jarz_pos.api.manufacturing._component_demand_warehouses",
-            return_value=list(demanded),
-        ), patch(
-            "jarz_pos.api.manufacturing._assert_pickable_warehouse", return_value=None
-        ), patch(
-            "jarz_pos.api.manufacturing._get_live_stock_qty",
-            side_effect=lambda item, wh: self.stock.get((item, wh), 0.0),
-        ), patch(
-            "jarz_pos.api.manufacturing._get_item_stock_uom", return_value="Kg"
-        ), patch(
-            "jarz_pos.api.manufacturing._resolve_invalidate_suggestions_cache",
-            return_value=self.invalidate,
-        ), patch(
-            "jarz_pos.api.manufacturing._debug_log", return_value=None
-        ), patch(
-            "jarz_pos.api.manufacturing._", new=lambda msg: msg
-        ), patch(
-            "jarz_pos.api.manufacturing.frappe"
-        ) as mock_frappe:
-            mock_frappe.throw.side_effect = _throw
-            mock_frappe.new_doc.return_value = self.entry
-            # `_assert_source_is_pickable_stock` is NOT stubbed -- it is the gate
-            # that stops an operator draining another batch's WIP, so it runs
-            # its real logic. Only the one column it reads is faked. Configured
-            # on the mock rather than as its own patch: the module-wide
-            # `patch("...frappe")` above is applied last and would replace any
-            # separate `frappe.db.get_value` patch.
-            mock_frappe.db.get_value.side_effect = (
-                lambda *a, **k: self.warehouse_type
-            )
-            return manufacturing.transfer_material_for_production(**payload)
+		with (
+			patch("jarz_pos.api.manufacturing._resolve_user_roles", return_value=set(roles)),
+			patch("jarz_pos.api.manufacturing._get_default_company", return_value=COMPANY),
+			patch("jarz_pos.api.manufacturing._is_bom_component", return_value=is_component),
+			patch(
+				"jarz_pos.api.manufacturing._component_demand_warehouses",
+				return_value=list(demanded),
+			),
+			patch("jarz_pos.api.manufacturing._assert_pickable_warehouse", return_value=None),
+			patch(
+				"jarz_pos.api.manufacturing._get_live_stock_qty",
+				side_effect=lambda item, wh: self.stock.get((item, wh), 0.0),
+			),
+			patch("jarz_pos.api.manufacturing._get_item_stock_uom", return_value="Kg"),
+			patch(
+				"jarz_pos.api.manufacturing._resolve_invalidate_suggestions_cache",
+				return_value=self.invalidate,
+			),
+			patch("jarz_pos.api.manufacturing._debug_log", return_value=None),
+			patch("jarz_pos.api.manufacturing._", new=lambda msg: msg),
+			patch("jarz_pos.api.manufacturing.frappe") as mock_frappe,
+		):
+			mock_frappe.throw.side_effect = _throw
+			mock_frappe.new_doc.return_value = self.entry
+			# `_assert_source_is_pickable_stock` is NOT stubbed -- it is the gate
+			# that stops an operator draining another batch's WIP, so it runs
+			# its real logic. Only the one column it reads is faked. Configured
+			# on the mock rather than as its own patch: the module-wide
+			# `patch("...frappe")` above is applied last and would replace any
+			# separate `frappe.db.get_value` patch.
+			mock_frappe.db.get_value.side_effect = lambda *a, **k: self.warehouse_type
+			return manufacturing.transfer_material_for_production(**payload)
 
 
 class TestMoveHappyPath(MoveTestCase):
-    def test_builds_a_material_transfer_from_the_holder_to_the_demand_warehouse(self):
-        result = self._call()
+	def test_builds_a_material_transfer_from_the_holder_to_the_demand_warehouse(self):
+		result = self._call()
 
-        self.assertEqual(self.entry.stock_entry_type, "Material Transfer")
-        self.assertEqual(self.entry.purpose, "Material Transfer")
-        self.assertEqual(self.entry.company, COMPANY)
-        self.assertEqual(len(self.entry.items), 1)
+		self.assertEqual(self.entry.stock_entry_type, "Material Transfer")
+		self.assertEqual(self.entry.purpose, "Material Transfer")
+		self.assertEqual(self.entry.company, COMPANY)
+		self.assertEqual(len(self.entry.items), 1)
 
-        row = self.entry.items[0]
-        # Direction is the whole point: source is where the stock is, target is
-        # where the recipe looks for it.  Reversed, this endpoint would empty
-        # the warehouse the shortage was measured in.
-        self.assertEqual(row["s_warehouse"], ELSEWHERE)
-        self.assertEqual(row["t_warehouse"], HOME)
-        self.assertEqual(row["item_code"], ITEM)
-        self.assertEqual(row["qty"], 4.0)
-        self.assertEqual(row["uom"], "Kg")
-        self.assertEqual(row["conversion_factor"], 1)
+		row = self.entry.items[0]
+		# Direction is the whole point: source is where the stock is, target is
+		# where the recipe looks for it.  Reversed, this endpoint would empty
+		# the warehouse the shortage was measured in.
+		self.assertEqual(row["s_warehouse"], ELSEWHERE)
+		self.assertEqual(row["t_warehouse"], HOME)
+		self.assertEqual(row["item_code"], ITEM)
+		self.assertEqual(row["qty"], 4.0)
+		self.assertEqual(row["uom"], "Kg")
+		self.assertEqual(row["conversion_factor"], 1)
 
-        self.assertTrue(self.entry.submitted)
-        self.assertEqual(result["stock_entry"], self.entry.name)
-        self.assertEqual(result["to_warehouse"], HOME)
-        self.assertEqual(result["from_warehouse"], ELSEWHERE)
+		self.assertTrue(self.entry.submitted)
+		self.assertEqual(result["stock_entry"], self.entry.name)
+		self.assertEqual(result["to_warehouse"], HOME)
+		self.assertEqual(result["from_warehouse"], ELSEWHERE)
 
-    def test_target_defaults_to_the_only_warehouse_the_component_is_drawn_from(self):
-        result = self._call(to_warehouse=None)
-        self.assertEqual(result["to_warehouse"], HOME)
+	def test_target_defaults_to_the_only_warehouse_the_component_is_drawn_from(self):
+		result = self._call(to_warehouse=None)
+		self.assertEqual(result["to_warehouse"], HOME)
 
-    def test_busts_the_board_cache(self):
-        """Or the operator moves the stock, still reads "Cannot start", and
-        moves it again."""
-        self._call()
-        self.invalidate.assert_called_once_with()
+	def test_busts_the_board_cache(self):
+		"""Or the operator moves the stock, still reads "Cannot start", and
+		moves it again."""
+		self._call()
+		self.invalidate.assert_called_once_with()
 
-    def test_moving_the_whole_available_quantity_is_allowed(self):
-        """The float tolerance exists so "move all" is not off by a hair."""
-        self._call(qty=4.336)
-        self.assertTrue(self.entry.submitted)
+	def test_moving_the_whole_available_quantity_is_allowed(self):
+		"""The float tolerance exists so "move all" is not off by a hair."""
+		self._call(qty=4.336)
+		self.assertTrue(self.entry.submitted)
 
-    def test_a_manager_may_use_it_too(self):
-        for roles in (JARZ_MANAGER, SYSTEM_MANAGER):
-            with self.subTest(roles=sorted(roles)):
-                self.setUp()
-                self._call(roles=roles)
-                self.assertTrue(self.entry.submitted)
+	def test_a_manager_may_use_it_too(self):
+		for roles in (JARZ_MANAGER, SYSTEM_MANAGER):
+			with self.subTest(roles=sorted(roles)):
+				self.setUp()
+				self._call(roles=roles)
+				self.assertTrue(self.entry.submitted)
 
 
 class TestMoveRefusals(MoveTestCase):
-    def _refused(self, **kwargs):
-        with self.assertRaises(Thrown) as ctx:
-            self._call(**kwargs)
-        self.assertFalse(self.entry.submitted)
-        self.invalidate.assert_not_called()
-        return str(ctx.exception)
+	def _refused(self, **kwargs):
+		with self.assertRaises(Thrown) as ctx:
+			self._call(**kwargs)
+		self.assertFalse(self.entry.submitted)
+		self.invalidate.assert_not_called()
+		return str(ctx.exception)
 
-    def test_a_role_without_production_access_is_refused(self):
-        self._refused(roles=NOBODY)
+	def test_a_role_without_production_access_is_refused(self):
+		self._refused(roles=NOBODY)
 
-    def test_an_item_no_recipe_consumes_is_refused(self):
-        """The gate that keeps this from being a general stock-moving tool."""
-        message = self._refused(is_component=False)
-        self.assertIn(ITEM, message)
+	def test_an_item_no_recipe_consumes_is_refused(self):
+		"""The gate that keeps this from being a general stock-moving tool."""
+		message = self._refused(is_component=False)
+		self.assertIn(ITEM, message)
 
-    def test_a_component_with_no_demand_warehouse_is_refused(self):
-        """A move cannot fix "nobody said where this is kept" — there is no
-        destination to move it to, and the message has to say which fix is."""
-        message = self._refused(demanded=())
-        self.assertIn("default warehouse", message)
+	def test_a_component_with_no_demand_warehouse_is_refused(self):
+		"""A move cannot fix "nobody said where this is kept" — there is no
+		destination to move it to, and the message has to say which fix is."""
+		message = self._refused(demanded=())
+		self.assertIn("default warehouse", message)
 
-    def test_a_target_the_component_is_not_drawn_from_is_refused(self):
-        """Otherwise the move succeeds and the board still says "Cannot start"."""
-        message = self._refused(to_warehouse="Finished Goods - J")
-        self.assertIn("Finished Goods - J", message)
+	def test_a_target_the_component_is_not_drawn_from_is_refused(self):
+		"""Otherwise the move succeeds and the board still says "Cannot start"."""
+		message = self._refused(to_warehouse="Finished Goods - J")
+		self.assertIn("Finished Goods - J", message)
 
-    def test_an_ambiguous_target_must_be_chosen_explicitly(self):
-        message = self._refused(
-            to_warehouse=None, demanded=(HOME, "Goods In Transit - J")
-        )
-        self.assertIn("more than one warehouse", message)
+	def test_an_ambiguous_target_must_be_chosen_explicitly(self):
+		message = self._refused(to_warehouse=None, demanded=(HOME, "Goods In Transit - J"))
+		self.assertIn("more than one warehouse", message)
 
-    def test_moving_stock_onto_itself_is_refused(self):
-        self._refused(from_warehouse=HOME, to_warehouse=HOME)
+	def test_moving_stock_onto_itself_is_refused(self):
+		self._refused(from_warehouse=HOME, to_warehouse=HOME)
 
-    def test_more_than_the_source_holds_is_refused(self):
-        message = self._refused(qty=10)
-        # Both numbers, because "insufficient stock" alone sends somebody to
-        # count a shelf they can already see.
-        self.assertIn("4.336", message)
-        self.assertIn("10", message)
+	def test_more_than_the_source_holds_is_refused(self):
+		message = self._refused(qty=10)
+		# Both numbers, because "insufficient stock" alone sends somebody to
+		# count a shelf they can already see.
+		self.assertIn("4.336", message)
+		self.assertIn("10", message)
 
-    def test_a_non_positive_quantity_is_refused(self):
-        for qty in (0, -1, "abc"):
-            with self.subTest(qty=qty):
-                self.setUp()
-                self._refused(qty=qty)
+	def test_a_non_positive_quantity_is_refused(self):
+		for qty in (0, -1, "abc"):
+			with self.subTest(qty=qty):
+				self.setUp()
+				self._refused(qty=qty)
 
 
 class TestSourceWarehouseIsPickable(MoveTestCase):
-    """The source has to be stock somebody may actually take.
+	"""The source has to be stock somebody may actually take.
 
-    ``find_stock_elsewhere`` already drops WIP and Rejected when it builds the
-    list the operator sees, so the app never offers one. That is not a gate: the
-    endpoint is whitelisted and every ``PRODUCTION_EXECUTE`` holder can call it
-    directly. Pulling from WIP would empty the bin another operator's open batch
-    is standing on, and that batch then fails its Manufacture entry for negative
-    stock with nothing on screen to explain why.
-    """
+	``find_stock_elsewhere`` already drops WIP and Rejected when it builds the
+	list the operator sees, so the app never offers one. That is not a gate: the
+	endpoint is whitelisted and every ``PRODUCTION_EXECUTE`` holder can call it
+	directly. Pulling from WIP would empty the bin another operator's open batch
+	is standing on, and that batch then fails its Manufacture entry for negative
+	stock with nothing on screen to explain why.
+	"""
 
-    def test_a_work_in_progress_source_is_refused(self):
-        self.warehouse_type = "Work In Progress"
-        with self.assertRaises(Thrown) as ctx:
-            self._call(from_warehouse="Work In Progress - J")
-        self.assertIn("Work In Progress - J", str(ctx.exception))
-        self.assertFalse(self.entry.submitted)
+	def test_a_work_in_progress_source_is_refused(self):
+		self.warehouse_type = "Work In Progress"
+		with self.assertRaises(Thrown) as ctx:
+			self._call(from_warehouse="Work In Progress - J")
+		self.assertIn("Work In Progress - J", str(ctx.exception))
+		self.assertFalse(self.entry.submitted)
 
-    def test_a_rejected_source_is_refused(self):
-        self.warehouse_type = "Rejected"
-        with self.assertRaises(Thrown):
-            self._call(from_warehouse="Rejected - J")
-        self.assertFalse(self.entry.submitted)
+	def test_a_rejected_source_is_refused(self):
+		self.warehouse_type = "Rejected"
+		with self.assertRaises(Thrown):
+			self._call(from_warehouse="Rejected - J")
+		self.assertFalse(self.entry.submitted)
 
-    def test_the_rule_falls_back_to_the_name_when_the_type_is_blank(self):
-        """Sites that never filled in warehouse_type are the common case here,
-        which is why ``is_non_sellable_warehouse`` reads the name too."""
-        self.warehouse_type = ""
-        with self.assertRaises(Thrown):
-            self._call(from_warehouse="Work In Progress - J")
-        self.assertFalse(self.entry.submitted)
+	def test_the_rule_falls_back_to_the_name_when_the_type_is_blank(self):
+		"""Sites that never filled in warehouse_type are the common case here,
+		which is why ``is_non_sellable_warehouse`` reads the name too."""
+		self.warehouse_type = ""
+		with self.assertRaises(Thrown):
+			self._call(from_warehouse="Work In Progress - J")
+		self.assertFalse(self.entry.submitted)
 
-    def test_an_ordinary_store_is_still_allowed(self):
-        self.warehouse_type = "Stores"
-        self._call()
-        self.assertTrue(self.entry.submitted)
+	def test_an_ordinary_store_is_still_allowed(self):
+		self.warehouse_type = "Stores"
+		self._call()
+		self.assertTrue(self.entry.submitted)
 
-    def test_an_ordinary_store_with_no_type_at_all_is_still_allowed(self):
-        """The negative control for the name-hint fallback: 'Raw Material - J'
-        must not trip 'wip' / 'rejected' by accident, or the button refuses the
-        one source it exists to offer."""
-        self.warehouse_type = None
-        self._call()
-        self.assertTrue(self.entry.submitted)
+	def test_an_ordinary_store_with_no_type_at_all_is_still_allowed(self):
+		"""The negative control for the name-hint fallback: 'Raw Material - J'
+		must not trip 'wip' / 'rejected' by accident, or the button refuses the
+		one source it exists to offer."""
+		self.warehouse_type = None
+		self._call()
+		self.assertTrue(self.entry.submitted)
 
 
 class TestQuantityEdgeCases(MoveTestCase):
-    def test_nan_is_refused(self):
-        """The one input that slips BOTH bounds checks -- every comparison
-        against NaN is False -- and would otherwise reach MariaDB."""
-        with self.assertRaises(Thrown):
-            self._call(qty=float("nan"))
-        self.assertFalse(self.entry.submitted)
+	def test_nan_is_refused(self):
+		"""The one input that slips BOTH bounds checks -- every comparison
+		against NaN is False -- and would otherwise reach MariaDB."""
+		with self.assertRaises(Thrown):
+			self._call(qty=float("nan"))
+		self.assertFalse(self.entry.submitted)
 
-    def test_infinity_is_refused(self):
-        with self.assertRaises(Thrown):
-            self._call(qty=float("inf"))
-        self.assertFalse(self.entry.submitted)
+	def test_infinity_is_refused(self):
+		with self.assertRaises(Thrown):
+			self._call(qty=float("inf"))
+		self.assertFalse(self.entry.submitted)
 
 
 class TestDemandWarehouseResolution(unittest.TestCase):
-    """``_component_demand_warehouses`` decides the only destinations this
-    endpoint will accept, so a defect here is a refusal the operator cannot
-    argue with -- or a destination that unblocks nothing.
-    """
+	"""``_component_demand_warehouses`` decides the only destinations this
+	endpoint will accept, so a defect here is a refusal the operator cannot
+	argue with -- or a destination that unblocks nothing.
+	"""
 
-    def _call(self, sql_rows, item_default):
-        from jarz_pos.api import manufacturing
+	def _call(self, sql_rows, item_default):
+		from jarz_pos.api import manufacturing
 
-        with patch(
-            "jarz_pos.api.manufacturing.frappe.db.sql", return_value=sql_rows
-        ), patch(
-            "jarz_pos.api.manufacturing._get_item_default_warehouse",
-            return_value=item_default,
-        ):
-            return manufacturing._component_demand_warehouses(ITEM, COMPANY)
+		with (
+			patch("jarz_pos.api.manufacturing.frappe.db.sql", return_value=sql_rows),
+			patch(
+				"jarz_pos.api.manufacturing._get_item_default_warehouse",
+				return_value=item_default,
+			),
+		):
+			return manufacturing._component_demand_warehouses(ITEM, COMPANY)
 
-    def test_the_item_default_is_included_even_when_a_recipe_names_a_source(self):
-        """The defect this pins: a union that short-circuits on the first named
-        source drops the item default for every OTHER recipe of the same
-        component. ``_get_required_material_rows`` resolves per BOM -- one
-        recipe naming a source does not stop another falling through to the
-        item default -- so both are live destinations at once.
-        """
-        out = self._call([{"source_warehouse": "Nasr City Store - J"}], HOME)
-        self.assertIn("Nasr City Store - J", out)
-        self.assertIn(HOME, out)
+	def test_the_item_default_is_included_even_when_a_recipe_names_a_source(self):
+		"""The defect this pins: a union that short-circuits on the first named
+		source drops the item default for every OTHER recipe of the same
+		component. ``_get_required_material_rows`` resolves per BOM -- one
+		recipe naming a source does not stop another falling through to the
+		item default -- so both are live destinations at once.
+		"""
+		out = self._call([{"source_warehouse": "Nasr City Store - J"}], HOME)
+		self.assertIn("Nasr City Store - J", out)
+		self.assertIn(HOME, out)
 
-    def test_no_named_source_falls_through_to_the_item_default(self):
-        self.assertEqual(self._call([], HOME), [HOME])
+	def test_no_named_source_falls_through_to_the_item_default(self):
+		self.assertEqual(self._call([], HOME), [HOME])
 
-    def test_no_source_and_no_item_default_is_empty(self):
-        self.assertEqual(self._call([], None), [])
+	def test_no_source_and_no_item_default_is_empty(self):
+		self.assertEqual(self._call([], None), [])
 
-    def test_the_item_default_is_not_duplicated(self):
-        self.assertEqual(self._call([{"source_warehouse": HOME}], HOME), [HOME])
+	def test_the_item_default_is_not_duplicated(self):
+		self.assertEqual(self._call([{"source_warehouse": HOME}], HOME), [HOME])
 
 
 class TestProductionPolicy(unittest.TestCase):
-    def _call(self, *, roles=JARZ_MANAGER, max_days=30):
-        from jarz_pos.api import manufacturing
+	def _call(self, *, roles=JARZ_MANAGER, max_days=30):
+		from jarz_pos.api import manufacturing
 
-        with patch(
-            "jarz_pos.api.manufacturing._resolve_user_roles", return_value=set(roles)
-        ), patch(
-            "jarz_pos.api.manufacturing._resolve_settings",
-            return_value=SimpleNamespace(production_max_backdate_days=max_days),
-        ), patch(
-            "jarz_pos.api.manufacturing._resolve_now_datetime", return_value=NOW
-        ), patch(
-            "jarz_pos.api.manufacturing._", new=lambda msg: msg
-        ), patch(
-            "jarz_pos.api.manufacturing.frappe"
-        ) as mock_frappe:
-            mock_frappe.throw.side_effect = _throw
-            return manufacturing.get_production_policy()
+		with (
+			patch("jarz_pos.api.manufacturing._resolve_user_roles", return_value=set(roles)),
+			patch(
+				"jarz_pos.api.manufacturing._resolve_settings",
+				return_value=SimpleNamespace(production_max_backdate_days=max_days),
+			),
+			patch("jarz_pos.api.manufacturing._resolve_now_datetime", return_value=NOW),
+			patch("jarz_pos.api.manufacturing._", new=lambda msg: msg),
+			patch("jarz_pos.api.manufacturing.frappe") as mock_frappe,
+		):
+			mock_frappe.throw.side_effect = _throw
+			return manufacturing.get_production_policy()
 
-    def test_reports_the_window_the_server_will_actually_accept(self):
-        policy = self._call(max_days=30)
-        self.assertEqual(policy["max_backdate_days"], 30)
-        self.assertTrue(policy["can_backdate"])
+	def test_reports_the_window_the_server_will_actually_accept(self):
+		policy = self._call(max_days=30)
+		self.assertEqual(policy["max_backdate_days"], 30)
+		self.assertTrue(policy["can_backdate"])
 
-    def test_a_stored_zero_stays_zero(self):
-        """The bug this endpoint exists to expose, and it must not paper over it.
+	def test_a_stored_zero_stays_zero(self):
+		"""The bug this endpoint exists to expose, and it must not paper over it.
 
-        Production's Settings record holds 0 because the Single predates the
-        field, so the DocType's default of 3 was never written.  Substituting
-        the default here would tell the client it may backdate three days while
-        ``_assert_posting_date_allowed`` — reading the same 0 — refuses every
-        one of them.  Wrong in the same direction as the bug.
-        """
-        self.assertEqual(self._call(max_days=0)["max_backdate_days"], 0)
+		Production's Settings record holds 0 because the Single predates the
+		field, so the DocType's default of 3 was never written.  Substituting
+		the default here would tell the client it may backdate three days while
+		``_assert_posting_date_allowed`` — reading the same 0 — refuses every
+		one of them.  Wrong in the same direction as the bug.
+		"""
+		self.assertEqual(self._call(max_days=0)["max_backdate_days"], 0)
 
-    def test_a_negative_setting_floors_at_zero(self):
-        self.assertEqual(self._call(max_days=-5)["max_backdate_days"], 0)
+	def test_a_negative_setting_floors_at_zero(self):
+		self.assertEqual(self._call(max_days=-5)["max_backdate_days"], 0)
 
-    def test_an_operator_may_execute_but_not_backdate(self):
-        policy = self._call(roles=OPERATOR)
-        self.assertTrue(policy["can_execute"])
-        self.assertFalse(policy["can_backdate"])
-        self.assertFalse(policy["unlimited_backdate"])
+	def test_an_operator_may_execute_but_not_backdate(self):
+		policy = self._call(roles=OPERATOR)
+		self.assertTrue(policy["can_execute"])
+		self.assertFalse(policy["can_backdate"])
+		self.assertFalse(policy["unlimited_backdate"])
 
-    def test_a_system_manager_is_not_bound_by_the_day_ceiling(self):
-        self.assertTrue(self._call(roles=SYSTEM_MANAGER)["unlimited_backdate"])
+	def test_a_system_manager_is_not_bound_by_the_day_ceiling(self):
+		self.assertTrue(self._call(roles=SYSTEM_MANAGER)["unlimited_backdate"])
 
-    def test_reports_the_servers_date_not_the_callers(self):
-        """The gate compares against the server clock, so the picker must be
-        built from it — a tablet a day fast would otherwise offer "the future"
-        as its last selectable day."""
-        self.assertEqual(self._call()["server_date"], "2026-09-07")
+	def test_reports_the_servers_date_not_the_callers(self):
+		"""The gate compares against the server clock, so the picker must be
+		built from it — a tablet a day fast would otherwise offer "the future"
+		as its last selectable day."""
+		self.assertEqual(self._call()["server_date"], "2026-09-07")
 
-    def test_a_role_without_board_access_is_refused(self):
-        with self.assertRaises(Thrown):
-            self._call(roles=NOBODY)
+	def test_a_role_without_board_access_is_refused(self):
+		with self.assertRaises(Thrown):
+			self._call(roles=NOBODY)
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()

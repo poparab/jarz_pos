@@ -27,6 +27,7 @@ Note the asymmetry worth remembering: ``Select`` and ``Data`` cast through
 ``cstr(None)`` to ``""``, which most fallbacks *do* treat as unset — so those
 field types were never affected, and the bug looked narrower than it was.
 """
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -34,65 +35,65 @@ from typing import Any, Optional
 import frappe
 
 
-def raw_single_value(doctype: str, fieldname: str) -> Optional[Any]:
-    """The stored value for a Single's field, or ``None`` when never written.
+def raw_single_value(doctype: str, fieldname: str) -> Any | None:
+	"""The stored value for a Single's field, or ``None`` when never written.
 
-    Returns the raw string as MariaDB holds it; callers coerce. ``None`` means
-    the field has no row — not that it holds an empty value.
-    """
-    try:
-        rows = frappe.db.sql(
-            "select `value` from `tabSingles` where `doctype`=%s and `field`=%s limit 1",
-            (doctype, fieldname),
-        )
-    except Exception:
-        return None
-    if not rows:
-        return None
-    value = rows[0][0]
-    return None if value is None else value
+	Returns the raw string as MariaDB holds it; callers coerce. ``None`` means
+	the field has no row — not that it holds an empty value.
+	"""
+	try:
+		rows = frappe.db.sql(
+			"select `value` from `tabSingles` where `doctype`=%s and `field`=%s limit 1",
+			(doctype, fieldname),
+		)
+	except Exception:
+		return None
+	if not rows:
+		return None
+	value = rows[0][0]
+	return None if value is None else value
 
 
 def single_int(doctype: str, fieldname: str, default: int) -> int:
-    """Int setting, with ``default`` applied only when nobody has ever set it.
+	"""Int setting, with ``default`` applied only when nobody has ever set it.
 
-    An explicit 0 is honoured as 0. That distinction is the whole point: for
-    several of these fields zero is a meaningful, deliberately-chosen value
-    ("never expire", "no limit"), so silently substituting the default would
-    be just as wrong as never applying it.
-    """
-    raw = raw_single_value(doctype, fieldname)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return int(float(str(raw).strip()))
-    except (TypeError, ValueError):
-        return default
+	An explicit 0 is honoured as 0. That distinction is the whole point: for
+	several of these fields zero is a meaningful, deliberately-chosen value
+	("never expire", "no limit"), so silently substituting the default would
+	be just as wrong as never applying it.
+	"""
+	raw = raw_single_value(doctype, fieldname)
+	if raw is None or str(raw).strip() == "":
+		return default
+	try:
+		return int(float(str(raw).strip()))
+	except (TypeError, ValueError):
+		return default
 
 
 def single_float(doctype: str, fieldname: str, default: float) -> float:
-    """Float/Currency setting, with the same unset-versus-zero distinction."""
-    raw = raw_single_value(doctype, fieldname)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return float(str(raw).strip())
-    except (TypeError, ValueError):
-        return default
+	"""Float/Currency setting, with the same unset-versus-zero distinction."""
+	raw = raw_single_value(doctype, fieldname)
+	if raw is None or str(raw).strip() == "":
+		return default
+	try:
+		return float(str(raw).strip())
+	except (TypeError, ValueError):
+		return default
 
 
 def single_flag(doctype: str, fieldname: str, default: bool) -> bool:
-    """Check setting, with ``default`` applied only when never written.
+	"""Check setting, with ``default`` applied only when never written.
 
-    This is where a JSON ``"default": "1"`` goes to die: the default in the
-    DocType applies when the Single is first created, so a Check field added by
-    a later migration lands with no row and reads ``0`` forever after. Passing
-    the intended default here is what makes the declared one real.
-    """
-    raw = raw_single_value(doctype, fieldname)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return bool(int(float(str(raw).strip())))
-    except (TypeError, ValueError):
-        return bool(raw)
+	This is where a JSON ``"default": "1"`` goes to die: the default in the
+	DocType applies when the Single is first created, so a Check field added by
+	a later migration lands with no row and reads ``0`` forever after. Passing
+	the intended default here is what makes the declared one real.
+	"""
+	raw = raw_single_value(doctype, fieldname)
+	if raw is None or str(raw).strip() == "":
+		return default
+	try:
+		return bool(int(float(str(raw).strip())))
+	except (TypeError, ValueError):
+		return bool(raw)

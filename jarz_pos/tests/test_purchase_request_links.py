@@ -14,7 +14,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 if "frappe" not in sys.modules:
 	fake_frappe = types.ModuleType("frappe")
 
@@ -53,7 +52,6 @@ if "frappe" not in sys.modules:
 	sys.modules["frappe"] = fake_frappe
 
 from jarz_pos.api import purchase
-
 
 MR = "MAT-MR-0001"
 MR_LINE = "abc123"
@@ -100,9 +98,7 @@ class TestValidateRequestLink(unittest.TestCase):
 
 	def test_returns_the_link_unchanged_when_open(self):
 		with patch.object(purchase.frappe.db, "get_value", side_effect=_line_value):
-			self.assertEqual(
-				purchase._validate_request_link(MR, MR_LINE, "RM-TOMATO"), (MR, MR_LINE)
-			)
+			self.assertEqual(purchase._validate_request_link(MR, MR_LINE, "RM-TOMATO"), (MR, MR_LINE))
 
 	def test_follows_an_edited_request_to_its_amendment(self):
 		"""An edit cancels the request and submits <name>-1; the cart's stale
@@ -180,9 +176,7 @@ class TestIdempotency(unittest.TestCase):
 	def test_missing_items_still_rejected_before_the_key_is_consulted(self):
 		with patch.object(purchase, "_ensure_manager_access"):
 			with self.assertRaises(Exception):
-				purchase.create_purchase_invoice(
-					supplier="Supplier A", items=[], idempotency_key="key-1"
-				)
+				purchase.create_purchase_invoice(supplier="Supplier A", items=[], idempotency_key="key-1")
 
 
 class TestCoerceRows(unittest.TestCase):

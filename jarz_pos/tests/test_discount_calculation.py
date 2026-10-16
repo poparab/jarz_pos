@@ -47,7 +47,9 @@ class TestDiscountCalculation(unittest.TestCase):
 		self.assertAlmostEqual(final_rate, expected_rate, places=2, msg="Rate should be discounted")
 
 		# Amount should be rate * qty
-		self.assertAlmostEqual(price_list_rate, original_rate, places=2, msg="Price list rate should remain original")
+		self.assertAlmostEqual(
+			price_list_rate, original_rate, places=2, msg="Price list rate should remain original"
+		)
 		self.assertIn(discount_type, {"partial", "100%"}, "Discount type should be recognised")
 
 	def test_calculate_discount_percentage_basic(self):
@@ -102,8 +104,22 @@ class TestDiscountCalculation(unittest.TestCase):
 
 		# Mock processed items that sum to bundle price
 		processed_items = [
-			{"item_code": "ITEM1", "amount": 80.0, "qty": 1, "rate": 80.0, "bundle_type": "child", "discount_amount": 0.0},
-			{"item_code": "ITEM2", "amount": 40.0, "qty": 1, "rate": 40.0, "bundle_type": "child", "discount_amount": 0.0},
+			{
+				"item_code": "ITEM1",
+				"amount": 80.0,
+				"qty": 1,
+				"rate": 80.0,
+				"bundle_type": "child",
+				"discount_amount": 0.0,
+			},
+			{
+				"item_code": "ITEM2",
+				"amount": 40.0,
+				"qty": 1,
+				"rate": 40.0,
+				"bundle_type": "child",
+				"discount_amount": 0.0,
+			},
 		]
 
 		bundle_qty = 1
@@ -119,8 +135,22 @@ class TestDiscountCalculation(unittest.TestCase):
 
 		# Mock processed items that don't sum to bundle price
 		processed_items = [
-			{"item_code": "ITEM1", "amount": 60.0, "qty": 1, "rate": 60.0, "bundle_type": "child", "discount_amount": 0.0},
-			{"item_code": "ITEM2", "amount": 40.0, "qty": 1, "rate": 40.0, "bundle_type": "child", "discount_amount": 0.0},
+			{
+				"item_code": "ITEM1",
+				"amount": 60.0,
+				"qty": 1,
+				"rate": 60.0,
+				"bundle_type": "child",
+				"discount_amount": 0.0,
+			},
+			{
+				"item_code": "ITEM2",
+				"amount": 40.0,
+				"qty": 1,
+				"rate": 40.0,
+				"bundle_type": "child",
+				"discount_amount": 0.0,
+			},
 		]
 
 		bundle_qty = 1
