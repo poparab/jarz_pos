@@ -767,6 +767,7 @@ def remove_colliding_custom_fields_for_fixtures() -> None:
 		fx_path = os.path.join(app_path, "fixtures", "custom_field.json")
 		if not os.path.exists(fx_path):
 			return
+		# nosemgrep: frappe-security-file-traversal -- constant fixtures/custom_field.json path inside the app dir
 		with open(fx_path, encoding="utf-8") as f:
 			data = json.load(f)
 		if not isinstance(data, list):

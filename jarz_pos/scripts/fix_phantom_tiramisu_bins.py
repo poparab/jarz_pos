@@ -41,6 +41,7 @@ def p(*a):
 
 repaired = 0
 for item, wh in TARGETS:
+	# nosemgrep: frappe-breaks-multitenancy -- one-off data script run via remote_exec.ps1 console, never imported by the app
 	before = frappe.db.get_value(
 		"Bin",
 		{"item_code": item, "warehouse": wh},
@@ -51,6 +52,7 @@ for item, wh in TARGETS:
 		p(f"SKIP {item} @ {wh}: no Bin row")
 		continue
 
+	# nosemgrep: frappe-breaks-multitenancy -- one-off data script run via remote_exec.ps1 console, never imported by the app
 	live = frappe.db.sql(
 		"""SELECT COUNT(*) FROM `tabStock Ledger Entry`
            WHERE item_code=%s AND warehouse=%s AND COALESCE(is_cancelled,0)=0""",
@@ -73,6 +75,7 @@ for item, wh in TARGETS:
 	repost_stock(item, wh, only_bin=True)
 	frappe.db.set_value("Bin", before.name, "stock_value", 0.0, update_modified=False)
 
+	# nosemgrep: frappe-breaks-multitenancy -- one-off data script run via remote_exec.ps1 console, never imported by the app
 	after = frappe.db.get_value(
 		"Bin",
 		before.name,
@@ -91,6 +94,7 @@ p(f"BINS REPAIRED: {repaired}")
 
 p("")
 p("=== re-sweep: every stock Bin vs its ledger balance ===")
+# nosemgrep: frappe-breaks-multitenancy -- one-off data script run via remote_exec.ps1 console, never imported by the app
 rows = frappe.db.sql(
 	"""
     SELECT b.item_code, b.warehouse, i.item_group, b.actual_qty, b.stock_value,
@@ -103,6 +107,7 @@ rows = frappe.db.sql(
 """,
 	as_dict=True,
 )
+# nosemgrep: frappe-breaks-multitenancy -- one-off data script run via remote_exec.ps1 console, never imported by the app
 bad = [r for r in rows if abs(flt(r["actual_qty"]) - flt(r["ledger_qty"] or 0)) > 0.001]
 p(f"  bins={len(rows)} still mismatched={len(bad)}")
 for r in bad:
@@ -113,6 +118,7 @@ for r in bad:
 
 p("")
 p("=== Medium/Large stock in Raw Material - J (should be empty) ===")
+# nosemgrep: frappe-breaks-multitenancy -- one-off data script run via remote_exec.ps1 console, never imported by the app
 left = frappe.db.sql(
 	"""
     SELECT b.item_code, b.warehouse, b.actual_qty FROM `tabBin` b

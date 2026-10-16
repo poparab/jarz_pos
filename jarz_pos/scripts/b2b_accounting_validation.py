@@ -1559,6 +1559,7 @@ def _emit_report(ctx: RunContext, report_path: str, baseline_diff_ok: bool, diff
 				else frappe.get_site_path(report_path)
 			)
 		os.makedirs(os.path.dirname(abspath), exist_ok=True)
+		# nosemgrep: frappe-security-file-traversal -- operator-run validation script, report path is the operator's own argument, not whitelisted
 		with open(abspath, "w", encoding="utf-8") as fh:
 			fh.write(content)
 		print(f"\nReport written: {abspath}")

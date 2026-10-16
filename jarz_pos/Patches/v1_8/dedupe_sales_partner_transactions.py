@@ -72,6 +72,7 @@ def execute():
 
 	if flagged:
 		lines = [
+			# nosemgrep: string-concat-in-list -- intentional implicit concatenation of one long message, no missing comma
 			f"{f['invoice']}: duplicate {f['settled_duplicate']} (kept {f['kept']}), "
 			f"fee {f['partner_fees']}, journal entry {f['journal_entry'] or '-'}"
 			for f in flagged
