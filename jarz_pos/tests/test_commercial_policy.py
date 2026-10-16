@@ -375,6 +375,21 @@ class TestCustomerTierPricing(unittest.TestCase):
 		# leak into a different customer's order. Use a dedicated price list so no
 		# pre-existing Item Price rows interfere.
 		code = frappe.db.get_value("Item", {"is_sales_item": 1, "disabled": 0}, "name")
+		if not code:
+			# A bare site (the CI site) carries no sales Item at all; make one. It is
+			# uncommitted and tearDown rolls it back with everything else.
+			code = "_TEST Tier Item"
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": code,
+					"item_name": code,
+					"item_group": "All Item Groups",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+					"is_sales_item": 1,
+				}
+			).insert(ignore_permissions=True)
 		plist = "_TEST Tier List"
 		if not frappe.db.exists("Price List", plist):
 			frappe.get_doc(

@@ -198,6 +198,31 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
 			je.submit()
 		return je.name
 
+	def _ensure_an_enabled_pos_profile(self):
+		"""Make sure the site has at least one enabled POS Profile.
+
+		The listing is scoped to the POS Profiles the caller may see, and returns
+		nothing at all when the site has none. A live site always has branches; a
+		bare site (the CI site) has none, so the listing could never find the
+		settlement however correct the query is. The row is uncommitted and
+		``_cleanup`` rolls it back with everything else.
+		"""
+		if frappe.db.exists("POS Profile", {"disabled": 0}):
+			return
+		company = frappe.get_cached_doc("Company", self.company)
+		profile = frappe.new_doc("POS Profile")
+		profile.name = "_TEST Settlement Branch"
+		profile.company = self.company
+		profile.currency = company.default_currency
+		profile.warehouse = frappe.db.get_value("Warehouse", {"company": self.company, "is_group": 0})
+		profile.write_off_account = company.write_off_account
+		profile.write_off_cost_center = company.cost_center
+		profile.append("payments", {"mode_of_payment": "Cash", "default": 1})
+		profile.flags.ignore_mandatory = True
+		profile.flags.ignore_links = True
+		profile.flags.ignore_validate = True
+		profile.insert(ignore_permissions=True)
+
 	def _make_ct(self, je_name, status="Settled"):
 		ct = frappe.new_doc("Courier Transaction")
 		ct.journal_entry = je_name
@@ -256,6 +281,7 @@ class TestSettlementClassificationAgainstRealDocs(_RealDatabaseTestCase):
 				"whose Courier Transactions carry no branch-bearing invoice"
 			)
 
+		self._ensure_an_enabled_pos_profile()
 		je = self._make_je(SETTLEMENT_REMARK, submit=True, stamp=BATCH_TAG)
 		self._make_ct(je)
 		listed = {row["journal_entry"] for row in dh.list_recent_courier_settlements(limit=200)}

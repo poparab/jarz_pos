@@ -122,7 +122,8 @@ class TestUserAdmin(unittest.TestCase):
 		out = self._create(role_profiles='["%s"]' % P_LINE, mobile_no="01000000000")
 		self.assertEqual(out["role_profiles"], [P_LINE])
 		roles = set(frappe.get_roles(NEW))
-		self.assertIn("JARZ line manager", roles)
+		# Role names are case-insensitive in MariaDB; a blank site stores this one lowercase.
+		self.assertIn("jarz line manager", {r.lower() for r in roles})
 		self.assertIn("POS User", roles)
 		self.assertEqual(out["tier"], "line_manager")
 		self.assertEqual(frappe.db.get_value("User", NEW, "user_type"), "System User")
@@ -213,7 +214,7 @@ class TestUserAdmin(unittest.TestCase):
 		self._create(role_profiles=[P_LINE])
 		svc.update_user(NEW, role_profiles=[P_STAFF])
 		roles = set(frappe.get_roles(NEW))
-		self.assertNotIn("JARZ line manager", roles)
+		self.assertNotIn("jarz line manager", {r.lower() for r in roles})
 		self.assertIn("Sales User", roles)
 		with self.assertRaises(frappe.ValidationError):
 			svc.update_user(NEW, role_profiles=[])
